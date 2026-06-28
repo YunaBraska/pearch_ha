@@ -3095,6 +3095,78 @@ final class PerchHAClientTests: XCTestCase {
         XCTAssertEqual(requests.map { $0.url.path }, ["/api/"])
     }
 
+    func testMirrorCaptureFallsBackToConfiguredFallbackURLOnPrimaryTransportFailure() async throws {
+        let transport = RecordingMirrorTransport { request in
+            if request.url.host == "primary.local" {
+                throw RecordingMirrorTransportError(message: "connection refused")
+            }
+            return HAMirrorResponse(
+                statusCode: 200,
+                headers: ["Authorization": "Bearer should-redact"],
+                body: Data((request.url.path == "/api/" ? #"{"message":"API running."}"# : #"[]"#).utf8)
+            )
+        }
+        let service = HAMirrorCaptureService(transport: transport)
+        let environment = HAMirrorEnvironment(
+            primaryURL: try XCTUnwrap(URL(string: "http://primary.local:8123")),
+            fallbackURL: try XCTUnwrap(URL(string: "https://fallback.example")),
+            token: "secret-token",
+            user: nil,
+            password: nil
+        )
+
+        let fixtures = try await service.capture(environment: environment)
+
+        XCTAssertEqual(fixtures.api.statusCode, 200)
+        let requests = await transport.requests
+        XCTAssertEqual(
+            requests.map { ($0.url.host ?? "", $0.url.path) },
+            [
+                ("primary.local", "/api/"),
+                ("fallback.example", "/api/"),
+                ("fallback.example", "/api/states")
+            ]
+        )
+    }
+
+    func testMirrorCaptureReportsSanitizedPrimaryAndFallbackFailures() async throws {
+        let transport = RecordingMirrorTransport { request in
+            if request.url.host == "primary.local" {
+                throw RecordingMirrorTransportError(message: "connection refused")
+            }
+            return HAMirrorResponse(
+                statusCode: 401,
+                headers: ["Authorization": "Bearer should-redact"],
+                body: Data(#"{"message":"Unauthorized","token":"secret"}"#.utf8)
+            )
+        }
+        let service = HAMirrorCaptureService(transport: transport)
+        let environment = HAMirrorEnvironment(
+            primaryURL: try XCTUnwrap(URL(string: "http://primary.local:8123")),
+            fallbackURL: try XCTUnwrap(URL(string: "https://fallback.example")),
+            token: "secret-token",
+            user: nil,
+            password: nil
+        )
+
+        do {
+            _ = try await service.capture(environment: environment)
+            XCTFail("capture unexpectedly succeeded when both base URLs failed")
+        } catch let error as HAMirrorCaptureError {
+            XCTAssertEqual(
+                error,
+                .primaryAndFallbackFailed(
+                    path: "/api/",
+                    primaryFailure: "Home Assistant request for /api/ failed: connection refused",
+                    fallbackFailure: "Home Assistant returned HTTP 401 for /api/"
+                )
+            )
+            XCTAssertFalse(error.description.contains("fallback.example"))
+            XCTAssertFalse(error.description.contains("primary.local"))
+            XCTAssertFalse(error.description.contains("secret"))
+        }
+    }
+
     func testFixtureWriterWritesManifestAndEndpoints() throws {
         let fixtureSet = HAMirrorFixtureSet(
             api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: "{}"),
@@ -3443,21 +3515,27 @@ actor RecordingMirrorTransport: HAMirrorTransport {
     private let statesStatusCode: Int
     private let apiBody: String
     private let statesBody: String
+    private let handler: (@Sendable (HAMirrorRequest) throws -> HAMirrorResponse)?
 
     init(
         apiStatusCode: Int = 200,
         statesStatusCode: Int = 200,
         apiBody: String = #"{"message":"API running."}"#,
-        statesBody: String = #"[]"#
+        statesBody: String = #"[]"#,
+        handler: (@Sendable (HAMirrorRequest) throws -> HAMirrorResponse)? = nil
     ) {
         self.apiStatusCode = apiStatusCode
         self.statesStatusCode = statesStatusCode
         self.apiBody = apiBody
         self.statesBody = statesBody
+        self.handler = handler
     }
 
     func send(_ request: HAMirrorRequest) async throws -> HAMirrorResponse {
         requests.append(request)
+        if let handler {
+            return try handler(request)
+        }
         let isAPI = request.url.path == "/api/"
         let body = isAPI ? apiBody : statesBody
         return HAMirrorResponse(

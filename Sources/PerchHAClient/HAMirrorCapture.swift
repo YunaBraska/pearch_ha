@@ -143,10 +143,15 @@ public struct HAMirrorCaptureService: Sendable {
             throw HAMirrorCaptureError.missingToken
         }
 
-        let api = try await captureEndpoint(path: "/api/", environment: environment, token: token)
-        let states = try await captureEndpoint(path: "/api/states", environment: environment, token: token)
-        let webSocket = includeWebSocketEvidence ? try await captureOptimizedWebSocketEvidence(environment: environment) : nil
-        return HAMirrorFixtureSet(api: api, states: states, webSocket: webSocket)
+        let api = try await captureEndpointSelectingBaseURL(path: "/api/", environment: environment, token: token)
+        let states = try await captureEndpoint(path: "/api/states", baseURL: api.baseURL, token: token)
+        let webSocket = includeWebSocketEvidence
+            ? try await captureOptimizedWebSocketEvidence(
+                baseURL: api.baseURL,
+                token: token
+            )
+            : nil
+        return HAMirrorFixtureSet(api: api.endpoint, states: states, webSocket: webSocket)
     }
 
     public func captureOptimizedWebSocketEvidence(
@@ -157,10 +162,36 @@ public struct HAMirrorCaptureService: Sendable {
             throw HAMirrorCaptureError.missingToken
         }
 
-        let task = try await authenticateWebSocket(environment: environment, token: token)
+        let api = try await captureEndpointSelectingBaseURL(path: "/api/", environment: environment, token: token)
+        let task = try await authenticateWebSocket(baseURL: api.baseURL, token: token)
         defer {
             task.cancel(with: .goingAway, reason: nil)
         }
+        return try await captureOptimizedWebSocketEvidence(
+            task: task,
+            captureSubscribeEventKeys: captureSubscribeEventKeys
+        )
+    }
+
+    private func captureOptimizedWebSocketEvidence(
+        baseURL: URL,
+        token: String,
+        captureSubscribeEventKeys: Bool = false
+    ) async throws -> HAMirrorWebSocketEvidence {
+        let task = try await authenticateWebSocket(baseURL: baseURL, token: token)
+        defer {
+            task.cancel(with: .goingAway, reason: nil)
+        }
+        return try await captureOptimizedWebSocketEvidence(
+            task: task,
+            captureSubscribeEventKeys: captureSubscribeEventKeys
+        )
+    }
+
+    private func captureOptimizedWebSocketEvidence(
+        task: URLSessionWebSocketTask,
+        captureSubscribeEventKeys: Bool
+    ) async throws -> HAMirrorWebSocketEvidence {
         let entityRegistryDisplayList = try await sendEvidenceCommand(
             task: task,
             id: 1,
@@ -179,8 +210,34 @@ public struct HAMirrorCaptureService: Sendable {
         )
     }
 
-    private func captureEndpoint(path: String, environment: HAMirrorEnvironment, token: String) async throws -> HAMirrorCapturedEndpoint {
-        let url = try environment.primaryURL.homeAssistantURL(path: path)
+    private func captureEndpointSelectingBaseURL(
+        path: String,
+        environment: HAMirrorEnvironment,
+        token: String
+    ) async throws -> (baseURL: URL, endpoint: HAMirrorCapturedEndpoint) {
+        do {
+            let endpoint = try await captureEndpoint(path: path, baseURL: environment.primaryURL, token: token)
+            return (environment.primaryURL, endpoint)
+        } catch {
+            guard let fallbackURL = environment.fallbackURL else {
+                throw error
+            }
+            let primaryFailure = sanitizedFailureDescription(error)
+            do {
+                let endpoint = try await captureEndpoint(path: path, baseURL: fallbackURL, token: token)
+                return (fallbackURL, endpoint)
+            } catch {
+                throw HAMirrorCaptureError.primaryAndFallbackFailed(
+                    path: path,
+                    primaryFailure: primaryFailure,
+                    fallbackFailure: sanitizedFailureDescription(error)
+                )
+            }
+        }
+    }
+
+    private func captureEndpoint(path: String, baseURL: URL, token: String) async throws -> HAMirrorCapturedEndpoint {
+        let url = try baseURL.homeAssistantURL(path: path)
         let request = HAMirrorRequest(
             method: "GET",
             url: url,
@@ -189,7 +246,14 @@ public struct HAMirrorCaptureService: Sendable {
                 "Content-Type": "application/json"
             ]
         )
-        let response = try await transport.send(request)
+        let response: HAMirrorResponse
+        do {
+            response = try await transport.send(request)
+        } catch let error as HAMirrorCaptureError {
+            throw error
+        } catch {
+            throw HAMirrorCaptureError.transportFailure(path: path, message: sanitizedTransportMessage(error))
+        }
         guard (200..<300).contains(response.statusCode) else {
             throw HAMirrorCaptureError.unexpectedStatus(path: path, statusCode: response.statusCode)
         }
@@ -203,19 +267,45 @@ public struct HAMirrorCaptureService: Sendable {
         )
     }
 
-    private func authenticateWebSocket(environment: HAMirrorEnvironment, token: String) async throws -> URLSessionWebSocketTask {
-        let url = try environment.primaryURL.homeAssistantWebSocketURL(path: "/api/websocket")
+    private func authenticateWebSocket(baseURL: URL, token: String) async throws -> URLSessionWebSocketTask {
+        let url = try baseURL.homeAssistantWebSocketURL(path: "/api/websocket")
         let task = URLSession.shared.webSocketTask(with: url)
         task.resume()
 
-        let required = try await receiveWebSocketObject(task: task)
+        let required: [String: Any]
+        do {
+            required = try await receiveWebSocketObject(task: task)
+        } catch let error as HAMirrorCaptureError {
+            task.cancel(with: .goingAway, reason: nil)
+            throw error
+        } catch {
+            task.cancel(with: .goingAway, reason: nil)
+            throw HAMirrorCaptureError.transportFailure(path: "/api/websocket", message: sanitizedTransportMessage(error))
+        }
         guard required["type"] as? String == "auth_required" else {
             task.cancel(with: .protocolError, reason: nil)
             throw HAMirrorCaptureError.webSocketProtocol("expected auth_required")
         }
 
-        try await sendWebSocketObject(task: task, object: ["type": "auth", "access_token": token])
-        let response = try await receiveWebSocketObject(task: task)
+        do {
+            try await sendWebSocketObject(task: task, object: ["type": "auth", "access_token": token])
+        } catch let error as HAMirrorCaptureError {
+            task.cancel(with: .goingAway, reason: nil)
+            throw error
+        } catch {
+            task.cancel(with: .goingAway, reason: nil)
+            throw HAMirrorCaptureError.transportFailure(path: "/api/websocket", message: sanitizedTransportMessage(error))
+        }
+        let response: [String: Any]
+        do {
+            response = try await receiveWebSocketObject(task: task)
+        } catch let error as HAMirrorCaptureError {
+            task.cancel(with: .goingAway, reason: nil)
+            throw error
+        } catch {
+            task.cancel(with: .goingAway, reason: nil)
+            throw HAMirrorCaptureError.transportFailure(path: "/api/websocket", message: sanitizedTransportMessage(error))
+        }
         if response["type"] as? String == "auth_ok" {
             return task
         }
@@ -276,6 +366,24 @@ public struct HAMirrorCaptureService: Sendable {
             throw HAMirrorCaptureError.webSocketProtocol("could not encode command")
         }
         try await task.send(.string(text))
+    }
+
+    private func sanitizedFailureDescription(_ error: Error) -> String {
+        if let captureError = error as? HAMirrorCaptureError {
+            return captureError.description
+        }
+        return String(describing: error)
+    }
+
+    private func sanitizedTransportMessage(_ error: Error) -> String {
+        if let urlError = error as? URLError {
+            return urlError.localizedDescription
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            return nsError.localizedDescription
+        }
+        return (error as any CustomStringConvertible).description
     }
 
     private func receiveWebSocketObject(task: URLSessionWebSocketTask) async throws -> [String: Any] {
@@ -754,7 +862,9 @@ public enum HAMirrorCaptureError: Error, Equatable, CustomStringConvertible {
     case missingToken
     case nonHTTPResponse
     case invalidPath(String)
+    case transportFailure(path: String, message: String)
     case unexpectedStatus(path: String, statusCode: Int)
+    case primaryAndFallbackFailed(path: String, primaryFailure: String, fallbackFailure: String)
     case webSocketAuthentication
     case webSocketProtocol(String)
     case webSocketTimeout
@@ -767,8 +877,12 @@ public enum HAMirrorCaptureError: Error, Equatable, CustomStringConvertible {
             "Home Assistant returned a non-HTTP response"
         case let .invalidPath(path):
             "invalid Home Assistant path: \(path)"
+        case let .transportFailure(path, message):
+            "Home Assistant request for \(path) failed: \(message)"
         case let .unexpectedStatus(path, statusCode):
             "Home Assistant returned HTTP \(statusCode) for \(path)"
+        case let .primaryAndFallbackFailed(path, primaryFailure, fallbackFailure):
+            "Home Assistant request for \(path) failed on both primary and fallback: primary=\(primaryFailure); fallback=\(fallbackFailure)"
         case .webSocketAuthentication:
             "Home Assistant rejected the WebSocket token"
         case let .webSocketProtocol(message):

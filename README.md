@@ -2,7 +2,7 @@
 
 Native macOS menu bar app for Home Assistant.
 
-[![CI](https://github.com/YunaBraska/perch_ha/actions/workflows/ci.yml/badge.svg)](https://github.com/YunaBraska/perch_ha/actions/workflows/ci.yml)
+[![CI](https://github.com/YunaBraska/pearch_ha/actions/workflows/ci.yml/badge.svg)](https://github.com/YunaBraska/pearch_ha/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![macOS 13+](https://img.shields.io/badge/macOS-13%2B-blue)](https://developer.apple.com/macos/)
 

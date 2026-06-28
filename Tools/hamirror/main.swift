@@ -260,7 +260,7 @@ struct HAMirrorCommand {
       hamirror serve --fixtures Fixtures/mirror --token fake-token
       hamirror serve --fixtures Fixtures/private/m8-real --token fake-token --path-prefix /ha
 
-    Capture reads url, url2, and token from the env file. User/password are not sent to REST.
+    Capture reads url, url2, and token from the env file. It tries url first and reuses url2 when the primary capture endpoint fails. User/password are not sent to REST.
     Capture with --write re-verifies the written fixture set immediately; private outputs under Fixtures/private/ also prove they stay ignored by Git.
     Doctor prints redacted key presence/status plus next-step hints. Pass --json for scriptable output and --strict to fail when capture is blocked.
     OAuth check reads only PERCHHA_OAUTH_CLIENT_ID and PERCHHA_OAUTH_REDIRECT_URI, and reports redacted readiness guidance when they are missing.

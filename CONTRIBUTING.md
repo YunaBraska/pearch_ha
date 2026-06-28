@@ -5,8 +5,8 @@ Thanks for helping. Keep changes small, tested, and documented.
 ## Development setup
 
 ```sh
-git clone https://github.com/YunaBraska/perch_ha.git
-cd perch_ha
+git clone https://github.com/YunaBraska/pearch_ha.git
+cd pearch_ha
 
 swift build -Xswiftc -warnings-as-errors
 swift test -Xswiftc -warnings-as-errors
