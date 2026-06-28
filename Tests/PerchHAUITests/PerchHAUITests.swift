@@ -261,6 +261,49 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertTrue(model.snapshot.redactedForDiagnostics().hasTokenInput)
     }
 
+    func testConnectionFormSelfSignedCertificateAllowanceIsOffByDefaultAndHostScoped() throws {
+        let defaultForm = PerchHAConnectionForm(
+            urlString: "https://HOMEASSISTANT.local:8123",
+            fallbackURLString: "https://fallback.example"
+        )
+        let enabledForm = PerchHAConnectionForm(
+            urlString: "https://HOMEASSISTANT.local:8123",
+            fallbackURLString: "https://fallback.example",
+            allowsSelfSignedCertificates: true
+        )
+        let insecureForm = PerchHAConnectionForm(
+            urlString: "http://homeassistant.local:8123",
+            fallbackURLString: "http://fallback.example",
+            allowsSelfSignedCertificates: true
+        )
+
+        XCTAssertEqual(defaultForm.selfSignedCertificateHosts(), Set<String>())
+        XCTAssertEqual(enabledForm.selfSignedCertificateHosts(), Set(["homeassistant.local", "fallback.example"]))
+        XCTAssertEqual(insecureForm.selfSignedCertificateHosts(), Set<String>())
+    }
+
+    func testPanelConnectionFormForwardsSelfSignedCertificateAllowanceWithoutLeakingToken() async {
+        let recorder = ConnectionFormRecorder()
+        let model = PerchHAPanelModel { form in
+            await recorder.record(form)
+            return .success(rooms: [])
+        }
+
+        model.updateConnectionForm(
+            urlString: "https://homeassistant.local:8123",
+            fallbackURLString: "https://fallback.example",
+            token: "secret-token",
+            allowsSelfSignedCertificates: true
+        )
+        await model.connect()
+
+        XCTAssertEqual(model.snapshot.connectionState, .connected)
+        XCTAssertEqual(model.snapshot.connectionForm.token, "")
+        XCTAssertTrue(model.snapshot.connectionForm.allowsSelfSignedCertificates)
+        XCTAssertEqual(await recorder.tokens(), ["secret-token"])
+        XCTAssertEqual(await recorder.selfSignedCertificateAllowances(), [true])
+    }
+
     func testStoredAuthSessionConnectsWithoutVisibleToken() async {
         let recorder = ConnectionFormRecorder()
         let model = PerchHAPanelModel { form in
@@ -1814,12 +1857,16 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.customActionPersistenceFailureDescription, "custom action is incomplete")
     }
 
-    func testCustomActionRejectsProtectedServiceDataKeys() async {
-        let model = PerchHAPanelModel(connector: { _ in .success(rooms: selectionRooms()) })
+    func testCustomActionStoresProtectedServiceDataKeysInProtectedStore() async throws {
+        let protectedStore = InMemoryProtectedActionValueStore()
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            protectedActionValueStore: protectedStore
+        )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
-        XCTAssertFalse(
+        XCTAssertTrue(
             model.setCustomAction(
                 EntityCustomAction(
                     id: "arm-alarm",
@@ -1839,21 +1886,30 @@ final class PerchHAUITests: XCTestCase {
                 )
             )
         )
-        XCTAssertEqual(model.customActionConfiguration.actions, [])
-        XCTAssertTrue(
-            model.customActionPersistenceFailureDescription?
-                .contains("protected service data key serviceData.alarm.pin") == true
-        )
+        let action = try XCTUnwrap(model.customAction(id: "arm-alarm"))
+        guard case let .object(alarm) = action.action.serviceData["alarm"],
+              case let .protectedString(reference) = alarm["pin"] else {
+            return XCTFail("expected protected pin reference")
+        }
+        XCTAssertEqual(try protectedStore.load(reference), "1234")
+        let encoded = try JSONEncoder().encode(model.customActionConfiguration)
+        let text = try XCTUnwrap(String(data: encoded, encoding: .utf8))
+        XCTAssertFalse(text.contains("1234"))
+        XCTAssertNil(model.customActionPersistenceFailureDescription)
     }
 
-    func testCustomActionServiceDataEditorUpdatesScalarsAndRejectsUnsafeKeys() async {
+    func testCustomActionServiceDataEditorUpdatesScalarsAndStoresProtectedKeys() async throws {
         let action = EntityCustomAction(
             id: "boost-air",
             entityID: "sensor.office_temperature",
             title: "Boost air",
             action: ActionSpec(domain: "script", service: "turn_on", targetEntityID: "script.air_cleaner_boost")
         )
-        let model = PerchHAPanelModel(connector: { _ in .success(rooms: selectionRooms()) })
+        let protectedStore = InMemoryProtectedActionValueStore()
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            protectedActionValueStore: protectedStore
+        )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
@@ -1892,14 +1948,171 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.customAction(id: action.id)?.action.serviceData["enabled"], true)
         XCTAssertFalse(model.renameCustomActionServiceDataKey(action.id, from: "profile", to: "duration"))
         XCTAssertEqual(model.customActionPersistenceFailureDescription, "custom action service data key is duplicated")
-        XCTAssertFalse(model.setCustomActionServiceDataValue(action.id, key: "pin", value: "1234"))
-        XCTAssertTrue(
-            model.customActionPersistenceFailureDescription?
-                .contains("protected service data key serviceData.pin") == true
-        )
+        XCTAssertTrue(model.setCustomActionServiceDataValue(action.id, key: "pin", value: "1234"))
+        guard case let .protectedString(reference) = model.customAction(id: action.id)?.action.serviceData["pin"] else {
+            return XCTFail("expected protected pin reference")
+        }
+        XCTAssertEqual(try protectedStore.load(reference), "1234")
 
         XCTAssertTrue(model.removeCustomActionServiceDataKey(action.id, key: "enabled"))
-        XCTAssertEqual(model.customAction(id: action.id)?.action.serviceData, ["profile": "boost", "duration": 15])
+        XCTAssertEqual(
+            model.customAction(id: action.id)?.action.serviceData,
+            ["profile": "boost", "duration": 15, "pin": .protectedString(reference)]
+        )
+    }
+
+    func testCustomActionServiceDataEditorUpdatesObjectsAndArrays() async throws {
+        let action = EntityCustomAction(
+            id: "boost-air",
+            entityID: "sensor.office_temperature",
+            title: "Boost air",
+            action: ActionSpec(domain: "script", service: "turn_on", targetEntityID: "script.air_cleaner_boost")
+        )
+        let protectedStore = InMemoryProtectedActionValueStore()
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            protectedActionValueStore: protectedStore
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        XCTAssertTrue(model.setCustomAction(action))
+        XCTAssertTrue(model.setCustomActionServiceDataValue(action.id, path: [.key("payload")], value: .object([:])))
+        XCTAssertTrue(model.setCustomActionServiceDataValue(action.id, path: [.key("payload"), .key("mode")], value: "boost"))
+        XCTAssertTrue(
+            model.setCustomActionServiceDataText(
+                action.id,
+                path: [.key("payload"), .key("duration")],
+                text: "15",
+                kind: .number
+            )
+        )
+        XCTAssertTrue(model.setCustomActionServiceDataValue(action.id, path: [.key("payload"), .key("steps")], value: .array([])))
+        XCTAssertTrue(
+            model.appendCustomActionServiceDataArrayValue(
+                action.id,
+                path: [.key("payload"), .key("steps")],
+                value: .object(["service": "fan.turn_on"])
+            )
+        )
+        XCTAssertTrue(
+            model.appendCustomActionServiceDataArrayValue(
+                action.id,
+                path: [.key("payload"), .key("steps")],
+                value: .object(["service": "fan.set_preset_mode"])
+            )
+        )
+        XCTAssertTrue(
+            model.setCustomActionServiceDataValue(
+                action.id,
+                path: [.key("payload"), .key("steps"), .index(1), .key("data")],
+                value: .object(["preset_mode": "boost"])
+            )
+        )
+        XCTAssertTrue(
+            model.renameCustomActionServiceDataKey(
+                action.id,
+                parentPath: [.key("payload")],
+                from: "mode",
+                to: "profile"
+            )
+        )
+        XCTAssertTrue(
+            model.moveCustomActionServiceDataArrayValue(
+                action.id,
+                path: [.key("payload"), .key("steps"), .index(1)],
+                direction: .up
+            )
+        )
+        XCTAssertTrue(
+            model.setCustomActionServiceDataValue(
+                action.id,
+                path: [.key("payload"), .key("steps"), .index(0), .key("pin")],
+                value: "1234"
+            )
+        )
+        let nestedPayload = try XCTUnwrap(model.customAction(id: action.id)?.action.serviceData["payload"])
+        guard case let .object(payload) = nestedPayload,
+              case let .array(steps) = payload["steps"],
+              case let .object(firstStep) = steps.first,
+              case let .protectedString(reference) = firstStep["pin"] else {
+            return XCTFail("expected nested protected pin reference")
+        }
+        XCTAssertEqual(try protectedStore.load(reference), "1234")
+        XCTAssertFalse(
+            model.setCustomActionServiceDataValue(
+                action.id,
+                path: [.key("payload"), .key("missing"), .key("value")],
+                value: "ignored"
+            )
+        )
+        XCTAssertEqual(model.customActionPersistenceFailureDescription, "custom action service data path is invalid")
+        XCTAssertTrue(
+            model.removeCustomActionServiceDataValue(
+                action.id,
+                path: [.key("payload"), .key("steps"), .index(1)]
+            )
+        )
+
+        XCTAssertEqual(
+            model.customAction(id: action.id)?.action.serviceData,
+            [
+                "payload": .object([
+                    "profile": "boost",
+                    "duration": 15,
+                    "steps": .array([
+                        .object([
+                            "service": "fan.set_preset_mode",
+                            "data": .object(["preset_mode": "boost"]),
+                            "pin": .protectedString(reference)
+                        ])
+                    ])
+                ])
+            ]
+        )
+    }
+
+    func testCustomActionServiceDataTypeChangesReplaceObjectsAndArraysWithScalarDefaults() async {
+        let action = EntityCustomAction(
+            id: "boost-air",
+            entityID: "sensor.office_temperature",
+            title: "Boost air",
+            action: ActionSpec(domain: "script", service: "turn_on", targetEntityID: "script.air_cleaner_boost")
+        )
+        let model = PerchHAPanelModel(connector: { _ in .success(rooms: selectionRooms()) })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        XCTAssertTrue(model.setCustomAction(action))
+        XCTAssertTrue(model.setCustomActionServiceDataValue(action.id, path: [.key("payload")], value: .object(["mode": "boost"])))
+        XCTAssertTrue(
+            model.setCustomActionServiceDataType(
+                action.id,
+                path: [.key("payload")],
+                kind: .string
+            )
+        )
+        XCTAssertEqual(model.customAction(id: action.id)?.action.serviceData["payload"], "")
+
+        XCTAssertTrue(model.setCustomActionServiceDataValue(action.id, path: [.key("steps")], value: .array(["fan"])))
+        XCTAssertTrue(
+            model.setCustomActionServiceDataType(
+                action.id,
+                path: [.key("steps")],
+                kind: .number
+            )
+        )
+        XCTAssertEqual(model.customAction(id: action.id)?.action.serviceData["steps"], 0)
+
+        XCTAssertTrue(model.setCustomActionServiceDataValue(action.id, path: [.key("enabled")], value: .object(["previous": true])))
+        XCTAssertTrue(
+            model.setCustomActionServiceDataType(
+                action.id,
+                path: [.key("enabled")],
+                kind: .bool
+            )
+        )
+        XCTAssertEqual(model.customAction(id: action.id)?.action.serviceData["enabled"], false)
     }
 
     func testCustomActionOrphanedLoadedActionsRemainVisibleForDeletion() async {
@@ -1951,6 +2164,17 @@ final class PerchHAUITests: XCTestCase {
                         required: true,
                         example: "script.air_cleaner_boost",
                         selector: .object(["entity": .object(["domain": "script"])])
+                    ),
+                    HAServiceFieldMetadata(
+                        key: "variables",
+                        name: "Variables",
+                        description: nil,
+                        required: false,
+                        example: .object([
+                            "mode": "boost",
+                            "steps": .array(["fan", "purifier"])
+                        ]),
+                        selector: .object(["object": .object([:])])
                     )
                 ]
             )
@@ -1982,7 +2206,75 @@ final class PerchHAUITests: XCTestCase {
 
         XCTAssertEqual(model.customAction(id: action.id)?.action.domain, "script")
         XCTAssertEqual(model.customAction(id: action.id)?.action.service, "turn_on")
-        XCTAssertEqual(model.customAction(id: action.id)?.action.serviceData, ["mode": "boost", "duration": 15])
+        XCTAssertEqual(
+            model.customAction(id: action.id)?.action.serviceData,
+            [
+                "mode": "boost",
+                "duration": 15,
+                "variables": .object([
+                    "mode": "boost",
+                    "steps": .array(["fan", "purifier"])
+                ])
+            ]
+        )
+    }
+
+    func testCustomActionServiceMetadataUsesProtectedReferenceForSensitiveDefaults() async throws {
+        let metadata = [
+            HAServiceMetadata(
+                domain: "alarm_control_panel",
+                service: "alarm_arm_home",
+                name: "Arm home",
+                description: "Arms the home profile",
+                fields: [
+                    HAServiceFieldMetadata(
+                        key: "code",
+                        name: "Code",
+                        description: "Alarm code",
+                        required: true,
+                        example: "1234",
+                        selector: nil
+                    ),
+                    HAServiceFieldMetadata(
+                        key: "mode",
+                        name: "Mode",
+                        description: "Alarm mode",
+                        required: false,
+                        example: "home",
+                        selector: nil
+                    )
+                ]
+            )
+        ]
+        let action = EntityCustomAction(
+            id: "arm-home",
+            entityID: "sensor.office_temperature",
+            title: "Arm home",
+            action: ActionSpec(
+                domain: "homeassistant",
+                service: "update_entity",
+                targetEntityID: "sensor.office_temperature"
+            )
+        )
+        let protectedStore = InMemoryProtectedActionValueStore()
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            serviceMetadataProvider: { _ in .success(metadata) },
+            protectedActionValueStore: protectedStore
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        XCTAssertTrue(model.setCustomAction(action))
+        XCTAssertTrue(model.setCustomActionService(action.id, domain: "alarm_control_panel", service: "alarm_arm_home"))
+        let storedAction = try XCTUnwrap(model.customAction(id: action.id))
+        guard case let .protectedString(reference) = storedAction.action.serviceData["code"] else {
+            return XCTFail("expected protected code reference")
+        }
+        XCTAssertThrowsError(try protectedStore.load(reference)) { error in
+            XCTAssertEqual(error as? ProtectedActionValueStoreError, .missingValue(reference))
+        }
+        XCTAssertEqual(storedAction.action.serviceData["mode"], "home")
     }
 
     func testCustomActionServiceMetadataFailureDoesNotFailConnection() async {
@@ -2040,7 +2332,42 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertTrue(serviceEntry?.bodyText?.contains(#""duration":15"#) == true)
     }
 
-    func testAppShellPersistsCustomActionsAndRunsInjectedActionRunner() async {
+    func testCustomActionRunFailsExplicitlyWhenProtectedValueIsMissing() async {
+        let reference: ProtectedActionValueReference = "protected-pin"
+        let action = EntityCustomAction(
+            id: "arm-home",
+            entityID: "sensor.office_temperature",
+            title: "Arm home",
+            action: ActionSpec(
+                domain: "alarm_control_panel",
+                service: "alarm_arm_home",
+                targetEntityID: "alarm_control_panel.home",
+                serviceData: ["pin": .protectedString(reference)]
+            ),
+            requiresConfirmation: true
+        )
+        let runner = ActionRunnerRecorder(results: [.success])
+        let protectedStore = InMemoryProtectedActionValueStore()
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            actionRunner: { form, action in
+                await runner.run(form: form, action: action)
+            },
+            protectedActionValueStore: protectedStore
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        XCTAssertTrue(model.setCustomAction(action))
+
+        XCTAssertFalse(await model.runCustomAction(action.id, confirmed: true))
+        XCTAssertEqual(await runner.actions(), [])
+        XCTAssertTrue(
+            model.snapshot.controlActionState.failureMessage(for: action.entityID)?
+                .contains("protected custom action value protected-pin is missing") == true
+        )
+    }
+
+    func testAppShellPersistsCustomActionsAndRunsInjectedActionRunner() async throws {
         let url = temporaryConfigURL()
         defer {
             try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
@@ -2048,13 +2375,15 @@ final class PerchHAUITests: XCTestCase {
         let store = JSONConfigStore(fileURL: url)
         let action = sensorCustomAction()
         let runner = ActionRunnerRecorder(results: [.success])
+        let protectedStore = InMemoryProtectedActionValueStore()
         let application = PerchHAApplication(
             configStore: store,
             connector: { _ in .success(rooms: selectionRooms()) },
             historyProvider: { _, _, _ in .unavailable("history unavailable") },
             actionRunner: { form, action in
                 await runner.run(form: form, action: action)
-            }
+            },
+            protectedActionValueStore: protectedStore
         )
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
@@ -2069,6 +2398,80 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertTrue(application.renameCustomActionServiceDataKey(action.id, from: "speed", to: "fan_speed"))
         XCTAssertTrue(application.removeCustomActionServiceDataKey(action.id, key: "fan_speed"))
         XCTAssertEqual(application.snapshot.customActionConfiguration.actions, [action])
+        XCTAssertTrue(application.setCustomActionServiceDataValue(action.id, key: "pin", value: "1234"))
+        XCTAssertTrue(application.setCustomActionServiceDataValue(action.id, path: [.key("payload")], value: .object([:])))
+        XCTAssertTrue(application.setCustomActionServiceDataValue(action.id, path: [.key("payload"), .key("steps")], value: .array([])))
+        XCTAssertTrue(
+            application.appendCustomActionServiceDataArrayValue(
+                action.id,
+                path: [.key("payload"), .key("steps")],
+                value: .object(["service": "script.turn_on"])
+            )
+        )
+        XCTAssertTrue(
+            application.appendCustomActionServiceDataArrayValue(
+                action.id,
+                path: [.key("payload"), .key("steps")],
+                value: .object(["service": "script.turn_off"])
+            )
+        )
+        XCTAssertTrue(
+            application.setCustomActionServiceDataText(
+                action.id,
+                path: [.key("payload"), .key("steps"), .index(1), .key("delay")],
+                text: "2.5",
+                kind: .number
+            )
+        )
+        XCTAssertTrue(
+            application.renameCustomActionServiceDataKey(
+                action.id,
+                parentPath: [.key("payload"), .key("steps"), .index(1)],
+                from: "delay",
+                to: "seconds"
+            )
+        )
+        XCTAssertTrue(
+            application.moveCustomActionServiceDataArrayValue(
+                action.id,
+                path: [.key("payload"), .key("steps"), .index(1)],
+                direction: .up
+            )
+        )
+        XCTAssertFalse(
+            application.moveCustomActionServiceDataArrayValue(
+                action.id,
+                path: [.key("payload"), .key("steps"), .index(1)],
+                direction: .down
+            )
+        )
+        XCTAssertTrue(
+            application.removeCustomActionServiceDataValue(
+                action.id,
+                path: [.key("payload"), .key("steps"), .index(0), .key("seconds")]
+            )
+        )
+        XCTAssertTrue(application.removeCustomActionServiceDataValue(action.id, path: [.key("payload")]))
+        guard case let .protectedString(configuredReference) = application.snapshot.customActionConfiguration.action(id: action.id)?.action.serviceData["pin"] else {
+            return XCTFail("expected protected pin reference")
+        }
+        let protectedAction = EntityCustomAction(
+            id: action.id,
+            entityID: action.entityID,
+            title: action.title,
+            action: ActionSpec(
+                domain: action.action.domain,
+                service: action.action.service,
+                targetEntityID: action.action.targetEntityID,
+                serviceData: [
+                    "mode": "boost",
+                    "duration": 15,
+                    "pin": .protectedString(configuredReference)
+                ]
+            ),
+            requiresConfirmation: action.requiresConfirmation
+        )
+        XCTAssertEqual(application.snapshot.customActionConfiguration.actions, [protectedAction])
         let secondAction = EntityCustomAction(
             id: "boost-air-later",
             entityID: "sensor.office_temperature",
@@ -2081,12 +2484,12 @@ final class PerchHAUITests: XCTestCase {
             )
         )
         XCTAssertTrue(application.setCustomAction(secondAction))
-        XCTAssertEqual(application.snapshot.customActionConfiguration.actions, [action, secondAction])
+        XCTAssertEqual(application.snapshot.customActionConfiguration.actions, [protectedAction, secondAction])
         let renamedAction = EntityCustomAction(
             id: action.id,
             entityID: action.entityID,
             title: "Boost air now",
-            action: action.action,
+            action: protectedAction.action,
             requiresConfirmation: action.requiresConfirmation
         )
         XCTAssertTrue(application.setCustomAction(renamedAction))
@@ -2094,13 +2497,39 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertTrue(application.moveCustomAction(action.id, direction: .down))
         XCTAssertEqual(application.snapshot.customActionConfiguration.actions, [secondAction, renamedAction])
         XCTAssertTrue(await application.runCustomAction(action.id))
+        let storedProtectedAction = try XCTUnwrap(application.snapshot.customActionConfiguration.action(id: action.id))
+        guard case let .protectedString(reference) = storedProtectedAction.action.serviceData["pin"] else {
+            return XCTFail("expected protected pin reference")
+        }
+        XCTAssertEqual(reference, configuredReference)
+        XCTAssertEqual(try protectedStore.load(reference), "1234")
+        let persistedConfiguration = try store.load()
+        let persistedText = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertFalse(persistedText.contains("1234"))
 
-        XCTAssertEqual(await runner.actions(), [action.action])
-        XCTAssertEqual(try? store.load().customActions, [secondAction, renamedAction])
+        XCTAssertEqual(
+            await runner.actions(),
+            [
+                ActionSpec(
+                    domain: action.action.domain,
+                    service: action.action.service,
+                    targetEntityID: action.action.targetEntityID,
+                    serviceData: [
+                        "mode": "boost",
+                        "duration": 15,
+                        "pin": "1234"
+                    ]
+                )
+            ]
+        )
+        XCTAssertEqual(persistedConfiguration.customActions, [secondAction, renamedAction])
 
         XCTAssertTrue(application.removeCustomAction(action.id))
         XCTAssertEqual(application.snapshot.customActionConfiguration.actions, [secondAction])
         XCTAssertEqual(try? store.load().customActions, [secondAction])
+        XCTAssertThrowsError(try protectedStore.load(reference)) { error in
+            XCTAssertEqual(error as? ProtectedActionValueStoreError, .missingValue(reference))
+        }
         XCTAssertTrue(application.removeCustomAction(secondAction.id))
         XCTAssertEqual(application.snapshot.customActionConfiguration.actions, [])
         XCTAssertEqual(try? store.load().customActions, [])
@@ -2131,6 +2560,31 @@ final class PerchHAUITests: XCTestCase {
             return
         }
         XCTAssertTrue(message.contains("disk full"))
+    }
+
+    func testAppShellRollsBackProtectedCustomActionValueWhenSaveFails() async throws {
+        let action = sensorCustomAction()
+        let store = FailingConfigStore(
+            loadedConfiguration: PerchHAConfiguration(customActions: [action]),
+            saveError: .writeFailed(URL(fileURLWithPath: "/tmp/perchha-config.json"), message: "disk full")
+        )
+        let protectedStore = InMemoryProtectedActionValueStore()
+        let application = PerchHAApplication(
+            configStore: store,
+            connector: { _ in .success(rooms: selectionRooms()) },
+            protectedActionValueStore: protectedStore
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+        application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await application.connect()
+
+        XCTAssertFalse(application.setCustomActionServiceDataValue(action.id, key: "pin", value: "1234"))
+        XCTAssertEqual(application.snapshot.customActionConfiguration.actions, [action])
+        XCTAssertEqual(try protectedStore.snapshot(), [:])
+        XCTAssertTrue(application.snapshot.customActionPersistenceFailureDescription?.contains("disk full") == true)
     }
 
     func test_t_app_shell_custom_action_remove_failure_rejects_live_configuration_change() {
@@ -2889,6 +3343,346 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(Int(frameSize.height.rounded()), 420)
     }
 
+    func testAppShellSettingsCustomActionEditorExposesOrderedNativeTextFieldFocusPath() {
+        let action = EntityCustomAction(
+            id: "boost-air",
+            entityID: "sensor.office_temperature",
+            title: "Boost air",
+            action: ActionSpec(
+                domain: "script",
+                service: "turn_on",
+                targetEntityID: "script.air_cleaner_boost",
+                serviceData: [
+                    "variables": .object([
+                        "steps": .array(["fan", "purifier"])
+                    ])
+                ]
+            ),
+            requiresConfirmation: true
+        )
+        let rooms = selectionRooms()
+        let snapshot = PerchHAPanelSnapshot(
+            connectionState: .connected,
+            phase: .connectedData,
+            rooms: rooms,
+            availableRooms: rooms,
+            selectionQuery: "temperature",
+            isSettingsPresented: true,
+            lastUpdateDescription: "Snapshot ready",
+            canRetry: true
+        )
+        let model = PerchHAPanelModel(
+            snapshot: snapshot,
+            selectionConfiguration: snapshot.selectionConfiguration,
+            menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
+            customActionConfiguration: CustomActionConfiguration(actions: [action])
+        )
+        let panel = PerchHAApplication.makePanel(model: model)
+        defer {
+            panel.orderOut(nil)
+            panel.contentViewController = nil
+        }
+
+        panel.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        let textFields = editableTextFields(in: panel.contentView)
+        let popUpButtons = nativePopUpButtons(in: panel.contentView)
+        let debugSummary = nativeControlDebugSummary(in: panel.contentView)
+        let titleField = textFields.first { $0.placeholderString == "Title" }
+        let targetField = textFields.first { $0.placeholderString == "Target entity" }
+        let keyField = textFields.first { $0.placeholderString == "Key" }
+        let valueField = textFields.first { $0.placeholderString == "Value" }
+
+        XCTAssertNotNil(titleField, debugSummary)
+        XCTAssertNotNil(targetField, debugSummary)
+        XCTAssertNotNil(keyField, debugSummary)
+        XCTAssertNotNil(valueField, debugSummary)
+        let selectedPopupTitles = Set(popUpButtons.compactMap(\.titleOfSelectedItem))
+        XCTAssertTrue(selectedPopupTitles.contains("script"), debugSummary)
+        XCTAssertTrue(selectedPopupTitles.contains("turn_on"), debugSummary)
+        XCTAssertTrue(selectedPopupTitles.contains("Object"), debugSummary)
+        XCTAssertTrue(selectedPopupTitles.contains("List"), debugSummary)
+
+        guard let titleField else {
+            return
+        }
+        XCTAssertTrue(panel.makeFirstResponder(titleField))
+        let firstResponder = panel.firstResponder as AnyObject?
+        XCTAssertTrue(firstResponder === titleField.currentEditor() || firstResponder === titleField)
+
+        let keyViewLabels = nativeKeyViewLoopLabels(startingAt: titleField)
+        let keyViewSummary = keyViewLabels.joined(separator: " -> ")
+        let targetIndex = keyViewLabels.firstIndex { $0.contains("placeholder:Target entity") }
+        let keyIndex = keyViewLabels.firstIndex { $0.contains("placeholder:Key") }
+        let valueIndex = keyViewLabels.firstIndex { $0.contains("placeholder:Value") }
+
+        XCTAssertNotNil(targetIndex, keyViewSummary)
+        XCTAssertNotNil(keyIndex, keyViewSummary)
+        XCTAssertNotNil(valueIndex, keyViewSummary)
+        if let targetIndex, let keyIndex, let valueIndex {
+            XCTAssertGreaterThan(targetIndex, 0, keyViewSummary)
+            XCTAssertGreaterThan(keyIndex, targetIndex, keyViewSummary)
+            XCTAssertGreaterThan(valueIndex, keyIndex, keyViewSummary)
+        }
+    }
+
+    func testAppShellSettingsCustomActionEditorMutatesNestedServiceDataThroughNativeTextFields() throws {
+        let action = EntityCustomAction(
+            id: "boost-air",
+            entityID: "sensor.office_temperature",
+            title: "Boost air",
+            action: ActionSpec(
+                domain: "script",
+                service: "turn_on",
+                targetEntityID: "script.air_cleaner_boost",
+                serviceData: [
+                    "variables": .object([
+                        "steps": .array(["fan", "purifier"])
+                    ])
+                ]
+            ),
+            requiresConfirmation: true
+        )
+        let rooms = selectionRooms()
+        let snapshot = PerchHAPanelSnapshot(
+            connectionState: .connected,
+            phase: .connectedData,
+            rooms: rooms,
+            availableRooms: rooms,
+            selectionQuery: "temperature",
+            isSettingsPresented: true,
+            lastUpdateDescription: "Snapshot ready",
+            canRetry: true,
+            serviceMetadata: [
+                HAServiceMetadata(
+                    domain: "script",
+                    service: "turn_on",
+                    name: "Turn on",
+                    description: nil,
+                    fields: [
+                        HAServiceFieldMetadata(
+                            key: "variables",
+                            name: "Variables",
+                            description: nil,
+                            required: false,
+                            example: .object([
+                                "steps": .array(["fan", "purifier"])
+                            ]),
+                            selector: .object(["object": .object([:])])
+                        )
+                    ]
+                )
+            ]
+        )
+        let model = PerchHAPanelModel(
+            snapshot: snapshot,
+            selectionConfiguration: snapshot.selectionConfiguration,
+            menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
+            customActionConfiguration: CustomActionConfiguration(actions: [action])
+        )
+        let panel = PerchHAApplication.makePanel(model: model)
+        defer {
+            panel.orderOut(nil)
+            panel.contentViewController = nil
+        }
+
+        panel.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        let textFields = editableTextFields(in: panel.contentView)
+        let debugSummary = nativeControlDebugSummary(in: panel.contentView)
+        guard let titleField = textFields.first(where: { $0.placeholderString == "Title" && $0.stringValue == "Boost air" }) else {
+            XCTFail(debugSummary)
+            return
+        }
+        guard let targetField = textFields.first(where: { $0.placeholderString == "Target entity" && $0.stringValue == "script.air_cleaner_boost" }) else {
+            XCTFail(debugSummary)
+            return
+        }
+        let valueFields = textFields.filter { $0.placeholderString == "Value" }
+        guard let nestedValueField = valueFields.last else {
+            XCTFail(debugSummary)
+            return
+        }
+
+        try setNativeTextFieldValue("Boost harder", for: titleField, in: panel)
+        try setNativeTextFieldValue("script.air_cleaner_quiet", for: targetField, in: panel)
+        try setNativeTextFieldValue("boost", for: nestedValueField, in: panel)
+
+        let updatedAction = try XCTUnwrap(model.customActionConfiguration.action(id: "boost-air"))
+        XCTAssertEqual(updatedAction.title, "Boost harder")
+        XCTAssertEqual(updatedAction.action.targetEntityID, "script.air_cleaner_quiet")
+        XCTAssertEqual(
+            updatedAction.action.serviceData,
+            [
+                "variables": .object([
+                    "steps": .array(["fan", "boost"])
+                ])
+            ]
+        )
+    }
+
+    func testAppShellSettingsCustomActionEditorMutatesServiceAndNestedTypeThroughNativePopups() throws {
+        let action = EntityCustomAction(
+            id: "boost-air",
+            entityID: "sensor.office_temperature",
+            title: "Boost air",
+            action: ActionSpec(
+                domain: "script",
+                service: "turn_on",
+                targetEntityID: "script.air_cleaner_boost",
+                serviceData: [
+                    "variables": .object([
+                        "steps": .array(["fan", "purifier"])
+                    ])
+                ]
+            ),
+            requiresConfirmation: true
+        )
+        let rooms = selectionRooms()
+        let snapshot = PerchHAPanelSnapshot(
+            connectionState: .connected,
+            phase: .connectedData,
+            rooms: rooms,
+            availableRooms: rooms,
+            selectionQuery: "temperature",
+            isSettingsPresented: true,
+            lastUpdateDescription: "Snapshot ready",
+            canRetry: true,
+            serviceMetadata: [
+                HAServiceMetadata(
+                    domain: "script",
+                    service: "turn_on",
+                    name: "Turn on",
+                    description: nil,
+                    fields: [
+                        HAServiceFieldMetadata(
+                            key: "variables",
+                            name: "Variables",
+                            description: nil,
+                            required: false,
+                            example: .object([
+                                "steps": .array(["fan", "purifier"])
+                            ]),
+                            selector: .object(["object": .object([:])])
+                        )
+                    ]
+                ),
+                HAServiceMetadata(
+                    domain: "script",
+                    service: "turn_off",
+                    name: "Turn off",
+                    description: nil,
+                    fields: [
+                        HAServiceFieldMetadata(
+                            key: "transition",
+                            name: "Transition",
+                            description: nil,
+                            required: false,
+                            example: 3,
+                            selector: .object(["number": .object(["min": 0])])
+                        )
+                    ]
+                )
+            ]
+        )
+        let model = PerchHAPanelModel(
+            snapshot: snapshot,
+            selectionConfiguration: snapshot.selectionConfiguration,
+            menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
+            customActionConfiguration: CustomActionConfiguration(actions: [action])
+        )
+        let panel = PerchHAApplication.makePanel(model: model)
+        defer {
+            panel.orderOut(nil)
+            panel.contentViewController = nil
+        }
+
+        panel.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        let popUpButtons = nativePopUpButtons(in: panel.contentView)
+        let debugSummary = nativeControlDebugSummary(in: panel.contentView)
+        guard let servicePopUp = popUpButtons.first(where: { $0.titleOfSelectedItem == "turn_on" }) else {
+            XCTFail(debugSummary)
+            return
+        }
+        guard let typePopUp = popUpButtons.first(where: { $0.titleOfSelectedItem == "List" }) else {
+            XCTFail(debugSummary)
+            return
+        }
+
+        try setNativePopUpSelection("turn_off", for: servicePopUp)
+        try setNativePopUpSelection("Text", for: typePopUp)
+
+        let updatedAction = try XCTUnwrap(model.customActionConfiguration.action(id: "boost-air"))
+        XCTAssertEqual(updatedAction.action.service, "turn_off")
+        XCTAssertEqual(
+            updatedAction.action.serviceData,
+            [
+                "variables": .object([
+                    "steps": ""
+                ]),
+                "transition": 3
+            ]
+        )
+    }
+
+    func testAppShellBuiltInControlsExposeNativeSwitchAndSlider() {
+        let rooms = controlRooms()
+        let snapshot = PerchHAPanelSnapshot(
+            connectionState: .connected,
+            phase: .connectedData,
+            rooms: rooms,
+            availableRooms: rooms,
+            lastUpdateDescription: "Snapshot ready",
+            canRetry: true,
+            controlActionState: .failed(entityID: "switch.office_lamp", message: "planned service failure")
+        )
+        let model = PerchHAPanelModel(snapshot: snapshot)
+        let panel = PerchHAApplication.makePanel(model: model)
+        defer {
+            panel.orderOut(nil)
+            panel.contentViewController = nil
+        }
+
+        panel.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        let switches = nativeSwitches(in: panel.contentView)
+        let sliders = nativeSliders(in: panel.contentView)
+        let buttons = nativeButtons(in: panel.contentView)
+        let debugSummary = nativeControlDebugSummary(in: panel.contentView)
+
+        let controlSwitch = switches.first
+        let coverSlider = sliders.first
+        let coverButtons = buttons.filter { String(describing: type(of: $0)).contains("SwiftUIAppKitButton") }
+
+        XCTAssertEqual(switches.count, 1, debugSummary)
+        XCTAssertEqual(sliders.count, 1, debugSummary)
+        XCTAssertGreaterThanOrEqual(coverButtons.count, 3, debugSummary)
+        XCTAssertTrue(controlSwitch.map { String(describing: type(of: $0)).contains("PlatformSwitch") } == true, debugSummary)
+        XCTAssertTrue(coverSlider.map { String(describing: type(of: $0)).contains("CustomMarkedSlider") } == true, debugSummary)
+
+        if let controlSwitch {
+            XCTAssertTrue(controlSwitch.acceptsFirstResponder, debugSummary)
+            XCTAssertTrue(panel.makeFirstResponder(controlSwitch))
+            let firstResponder = panel.firstResponder as AnyObject?
+            XCTAssertTrue(firstResponder === controlSwitch || firstResponder === controlSwitch.currentEditor())
+        }
+        if let slider = coverSlider {
+            XCTAssertTrue(slider.acceptsFirstResponder, debugSummary)
+            XCTAssertTrue(panel.makeFirstResponder(slider))
+            let firstResponder = panel.firstResponder as AnyObject?
+            XCTAssertTrue(firstResponder === slider || firstResponder === slider.currentEditor())
+        }
+    }
+
     func test_t_app_shell_launch_wires_status_item_panel_and_cleanup() {
         let application = PerchHAApplication()
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
@@ -3103,13 +3897,175 @@ final class PerchHAUITests: XCTestCase {
                 OAuthRefreshRequest(
                     baseURL: try XCTUnwrap(URL(string: "http://homeassistant.local:8123")),
                     refreshToken: "refresh-token",
-                    clientID: "https://perchha.dev/app"
+                    clientID: "https://perchha.dev/app",
+                    serverTrustPolicy: .default
                 )
             ]
         )
         XCTAssertEqual(try sessionStore.load().accessToken, "fresh-access")
         XCTAssertEqual(try sessionStore.load().refreshToken, "refresh-token")
         XCTAssertEqual(try sessionStore.load().clientID, "https://perchha.dev/app")
+    }
+
+    func testAppShellForwardsSelfSignedCertificatePolicyToConnectionAndRefresh() async throws {
+        let keychain = KeychainSecretStore(service: "dev.perchha.ui.tests.\(UUID().uuidString)")
+        let sessionStore = PerchHAAuthSessionStore(secretStore: keychain)
+        defer {
+            _ = try? sessionStore.clear()
+        }
+        try sessionStore.save(
+            PerchHAAuthSession(
+                accessToken: "expired-access",
+                refreshToken: "refresh-token",
+                clientID: "https://perchha.dev/app"
+            )
+        )
+        let client = RefreshingHAClientRecorder(
+            discoveryResults: [
+                .failure(.authentication),
+                .success(oauthDiscoverySnapshot())
+            ],
+            refreshResults: [
+                .success(
+                    HAOAuthToken(
+                        accessToken: "fresh-access",
+                        refreshToken: nil,
+                        expiresInSeconds: 1800,
+                        tokenType: "Bearer"
+                    )
+                )
+            ]
+        )
+        let application = PerchHAApplication(
+            configStore: nil,
+            authSessionStore: sessionStore,
+            client: client
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        application.updateConnectionForm(
+            urlString: "https://HOMEASSISTANT.local:8123",
+            fallbackURLString: "https://fallback.example",
+            usesStoredAuthSession: true,
+            allowsSelfSignedCertificates: true
+        )
+        await application.connect()
+
+        let expectedPolicy = HAServerTrustPolicy(
+            allowedSelfSignedCertificateHosts: ["homeassistant.local", "fallback.example"]
+        )
+        XCTAssertEqual(application.snapshot.connectionState, .connected)
+        XCTAssertEqual(application.snapshot.connectionForm.token, "")
+        XCTAssertTrue(application.snapshot.connectionForm.allowsSelfSignedCertificates)
+        XCTAssertEqual(await client.discoveryTrustPolicies(), [expectedPolicy, expectedPolicy])
+        XCTAssertEqual(
+            await client.refreshRequests(),
+            [
+                OAuthRefreshRequest(
+                    baseURL: try XCTUnwrap(URL(string: "https://HOMEASSISTANT.local:8123")),
+                    refreshToken: "refresh-token",
+                    clientID: "https://perchha.dev/app",
+                    serverTrustPolicy: expectedPolicy
+                )
+            ]
+        )
+    }
+
+    func testStoredOAuthRefreshUsesFallbackBaseURLAfterPrimaryTransportFailureAndFallbackAuthentication() async throws {
+        let keychain = KeychainSecretStore(service: "dev.perchha.ui.tests.\(UUID().uuidString)")
+        let sessionStore = PerchHAAuthSessionStore(secretStore: keychain)
+        defer {
+            _ = try? sessionStore.clear()
+        }
+        try sessionStore.save(
+            PerchHAAuthSession(
+                accessToken: "expired-access",
+                refreshToken: "refresh-token",
+                clientID: "https://perchha.dev/app"
+            )
+        )
+        let client = RefreshingHAClientRecorder(
+            discoveryResults: [
+                .failure(.unreachable(host: "primary.local")),
+                .failure(.authentication),
+                .success(oauthDiscoverySnapshot())
+            ],
+            refreshResults: [
+                .success(
+                    HAOAuthToken(
+                        accessToken: "fresh-access",
+                        refreshToken: nil,
+                        expiresInSeconds: 1800,
+                        tokenType: "Bearer"
+                    )
+                )
+            ]
+        )
+        let application = PerchHAApplication(
+            configStore: nil,
+            authSessionStore: sessionStore,
+            client: client
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+        let primaryURL = try XCTUnwrap(URL(string: "https://primary.local:8123"))
+        let fallbackURL = try XCTUnwrap(URL(string: "https://fallback.example"))
+        let expectedPolicy = HAServerTrustPolicy(
+            allowedSelfSignedCertificateHosts: ["primary.local", "fallback.example"]
+        )
+
+        application.updateConnectionForm(
+            urlString: primaryURL.absoluteString,
+            fallbackURLString: fallbackURL.absoluteString,
+            usesStoredAuthSession: true,
+            allowsSelfSignedCertificates: true
+        )
+        await application.connect()
+
+        XCTAssertEqual(application.snapshot.connectionState, .connected)
+        XCTAssertEqual(await client.discoveryURLs(), [primaryURL, fallbackURL, fallbackURL])
+        XCTAssertEqual(await client.discoveryTokens(), ["expired-access", "expired-access", "fresh-access"])
+        XCTAssertEqual(await client.discoveryTrustPolicies(), [expectedPolicy, expectedPolicy, expectedPolicy])
+        XCTAssertEqual(
+            await client.refreshRequests(),
+            [
+                OAuthRefreshRequest(
+                    baseURL: fallbackURL,
+                    refreshToken: "refresh-token",
+                    clientID: "https://perchha.dev/app",
+                    serverTrustPolicy: expectedPolicy
+                )
+            ]
+        )
+        XCTAssertEqual(try sessionStore.load().accessToken, "fresh-access")
+    }
+
+    func testAuthorizedGatewayFallsBackAfterPrimaryTransportFailure() async throws {
+        let client = RefreshingHAClientRecorder(
+            discoveryResults: [
+                .failure(.transport("socket closed before response")),
+                .success(oauthDiscoverySnapshot())
+            ]
+        )
+        let gateway = PerchHAAuthorizedHomeAssistantGateway(client: client)
+        let primaryURL = try XCTUnwrap(URL(string: "https://primary.local:8123"))
+        let fallbackURL = try XCTUnwrap(URL(string: "https://fallback.example"))
+        let form = PerchHAConnectionForm(
+            urlString: primaryURL.absoluteString,
+            fallbackURLString: fallbackURL.absoluteString,
+            token: "long-lived-token"
+        )
+
+        let result = await gateway.connect(form: form)
+
+        XCTAssertEqual(result, .success(rooms: RoomResolver().resolve(snapshot: oauthDiscoverySnapshot())))
+        XCTAssertEqual(await client.discoveryURLs(), [primaryURL, fallbackURL])
+        XCTAssertEqual(await client.discoveryTokens(), ["long-lived-token", "long-lived-token"])
     }
 
     func testAppShellClearsStoredOAuthSessionWhenRefreshFails() async throws {
@@ -3488,17 +4444,25 @@ final class PerchHAUITests: XCTestCase {
         )
 
         let result = await coordinator.signIn(
-            form: PerchHAConnectionForm(urlString: "http://homeassistant.local:8123")
+            form: PerchHAConnectionForm(
+                urlString: "https://homeassistant.local:8123",
+                fallbackURLString: "https://fallback.example",
+                allowsSelfSignedCertificates: true
+            )
         )
 
         XCTAssertEqual(result, .success)
         XCTAssertEqual(
             await presenter.authorizationURLs().first,
-            try XCTUnwrap(URL(string: "http://homeassistant.local:8123/auth/authorize?client_id=https%3A%2F%2Fperchha.dev%2Fapp&redirect_uri=perchha%3A%2F%2Fauth&state=state-value"))
+            try XCTUnwrap(URL(string: "https://homeassistant.local:8123/auth/authorize?client_id=https%3A%2F%2Fperchha.dev%2Fapp&redirect_uri=perchha%3A%2F%2Fauth&state=state-value"))
         )
         let request = try await XCTUnwrap(transport.requests().first)
         XCTAssertEqual(request.method, "POST")
         XCTAssertEqual(request.url.path, "/auth/token")
+        XCTAssertEqual(
+            request.serverTrustPolicy,
+            HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["homeassistant.local", "fallback.example"])
+        )
         XCTAssertEqual(
             String(data: try XCTUnwrap(request.body), encoding: .utf8),
             "grant_type=authorization_code&code=auth-code&client_id=https%3A%2F%2Fperchha.dev%2Fapp"
@@ -4505,6 +5469,172 @@ final class PerchHAUITests: XCTestCase {
         ]
     }
 
+    private func drainPanelRunLoop() {
+        for _ in 0..<3 {
+            _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.001))
+        }
+    }
+
+    private func editableTextFields(in root: NSView?) -> [NSTextField] {
+        guard let root else {
+            return []
+        }
+        var result: [NSTextField] = []
+        func collect(_ view: NSView) {
+            if let textField = view as? NSTextField, !textField.isHiddenOrHasHiddenAncestor, textField.isEditable {
+                result.append(textField)
+            }
+            view.subviews.forEach(collect)
+        }
+        collect(root)
+        return result
+    }
+
+    private func setNativeTextFieldValue(_ value: String, for textField: NSTextField, in panel: NSPanel) throws {
+        XCTAssertTrue(panel.makeFirstResponder(textField))
+        drainPanelRunLoop()
+        if let editor = textField.currentEditor() {
+            editor.string = value
+            textField.stringValue = value
+            NotificationCenter.default.post(
+                name: NSControl.textDidChangeNotification,
+                object: textField,
+                userInfo: ["NSFieldEditor": editor]
+            )
+            NotificationCenter.default.post(
+                name: NSControl.textDidEndEditingNotification,
+                object: textField,
+                userInfo: ["NSFieldEditor": editor]
+            )
+        }
+        textField.stringValue = value
+        textField.validateEditing()
+        textField.sendAction(textField.action, to: textField.target)
+        panel.endEditing(for: nil)
+        _ = panel.makeFirstResponder(nil)
+        drainPanelRunLoop()
+    }
+
+    private func setNativePopUpSelection(_ title: String, for popUpButton: NSPopUpButton) throws {
+        XCTAssertTrue(popUpButton.itemTitles.contains(title))
+        popUpButton.selectItem(withTitle: title)
+        popUpButton.synchronizeTitleAndSelectedItem()
+        let index = popUpButton.indexOfSelectedItem
+        if index >= 0 {
+            popUpButton.menu?.performActionForItem(at: index)
+        }
+        popUpButton.sendAction(popUpButton.action, to: popUpButton.target)
+        drainPanelRunLoop()
+    }
+
+    @MainActor
+    private func nativeSwitches(in root: NSView?) -> [NSSwitch] {
+        guard let root else {
+            return []
+        }
+        var result: [NSSwitch] = []
+        func collect(_ view: NSView) {
+            if let controlSwitch = view as? NSSwitch, !controlSwitch.isHiddenOrHasHiddenAncestor {
+                result.append(controlSwitch)
+            }
+            view.subviews.forEach(collect)
+        }
+        collect(root)
+        return result
+    }
+
+    @MainActor
+    private func nativeSliders(in root: NSView?) -> [NSSlider] {
+        guard let root else {
+            return []
+        }
+        var result: [NSSlider] = []
+        func collect(_ view: NSView) {
+            if let slider = view as? NSSlider, !slider.isHiddenOrHasHiddenAncestor {
+                result.append(slider)
+            }
+            view.subviews.forEach(collect)
+        }
+        collect(root)
+        return result
+    }
+
+    @MainActor
+    private func nativeButtons(in root: NSView?) -> [NSButton] {
+        guard let root else {
+            return []
+        }
+        var result: [NSButton] = []
+        func collect(_ view: NSView) {
+            if let button = view as? NSButton, !button.isHiddenOrHasHiddenAncestor {
+                result.append(button)
+            }
+            view.subviews.forEach(collect)
+        }
+        collect(root)
+        return result
+    }
+
+    private func nativePopUpButtons(in root: NSView?) -> [NSPopUpButton] {
+        guard let root else {
+            return []
+        }
+        var result: [NSPopUpButton] = []
+        func collect(_ view: NSView) {
+            if let popUpButton = view as? NSPopUpButton, !popUpButton.isHiddenOrHasHiddenAncestor {
+                result.append(popUpButton)
+            }
+            view.subviews.forEach(collect)
+        }
+        collect(root)
+        return result
+    }
+
+    private func nativeKeyViewLoopLabels(startingAt start: NSView) -> [String] {
+        var labels: [String] = []
+        var visited: Set<ObjectIdentifier> = []
+        var current: NSView? = start
+
+        while let view = current, labels.count < 64 {
+            let identifier = ObjectIdentifier(view)
+            if !visited.insert(identifier).inserted {
+                break
+            }
+            labels.append(nativeControlLabel(for: view))
+            current = view.nextValidKeyView
+        }
+
+        return labels
+    }
+
+    private func nativeControlLabel(for view: NSView) -> String {
+        if let textField = view as? NSTextField {
+            return "\(type(of: view))(placeholder:\(textField.placeholderString ?? ""))"
+        }
+        if let button = view as? NSButton {
+            return "\(type(of: view))(title:\(button.title),label:\(button.accessibilityLabel() ?? ""))"
+        }
+        return String(describing: type(of: view))
+    }
+
+    private func nativeControlDebugSummary(in root: NSView?) -> String {
+        guard let root else {
+            return "no-root-view"
+        }
+        var result: [String] = []
+        func collect(_ view: NSView) {
+            if let control = view as? NSControl {
+                let placeholder = (control as? NSTextField)?.placeholderString ?? ""
+                let title = control is NSButton ? (control as? NSButton)?.title ?? "" : ""
+                let label = control.accessibilityLabel() ?? ""
+                result.append("\(type(of: control))(placeholder:\(placeholder),title:\(title),label:\(label),enabled:\(control.isEnabled),hidden:\(control.isHiddenOrHasHiddenAncestor))")
+            }
+            view.subviews.forEach(collect)
+        }
+        collect(root)
+        return result.prefix(16).joined(separator: " | ")
+    }
+
     private func controlRooms() -> [Room] {
         [
             Room(
@@ -4628,6 +5758,7 @@ private struct OAuthRefreshRequest: Equatable, Sendable {
     let baseURL: URL
     let refreshToken: String
     let clientID: String
+    let serverTrustPolicy: HAServerTrustPolicy
 }
 
 @MainActor
@@ -4673,10 +5804,12 @@ private actor OAuthHARESTTransportRecorder: HARESTTransport {
     }
 }
 
-private actor RefreshingHAClientRecorder: PerchHARefreshingHomeAssistantClient {
+private actor RefreshingHAClientRecorder: PerchHAServerTrustRefreshingHomeAssistantClient {
     private var discoveryResults: [HAClientResult<DiscoverySnapshot>]
     private var refreshResults: [HAClientResult<HAOAuthToken>]
+    private var recordedDiscoveryURLs: [URL] = []
     private var recordedDiscoveryTokens: [String] = []
+    private var recordedDiscoveryTrustPolicies: [HAServerTrustPolicy] = []
     private var recordedRefreshRequests: [OAuthRefreshRequest] = []
 
     init(
@@ -4688,7 +5821,9 @@ private actor RefreshingHAClientRecorder: PerchHARefreshingHomeAssistantClient {
     }
 
     func discovery(_ input: HAConnectionInput) async -> HAClientResult<DiscoverySnapshot> {
+        recordedDiscoveryURLs.append(input.endpoint.primaryURL)
         recordedDiscoveryTokens.append(input.token)
+        recordedDiscoveryTrustPolicies.append(input.serverTrustPolicy)
         guard !discoveryResults.isEmpty else {
             return .failure(.transport("unexpected discovery request"))
         }
@@ -4708,11 +5843,26 @@ private actor RefreshingHAClientRecorder: PerchHARefreshingHomeAssistantClient {
     }
 
     func refreshAccessToken(baseURL: URL, refreshToken: String, clientID: String) async -> HAClientResult<HAOAuthToken> {
+        await refreshAccessToken(
+            baseURL: baseURL,
+            refreshToken: refreshToken,
+            clientID: clientID,
+            serverTrustPolicy: .default
+        )
+    }
+
+    func refreshAccessToken(
+        baseURL: URL,
+        refreshToken: String,
+        clientID: String,
+        serverTrustPolicy: HAServerTrustPolicy
+    ) async -> HAClientResult<HAOAuthToken> {
         recordedRefreshRequests.append(
             OAuthRefreshRequest(
                 baseURL: baseURL,
                 refreshToken: refreshToken,
-                clientID: clientID
+                clientID: clientID,
+                serverTrustPolicy: serverTrustPolicy
             )
         )
         guard !refreshResults.isEmpty else {
@@ -4721,8 +5871,16 @@ private actor RefreshingHAClientRecorder: PerchHARefreshingHomeAssistantClient {
         return refreshResults.removeFirst()
     }
 
+    func discoveryURLs() -> [URL] {
+        recordedDiscoveryURLs
+    }
+
     func discoveryTokens() -> [String] {
         recordedDiscoveryTokens
+    }
+
+    func discoveryTrustPolicies() -> [HAServerTrustPolicy] {
+        recordedDiscoveryTrustPolicies
     }
 
     func refreshRequests() -> [OAuthRefreshRequest] {
@@ -4736,6 +5894,7 @@ private actor ConnectionFormRecorder {
     private var recordedFallbackURLString: String?
     private var recordedTokens: [String] = []
     private var recordedUsesStoredAuthSessions: [Bool] = []
+    private var recordedSelfSignedCertificateAllowances: [Bool] = []
 
     func record(_ form: PerchHAConnectionForm) {
         recordedCallCount += 1
@@ -4743,6 +5902,7 @@ private actor ConnectionFormRecorder {
         recordedFallbackURLString = form.fallbackURL()?.absoluteString
         recordedTokens.append(form.token)
         recordedUsesStoredAuthSessions.append(form.usesStoredAuthSession)
+        recordedSelfSignedCertificateAllowances.append(form.allowsSelfSignedCertificates)
     }
 
     func callCount() -> Int {
@@ -4763,6 +5923,10 @@ private actor ConnectionFormRecorder {
 
     func usesStoredAuthSessions() -> [Bool] {
         recordedUsesStoredAuthSessions
+    }
+
+    func selfSignedCertificateAllowances() -> [Bool] {
+        recordedSelfSignedCertificateAllowances
     }
 }
 
@@ -4957,6 +6121,33 @@ private final class CustomActionSinkRecorder {
 
     func configurations() -> [CustomActionConfiguration] {
         recordedConfigurations
+    }
+}
+
+private final class InMemoryProtectedActionValueStore: ProtectedActionValueStore, @unchecked Sendable {
+    private var values: [ProtectedActionValueReference: String] = [:]
+
+    func save(_ value: String, for reference: ProtectedActionValueReference) throws {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            throw SecretStoreError.emptySecret(.customActionProtectedValues)
+        }
+        values[reference] = normalized
+    }
+
+    func load(_ reference: ProtectedActionValueReference) throws -> String {
+        guard let value = values[reference] else {
+            throw ProtectedActionValueStoreError.missingValue(reference)
+        }
+        return value
+    }
+
+    func delete(_ reference: ProtectedActionValueReference) throws {
+        values.removeValue(forKey: reference)
+    }
+
+    func snapshot() throws -> [ProtectedActionValueReference: String] {
+        values
     }
 }
 

@@ -145,8 +145,53 @@ public struct RoomID: Hashable, Codable, Sendable, ExpressibleByStringLiteral {
     }
 }
 
+public struct ProtectedActionValueReference: Hashable, Codable, Sendable, ExpressibleByStringLiteral {
+    public let rawValue: String
+
+    public init(_ rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public init(stringLiteral value: StringLiteralType) {
+        self.init(value)
+    }
+
+    public init(from decoder: Decoder) throws {
+        rawValue = try decoder.singleValueContainer().decode(String.self)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
+public protocol ProtectedActionValueStore: Sendable {
+    func save(_ value: String, for reference: ProtectedActionValueReference) throws
+    func load(_ reference: ProtectedActionValueReference) throws -> String
+    func delete(_ reference: ProtectedActionValueReference) throws
+}
+
+public enum ProtectedActionValueStoreError: Error, Equatable, CustomStringConvertible, Sendable {
+    case invalidStoredValues
+    case missingValue(ProtectedActionValueReference)
+    case unavailable
+
+    public var description: String {
+        switch self {
+        case .invalidStoredValues:
+            "protected custom action values are invalid"
+        case let .missingValue(reference):
+            "protected custom action value \(reference.rawValue) is missing"
+        case .unavailable:
+            "protected custom action values are unavailable"
+        }
+    }
+}
+
 public enum ActionValue: Equatable, Sendable, Codable, ExpressibleByStringLiteral, ExpressibleByIntegerLiteral, ExpressibleByFloatLiteral, ExpressibleByBooleanLiteral {
     case string(String)
+    case protectedString(ProtectedActionValueReference)
     case number(Double)
     case bool(Bool)
     case object([String: ActionValue])
@@ -179,6 +224,9 @@ public enum ActionValue: Equatable, Sendable, Codable, ExpressibleByStringLitera
             self = .number(value)
         } else if let value = try? container.decode(String.self) {
             self = .string(value)
+        } else if let value = try? container.decode(ProtectedActionValueEnvelope.self),
+                  value.kind == ProtectedActionValueEnvelope.protectedStringKind {
+            self = .protectedString(value.reference)
         } else if let value = try? container.decode([String: ActionValue].self) {
             self = .object(value)
         } else {
@@ -191,6 +239,13 @@ public enum ActionValue: Equatable, Sendable, Codable, ExpressibleByStringLitera
         switch self {
         case let .string(value):
             try container.encode(value)
+        case let .protectedString(reference):
+            try container.encode(
+                ProtectedActionValueEnvelope(
+                    kind: ProtectedActionValueEnvelope.protectedStringKind,
+                    reference: reference
+                )
+            )
         case let .number(value):
             try container.encode(value)
         case let .bool(value):
@@ -202,6 +257,63 @@ public enum ActionValue: Equatable, Sendable, Codable, ExpressibleByStringLitera
         case .null:
             try container.encodeNil()
         }
+    }
+
+    public var protectedValueReference: ProtectedActionValueReference? {
+        guard case let .protectedString(reference) = self else {
+            return nil
+        }
+        return reference
+    }
+
+    public func resolvedProtectedValues(
+        using resolver: (ProtectedActionValueReference) throws -> String
+    ) throws -> ActionValue {
+        switch self {
+        case let .protectedString(reference):
+            return .string(try resolver(reference))
+        case let .object(values):
+            return .object(
+                Dictionary(
+                    uniqueKeysWithValues: try values.map { key, value in
+                        (key, try value.resolvedProtectedValues(using: resolver))
+                    }
+                )
+            )
+        case let .array(values):
+            return .array(try values.map { try $0.resolvedProtectedValues(using: resolver) })
+        case .string, .number, .bool, .null:
+            return self
+        }
+    }
+
+    public var protectedValueReferences: Set<ProtectedActionValueReference> {
+        switch self {
+        case let .protectedString(reference):
+            [reference]
+        case let .object(values):
+            values.values.reduce(into: Set<ProtectedActionValueReference>()) { result, value in
+                result.formUnion(value.protectedValueReferences)
+            }
+        case let .array(values):
+            values.reduce(into: Set<ProtectedActionValueReference>()) { result, value in
+                result.formUnion(value.protectedValueReferences)
+            }
+        case .string, .number, .bool, .null:
+            []
+        }
+    }
+}
+
+private struct ProtectedActionValueEnvelope: Codable {
+    static let protectedStringKind = "protected_string"
+
+    let kind: String
+    let reference: ProtectedActionValueReference
+
+    private enum CodingKeys: String, CodingKey {
+        case kind = "$perchha"
+        case reference
     }
 }
 
@@ -216,6 +328,55 @@ public struct ActionSpec: Equatable, Sendable, Codable {
         self.service = service
         self.targetEntityID = targetEntityID
         self.serviceData = serviceData
+    }
+
+    public func resolvedProtectedValues(
+        using resolver: (ProtectedActionValueReference) throws -> String
+    ) throws -> ActionSpec {
+        ActionSpec(
+            domain: domain,
+            service: service,
+            targetEntityID: targetEntityID,
+            serviceData: Dictionary(
+                uniqueKeysWithValues: try serviceData.map { key, value in
+                    (key, try value.resolvedProtectedValues(using: resolver))
+                }
+            )
+        )
+    }
+
+    public var protectedValueReferences: Set<ProtectedActionValueReference> {
+        serviceData.values.reduce(into: Set<ProtectedActionValueReference>()) { result, value in
+            result.formUnion(value.protectedValueReferences)
+        }
+    }
+
+    public static func isSensitiveServiceDataKey(_ key: String) -> Bool {
+        let terms = Set([
+            "apikey",
+            "auth",
+            "authorization",
+            "bearer",
+            "code",
+            "credential",
+            "credentials",
+            "pass",
+            "passcode",
+            "password",
+            "pin",
+            "secret",
+            "token"
+        ])
+        let segments = key
+            .lowercased()
+            .split { character in
+                !character.isLetter && !character.isNumber
+            }
+            .map(String.init)
+        if segments.contains(where: terms.contains) {
+            return true
+        }
+        return terms.contains(segments.joined())
     }
 }
 
@@ -376,6 +537,12 @@ public struct CustomActionConfiguration: Equatable, Codable, Sendable {
         return nil
     }
 
+    public var protectedValueReferences: Set<ProtectedActionValueReference> {
+        actions.reduce(into: Set<ProtectedActionValueReference>()) { result, action in
+            result.formUnion(action.action.protectedValueReferences)
+        }
+    }
+
     public func upserting(_ action: EntityCustomAction) -> CustomActionConfiguration {
         var next = actions
         if let index = next.firstIndex(where: { $0.id == action.id }) {
@@ -399,7 +566,9 @@ private extension ActionSpec {
     static func sensitiveServiceDataKeyPath(in values: [String: ActionValue], prefix: String) -> String? {
         for key in values.keys.sorted() {
             let keyPath = "\(prefix).\(key)"
-            if isSensitiveServiceDataKey(key) {
+            if isSensitiveServiceDataKey(key),
+               let value = values[key],
+               !value.isProtectedSensitiveLeaf {
                 return keyPath
             }
             if let value = values[key],
@@ -421,37 +590,18 @@ private extension ActionSpec {
                     sensitiveServiceDataKeyPath(in: value, prefix: "\(prefix)[\(index)]")
                 }
                 .first
-        case .string, .number, .bool, .null:
+        case .string, .protectedString, .number, .bool, .null:
             nil
         }
     }
+}
 
-    static func isSensitiveServiceDataKey(_ key: String) -> Bool {
-        let terms = Set([
-            "apikey",
-            "auth",
-            "authorization",
-            "bearer",
-            "code",
-            "credential",
-            "credentials",
-            "pass",
-            "passcode",
-            "password",
-            "pin",
-            "secret",
-            "token"
-        ])
-        let segments = key
-            .lowercased()
-            .split { character in
-                !character.isLetter && !character.isNumber
-            }
-            .map(String.init)
-        if segments.contains(where: terms.contains) {
+private extension ActionValue {
+    var isProtectedSensitiveLeaf: Bool {
+        if case .protectedString = self {
             return true
         }
-        return terms.contains(segments.joined())
+        return false
     }
 }
 

@@ -21,14 +21,22 @@ Deliver:
 - Initial CI workflow for build and unit tests.
 - Framework-free smoke verifier for Command Line Tools environments.
 
-Done:
+Implemented locally:
 
 - `swift build` runs.
-- `swift test` runs.
+- `swift test` compiles test targets in Command Line Tools environments.
 - `swift run perchha-smoke` runs.
 - CI runs on pull requests.
-- Full-Xcode app wrapper build is verified with `xcodebuild`.
+- `perchha-xcode-doctor` reports checked-in project/scheme, `xcodebuild` project listing, and full-Xcode readiness from the active developer directory, `xctest`, and `xcodebuild`, with scriptable JSON output and strict preflight mode.
+- Full-Xcode CI selects Xcode, runs `perchha-xcode-doctor --json --strict`, lists XCTest cases with `swift test --disable-swift-testing --enable-xctest list`, and runs XCTest coverage gates.
+- `PerchHA.xcodeproj` declares a thin app target that uses the local Swift package library product, menu-bar `Info.plist`, OAuth callback scheme, and shared `PerchHA` scheme.
+- CI lints Xcode project, scheme, and `Info.plist` metadata.
+- `PerchHARepoAudit` and `perchha-repo-audit` fail on tracked or unignored local env files, private fixture captures, build output, credential-bearing artifact paths, and default telemetry SDK imports/dependencies/endpoints, with public-command XCTest and smoke coverage.
 - Docs match created paths.
+
+Remaining before M0 is complete:
+
+- Full-Xcode app wrapper build is verified with `xcodebuild`.
 
 ## M1 - Support primitives and test clocks
 
@@ -87,6 +95,7 @@ Implemented in the first M3 slice:
 - WebSocket `call_service` through `HomeAssistantClient.callService`.
 - Typed REST errors mapped to `ConnectionFailure`.
 - Typed WebSocket protocol and command errors mapped to `ConnectionFailure`.
+- Optional self-signed certificate allowance is off by default, scoped to the current HTTPS primary/fallback hosts, and forwarded through REST, WebSocket, OAuth exchange, and OAuth refresh requests.
 - FakeHA WebSocket service-call journal entries with exact redacted command payloads.
 
 Done:
@@ -96,6 +105,10 @@ Done:
 - `t_live_updates_panel_and_bar` passes at contract level.
 - `t_call_service_journaled` passes.
 - Service calls are journaled.
+
+Remaining production evidence:
+
+- Real Home Assistant evidence for the optional certificate allowance when a self-signed deployment is available.
 
 ## M4 - Discovery and persistence
 
@@ -140,6 +153,7 @@ Implemented in the first M5 slice:
 - Menu bar status item opens a custom AppKit `NSPanel` hosted with SwiftUI.
 - Custom panel can become key and hosts the first-run form.
 - First-run connection form accepts Home Assistant URL, optional fallback URL, and long-lived access token.
+- First-run connection form exposes an explicit self-signed certificate opt-in for the current HTTPS Home Assistant hosts.
 - Panel model connects through the real Home Assistant discovery client and room resolver.
 - Header and footer expose connection state, update status, disabled settings placeholder, quit, and manual refresh.
 - Panel displays discovered room/entity values from FakeHA.
@@ -285,7 +299,10 @@ Implemented in the first M8 local slice:
 - Non-unavailable WebSocket command failures remain explicit failures.
 - FakeHA can simulate optimized registry support and command-specific unavailable responses using current `unknown_command` and legacy `unsupported_command`.
 - `hamirror capture --websocket` records optimized WebSocket command evidence without storing private command payloads.
+- `hamirror capture --write` re-verifies the written fixture set immediately, and private fixture outputs under `Fixtures/private/` also prove they stay ignored by Git.
+- `hamirror doctor` reports mirror-capture readiness from redacted key presence/status plus next-step hints and suggested follow-up commands, treats user/password as non-capture credentials, supports scriptable JSON presence/status output plus redacted guidance, and supports strict preflight for scripts.
 - `hamirror verify` rejects stale WebSocket evidence files and unknown WebSocket evidence fields.
+- `hamirror serve` starts mirrored REST and WebSocket loopback servers together, respects captured optimized-command availability, and synthesizes minimal display/entity registry rows from mirrored states when private WebSocket payloads were intentionally omitted.
 - WebSocket mirror capture fails explicitly when HA stops responding during the evidence handshake.
 - Live updates try `subscribe_entities` before the documented `subscribe_events` path.
 - Live updates merge full `subscribe_entities` additions and partial compact change diffs.
@@ -307,12 +324,15 @@ Verified locally:
 - `t_live_updates_fall_back_to_subscribe_events_when_subscribe_entities_is_unknown` covers current `unknown_command` fallback to documented `subscribe_events`.
 - `t_live_updates_fall_back_to_subscribe_events_when_subscribe_entities_is_legacy_unsupported` covers legacy `unsupported_command` fallback.
 - `testFakeHAWebSocketServerRejectsUnknownCommandExplicitly` covers explicit unknown-command behavior.
+- `testMirrorEnvironmentReadinessReportsMissingTokenWithoutCredentialValues`, `testMirrorEnvironmentReadinessReportsCaptureAndOAuthReadiness`, `testMirrorEnvironmentReadinessReportsIncompleteOAuthConfiguration`, `testMirrorEnvironmentReadinessReportsOAuthReadyWhileCaptureBlocked`, `testMirrorEnvironmentSuggestedCommandsShellQuoteEnvPath`, `testMirrorEnvironmentReadinessNextStepsShellQuoteEnvPathCommands`, and `testMirrorEnvironmentReadinessDiagnosticIsScriptableAndRedacted` cover secret-redacted mirror env preflight, mixed readiness states, and shell-safe follow-up guidance.
+- `testFakeHALoadsMirrorFixturesAndSynthesizesDisplayRegistryResults` and `testFakeHAMirroredWebSocketModePreservesPerCommandAvailabilityCodes` cover synthesized mirrored registry replay and command-specific unavailable-code preservation.
 - Command Line Tools smoke covers optimized display-list discovery, states-only fallback, optimized live updates, partial compact diff merging, compact removals, and live-update fallback.
 - Command Line Tools smoke covers `hamirror` optimized WebSocket evidence capture and timeout behavior against FakeHA.
+- Command Line Tools smoke launches `hamirror serve`, verifies prefixed mirrored `/api/states` replay, completes the WebSocket auth-required handshake, and exercises synthesized display-list results from mirrored states.
 
 Remaining before M8 is complete:
 
-- Run `hamirror capture --env .env.local --output Fixtures/private/m8-real --websocket --write` against the real Home Assistant instance and verify the ignored fixture set.
+- Run `hamirror capture --env .env.local --output Fixtures/private/m8-real --websocket --write` against the real Home Assistant instance. The write path now self-verifies the fixture set and ignored private output status; retain that command evidence.
 
 Done:
 
@@ -346,6 +366,7 @@ Implemented in the first M9 local slice:
 - Successful connection identity changes clear cached history and visible history state.
 - History loading maps to a skeleton presentation instead of a spinner.
 - The loading skeleton has a fixed chart-plus-statistics placeholder layout contract for pre-snapshot regression coverage.
+- `PerchHAHistoryPopoverContent` is shared between the real popover and smoke rendering, so `perchha-smoke` exports `history-loaded-light.png` with the segmented range control, sparkline, and statistics using the same layout code.
 - Empty or non-numeric history renders an explicit no-data state.
 - App shell wires the panel history provider to the real Home Assistant history client.
 - Command Line Tools smoke covers panel history debounce, cache hit behavior, and disconnected unavailable state.
@@ -361,7 +382,7 @@ Implemented in the first M9 local slice:
 Remaining before M9 is complete:
 
 - Full-Xcode verification of the SwiftUI hover popover.
-- Full-Xcode snapshot or visual verification for chart rendering and unavailable-history UI.
+- Full-Xcode native popover and focus verification for chart rendering and unavailable-history UI.
 
 Done:
 
@@ -372,7 +393,7 @@ Done:
 - `test_t_history_reconnect_clears_cached_series_and_visible_history`, `test_t_history_hover_out_closes_loaded_and_unavailable_popovers`, `testHistoryContentSummaryEmptySeriesIsNoNumericData`, `testHistoryContentSummaryNonNumericOnlySeriesIsNoNumericData`, and `testHistoryContentSummaryKeepsNumericHistoryWhenTrailingSampleIsNonNumeric` cover cache scoping, popover dismissal, no-data summaries, and mixed numeric/non-numeric summaries.
 - `test_t_history_unavailable_state_is_explicit` covers disconnected and provider-unavailable history states.
 - `test_t_app_shell_load_history_uses_injected_provider` covers app-shell history provider wiring.
-- `test_t_history_week_routes_to_recorder_statistics`, `testHistoryMonthRoutesToRecorderStatisticsWithDailyPeriod`, `testHistoryRecorderStatisticsPreservesBasePathPrefixAgainstFakeHA`, `testHistoryFallsBackToRESTWhenRecorderStatisticsIsUnknown`, `testHistoryRecorderStatisticsFallbackPreservesBasePathPrefixAgainstFakeHA`, `testHistoryFallsBackToRESTWhenRecorderStatisticsIsLegacyUnsupported`, `testHistoryFallsBackToRESTWhenRecorderStatisticsTransportIsUnreachable`, and `testHistoryRecorderStatisticsRejectsMalformedPayload` cover recorder-statistics routing, path-prefix handling, fallback, null-column handling, transport failure, and malformed payloads.
+- `test_t_history_week_routes_to_recorder_statistics`, `testHistoryMonthRoutesToRecorderStatisticsWithDailyPeriod`, `testHistoryRecorderStatisticsPreservesBasePathPrefixAgainstFakeHA`, `testHistoryFallsBackToRESTWhenRecorderStatisticsIsUnknown`, `testHistoryRecorderStatisticsFallbackPreservesBasePathPrefixAgainstFakeHA`, `testHistoryFallsBackToRESTWhenRecorderStatisticsIsLegacyUnsupported`, `testHistoryFallsBackToRESTWhenRecorderStatisticsTransportIsUnreachable`, `testHistoryFallsBackToRESTWhenRecorderStatisticsCommandTransportBreaks`, and `testHistoryRecorderStatisticsRejectsMalformedPayload` cover recorder-statistics routing, path-prefix handling, fallback, null-column handling, unreachable/generic transport failure, and malformed payloads.
 - `testHistoryContentSummaryUsesLatestChronologicalNumericSample`, `testHistorySparklineGeometryMapsTimeAndValueIntoNormalizedPoints`, `testHistorySparklineGeometrySortsSamplesChronologically`, `testHistorySparklineGeometryFallsBackToMidlineWithoutEnoughNumericSamples`, and `testHistorySparklineGeometryCentersConstantValuesAndSpreadsEqualTimestamps` cover deterministic chart geometry and mixed numeric/non-numeric history; Command Line Tools smoke covers the same core chart mapping path.
 - `t_interval_fallback_polling` passes.
 
@@ -398,6 +419,8 @@ Implemented in the M10 local slices:
 - Cover rows derive open, close, stop, and set-position actions through the same shared action runner.
 - Cover position changes update optimistically, roll back on service failure, reject covers without a reported position, and clamp payloads to Home Assistant's 0-100 range.
 - FakeHA smoke verifies panel toggle and cover position controls emit exact WebSocket `call_service` payloads.
+- Command Line Tools smoke exports `built-in-controls-light.png` from the real panel with toggle failure feedback plus cover buttons and position slider visible.
+- Command Line Tools smoke and the Xcode-testable UI suite verify the real built-in controls panel exposes the native switch class, marked cover-position slider class, and native cover buttons through the panel factory seam.
 
 Remaining before M10 is complete:
 
@@ -433,24 +456,26 @@ Implemented in the first M11 local slice:
 
 - `EntityCustomAction` persists a stable ID, attached entity, button title, confirmation flag, and shared `ActionSpec`.
 - Custom actions can be attached to any discovered entity row, including sensors.
-- Settings exposes per-entity custom action controls for add, edit, delete, and reorder of title, domain, service, target entity, scalar `serviceData`, and confirmation.
+- Settings exposes per-entity custom action controls for add, edit, delete, and reorder of title, domain, service, target entity, scalar/object/list `serviceData`, and confirmation.
 - Settings uses fetched Home Assistant service metadata for domain/service pickers and scalar field defaults while preserving manual fallback fields when metadata is unavailable.
 - Settings exposes unmatched persisted actions so stale entity attachments can be deleted instead of hidden.
 - Sensor-attached action buttons run through the same injected action runner as built-in controls.
 - Optional confirmation blocks execution until the caller confirms.
 - Exact domain, service, target entity, and `serviceData` payloads are preserved through the FakeHA `call_service` journal.
+- Native object and array service-data editing preserves nested JSON payloads through persistence, app-shell forwarding, and FakeHA service-call journaling.
+- Protected service-data values round-trip as opaque JSON references, resolve from Keychain before execution, and fail explicitly when the referenced secret is missing.
+- Command Line Tools smoke verifies the real settings editor commits native title, target-entity, and nested service-data text-field edits back into `CustomActionConfiguration`.
 - Failed custom actions show an inline entity-scoped error and do not mutate sensor values.
 - Malformed persisted custom actions fail explicitly on load or save, including blank required fields and duplicate action IDs.
-- Custom action `serviceData` stored in plaintext JSON rejects protected key names such as token, password, pin, code, and secret, including nested keys.
+- Custom action `serviceData` no longer stores secret scalar values in plaintext JSON; protected values persist as opaque references and are resolved only at execution time.
 - `HomeAssistantClient.services` fetches Home Assistant WebSocket `get_services` metadata and FakeHA replays service metadata fixtures.
 - App shell persists custom actions and exposes run/set/remove entrypoints.
+- Command Line Tools smoke exports `custom-action-editor-light.png` from the real settings editor with service metadata, confirmation, target entity, and nested object/list service data visible.
 
 Remaining before M11 is complete:
 
-- Native object and array service-data editing, if needed after service metadata proves a concrete use case.
-- Keychain-backed protected custom-action fields if secret-bearing service payloads are supported later.
 - Full-Xcode visual and keyboard verification for custom action rows and confirmation.
-- Native UI automation/snapshot coverage once the full app wrapper is available.
+- Native UI automation coverage once the full app wrapper is available.
 
 Done:
 
@@ -460,6 +485,7 @@ Done:
 - `testCustomActionRejectsIncompleteOrUnknownEntityConfiguration` covers invalid and unknown-entity configuration rejection.
 - `testCustomActionRejectsProtectedServiceDataKeys` covers UI-model rejection for secret-bearing plaintext service data.
 - `testCustomActionServiceDataEditorUpdatesScalarsAndRejectsUnsafeKeys` covers scalar service-data add, edit, rename, delete, duplicate-key rejection, invalid scalar-value rejection, and protected-key rejection.
+- `testActionValueRoundTripsNestedJSONShapes`, `testCustomActionServiceDataEditorUpdatesObjectsAndArrays`, and persistence malformed-config cases cover object/list service-data editing, nested JSON round-trip, array-path protected-key rejection, invalid nested paths, nested reordering, and nested removal.
 - `testCustomActionOrphanedLoadedActionsRemainVisibleForDeletion` covers stale custom-action attachment visibility and deletion.
 - `testCustomActionServiceMetadataLoadsAfterConnectAndScaffoldsDefaults` and `testCustomActionServiceMetadataFailureDoesNotFailConnection` cover metadata loading, metadata failure behavior, and metadata-driven service-data defaults.
 - `testCustomActionUsesFakeHAServiceCallJournal` covers panel-to-FakeHA service-call journaling.
@@ -488,14 +514,18 @@ Integrated:
 - `PerchHAPanelModel` can connect with a stored auth session without exposing tokens and clears the stored-session flag after authentication failure so the user must reconnect.
 - `PerchHAOAuthSignInCoordinator` builds the authorization URL, presents native `ASWebAuthenticationSession`, validates callback state and redirect URI, exchanges the code, saves the first Keychain session, and switches the panel into stored-session connection mode with the form that was authorized.
 - `PerchHAOAuthApplicationConfiguration` loads the OAuth client website and redirect URI from exported environment values or `.env.local`, with exported values taking precedence and smoke coverage for the env-file path.
+- `PerchHAOAuthClientWebsiteBuilder`, `PerchHAOAuthClientWebsiteVerifier`, and `perchha-package-app --write-oauth-site/--verify-oauth-site` generate and verify the static HTML artifact that must be published at the configured OAuth client website URL.
+- `perchha-package-app --verify-published-oauth-site` fetches the configured client website URL and verifies the live deployed HTML declaration against the configured redirect URI without sending Home Assistant secrets.
+- `PerchHAReleaseEvidenceWriter`, `PerchHAReleaseEvidenceVerifier`, and `perchha-package-app --oauth-site` can retain the generated OAuth client-website artifact in the release evidence manifest so the release bundle can re-verify the exact declaration page beside the app and DMG artifacts.
 - `PerchHAPackaging` builds a SwiftPM-driven `.app` bundle with `CFBundleURLTypes` for the OAuth callback scheme, `LSUIElement=true`, and CI/smoke coverage for generated metadata.
 - `PerchHALaunchServicesVerifier` registers the generated bundle and verifies macOS records its OAuth callback scheme claim with `Viewer` role.
 - `HomeAssistantClient.verifyOAuthClientWebsite` and `hamirror oauth-check` verify the production OAuth client website rule for native redirects without sending HA tokens or credentials.
 - `PerchHAApplication` handles delivered external URLs, accepts only the configured OAuth callback redirect base, and stores only redacted ingress metadata so authorization codes and states are not retained.
+- `perchha-smoke` exports `signing-in-light.png` by driving the panel through the public native OAuth sign-in path with an in-flight runner, proving the sign-in loading row without contacting real Home Assistant.
 
 Remaining:
 
-- Production OAuth client website deployment using the configured redirect URI.
+- Production hosting of the generated OAuth client website at the configured client website URL.
 - Real-HA callback evidence with the configured client identity.
 - Real delivered-callback evidence and native UI verification with the generated app bundle or full Xcode.
 
@@ -521,17 +551,21 @@ Integrated:
 - `PerchHAPanelView` surfaces the root accessibility label, value, hint, Reduce Motion policy, and Increase Contrast policy through one tested presentation boundary.
 - Entity-row accessibility presentation covers value labels, toggle controls, cover buttons, cover position values, custom actions, running states, and inline failures.
 - Keyboard reorder hints for settings and menu-bar promotion share one tested source and explain boundary/search-blocked states.
-- `perchha-smoke` renders real `PerchHAPanelView` snapshots through `NSHostingView` for light, dark, increased-contrast, reduced-motion, empty, success, and error variants, then verifies stable dimensions, nonblank pixels, and distinct appearance/state hashes.
+- Command Line Tools smoke verifies the real first-run AppKit panel exposes native URL/token controls, accepts first-responder assignment for the URL field, and advances through a non-degenerate native key-view path.
+- Command Line Tools smoke and the Xcode-testable UI suite both verify the real settings custom-action editor exposes native title/target/service-data text fields, metadata-backed popup selections, and an ordered key-view path from the action title into the rest of the editor.
+- `perchha-smoke` renders real `PerchHAPanelView` snapshots through `NSHostingView` for light, dark, increased-contrast, reduced-motion, first-run, connecting/loading, OAuth signing-in, settings selection, settings custom-action editor, built-in controls, reconnecting stale values, empty, success, error, and increased-contrast history variants, then verifies stable dimensions, nonblank pixels, distinct appearance/state hashes, loading accessibility state, public OAuth sign-in state, explicit selection state, menu-bar promotion, and stale-value formatting.
+- `perchha-smoke` also exports `review-contact-sheet.png`, a deterministic contact sheet of the real panel screenshots for fast release UI/UX review.
+- `perchha-smoke` compares the real panel screenshot signatures and `review-contact-sheet.png` signature against the checked-in `docs/release-review-baseline.json` manifest, and can refresh that manifest intentionally with `--update-review-baseline`.
+- `perchha-smoke --repeat <count>` reruns the full public smoke entrypoint as fresh invocations for repeatable flake and snapshot-drift diagnosis while keeping the last-run screenshots as retained evidence.
 
 Remaining:
 
-- Full-Xcode focus traversal and native control verification.
-- Stored visual baselines for release review, if they earn the maintenance cost beyond the smoke hash gate.
+- Full-Xcode execution of the native focus traversal checks on a machine with Xcode selected.
 
 Completion criteria:
 
-- `t_accessibility` passes in CI and full-Xcode focus traversal passes.
-- Snapshot suite passes for light, dark, increased-contrast, and reduced-motion variants.
+- `t_accessibility` passes in CI and the native focus traversal checks run under a full-Xcode test execution path.
+- Snapshot suite passes for light, dark, increased-contrast, and reduced-motion variants, and the stored release-review baseline stays in sync with intentional UI changes.
 
 ## M14 - Performance and resilience
 
@@ -551,6 +585,7 @@ Integrated:
 - `perchha-smoke` and `test_t_display_settings_apply_live` prove status-item gauge images are rendered only when image-relevant fields change, and text-only menu-bar items skip image rendering entirely.
 - `perchha-smoke` and `test_t_reconnect_after_restart_resubscribes_live_state` prove live WebSocket restart recovery re-authenticates and resubscribes once after a post-subscription socket drop.
 - `perchha-smoke` measures process CPU time while the connected AppKit app shell is idle after launch, discovery, and stable status-item rendering.
+- `perchha-coverage-check` enforces the documented LLVM coverage JSON gates for `PerchHACore`, `PerchHAClient`, and core branch coverage in full-Xcode CI, including explicit failure when requested branch coverage is unavailable; `perchha-smoke` exercises that guard in Command Line Tools environments.
 
 Remaining:
 
@@ -568,11 +603,37 @@ Deliver:
 - Notarized app.
 - DMG packaging.
 - Release checklist.
-- Sparkle update support only if it earns its complexity before release.
+- Sparkle update support is deferred until after the direct release path is stable.
 
-Done:
+Integrated:
+
+- `PerchHADMGBuilder` stages the `.app` bundle with an `/Applications` shortcut and creates a compressed read-only DMG through `hdiutil`.
+- `PerchHADMGVerifier`, `PerchHADMGContentVerifier`, `perchha-package-app --package-dmg --verify-dmg --verify-dmg-contents`, smoke, and CI verify the generated DMG bytes and mounted drag-install layout with native macOS tooling and retain the local DMG artifact.
+- `PerchHACodeSigner` and `PerchHACodeSignatureVerifier` provide explicit `codesign` command orchestration for ad-hoc smoke signing and Developer ID release signing, including hardened runtime, timestamp, and entitlements support.
+- `PerchHANotarySubmitter` and `perchha-package-app --notary-profile` provide `xcrun notarytool submit --wait` and `xcrun stapler staple` orchestration for credentialed release machines.
+- `perchha-package-app` rejects notary submission options that are missing the DMG packaging step, required notary profile, or Developer ID signing identity, while preserving standalone `--release-preflight`.
+- `PerchHAReleasePreflightChecker` and `perchha-package-app --release-preflight` verify that the selected Developer ID identity is installed and the `notarytool` Keychain profile is usable before a credentialed release build starts, with redacted JSON output for release scripts.
+- `PerchHAReleasePreflightChecker` and `perchha-package-app --release-preflight` also emit redacted next-step hints and suggested commands so blocked credentialed releases fail with actionable guidance instead of only a terse status.
+- CI builds `.build/release/PerchHA` and packages that release executable for local release evidence instead of the debug executable.
+- `perchha-smoke` verifies generated app bundles can be ad-hoc signed locally before DMG creation, exports fresh panel PNGs under `PERCHHA_SMOKE_SNAPSHOT_DIR/current` for completion evidence, and CI retains those screenshots.
+- `PerchHAReleaseEvidenceWriter`, `perchha-package-app --release-manifest`, and `docs/RELEASE.md` record release checklist evidence, app metadata, DMG hashes, screenshot hashes, signing status, and notarization status.
+- `PerchHAReleaseEvidenceVerifier` and `perchha-package-app --verify-release-manifest` re-read retained release evidence and fail when app metadata, recorded app signature validity, recorded stapled DMG validation, DMG hashes, screenshot hashes, or canonical required smoke screenshot names drift from the current artifacts.
+- Release evidence manifests store artifact paths relative to the manifest when possible, and CI retains a single portable evidence bundle whose manifest still replay-verifies after download as long as the internal layout is preserved.
+- Local release evidence includes the smoke-generated screenshot contact sheet, so UI review coverage is retained and hash-verified with the individual screenshots.
+- Local release evidence also records the smoke-exported `review-baseline-expected.json`, a retained copy of the checked-in baseline that smoke compared against, and hash-verifies it during manifest replay.
+- `PerchHARepoAudit` enforces the no-telemetry-by-default release criterion by rejecting common telemetry SDK imports, package identifiers, and collection endpoints from tracked or unignored Swift/build/config files.
+- Sparkle is deferred by ADR-0009 until the direct Developer ID release path is stable, so no updater dependency is required for v1.
+
+Remaining:
+
+- Credentialed Developer ID signing evidence.
+- Notarized and stapled build artifact evidence.
+
+Completion criteria:
 
 - Signed and notarized build artifact is produced.
+- DMG artifact is produced and verified.
+- Release evidence manifest is produced and retained.
 - No telemetry is present by default.
 
 ## Ongoing rules
@@ -581,3 +642,5 @@ Done:
 - New Home Assistant wire behavior means one mirror fixture update.
 - New persistence, auth, or public module decision means one ADR update.
 - No committed `.env.local`, tokens, credentials, or private fixture data.
+- CI runs `perchha-repo-audit` and exercises local env, private fixture, build output, credential artifact, and default telemetry failure cases; `perchha-smoke` also runs the same public-command audit guard for Command Line Tools evidence.
+- Smoke screenshots are used for UI/UX review before completion reporting; a roadmap item that reaches completion needs a current app screenshot artifact from smoke snapshots, and the completion report must embed that screenshot before reporting it as 100%.

@@ -56,9 +56,9 @@ Alternatives: Internal mocks were rejected because they would skip transport, pa
 
 Context: Built-in controls and custom actions all become Home Assistant service calls.
 
-Decision: Model Home Assistant service calls as `ActionSpec` and execute them through one `call_service` path. Built-in UI controls produce `ActionSpec`; custom actions persist row metadata around `ActionSpec`. Plaintext custom-action config rejects protected service-data key names until a Keychain-backed protected-field path exists.
+Decision: Model Home Assistant service calls as `ActionSpec` and execute them through one `call_service` path. Built-in UI controls produce `ActionSpec`; custom actions persist row metadata around `ActionSpec`. Protected custom-action service-data values are stored in JSON as opaque references, resolved from Keychain before `call_service`, and fail explicitly if the referenced secret is missing.
 
-Consequences: Covers, switches, lights, scripts, shell commands, and sensor-attached buttons share one tested transport path. Custom actions with secret-bearing payloads fail explicitly instead of being silently written to JSON.
+Consequences: Covers, switches, lights, scripts, shell commands, and sensor-attached buttons share one tested transport path. Custom actions with secret-bearing payloads keep JSON opaque, resolve secrets at execution time, and fail explicitly instead of pretending the secret was safely "just config."
 
 Alternatives: Per-domain transport handlers were rejected as duplicated and harder to test.
 

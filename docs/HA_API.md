@@ -49,7 +49,9 @@ For native callback schemes such as `perchha://auth`, the application website mu
 <link rel="redirect_uri" href="perchha://auth">
 ```
 
-Run `swift run hamirror oauth-check --env .env.local` before real browser sign-in. The check reads only `PERCHHA_OAUTH_CLIENT_ID` and `PERCHHA_OAUTH_REDIRECT_URI`, verifies the public client website declaration, and does not send the Home Assistant token, user, or password.
+Run `swift run hamirror oauth-check --env .env.local` before real browser sign-in. The check reads only `PERCHHA_OAUTH_CLIENT_ID` and `PERCHHA_OAUTH_REDIRECT_URI`, verifies the public client website declaration, reports redacted setup guidance when OAuth config is incomplete, and does not send the Home Assistant token, user, or password.
+Run `swift run perchha-package-app --write-oauth-site .build/perchha-oauth-site/index.html --oauth-env .env.local` to generate the static HTML artifact that should be published at the configured client website, then `swift run perchha-package-app --verify-oauth-site .build/perchha-oauth-site/index.html --oauth-env .env.local` to confirm the artifact still matches the configured website URL and redirect declaration before deployment. After publishing, run `swift run perchha-package-app --verify-published-oauth-site --oauth-env .env.local` to fetch the live client website URL and verify the deployed HTML declaration without sending Home Assistant secrets.
+For releasable builds, include `--oauth-site .build/perchha-oauth-site/index.html` when writing the release manifest so the retained release evidence can re-verify the exact OAuth declaration page that was meant to be deployed.
 
 ## 2. Required documented API surface
 
@@ -173,7 +175,7 @@ Persisted custom actions wrap the service call with PerchHA row metadata:
 
 `requiresConfirmation`, `title`, and attached row metadata are local UI/config fields. The WebSocket transport sends only the nested action as Home Assistant `call_service` fields.
 
-Because this wrapper is stored in plaintext JSON, `serviceData` must not contain protected key names such as token, password, pin, code, or secret. Those keys fail configuration validation until a Keychain-backed protected-field path exists.
+Protected custom-action values are stored in JSON as opaque protected-string references. The actual secret scalar strings live in Keychain, are resolved immediately before `call_service`, and fail explicitly if the referenced secret is missing. Documentation, logs, fixtures, and snapshots must not imply plaintext secret storage.
 
 FakeHA must journal every received service call so tests can assert exact payloads.
 
@@ -198,7 +200,7 @@ Position payload:
 
 ## 8. Mirrored fixtures
 
-`hamirror` captures from `.env.local`, anonymizes, and writes fixtures under `Fixtures/`. The M2 foundation captures `/api/` and `/api/states`; M8 adds optional `--websocket` evidence for optimized commands. The WebSocket evidence records command availability and error codes without storing private WebSocket result payloads. Deterministic FakeHA tests can also record compact event top-level keys. Verification rejects stale `websocket.json` files and unknown WebSocket evidence fields, and WebSocket capture fails explicitly when HA does not answer before the receive timeout. Later milestones add services and history fixtures.
+`hamirror` captures from `.env.local`, anonymizes, and writes fixtures under `Fixtures/`. `hamirror doctor --env .env.local` reports redacted key presence/status plus next-step hints, emits machine-readable readiness plus redacted guidance with `--json`, surfaces exact suggested commands when capture or OAuth checks are ready, and fails before capture in `--strict` mode when the bearer token is missing. Exported `PERCHHA_ENV_FILE`, `PERCHHA_HA_URL`, `PERCHHA_HA_FALLBACK_URL`, `PERCHHA_HA_TOKEN`, `PERCHHA_HA_USER`, `PERCHHA_HA_PASSWORD`, `PERCHHA_OAUTH_CLIENT_ID`, and `PERCHHA_OAUTH_REDIRECT_URI` override the file-based values for capture and OAuth checks. The M2 foundation captures `/api/` and `/api/states`; M8 adds optional `--websocket` evidence for optimized commands. The WebSocket evidence records command availability and error codes without storing private WebSocket result payloads. `hamirror serve` replays the mirrored REST payloads and the captured command-availability surface locally; when display-list payloads were intentionally omitted for privacy, FakeHA synthesizes minimal registry rows from mirrored `states.json` so optimized discovery can still be exercised. Deterministic FakeHA tests can also record compact event top-level keys. Verification rejects stale `websocket.json` files and unknown WebSocket evidence fields, and WebSocket capture fails explicitly when HA does not answer before the receive timeout. Later milestones add services and history fixtures.
 
 The M2 sanitizer structurally rewrites captured JSON before writing. It redacts tokens and credentials, aliases entity IDs, redacts friendly names and free-text attributes, zeros location coordinates, and normalizes timestamps.
 

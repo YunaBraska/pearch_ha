@@ -16,6 +16,34 @@ final class PerchHAClientTests: XCTestCase {
 
         XCTAssertEqual(input.endpoint.primaryURL, primary)
         XCTAssertEqual(input.endpoint.fallbackURL, fallback)
+        XCTAssertEqual(input.serverTrustPolicy, .default)
+    }
+
+    func testServerTrustPolicyIsHostScopedAndSecureSchemeOnly() throws {
+        let policy = HAServerTrustPolicy(
+            allowedSelfSignedCertificateHosts: [" HOMEASSISTANT.local ", "fallback.example", ""]
+        )
+
+        XCTAssertTrue(
+            policy.allowsSelfSignedCertificate(
+                for: try XCTUnwrap(URL(string: "https://homeassistant.local:8123/api/"))
+            )
+        )
+        XCTAssertTrue(
+            policy.allowsSelfSignedCertificate(
+                for: try XCTUnwrap(URL(string: "wss://fallback.example/api/websocket"))
+            )
+        )
+        XCTAssertFalse(
+            policy.allowsSelfSignedCertificate(
+                for: try XCTUnwrap(URL(string: "http://homeassistant.local:8123/api/"))
+            )
+        )
+        XCTAssertFalse(
+            policy.allowsSelfSignedCertificate(
+                for: try XCTUnwrap(URL(string: "https://other.local:8123/api/"))
+            )
+        )
     }
 
     func testPlannedClientIdentifiesModule() {
@@ -313,6 +341,51 @@ final class PerchHAClientTests: XCTestCase {
             String(data: try XCTUnwrap(request.body), encoding: .utf8),
             "grant_type=authorization_code&code=code+value&client_id=https%3A%2F%2Fperchha.dev%2Fapp"
         )
+        XCTAssertEqual(request.serverTrustPolicy, .default)
+    }
+
+    func testOAuthTokenRequestsCarrySelfSignedCertificatePolicy() async throws {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .success(HARESTResponse(
+                    statusCode: 200,
+                    headers: [:],
+                    body: Data(#"{"access_token":"access-token","refresh_token":"refresh-token","expires_in":1800,"token_type":"Bearer"}"#.utf8)
+                )),
+                .success(HARESTResponse(
+                    statusCode: 200,
+                    headers: [:],
+                    body: Data(#"{"access_token":"rotated-access","expires_in":1800,"token_type":"Bearer"}"#.utf8)
+                ))
+            ]
+        )
+        let policy = HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["homeassistant.local"])
+        let client = HomeAssistantClient(transport: transport)
+        let baseURL = try XCTUnwrap(URL(string: "https://homeassistant.local"))
+
+        let exchange = await client.exchangeAuthorizationCode(
+            baseURL: baseURL,
+            code: "code",
+            clientID: "https://perchha.dev/app",
+            serverTrustPolicy: policy
+        )
+        let refresh = await client.refreshAccessToken(
+            baseURL: baseURL,
+            refreshToken: "refresh-token",
+            clientID: "https://perchha.dev/app",
+            serverTrustPolicy: policy
+        )
+
+        XCTAssertEqual(
+            exchange,
+            .success(HAOAuthToken(accessToken: "access-token", refreshToken: "refresh-token", expiresInSeconds: 1800, tokenType: "Bearer"))
+        )
+        XCTAssertEqual(
+            refresh,
+            .success(HAOAuthToken(accessToken: "rotated-access", refreshToken: nil, expiresInSeconds: 1800, tokenType: "Bearer"))
+        )
+        let requests = await transport.requests
+        XCTAssertEqual(requests.map(\.serverTrustPolicy), [policy, policy])
     }
 
     func testOAuthCodeExchangeRejectsTokenPayloadWithoutRefreshToken() async throws {
@@ -577,6 +650,30 @@ final class PerchHAClientTests: XCTestCase {
         XCTAssertEqual(requests.map { $0.url.path }, ["/ha/api/"])
     }
 
+    func testRESTRequestCarriesSelfSignedCertificatePolicy() async throws {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(#"{"message":"API running."}"#.utf8)))
+            ]
+        )
+        let policy = HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["homeassistant.local"])
+        let client = HomeAssistantClient(transport: transport)
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(
+                primaryURL: try XCTUnwrap(URL(string: "https://homeassistant.local:8123")),
+                fallbackURL: nil
+            ),
+            token: "secret-token",
+            serverTrustPolicy: policy
+        )
+
+        let result = await client.checkRESTConnection(input)
+
+        XCTAssertEqual(result, .success(HARESTCheck(message: "API running.")))
+        let requests = await transport.requests
+        XCTAssertEqual(requests.first?.serverTrustPolicy, policy)
+    }
+
     func testStatesMapsFriendlyNameUnitAndMissingAttributes() async throws {
         let body = """
         [
@@ -673,6 +770,29 @@ final class PerchHAClientTests: XCTestCase {
         XCTAssertEqual(requests.map { $0.url.host }, ["primary.local", "fallback.example"])
     }
 
+    func testConnectionFallsBackWhenPrimaryTransportFails() async throws {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .transportError("socket closed before response"),
+                .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(#"{"message":"API running."}"#.utf8)))
+            ]
+        )
+        let client = HomeAssistantClient(transport: transport)
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(
+                primaryURL: try XCTUnwrap(URL(string: "http://primary.local:8123")),
+                fallbackURL: try XCTUnwrap(URL(string: "https://fallback.example"))
+            ),
+            token: "secret-token"
+        )
+
+        let result = await client.checkRESTConnection(input)
+
+        XCTAssertEqual(result, .success(HARESTCheck(message: "API running.")))
+        let requests = await transport.requests
+        XCTAssertEqual(requests.map { $0.url.host }, ["primary.local", "fallback.example"])
+    }
+
     func testInvalidStatesPayloadIsTyped() async throws {
         let transport = RecordingHARESTTransport(
             responses: [
@@ -742,6 +862,94 @@ final class PerchHAClientTests: XCTestCase {
                 EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "21.4", unit: "°C")
             ])
         )
+    }
+
+    func testSelfSignedRESTRequiresExplicitHostAllowance() async throws {
+        let identity = try FakeHASelfSignedIdentity()
+        let server = try FakeHARESTServer(
+            fixtures: FakeHAFixtures(
+                apiBody: #"{"message":"API running."}"#,
+                statesBody: #"[]"#
+            ),
+            tlsIdentity: identity.identity
+        )
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = HomeAssistantClient()
+        let strictInput = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+        let allowedInput = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token",
+            serverTrustPolicy: HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["127.0.0.1"])
+        )
+
+        XCTAssertEqual(await client.checkRESTConnection(strictInput), .failure(.tlsRejected(host: "127.0.0.1")))
+        XCTAssertEqual(await client.checkRESTConnection(allowedInput), .success(HARESTCheck(message: "API running.")))
+    }
+
+    func testSelfSignedAllowanceRejectsCASignedSingleLeafCertificate() async throws {
+        let identity = try FakeHASelfSignedIdentity.caSignedLeaf()
+        let server = try FakeHARESTServer(
+            fixtures: FakeHAFixtures(
+                apiBody: #"{"message":"API running."}"#,
+                statesBody: #"[]"#
+            ),
+            tlsIdentity: identity.identity
+        )
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token",
+            serverTrustPolicy: HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["127.0.0.1"])
+        )
+
+        XCTAssertEqual(await HomeAssistantClient().checkRESTConnection(input), .failure(.tlsRejected(host: "127.0.0.1")))
+    }
+
+    func testSelfSignedWebSocketRequiresExplicitHostAllowance() async throws {
+        let identity = try FakeHASelfSignedIdentity()
+        let server = try FakeHAWebSocketServer(tlsIdentity: identity.identity)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = HomeAssistantClient()
+        let strictInput = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+        let allowedInput = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token",
+            serverTrustPolicy: HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["127.0.0.1"])
+        )
+
+        XCTAssertEqual(await client.checkWebSocketConnection(strictInput), .failure(.tlsRejected(host: "127.0.0.1")))
+        XCTAssertEqual(await client.checkWebSocketConnection(allowedInput), .success(HAWebSocketCheck(haVersion: "fake-ha")))
+    }
+
+    func testSelfSignedWebSocketAllowanceRejectsCASignedSingleLeafCertificate() async throws {
+        let identity = try FakeHASelfSignedIdentity.caSignedLeaf()
+        let server = try FakeHAWebSocketServer(tlsIdentity: identity.identity)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token",
+            serverTrustPolicy: HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["127.0.0.1"])
+        )
+
+        XCTAssertEqual(await HomeAssistantClient().checkWebSocketConnection(input), .failure(.tlsRejected(host: "127.0.0.1")))
     }
 
     func test_t_rest_history_provider_maps_and_sorts_samples() async throws {
@@ -1283,6 +1491,56 @@ final class PerchHAClientTests: XCTestCase {
         try await waitForJournalPath(server: fallbackServer, path: "/api/websocket/recorder/statistics_during_period")
         let journal = await fallbackServer.journal.snapshot()
         XCTAssertEqual(journal.first?.path, "/api/websocket")
+        XCTAssertTrue(journal.contains { $0.path.hasPrefix("/api/history/period/") })
+        XCTAssertTrue(journal.contains { $0.path.contains("filter_entity_id=sensor.office_temperature") })
+    }
+
+    func testHistoryFallsBackToRESTWhenRecorderStatisticsCommandTransportBreaks() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[]"#,
+            historyBody: """
+            [[{"entity_id":"sensor.office_temperature","state":"20.75","last_changed":"2026-06-27T09:30:00+00:00"}]]
+            """,
+            recorderStatisticsBody: """
+            {"sensor.office_temperature":[{"start":1782460800000,"mean":99.0}]}
+            """
+        )
+        let server = try FakeHAWebSocketServer(
+            fixtures: fixtures,
+            mode: .disconnectOnCommands(["recorder/statistics_during_period"])
+        )
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = HomeAssistantClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        let result = await client.history(
+            input,
+            entityID: "sensor.office_temperature",
+            range: .week,
+            end: try historyDate("2026-06-27T12:00:00+00:00")
+        )
+
+        XCTAssertEqual(
+            result,
+            .success(
+                HistorySeries(
+                    entityID: "sensor.office_temperature",
+                    range: .week,
+                    samples: [
+                        HistorySample(timestamp: try historyDate("2026-06-27T09:30:00+00:00"), state: "20.75", numericValue: 20.75)
+                    ]
+                )
+            )
+        )
+        try await waitForJournalPath(server: server, path: "/api/websocket/recorder/statistics_during_period")
+        let journal = await server.journal.snapshot()
         XCTAssertTrue(journal.contains { $0.path.hasPrefix("/api/history/period/") })
         XCTAssertTrue(journal.contains { $0.path.contains("filter_entity_id=sensor.office_temperature") })
     }
@@ -2254,6 +2512,313 @@ final class PerchHAClientTests: XCTestCase {
         XCTAssertEqual(environment.fallbackURL?.absoluteString, "http://backup.local:8123/ha")
     }
 
+    func testMirrorEnvironmentFromEnvironmentLoadsExplicitEnvironmentFileAndOverridesExportedValues() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("perchha-client-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let fileURL = directory.appendingPathComponent("mirror.env", isDirectory: false)
+        try """
+        url=http://file.homeassistant.local:8123
+        url2=https://file.ui.nabu.casa
+        token=file-token
+        user=file-user
+        password=file-password
+        PERCHHA_OAUTH_CLIENT_ID=https://file.perchha.dev/app
+        PERCHHA_OAUTH_REDIRECT_URI=perchha-file://auth
+        """.write(to: fileURL, atomically: true, encoding: .utf8)
+
+        let environment = try HAMirrorEnvironment.fromEnvironment([
+            HAMirrorEnvironment.environmentFileEnvironmentKey: fileURL.path,
+            HAMirrorEnvironment.tokenEnvironmentKey: "exported-token",
+            HAMirrorEnvironment.oauthClientIDEnvironmentKey: "https://exported.perchha.dev/app",
+            HAMirrorEnvironment.oauthRedirectURIEnvironmentKey: "perchha-exported://auth"
+        ])
+
+        XCTAssertEqual(environment.primaryURL.absoluteString, "http://file.homeassistant.local:8123")
+        XCTAssertEqual(environment.fallbackURL?.absoluteString, "https://file.ui.nabu.casa")
+        XCTAssertEqual(environment.token, "exported-token")
+        XCTAssertEqual(environment.user, "file-user")
+        XCTAssertEqual(environment.password, "file-password")
+        XCTAssertEqual(environment.oauthClientID, "https://exported.perchha.dev/app")
+        XCTAssertEqual(environment.oauthRedirectURI, "perchha-exported://auth")
+    }
+
+    func testMirrorEnvironmentFromEnvironmentOverridesMalformedExplicitEnvironmentFileWhenURLIsExported() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("perchha-client-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let fileURL = directory.appendingPathComponent("mirror.env", isDirectory: false)
+        try """
+        PERCHHA_OAUTH_CLIENT_ID
+        """.write(to: fileURL, atomically: true, encoding: .utf8)
+
+        let environment = try HAMirrorEnvironment.fromEnvironment([
+            HAMirrorEnvironment.environmentFileEnvironmentKey: fileURL.path,
+            HAMirrorEnvironment.primaryURLEnvironmentKey: "homeassistant.local:8123",
+            HAMirrorEnvironment.tokenEnvironmentKey: "exported-token"
+        ])
+
+        XCTAssertEqual(environment.primaryURL.absoluteString, "http://homeassistant.local:8123")
+        XCTAssertNil(environment.fallbackURL)
+        XCTAssertEqual(environment.token, "exported-token")
+    }
+
+    func testMirrorEnvironmentFromEnvironmentRejectsMissingExplicitEnvironmentFileWithoutExportedURL() {
+        XCTAssertThrowsError(
+            try HAMirrorEnvironment.fromEnvironment([
+                HAMirrorEnvironment.environmentFileEnvironmentKey: "/tmp/perchha-client-tests/missing.env"
+            ])
+        ) { error in
+            XCTAssertEqual(
+                error as? HAMirrorEnvironmentError,
+                .missingFile("/tmp/perchha-client-tests/missing.env")
+            )
+        }
+    }
+
+    func testMirrorEnvironmentReadinessReportsMissingTokenWithoutCredentialValues() throws {
+        let environment = try HAMirrorEnvironment.parse(
+            """
+            url=http://homeassistant.local:8123
+            user=owner@example.invalid
+            password=secret-password
+            """
+        )
+
+        let report = environment.readinessReport
+
+        XCTAssertFalse(report.canCaptureMirror)
+        XCTAssertFalse(report.canCheckOAuthClientWebsite)
+        XCTAssertEqual(
+            report.issues,
+            [
+                .missingCaptureToken,
+                .usernamePasswordNotCaptureCredentials
+            ]
+        )
+        XCTAssertEqual(
+            report.nextSteps(envPath: ".env.local"),
+            [
+                "Set token= in .env.local or export PERCHHA_HA_TOKEN to a Home Assistant bearer access token before mirror capture. A long-lived access token works, or use the native OAuth sign-in flow and copy the resulting access token.",
+                "user/password alone cannot authenticate the REST or WebSocket APIs. Keep them only for browser sign-in or manual work; mirror capture still needs token= in .env.local or PERCHHA_HA_TOKEN in the process environment.",
+                "If you want native OAuth sign-in instead of a long-lived token, set both PERCHHA_OAUTH_CLIENT_ID and PERCHHA_OAUTH_REDIRECT_URI in .env.local, or export both values, then run hamirror oauth-check --env .env.local."
+            ]
+        )
+        let issueText = report.issues.map(\.description).joined(separator: "\n")
+        XCTAssertFalse(issueText.contains("owner@example.invalid"))
+        XCTAssertFalse(issueText.contains("secret-password"))
+    }
+
+    func testMirrorEnvironmentReadinessReportsCaptureAndOAuthReadiness() throws {
+        let environment = try HAMirrorEnvironment.parse(
+            """
+            url=http://homeassistant.local:8123
+            url2=https://example.ui.nabu.casa
+            token=secret-token
+            PERCHHA_OAUTH_CLIENT_ID=https://perchha.dev/app
+            PERCHHA_OAUTH_REDIRECT_URI=perchha://auth
+            """
+        )
+
+        let report = environment.readinessReport
+
+        XCTAssertTrue(report.hasFallbackURL)
+        XCTAssertTrue(report.hasToken)
+        XCTAssertTrue(report.hasOAuthClientID)
+        XCTAssertTrue(report.hasOAuthRedirectURI)
+        XCTAssertTrue(report.canCaptureMirror)
+        XCTAssertTrue(report.canCheckOAuthClientWebsite)
+        XCTAssertEqual(report.issues, [])
+        XCTAssertEqual(
+            report.suggestedCommands(envPath: ".env.local"),
+            [
+                "swift run hamirror capture --env .env.local --output Fixtures/private/m8-real --websocket --write",
+                "swift run hamirror oauth-check --env .env.local"
+            ]
+        )
+    }
+
+    func testMirrorEnvironmentReadinessReportsOAuthReadyWhileCaptureBlocked() throws {
+        let environment = try HAMirrorEnvironment.parse(
+            """
+            url=http://homeassistant.local:8123
+            PERCHHA_OAUTH_CLIENT_ID=https://perchha.dev/app
+            PERCHHA_OAUTH_REDIRECT_URI=perchha://auth
+            """
+        )
+
+        let report = environment.readinessReport
+
+        XCTAssertFalse(report.canCaptureMirror)
+        XCTAssertTrue(report.canCheckOAuthClientWebsite)
+        XCTAssertEqual(report.issues, [.missingCaptureToken])
+        XCTAssertEqual(
+            report.nextSteps(envPath: ".env.local"),
+            [
+                "Set token= in .env.local or export PERCHHA_HA_TOKEN to a Home Assistant bearer access token before mirror capture. A long-lived access token works, or use the native OAuth sign-in flow and copy the resulting access token."
+            ]
+        )
+        XCTAssertEqual(
+            report.suggestedCommands(envPath: ".env.local"),
+            [
+                "swift run hamirror oauth-check --env .env.local"
+            ]
+        )
+    }
+
+    func testMirrorEnvironmentSuggestedCommandsShellQuoteEnvPath() throws {
+        let environment = try HAMirrorEnvironment.parse(
+            """
+            url=http://homeassistant.local:8123
+            token=secret-token
+            PERCHHA_OAUTH_CLIENT_ID=https://perchha.dev/app
+            PERCHHA_OAUTH_REDIRECT_URI=perchha://auth
+            """
+        )
+
+        XCTAssertEqual(
+            environment.readinessReport.suggestedCommands(envPath: "/tmp/My Project/owner's env.local"),
+            [
+                "swift run hamirror capture --env '/tmp/My Project/owner'\"'\"'s env.local' --output Fixtures/private/m8-real --websocket --write",
+                "swift run hamirror oauth-check --env '/tmp/My Project/owner'\"'\"'s env.local'"
+            ]
+        )
+    }
+
+    func testMirrorEnvironmentReadinessDiagnosticIsScriptableAndRedacted() throws {
+        let environment = try HAMirrorEnvironment.parse(
+            """
+            url=http://homeassistant.local:8123
+            url2=https://example.ui.nabu.casa
+            user=owner@example.invalid
+            password=secret-password
+            PERCHHA_OAUTH_CLIENT_ID=https://perchha.dev/app
+            """
+        )
+
+        let diagnostic = environment.readinessReport.diagnostic(envPath: ".env.local")
+        let data = try JSONEncoder().encode(diagnostic)
+        let decoded = try JSONDecoder().decode(HAMirrorEnvironmentReadinessDiagnostic.self, from: data)
+        let text = String(decoding: data, as: UTF8.self)
+
+        XCTAssertEqual(decoded.envPath, ".env.local")
+        XCTAssertEqual(decoded.url, .present)
+        XCTAssertEqual(decoded.url2, .present)
+        XCTAssertEqual(decoded.token, .missing)
+        XCTAssertEqual(decoded.user, .present)
+        XCTAssertEqual(decoded.password, .present)
+        XCTAssertEqual(decoded.oauthClientID, .present)
+        XCTAssertEqual(decoded.oauthRedirectURI, .missing)
+        XCTAssertEqual(decoded.capture, .blocked)
+        XCTAssertEqual(decoded.oauthCheck, .blocked)
+        XCTAssertEqual(
+            decoded.issues.map(\.code),
+            [
+                .missingCaptureToken,
+                .usernamePasswordNotCaptureCredentials,
+                .incompleteOAuthClientWebsiteConfiguration
+            ]
+        )
+        XCTAssertEqual(
+            decoded.nextSteps,
+            [
+                "Set token= in .env.local or export PERCHHA_HA_TOKEN to a Home Assistant bearer access token before mirror capture. A long-lived access token works, or use the native OAuth sign-in flow and copy the resulting access token.",
+                "user/password alone cannot authenticate the REST or WebSocket APIs. Keep them only for browser sign-in or manual work; mirror capture still needs token= in .env.local or PERCHHA_HA_TOKEN in the process environment.",
+                "Set both PERCHHA_OAUTH_CLIENT_ID and PERCHHA_OAUTH_REDIRECT_URI in .env.local, or export both values, then rerun hamirror oauth-check --env .env.local."
+            ]
+        )
+        XCTAssertEqual(decoded.suggestedCommands, [])
+        XCTAssertFalse(text.contains("owner@example.invalid"))
+        XCTAssertFalse(text.contains("secret-password"))
+        XCTAssertFalse(text.contains("https://perchha.dev/app"))
+    }
+
+    func testMirrorEnvironmentReadinessReportsIncompleteOAuthConfiguration() throws {
+        let environment = try HAMirrorEnvironment.parse(
+            """
+            url=http://homeassistant.local:8123
+            token=secret-token
+            PERCHHA_OAUTH_CLIENT_ID=https://perchha.dev/app
+            """
+        )
+
+        let report = environment.readinessReport
+
+        XCTAssertTrue(report.canCaptureMirror)
+        XCTAssertFalse(report.canCheckOAuthClientWebsite)
+        XCTAssertEqual(report.issues, [.incompleteOAuthClientWebsiteConfiguration])
+        XCTAssertEqual(
+            report.nextSteps(envPath: ".env.local"),
+            [
+                "Set both PERCHHA_OAUTH_CLIENT_ID and PERCHHA_OAUTH_REDIRECT_URI in .env.local, or export both values, then rerun hamirror oauth-check --env .env.local."
+            ]
+        )
+        XCTAssertEqual(
+            report.suggestedCommands(envPath: ".env.local"),
+            [
+                "swift run hamirror capture --env .env.local --output Fixtures/private/m8-real --websocket --write"
+            ]
+        )
+    }
+
+    func testMirrorEnvironmentOAuthCheckBlockingMessagesOnlyReportOAuthReadiness() throws {
+        let environment = try HAMirrorEnvironment.parse(
+            """
+            url=http://homeassistant.local:8123
+            user=owner@example.invalid
+            password=secret-password
+            """
+        )
+
+        XCTAssertEqual(
+            environment.readinessReport.oauthCheckBlockingMessages(envPath: ".env.local"),
+            [
+                "OAuth client website check requires PERCHHA_OAUTH_CLIENT_ID and PERCHHA_OAUTH_REDIRECT_URI",
+                "If you want native OAuth sign-in instead of a long-lived token, set both PERCHHA_OAUTH_CLIENT_ID and PERCHHA_OAUTH_REDIRECT_URI in .env.local, or export both values, then run hamirror oauth-check --env .env.local."
+            ]
+        )
+    }
+
+    func testMirrorEnvironmentOAuthCheckBlockingMessagesExplainIncompleteOAuthConfiguration() throws {
+        let environment = try HAMirrorEnvironment.parse(
+            """
+            url=http://homeassistant.local:8123
+            PERCHHA_OAUTH_CLIENT_ID=https://perchha.dev/app
+            """
+        )
+
+        XCTAssertEqual(
+            environment.readinessReport.oauthCheckBlockingMessages(envPath: ".env.local"),
+            [
+                "OAuth client website check requires PERCHHA_OAUTH_CLIENT_ID and PERCHHA_OAUTH_REDIRECT_URI",
+                "Set both PERCHHA_OAUTH_CLIENT_ID and PERCHHA_OAUTH_REDIRECT_URI in .env.local, or export both values, then rerun hamirror oauth-check --env .env.local."
+            ]
+        )
+    }
+
+    func testMirrorEnvironmentReadinessNextStepsShellQuoteEnvPathCommands() throws {
+        let environment = try HAMirrorEnvironment.parse(
+            """
+            url=http://homeassistant.local:8123
+            PERCHHA_OAUTH_CLIENT_ID=https://perchha.dev/app
+            """
+        )
+
+        XCTAssertEqual(
+            environment.readinessReport.nextSteps(envPath: "/tmp/My Project/owner's env.local"),
+            [
+                "Set token= in /tmp/My Project/owner's env.local or export PERCHHA_HA_TOKEN to a Home Assistant bearer access token before mirror capture. A long-lived access token works, or use the native OAuth sign-in flow and copy the resulting access token.",
+                "Set both PERCHHA_OAUTH_CLIENT_ID and PERCHHA_OAUTH_REDIRECT_URI in /tmp/My Project/owner's env.local, or export both values, then rerun hamirror oauth-check --env '/tmp/My Project/owner'\"'\"'s env.local'."
+            ]
+        )
+    }
+
     func testOAuthClientWebsiteEnvironmentParsesOAuthOnlyEnvFile() throws {
         let environment = try HAOAuthClientWebsiteEnvironment.parse(
             """
@@ -2264,6 +2829,38 @@ final class PerchHAClientTests: XCTestCase {
 
         XCTAssertEqual(environment.clientID, "https://perchha.dev/app")
         XCTAssertEqual(environment.redirectURI, "perchha://auth")
+    }
+
+    func testOAuthClientWebsiteEnvironmentFromEnvironmentLoadsExplicitEnvironmentFile() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("perchha-client-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let fileURL = directory.appendingPathComponent("oauth.env", isDirectory: false)
+        try """
+        PERCHHA_OAUTH_CLIENT_ID=https://file.perchha.dev/app
+        PERCHHA_OAUTH_REDIRECT_URI=perchha-file://auth
+        """.write(to: fileURL, atomically: true, encoding: .utf8)
+
+        let environment = try HAOAuthClientWebsiteEnvironment.fromEnvironment([
+            HAMirrorEnvironment.environmentFileEnvironmentKey: fileURL.path
+        ])
+
+        XCTAssertEqual(environment.clientID, "https://file.perchha.dev/app")
+        XCTAssertEqual(environment.redirectURI, "perchha-file://auth")
+    }
+
+    func testOAuthClientWebsiteEnvironmentFromEnvironmentOverridesMissingExplicitEnvironmentFile() throws {
+        let environment = try HAOAuthClientWebsiteEnvironment.fromEnvironment([
+            HAMirrorEnvironment.environmentFileEnvironmentKey: "/tmp/perchha-client-tests/missing-oauth.env",
+            HAMirrorEnvironment.oauthClientIDEnvironmentKey: "https://exported.perchha.dev/app",
+            HAMirrorEnvironment.oauthRedirectURIEnvironmentKey: "perchha-exported://auth"
+        ])
+
+        XCTAssertEqual(environment.clientID, "https://exported.perchha.dev/app")
+        XCTAssertEqual(environment.redirectURI, "perchha-exported://auth")
     }
 
     func testOAuthClientWebsiteEnvironmentRejectsMissingOAuthKeys() {
@@ -2585,6 +3182,24 @@ final class PerchHAClientTests: XCTestCase {
         _ = try writer.write(restOnly, to: directory)
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("websocket.json").path))
+    }
+
+    func testMirrorFixtureOutputPolicyRequiresIgnoredVerificationForPrivateFixtureDirectory() {
+        XCTAssertTrue(
+            HAMirrorFixtureOutputPolicy.requiresIgnoredDirectoryVerification(
+                URL(fileURLWithPath: "Fixtures/private/m8-real", isDirectory: true)
+            )
+        )
+        XCTAssertTrue(
+            HAMirrorFixtureOutputPolicy.requiresIgnoredDirectoryVerification(
+                URL(fileURLWithPath: "/tmp/Repo/Fixtures/private/m8-real", isDirectory: true)
+            )
+        )
+        XCTAssertFalse(
+            HAMirrorFixtureOutputPolicy.requiresIgnoredDirectoryVerification(
+                URL(fileURLWithPath: "Fixtures/public/m2-minimal", isDirectory: true)
+            )
+        )
     }
 
     func testFixtureVerifierAcceptsCompleteSanitizedFixtureSet() throws {

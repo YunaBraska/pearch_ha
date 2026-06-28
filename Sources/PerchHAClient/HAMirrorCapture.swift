@@ -110,6 +110,19 @@ public struct HAMirrorFixtureSet: Codable, Equatable, Sendable {
     }
 }
 
+public enum HAMirrorFixtureOutputPolicy {
+    public static func requiresIgnoredDirectoryVerification(_ directoryURL: URL) -> Bool {
+        let components = URL(fileURLWithPath: directoryURL.path, isDirectory: true)
+            .standardizedFileURL
+            .pathComponents
+            .map { $0.lowercased() }
+        for (first, second) in zip(components, components.dropFirst()) where first == "fixtures" && second == "private" {
+            return true
+        }
+        return false
+    }
+}
+
 public struct HAMirrorCaptureService: Sendable {
     private let transport: any HAMirrorTransport
     private let redactor: Redactor

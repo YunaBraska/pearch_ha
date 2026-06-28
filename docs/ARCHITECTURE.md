@@ -23,11 +23,11 @@ PerchHAApp -> PerchHAUI -> PerchHACore <- PerchHAClient -> PerchHASupport
 
 - `PerchHACore`: domain models, app state, formatting, normalization, ordering, thresholds, and pure behavior.
 - `PerchHAClient`: Home Assistant REST/WebSocket client, auth, reconnection, decoding, service calls, history, and registry discovery.
-- `PerchHASupport`: rate limiter, jittered scheduler, request coalescer, backoff, clock abstraction, redacted logging.
+- `PerchHASupport`: strict command-line option parsing, rate limiter, jittered scheduler, request coalescer, backoff, clock abstraction, redacted logging.
 - `PerchHAPersistence`: JSON config and Keychain-backed secret storage behind protocols.
 - `PerchHAUI`: SwiftUI panel, settings, gauges, charts, controls, and accessibility labels.
 - `PerchHAApp`: lifecycle, status items, panel positioning, external URL ingress, app commands, and release integration.
-- `PerchHAPackaging`: SwiftPM-driven `.app` bundle metadata, executable layout, OAuth callback URL scheme declaration, and LaunchServices verification.
+- `PerchHAPackaging`: SwiftPM-driven `.app` bundle metadata, executable layout, OAuth callback URL scheme declaration, LaunchServices verification, code-signature creation/verification, native DMG creation/verification, notarization/stapling command orchestration, and release evidence manifests.
 - `FakeHA`: local test server that mirrors Home Assistant wire behavior from fixtures.
 - `hamirror`: tool that captures and verifies mirrored fixture sets from real Home Assistant.
 
@@ -157,7 +157,8 @@ Secrets:
 
 - Access tokens.
 - Refresh tokens.
-- Optional self-signed host allowance metadata.
-- Protected custom-action service-data fields, if supported in a later milestone.
+- Protected custom-action service-data fields backed by opaque references in JSON and resolved from Keychain at execution time.
 
-Secrets live in Keychain and never in JSON config, fixtures, logs, or `.env.local` snapshots. The M11 custom-action slice rejects protected service-data key names in plaintext config rather than storing them.
+Secrets live in Keychain and never in JSON config, fixtures, logs, or `.env.local` snapshots. The M11 custom-action slice stores protected service-data as opaque references in JSON, resolves them before `call_service`, and fails explicitly if a referenced secret is missing.
+
+Connection trust exceptions are transient connection-form state in the current local slice. The optional self-signed certificate allowance is off by default, scoped to the current HTTPS Home Assistant hosts, and forwarded to REST, WebSocket, and OAuth token requests.

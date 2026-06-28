@@ -1,0 +1,3 @@
+import PerchHAAppShell
+
+PerchHAApplication.main()

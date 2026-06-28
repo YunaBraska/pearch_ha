@@ -10,17 +10,20 @@ public struct PerchHAConnectionForm: Equatable, Sendable {
     public var fallbackURLString: String
     public var token: String
     public var usesStoredAuthSession: Bool
+    public var allowsSelfSignedCertificates: Bool
 
     public init(
         urlString: String = "",
         fallbackURLString: String = "",
         token: String = "",
-        usesStoredAuthSession: Bool = false
+        usesStoredAuthSession: Bool = false,
+        allowsSelfSignedCertificates: Bool = false
     ) {
         self.urlString = urlString
         self.fallbackURLString = fallbackURLString
         self.token = token
         self.usesStoredAuthSession = usesStoredAuthSession
+        self.allowsSelfSignedCertificates = allowsSelfSignedCertificates
     }
 
     public var trimmedToken: String {
@@ -37,6 +40,13 @@ public struct PerchHAConnectionForm: Equatable, Sendable {
             return nil
         }
         return Self.validURL(trimmed)
+    }
+
+    public func selfSignedCertificateHosts() -> Set<String> {
+        guard allowsSelfSignedCertificates else {
+            return []
+        }
+        return Set([primaryURL(), fallbackURL()].compactMap(Self.secureHost))
     }
 
     public var validationFailure: ConnectionFailure? {
@@ -61,6 +71,16 @@ public struct PerchHAConnectionForm: Equatable, Sendable {
             return nil
         }
         return url
+    }
+
+    private static func secureHost(_ url: URL?) -> String? {
+        guard url?.scheme?.lowercased() == "https",
+              let host = url?.host?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !host.isEmpty
+        else {
+            return nil
+        }
+        return host
     }
 }
 
@@ -114,6 +134,13 @@ public enum PerchHACustomActionServiceDataValueKind: String, CaseIterable, Hasha
     case string
     case number
     case bool
+    case object
+    case array
+}
+
+public enum PerchHACustomActionServiceDataPathComponent: Equatable, Hashable, Sendable {
+    case key(String)
+    case index(Int)
 }
 
 public enum PerchHAControlActionState: Equatable, Sendable {
@@ -780,7 +807,8 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
                 urlString: connectionForm.urlString,
                 fallbackURLString: connectionForm.fallbackURLString,
                 token: "",
-                usesStoredAuthSession: connectionForm.usesStoredAuthSession
+                usesStoredAuthSession: connectionForm.usesStoredAuthSession,
+                allowsSelfSignedCertificates: connectionForm.allowsSelfSignedCertificates
             ),
             lastUpdateDescription: lastUpdateDescription,
             refreshCount: refreshCount,
@@ -1028,6 +1056,7 @@ public final class PerchHAPanelModel: ObservableObject {
     private let selectionSink: SelectionConfigurationSink
     private let menuBarDisplaySink: MenuBarDisplayConfigurationSink
     private let customActionSink: CustomActionConfigurationSink
+    private let protectedActionValueStore: any ProtectedActionValueStore
     private let snapshotSink: SnapshotSink
     private var historyCache = PerchHAHistoryCache()
     private var lastConnectedForm: PerchHAConnectionForm?
@@ -1037,6 +1066,7 @@ public final class PerchHAPanelModel: ObservableObject {
     private var pendingControlChange: PendingControlChange?
     private var historyTask: Task<Void, Never>?
     private var historyRequestGeneration = 0
+    private var protectedValueDrafts: [String: String] = [:]
 
     public init(
         snapshot: PerchHAPanelSnapshot = PerchHAPanelSnapshot(),
@@ -1054,6 +1084,7 @@ public final class PerchHAPanelModel: ObservableObject {
         selectionSink: @escaping SelectionConfigurationSink = { _ in .saved },
         menuBarDisplaySink: @escaping MenuBarDisplayConfigurationSink = { _ in .saved },
         customActionSink: @escaping CustomActionConfigurationSink = { _ in .saved },
+        protectedActionValueStore: (any ProtectedActionValueStore)? = nil,
         snapshotSink: @escaping SnapshotSink = { _ in }
     ) {
         self.snapshotSink = snapshotSink
@@ -1098,6 +1129,7 @@ public final class PerchHAPanelModel: ObservableObject {
         self.selectionSink = selectionSink
         self.menuBarDisplaySink = menuBarDisplaySink
         self.customActionSink = customActionSink
+        self.protectedActionValueStore = protectedActionValueStore ?? UnavailableProtectedActionValueStore()
     }
 
     deinit {
@@ -1110,7 +1142,8 @@ public final class PerchHAPanelModel: ObservableObject {
         urlString: String? = nil,
         fallbackURLString: String? = nil,
         token: String? = nil,
-        usesStoredAuthSession: Bool? = nil
+        usesStoredAuthSession: Bool? = nil,
+        allowsSelfSignedCertificates: Bool? = nil
     ) {
         let nextUsesStoredAuthSession = usesStoredAuthSession
             ?? (token?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? false : editableForm.usesStoredAuthSession)
@@ -1118,7 +1151,8 @@ public final class PerchHAPanelModel: ObservableObject {
             urlString: urlString ?? editableForm.urlString,
             fallbackURLString: fallbackURLString ?? editableForm.fallbackURLString,
             token: token ?? editableForm.token,
-            usesStoredAuthSession: nextUsesStoredAuthSession
+            usesStoredAuthSession: nextUsesStoredAuthSession,
+            allowsSelfSignedCertificates: allowsSelfSignedCertificates ?? editableForm.allowsSelfSignedCertificates
         )
         snapshot = PerchHAPanelSnapshot(
             connectionState: snapshot.connectionState,
@@ -1181,7 +1215,8 @@ public final class PerchHAPanelModel: ObservableObject {
                 urlString: form.urlString,
                 fallbackURLString: form.fallbackURLString,
                 token: "",
-                usesStoredAuthSession: true
+                usesStoredAuthSession: true,
+                allowsSelfSignedCertificates: form.allowsSelfSignedCertificates
             )
             await connect()
         case let .failed(message):
@@ -1542,7 +1577,11 @@ public final class PerchHAPanelModel: ObservableObject {
             return false
         }
         let metadata = serviceMetadata(domain: trimmedDomain, service: trimmedService)
-        let serviceData = serviceDataWithMetadataDefaults(action.action.serviceData, metadata: metadata)
+        let serviceData = serviceDataWithMetadataDefaults(
+            action.action.serviceData,
+            metadata: metadata,
+            actionID: action.id
+        )
         return setCustomAction(
             EntityCustomAction(
                 id: action.id,
@@ -1561,15 +1600,27 @@ public final class PerchHAPanelModel: ObservableObject {
 
     @discardableResult
     public func setCustomAction(_ action: EntityCustomAction) -> Bool {
-        if let failure = action.validationFailure() {
+        let existingAction = customActionConfiguration.action(id: action.id)
+        let sanitized: SanitizedCustomAction
+        do {
+            sanitized = try sanitize(action: action, existingAction: existingAction)
+        } catch {
+            customActionPersistenceFailureDescription = String(describing: error)
+            return false
+        }
+        if let failure = sanitized.action.validationFailure() {
             customActionPersistenceFailureDescription = failure.description
             return false
         }
-        guard entity(for: action.entityID) != nil else {
+        guard entity(for: sanitized.action.entityID) != nil else {
             customActionPersistenceFailureDescription = "custom action is incomplete"
             return false
         }
-        return updateCustomActionConfiguration(customActionConfiguration.upserting(action), persist: true)
+        return updateCustomActionConfiguration(
+            customActionConfiguration.upserting(sanitized.action),
+            persist: true,
+            protectedValueUpserts: sanitized.protectedValueUpserts
+        )
     }
 
     @discardableResult
@@ -1613,16 +1664,211 @@ public final class PerchHAPanelModel: ObservableObject {
 
     @discardableResult
     public func setCustomActionServiceDataValue(_ id: CustomActionID, key: String, value: ActionValue) -> Bool {
-        let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedKey.isEmpty,
-              let action = customActionConfiguration.action(id: id)
+        setCustomActionServiceDataValue(id, path: [.key(key)], value: value)
+    }
+
+    @discardableResult
+    public func setCustomActionServiceDataValue(
+        _ id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent],
+        value: ActionValue
+    ) -> Bool {
+        updateCustomActionServiceData(id) { serviceData in
+            Self.setServiceDataValue(value, at: path, in: &serviceData)
+        }
+    }
+
+    @discardableResult
+    public func appendCustomActionServiceDataArrayValue(
+        _ id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent],
+        value: ActionValue
+    ) -> Bool {
+        updateCustomActionServiceData(id) { serviceData in
+            Self.appendServiceDataArrayValue(value, at: path, in: &serviceData)
+        }
+    }
+
+    @discardableResult
+    public func setCustomActionServiceDataText(
+        _ id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent],
+        text: String,
+        kind: PerchHACustomActionServiceDataValueKind
+    ) -> Bool {
+        if isSensitiveServiceDataPath(path),
+           text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let removed = removeCustomActionServiceDataValue(id, path: path)
+            if removed {
+                clearProtectedValueDraft(id: id, path: path)
+            }
+            return removed
+        }
+        guard let value = Self.customActionServiceDataValue(text: text, kind: kind) else {
+            customActionPersistenceFailureDescription = "custom action service data value is invalid"
+            return false
+        }
+        let updated = setCustomActionServiceDataValue(id, path: path, value: value)
+        if updated, isSensitiveServiceDataPath(path) {
+            setProtectedValueDraft(text, id: id, path: path)
+        }
+        return updated
+    }
+
+    @discardableResult
+    public func setCustomActionServiceDataType(
+        _ id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent],
+        kind: PerchHACustomActionServiceDataValueKind
+    ) -> Bool {
+        guard let action = customAction(id: id),
+              let value = Self.serviceDataValue(at: path, in: action.action.serviceData)
         else {
-            customActionPersistenceFailureDescription = "custom action service data key is incomplete"
+            customActionPersistenceFailureDescription = "custom action service data path is invalid"
+            return false
+        }
+        let text = value.isInlineEditable ? value.editorText : ""
+        return setCustomActionServiceDataText(id, path: path, text: text, kind: kind)
+    }
+
+    @discardableResult
+    public func renameCustomActionServiceDataKey(
+        _ id: CustomActionID,
+        parentPath: [PerchHACustomActionServiceDataPathComponent],
+        from oldKey: String,
+        to newKey: String
+    ) -> Bool {
+        updateCustomActionServiceData(id) { serviceData in
+            Self.renameServiceDataKey(parentPath: parentPath, from: oldKey, to: newKey, in: &serviceData)
+        }
+    }
+
+    @discardableResult
+    public func removeCustomActionServiceDataValue(
+        _ id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent]
+    ) -> Bool {
+        updateCustomActionServiceData(id) { serviceData in
+            Self.removeServiceDataValue(at: path, in: &serviceData)
+        }
+    }
+
+    @discardableResult
+    public func moveCustomActionServiceDataArrayValue(
+        _ id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent],
+        direction: SelectionMoveDirection
+    ) -> Bool {
+        updateCustomActionServiceData(id) { serviceData in
+            Self.moveServiceDataArrayValue(at: path, direction: direction, in: &serviceData)
+        }
+    }
+
+    @discardableResult
+    private func updateCustomActionServiceData(
+        _ id: CustomActionID,
+        update: (inout [String: ActionValue]) -> Bool
+    ) -> Bool {
+        guard let action = customActionConfiguration.action(id: id) else {
+            customActionPersistenceFailureDescription = "custom action service data path is invalid"
             return false
         }
         var serviceData = action.action.serviceData
-        serviceData[trimmedKey] = value
+        guard update(&serviceData) else {
+            customActionPersistenceFailureDescription = "custom action service data path is invalid"
+            return false
+        }
         return setCustomAction(action.withServiceData(serviceData))
+    }
+
+    private static func setServiceDataValue(
+        _ value: ActionValue,
+        at path: [PerchHACustomActionServiceDataPathComponent],
+        in serviceData: inout [String: ActionValue]
+    ) -> Bool {
+        guard let first = path.first,
+              case let .key(rawKey) = first
+        else {
+            return false
+        }
+        let trimmedKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKey.isEmpty else {
+            return false
+        }
+        let remainingPath = Array(path.dropFirst())
+        guard !remainingPath.isEmpty else {
+            serviceData[trimmedKey] = value
+            return true
+        }
+        guard var existing = serviceData[trimmedKey] else {
+            return false
+        }
+        guard setActionValue(value, at: remainingPath, in: &existing) else {
+            return false
+        }
+        serviceData[trimmedKey] = existing
+        return true
+    }
+
+    private static func setActionValue(
+        _ value: ActionValue,
+        at path: [PerchHACustomActionServiceDataPathComponent],
+        in parent: inout ActionValue
+    ) -> Bool {
+        guard let first = path.first else {
+            return false
+        }
+        switch (first, parent) {
+        case let (.key(rawKey), .object(values)):
+            let trimmedKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedKey.isEmpty else {
+                return false
+            }
+            var nextValues = values
+            let remainingPath = Array(path.dropFirst())
+            guard !remainingPath.isEmpty else {
+                nextValues[trimmedKey] = value
+                parent = .object(nextValues)
+                return true
+            }
+            guard var child = nextValues[trimmedKey],
+                  setActionValue(value, at: remainingPath, in: &child)
+            else {
+                return false
+            }
+            nextValues[trimmedKey] = child
+            parent = .object(nextValues)
+            return true
+        case let (.index(index), .array(values)):
+            guard values.indices.contains(index) else {
+                return false
+            }
+            var nextValues = values
+            let remainingPath = Array(path.dropFirst())
+            guard !remainingPath.isEmpty else {
+                nextValues[index] = value
+                parent = .array(nextValues)
+                return true
+            }
+            guard setActionValue(value, at: remainingPath, in: &nextValues[index]) else {
+                return false
+            }
+            parent = .array(nextValues)
+            return true
+        case (.key, .string),
+             (.key, .protectedString),
+             (.key, .number),
+             (.key, .bool),
+             (.key, .array),
+             (.key, .null),
+             (.index, .string),
+             (.index, .protectedString),
+             (.index, .number),
+             (.index, .bool),
+             (.index, .object),
+             (.index, .null):
+            return false
+        }
     }
 
     @discardableResult
@@ -1632,11 +1878,24 @@ public final class PerchHAPanelModel: ObservableObject {
         text: String,
         kind: PerchHACustomActionServiceDataValueKind
     ) -> Bool {
+        let path: [PerchHACustomActionServiceDataPathComponent] = [.key(key)]
+        if isSensitiveServiceDataPath(path),
+           text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let removed = removeCustomActionServiceDataKey(id, key: key)
+            if removed {
+                clearProtectedValueDraft(id: id, path: path)
+            }
+            return removed
+        }
         guard let value = Self.customActionServiceDataValue(text: text, kind: kind) else {
             customActionPersistenceFailureDescription = "custom action service data value is invalid"
             return false
         }
-        return setCustomActionServiceDataValue(id, key: key, value: value)
+        let updated = setCustomActionServiceDataValue(id, key: key, value: value)
+        if updated, isSensitiveServiceDataPath(path) {
+            setProtectedValueDraft(text, id: id, path: path)
+        }
+        return updated
     }
 
     @discardableResult
@@ -1646,7 +1905,7 @@ public final class PerchHAPanelModel: ObservableObject {
         guard !trimmedOldKey.isEmpty,
               !trimmedNewKey.isEmpty,
               let action = customActionConfiguration.action(id: id),
-              let value = action.action.serviceData[trimmedOldKey]
+              action.action.serviceData[trimmedOldKey] != nil
         else {
             customActionPersistenceFailureDescription = "custom action service data key is incomplete"
             return false
@@ -1655,41 +1914,339 @@ public final class PerchHAPanelModel: ObservableObject {
             customActionPersistenceFailureDescription = "custom action service data key is duplicated"
             return false
         }
-        var serviceData = action.action.serviceData
-        serviceData.removeValue(forKey: trimmedOldKey)
-        serviceData[trimmedNewKey] = value
-        return setCustomAction(action.withServiceData(serviceData))
+        return renameCustomActionServiceDataKey(id, parentPath: [], from: oldKey, to: newKey)
+    }
+
+    private static func renameServiceDataKey(
+        parentPath: [PerchHACustomActionServiceDataPathComponent],
+        from oldKey: String,
+        to newKey: String,
+        in serviceData: inout [String: ActionValue]
+    ) -> Bool {
+        let trimmedOldKey = oldKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedNewKey = newKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedOldKey.isEmpty, !trimmedNewKey.isEmpty else {
+            return false
+        }
+        guard !parentPath.isEmpty else {
+            guard let value = serviceData[trimmedOldKey],
+                  trimmedOldKey == trimmedNewKey || serviceData[trimmedNewKey] == nil
+            else {
+                return false
+            }
+            serviceData.removeValue(forKey: trimmedOldKey)
+            serviceData[trimmedNewKey] = value
+            return true
+        }
+        return updateServiceDataValue(at: parentPath, in: &serviceData) { parent in
+            guard case let .object(values) = parent else {
+                return false
+            }
+            guard let value = values[trimmedOldKey],
+                  trimmedOldKey == trimmedNewKey || values[trimmedNewKey] == nil
+            else {
+                return false
+            }
+            var nextValues = values
+            nextValues.removeValue(forKey: trimmedOldKey)
+            nextValues[trimmedNewKey] = value
+            parent = .object(nextValues)
+            return true
+        }
     }
 
     @discardableResult
     public func removeCustomActionServiceDataKey(_ id: CustomActionID, key: String) -> Bool {
-        let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let action = customActionConfiguration.action(id: id),
-              action.action.serviceData[trimmedKey] != nil
+        removeCustomActionServiceDataValue(id, path: [.key(key)])
+    }
+
+    private static func removeServiceDataValue(
+        at path: [PerchHACustomActionServiceDataPathComponent],
+        in serviceData: inout [String: ActionValue]
+    ) -> Bool {
+        guard let first = path.first,
+              case let .key(rawKey) = first
         else {
             return false
         }
-        var serviceData = action.action.serviceData
-        serviceData.removeValue(forKey: trimmedKey)
-        return setCustomAction(action.withServiceData(serviceData))
+        let trimmedKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKey.isEmpty else {
+            return false
+        }
+        let remainingPath = Array(path.dropFirst())
+        guard !remainingPath.isEmpty else {
+            return serviceData.removeValue(forKey: trimmedKey) != nil
+        }
+        return updateServiceDataValue(at: [.key(trimmedKey)], in: &serviceData) { parent in
+            removeActionValue(at: remainingPath, in: &parent)
+        }
+    }
+
+    private static func removeActionValue(
+        at path: [PerchHACustomActionServiceDataPathComponent],
+        in parent: inout ActionValue
+    ) -> Bool {
+        guard let first = path.first else {
+            return false
+        }
+        let remainingPath = Array(path.dropFirst())
+        switch (first, parent) {
+        case let (.key(rawKey), .object(values)):
+            let trimmedKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedKey.isEmpty else {
+                return false
+            }
+            var nextValues = values
+            guard !remainingPath.isEmpty else {
+                guard nextValues.removeValue(forKey: trimmedKey) != nil else {
+                    return false
+                }
+                parent = .object(nextValues)
+                return true
+            }
+            guard var child = nextValues[trimmedKey],
+                  removeActionValue(at: remainingPath, in: &child)
+            else {
+                return false
+            }
+            nextValues[trimmedKey] = child
+            parent = .object(nextValues)
+            return true
+        case let (.index(index), .array(values)):
+            guard values.indices.contains(index) else {
+                return false
+            }
+            var nextValues = values
+            guard !remainingPath.isEmpty else {
+                nextValues.remove(at: index)
+                parent = .array(nextValues)
+                return true
+            }
+            guard removeActionValue(at: remainingPath, in: &nextValues[index]) else {
+                return false
+            }
+            parent = .array(nextValues)
+            return true
+        case (.key, .string),
+             (.key, .protectedString),
+             (.key, .number),
+             (.key, .bool),
+             (.key, .array),
+             (.key, .null),
+             (.index, .string),
+             (.index, .protectedString),
+             (.index, .number),
+             (.index, .bool),
+             (.index, .object),
+             (.index, .null):
+            return false
+        }
+    }
+
+    private static func appendServiceDataArrayValue(
+        _ value: ActionValue,
+        at path: [PerchHACustomActionServiceDataPathComponent],
+        in serviceData: inout [String: ActionValue]
+    ) -> Bool {
+        updateServiceDataValue(at: path, in: &serviceData) { parent in
+            guard case let .array(values) = parent else {
+                return false
+            }
+            parent = .array(values + [value])
+            return true
+        }
+    }
+
+    private static func moveServiceDataArrayValue(
+        at path: [PerchHACustomActionServiceDataPathComponent],
+        direction: SelectionMoveDirection,
+        in serviceData: inout [String: ActionValue]
+    ) -> Bool {
+        guard let last = path.last,
+              case let .index(index) = last
+        else {
+            return false
+        }
+        let parentPath = Array(path.dropLast())
+        return updateServiceDataValue(at: parentPath, in: &serviceData) { parent in
+            guard case let .array(values) = parent,
+                  values.indices.contains(index)
+            else {
+                return false
+            }
+            let targetIndex: Int
+            switch direction {
+            case .up:
+                guard index > values.startIndex else {
+                    return false
+                }
+                targetIndex = values.index(before: index)
+            case .down:
+                guard index < values.index(before: values.endIndex) else {
+                    return false
+                }
+                targetIndex = values.index(after: index)
+            }
+            var nextValues = values
+            nextValues.swapAt(index, targetIndex)
+            parent = .array(nextValues)
+            return true
+        }
+    }
+
+    private static func updateServiceDataValue(
+        at path: [PerchHACustomActionServiceDataPathComponent],
+        in serviceData: inout [String: ActionValue],
+        update: (inout ActionValue) -> Bool
+    ) -> Bool {
+        guard let first = path.first,
+              case let .key(rawKey) = first
+        else {
+            return false
+        }
+        let trimmedKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKey.isEmpty,
+              var value = serviceData[trimmedKey]
+        else {
+            return false
+        }
+        let remainingPath = Array(path.dropFirst())
+        let updated: Bool
+        if remainingPath.isEmpty {
+            updated = update(&value)
+        } else {
+            updated = updateActionValue(at: remainingPath, in: &value, update: update)
+        }
+        guard updated else {
+            return false
+        }
+        serviceData[trimmedKey] = value
+        return true
+    }
+
+    private static func serviceDataValue(
+        at path: [PerchHACustomActionServiceDataPathComponent],
+        in serviceData: [String: ActionValue]
+    ) -> ActionValue? {
+        guard let first = path.first,
+              case let .key(rawKey) = first
+        else {
+            return nil
+        }
+        let trimmedKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var value = serviceData[trimmedKey] else {
+            return nil
+        }
+        for component in path.dropFirst() {
+            switch (component, value) {
+            case let (.key(rawKey), .object(values)):
+                let trimmedKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let child = values[trimmedKey] else {
+                    return nil
+                }
+                value = child
+            case let (.index(index), .array(values)):
+                guard values.indices.contains(index) else {
+                    return nil
+                }
+                value = values[index]
+            case (.key, .string),
+                 (.key, .protectedString),
+                 (.key, .number),
+                 (.key, .bool),
+                 (.key, .array),
+                 (.key, .null),
+                 (.index, .string),
+                 (.index, .protectedString),
+                 (.index, .number),
+                 (.index, .bool),
+                 (.index, .object),
+                 (.index, .null):
+                return nil
+            }
+        }
+        return value
+    }
+
+    private static func updateActionValue(
+        at path: [PerchHACustomActionServiceDataPathComponent],
+        in parent: inout ActionValue,
+        update: (inout ActionValue) -> Bool
+    ) -> Bool {
+        guard let first = path.first else {
+            return update(&parent)
+        }
+        let remainingPath = Array(path.dropFirst())
+        switch (first, parent) {
+        case let (.key(rawKey), .object(values)):
+            let trimmedKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedKey.isEmpty,
+                  var child = values[trimmedKey]
+            else {
+                return false
+            }
+            let updated = remainingPath.isEmpty
+                ? update(&child)
+                : updateActionValue(at: remainingPath, in: &child, update: update)
+            guard updated else {
+                return false
+            }
+            var nextValues = values
+            nextValues[trimmedKey] = child
+            parent = .object(nextValues)
+            return true
+        case let (.index(index), .array(values)):
+            guard values.indices.contains(index) else {
+                return false
+            }
+            var nextValues = values
+            let updated = remainingPath.isEmpty
+                ? update(&nextValues[index])
+                : updateActionValue(at: remainingPath, in: &nextValues[index], update: update)
+            guard updated else {
+                return false
+            }
+            parent = .array(nextValues)
+            return true
+        case (.key, .string),
+             (.key, .protectedString),
+             (.key, .number),
+             (.key, .bool),
+             (.key, .array),
+             (.key, .null),
+             (.index, .string),
+             (.index, .protectedString),
+             (.index, .number),
+             (.index, .bool),
+             (.index, .object),
+             (.index, .null):
+            return false
+        }
     }
 
     private static func customActionServiceDataValue(
         text: String,
         kind: PerchHACustomActionServiceDataValueKind
     ) -> ActionValue? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         switch kind {
         case .string:
             return .string(text)
         case .number:
-            guard let value = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+            guard !trimmed.isEmpty else {
+                return .number(0)
+            }
+            guard let value = Double(trimmed),
                   value.isFinite
             else {
                 return nil
             }
             return .number(value)
         case .bool:
-            switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            guard !trimmed.isEmpty else {
+                return .bool(false)
+            }
+            switch trimmed.lowercased() {
             case "true", "1", "yes", "on":
                 return .bool(true)
             case "false", "0", "no", "off":
@@ -1697,6 +2254,10 @@ public final class PerchHAPanelModel: ObservableObject {
             default:
                 return nil
             }
+        case .object:
+            return .object([:])
+        case .array:
+            return .array([])
         }
     }
 
@@ -1706,14 +2267,19 @@ public final class PerchHAPanelModel: ObservableObject {
 
     private func serviceDataWithMetadataDefaults(
         _ existing: [String: ActionValue],
-        metadata: HAServiceMetadata?
+        metadata: HAServiceMetadata?,
+        actionID: CustomActionID
     ) -> [String: ActionValue] {
         guard let metadata else {
             return existing
         }
         var serviceData = existing
         for field in metadata.fields where serviceData[field.key] == nil && !Self.isTargetField(field.key) {
-            serviceData[field.key] = field.example ?? .string("")
+            if ActionSpec.isSensitiveServiceDataKey(field.key) {
+                serviceData[field.key] = .protectedString(freshProtectedValueReference(for: actionID))
+            } else {
+                serviceData[field.key] = field.example ?? .string("")
+            }
         }
         return serviceData
     }
@@ -1765,7 +2331,17 @@ public final class PerchHAPanelModel: ObservableObject {
             .running(entityID: action.entityID),
             lastUpdateDescription: "Running \(action.title)"
         )
-        let result = await actionRunner(form, action.action)
+        let resolvedAction: ActionSpec
+        do {
+            resolvedAction = try action.action.resolvedProtectedValues(using: protectedActionValueStore.load)
+        } catch {
+            applyControlActionState(
+                .failed(entityID: action.entityID, message: String(describing: error)),
+                lastUpdateDescription: "Action unavailable for \(action.title)"
+            )
+            return false
+        }
+        let result = await actionRunner(form, resolvedAction)
         guard !Task.isCancelled else {
             return false
         }
@@ -2510,12 +3086,304 @@ public final class PerchHAPanelModel: ObservableObject {
             urlString: form.urlString,
             fallbackURLString: form.fallbackURLString,
             token: "",
-            usesStoredAuthSession: form.usesStoredAuthSession
+            usesStoredAuthSession: form.usesStoredAuthSession,
+            allowsSelfSignedCertificates: form.allowsSelfSignedCertificates
         )
     }
 
     private func hasToken(in form: PerchHAConnectionForm) -> Bool {
         !form.trimmedToken.isEmpty || form.usesStoredAuthSession
+    }
+
+    fileprivate func protectedValueDraft(
+        for id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent]
+    ) -> String {
+        let value = currentCustomActionServiceDataValue(for: id, path: path)
+        if let reference = value?.protectedValueReference,
+           let draft = protectedValueDrafts[reference.rawValue] {
+            return draft
+        }
+        return protectedValueDrafts[protectedValueDraftPathKey(id: id, path: path)] ?? ""
+    }
+
+    private func setProtectedValueDraft(
+        _ value: String,
+        id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent]
+    ) {
+        let pathKey = protectedValueDraftPathKey(id: id, path: path)
+        if let reference = currentCustomActionServiceDataValue(for: id, path: path)?.protectedValueReference {
+            protectedValueDrafts[reference.rawValue] = value
+            protectedValueDrafts.removeValue(forKey: pathKey)
+        } else {
+            protectedValueDrafts[pathKey] = value
+        }
+    }
+
+    private func clearProtectedValueDraft(
+        id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent]
+    ) {
+        let pathKey = protectedValueDraftPathKey(id: id, path: path)
+        protectedValueDrafts.removeValue(forKey: pathKey)
+        if let reference = currentCustomActionServiceDataValue(for: id, path: path)?.protectedValueReference {
+            protectedValueDrafts.removeValue(forKey: reference.rawValue)
+        }
+    }
+
+    private func protectedValueDraftPathKey(
+        id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent]
+    ) -> String {
+        "\(id.rawValue):\(serviceDataPathDescription(path))"
+    }
+
+    fileprivate func isSensitiveServiceDataPath(_ path: [PerchHACustomActionServiceDataPathComponent]) -> Bool {
+        path
+            .reversed()
+            .compactMap { component in
+                if case let .key(key) = component {
+                    return key
+                }
+                return nil
+            }
+            .first
+            .map(ActionSpec.isSensitiveServiceDataKey(_:))
+            ?? false
+    }
+
+    private func freshProtectedValueReference(for actionID: CustomActionID) -> ProtectedActionValueReference {
+        ProtectedActionValueReference("custom-action:\(actionID.rawValue):\(UUID().uuidString)")
+    }
+
+    private func currentCustomActionServiceDataValue(
+        for id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent]
+    ) -> ActionValue? {
+        guard let action = customActionConfiguration.action(id: id) else {
+            return nil
+        }
+        return Self.serviceDataValue(at: path, in: action.action.serviceData)
+    }
+
+    private func sanitize(
+        action: EntityCustomAction,
+        existingAction: EntityCustomAction?
+    ) throws -> SanitizedCustomAction {
+        let sanitized = try sanitize(
+            serviceData: action.action.serviceData,
+            path: [],
+            actionID: action.id,
+            existingValue: existingAction.map { .object($0.action.serviceData) }
+        )
+        return SanitizedCustomAction(
+            action: action.withServiceData(sanitized.value),
+            protectedValueUpserts: sanitized.protectedValueUpserts
+        )
+    }
+
+    private func sanitize(
+        serviceData: [String: ActionValue],
+        path: [PerchHACustomActionServiceDataPathComponent],
+        actionID: CustomActionID,
+        existingValue: ActionValue?
+    ) throws -> SanitizedActionValue {
+        var sanitized: [String: ActionValue] = [:]
+        var upserts: [ProtectedActionValueReference: String] = [:]
+        let existingObject: [String: ActionValue]
+        if case let .object(values) = existingValue {
+            existingObject = values
+        } else {
+            existingObject = [:]
+        }
+        for key in serviceData.keys.sorted() {
+            guard let value = serviceData[key] else {
+                continue
+            }
+            let existingChild = existingObject[key]
+            let child = try sanitize(
+                value: value,
+                path: path + [.key(key)],
+                actionID: actionID,
+                existingValue: existingChild
+            )
+            sanitized[key] = child.value
+            upserts.merge(child.protectedValueUpserts) { _, new in new }
+        }
+        return SanitizedActionValue(value: sanitized, protectedValueUpserts: upserts)
+    }
+
+    private func sanitize(
+        value: ActionValue,
+        path: [PerchHACustomActionServiceDataPathComponent],
+        actionID: CustomActionID,
+        existingValue: ActionValue?
+    ) throws -> SanitizedScalarActionValue {
+        if isSensitiveServiceDataPath(path) {
+            switch value {
+            case let .string(secret):
+                let trimmed = secret.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else {
+                    return SanitizedScalarActionValue(value: value, protectedValueUpserts: [:])
+                }
+                let reference = existingValue?.protectedValueReference ?? freshProtectedValueReference(for: actionID)
+                return SanitizedScalarActionValue(
+                    value: .protectedString(reference),
+                    protectedValueUpserts: [reference: secret]
+                )
+            case .protectedString:
+                return SanitizedScalarActionValue(value: value, protectedValueUpserts: [:])
+            case let .object(values):
+                let child = try sanitize(
+                    serviceData: values,
+                    path: path,
+                    actionID: actionID,
+                    existingValue: existingValue
+                )
+                return SanitizedScalarActionValue(
+                    value: .object(child.value),
+                    protectedValueUpserts: child.protectedValueUpserts
+                )
+            case let .array(values):
+                var sanitizedValues: [ActionValue] = []
+                var upserts: [ProtectedActionValueReference: String] = [:]
+                let existingArray: [ActionValue]
+                if case let .array(storedValues) = existingValue {
+                    existingArray = storedValues
+                } else {
+                    existingArray = []
+                }
+                for (index, childValue) in values.enumerated() {
+                    let child = try sanitize(
+                        value: childValue,
+                        path: path + [.index(index)],
+                        actionID: actionID,
+                        existingValue: existingArray.indices.contains(index) ? existingArray[index] : nil
+                    )
+                    sanitizedValues.append(child.value)
+                    upserts.merge(child.protectedValueUpserts) { _, new in new }
+                }
+                return SanitizedScalarActionValue(
+                    value: .array(sanitizedValues),
+                    protectedValueUpserts: upserts
+                )
+            case .number, .bool, .null:
+                return SanitizedScalarActionValue(value: value, protectedValueUpserts: [:])
+            }
+        }
+
+        switch value {
+        case let .protectedString(reference):
+            return SanitizedScalarActionValue(
+                value: .string(try protectedActionValueStore.load(reference)),
+                protectedValueUpserts: [:]
+            )
+        case let .object(values):
+            let child = try sanitize(
+                serviceData: values,
+                path: path,
+                actionID: actionID,
+                existingValue: existingValue
+            )
+            return SanitizedScalarActionValue(
+                value: .object(child.value),
+                protectedValueUpserts: child.protectedValueUpserts
+            )
+        case let .array(values):
+            var sanitizedValues: [ActionValue] = []
+            var upserts: [ProtectedActionValueReference: String] = [:]
+            let existingArray: [ActionValue]
+            if case let .array(storedValues) = existingValue {
+                existingArray = storedValues
+            } else {
+                existingArray = []
+            }
+            for (index, childValue) in values.enumerated() {
+                let child = try sanitize(
+                    value: childValue,
+                    path: path + [.index(index)],
+                    actionID: actionID,
+                    existingValue: existingArray.indices.contains(index) ? existingArray[index] : nil
+                )
+                sanitizedValues.append(child.value)
+                upserts.merge(child.protectedValueUpserts) { _, new in new }
+            }
+            return SanitizedScalarActionValue(
+                value: .array(sanitizedValues),
+                protectedValueUpserts: upserts
+            )
+        case .string, .number, .bool, .null:
+            return SanitizedScalarActionValue(value: value, protectedValueUpserts: [:])
+        }
+    }
+
+    private func protectedActionValueSnapshots(
+        for references: Set<ProtectedActionValueReference>
+    ) throws -> [ProtectedActionValueReference: ProtectedActionValueSnapshot] {
+        var snapshots: [ProtectedActionValueReference: ProtectedActionValueSnapshot] = [:]
+        for reference in references.sorted(by: { $0.rawValue < $1.rawValue }) {
+            do {
+                snapshots[reference] = .present(try protectedActionValueStore.load(reference))
+            } catch let error as ProtectedActionValueStoreError {
+                switch error {
+                case .missingValue:
+                    snapshots[reference] = .missing
+                case .invalidStoredValues, .unavailable:
+                    throw error
+                }
+            }
+        }
+        return snapshots
+    }
+
+    private func restoreProtectedActionValueSnapshots(
+        _ snapshots: [ProtectedActionValueReference: ProtectedActionValueSnapshot]
+    ) throws {
+        for reference in snapshots.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
+            guard let snapshot = snapshots[reference] else {
+                continue
+            }
+            switch snapshot {
+            case let .present(value):
+                try protectedActionValueStore.save(value, for: reference)
+            case .missing:
+                try protectedActionValueStore.delete(reference)
+            }
+        }
+    }
+
+    private func applyProtectedValueUpserts(
+        _ upserts: [ProtectedActionValueReference: String]
+    ) throws {
+        for reference in upserts.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
+            guard let value = upserts[reference] else {
+                continue
+            }
+            try protectedActionValueStore.save(value, for: reference)
+        }
+    }
+
+    private func deleteProtectedActionValues(
+        references: Set<ProtectedActionValueReference>
+    ) throws {
+        for reference in references.sorted(by: { $0.rawValue < $1.rawValue }) {
+            try protectedActionValueStore.delete(reference)
+            protectedValueDrafts.removeValue(forKey: reference.rawValue)
+        }
+    }
+
+    private func serviceDataPathDescription(
+        _ path: [PerchHACustomActionServiceDataPathComponent]
+    ) -> String {
+        path.reduce(into: "serviceData") { description, component in
+            switch component {
+            case let .key(key):
+                description.append(".\(key)")
+            case let .index(index):
+                description.append("[\(index)]")
+            }
+        }
     }
 
     private func canSetAbsoluteTotal(_ id: EntityID, total: Double?) -> Bool {
@@ -2664,8 +3532,12 @@ public final class PerchHAPanelModel: ObservableObject {
     }
 
     @discardableResult
-    private func updateCustomActionConfiguration(_ configuration: CustomActionConfiguration, persist: Bool) -> Bool {
-        guard configuration != customActionConfiguration else {
+    private func updateCustomActionConfiguration(
+        _ configuration: CustomActionConfiguration,
+        persist: Bool,
+        protectedValueUpserts: [ProtectedActionValueReference: String] = [:]
+    ) -> Bool {
+        guard configuration != customActionConfiguration || !protectedValueUpserts.isEmpty else {
             return false
         }
         if let failure = configuration.validationFailure() {
@@ -2674,11 +3546,28 @@ public final class PerchHAPanelModel: ObservableObject {
         }
 
         if persist {
-            switch customActionSink(configuration) {
-            case .saved:
-                break
-            case let .failed(message):
-                customActionPersistenceFailureDescription = message
+            let previousReferences = customActionConfiguration.protectedValueReferences
+            let nextReferences = configuration.protectedValueReferences
+            let removedReferences = previousReferences.subtracting(nextReferences)
+            let touchedReferences = previousReferences
+                .union(nextReferences)
+                .union(protectedValueUpserts.keys)
+            var snapshots: [ProtectedActionValueReference: ProtectedActionValueSnapshot] = [:]
+            do {
+                snapshots = try protectedActionValueSnapshots(for: touchedReferences)
+                try applyProtectedValueUpserts(protectedValueUpserts)
+                try deleteProtectedActionValues(references: removedReferences)
+                switch customActionSink(configuration) {
+                case .saved:
+                    break
+                case let .failed(message):
+                    try restoreProtectedActionValueSnapshots(snapshots)
+                    customActionPersistenceFailureDescription = message
+                    return false
+                }
+            } catch {
+                try? restoreProtectedActionValueSnapshots(snapshots)
+                customActionPersistenceFailureDescription = String(describing: error)
                 return false
             }
         }
@@ -2791,6 +3680,40 @@ private enum MenuBarTotalMode: Hashable {
     case entity(EntityID)
 }
 
+private struct SanitizedCustomAction {
+    let action: EntityCustomAction
+    let protectedValueUpserts: [ProtectedActionValueReference: String]
+}
+
+private struct SanitizedActionValue {
+    let value: [String: ActionValue]
+    let protectedValueUpserts: [ProtectedActionValueReference: String]
+}
+
+private struct SanitizedScalarActionValue {
+    let value: ActionValue
+    let protectedValueUpserts: [ProtectedActionValueReference: String]
+}
+
+private enum ProtectedActionValueSnapshot {
+    case present(String)
+    case missing
+}
+
+private struct UnavailableProtectedActionValueStore: ProtectedActionValueStore {
+    func save(_ value: String, for reference: ProtectedActionValueReference) throws {
+        throw ProtectedActionValueStoreError.unavailable
+    }
+
+    func load(_ reference: ProtectedActionValueReference) throws -> String {
+        throw ProtectedActionValueStoreError.unavailable
+    }
+
+    func delete(_ reference: ProtectedActionValueReference) throws {
+        throw ProtectedActionValueStoreError.unavailable
+    }
+}
+
 private extension EntityCustomAction {
     func withServiceData(_ serviceData: [String: ActionValue]) -> EntityCustomAction {
         EntityCustomAction(
@@ -2815,7 +3738,11 @@ private extension ActionValue {
             .number
         case .bool:
             .bool
-        case .string, .object, .array, .null:
+        case .object:
+            .object
+        case .array:
+            .array
+        case .string, .protectedString, .null:
             .string
         }
     }
@@ -2824,6 +3751,8 @@ private extension ActionValue {
         switch self {
         case let .string(value):
             return value
+        case .protectedString:
+            return ""
         case let .number(value):
             if value.isFinite,
                value.rounded() == value,
@@ -2834,10 +3763,10 @@ private extension ActionValue {
             return String(value)
         case let .bool(value):
             return value ? "true" : "false"
-        case .object:
-            return "{...}"
-        case .array:
-            return "[...]"
+        case let .object(values):
+            return "\(values.count) field\(values.count == 1 ? "" : "s")"
+        case let .array(values):
+            return "\(values.count) item\(values.count == 1 ? "" : "s")"
         case .null:
             return ""
         }
@@ -2845,7 +3774,7 @@ private extension ActionValue {
 
     var isInlineEditable: Bool {
         switch self {
-        case .string, .number, .bool, .null:
+        case .string, .protectedString, .number, .bool, .null:
             true
         case .object, .array:
             false
@@ -2898,7 +3827,153 @@ public struct SelectionDropTranslator: Sendable {
     }
 }
 
+public struct PerchHAHistoryPopoverContent: View {
+    private let entityID: EntityID
+    private let entityName: String
+    private let valueText: String
+    private let state: PerchHAHistoryPanelState
+    private let increaseContrastOverride: Bool?
+    @Binding private var selectedRange: HistoryRange
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+
+    public init(
+        entityID: EntityID,
+        entityName: String,
+        valueText: String,
+        state: PerchHAHistoryPanelState,
+        increaseContrastOverride: Bool? = nil,
+        selectedRange: Binding<HistoryRange>
+    ) {
+        self.entityID = entityID
+        self.entityName = entityName
+        self.valueText = valueText
+        self.state = state
+        self.increaseContrastOverride = increaseContrastOverride
+        _selectedRange = selectedRange
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(entityName)
+                    .font(.headline)
+                    .lineLimit(1)
+                Spacer()
+                Text(valueText)
+                    .monospacedDigit()
+                    .foregroundStyle(historyValueForegroundStyle)
+            }
+            Picker("Range", selection: $selectedRange) {
+                ForEach(HistoryRange.allCases, id: \.rawValue) { range in
+                    Text(range.displayName).tag(range)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .accessibilityLabel("\(entityName) history range")
+            historyBody
+        }
+        .padding(12)
+        .frame(width: 280)
+    }
+
+    @ViewBuilder
+    private var historyBody: some View {
+        switch PerchHAHistoryBodyPresentation(state: state, entityID: entityID) {
+        case .hidden:
+            EmptyView()
+        case .loadingSkeleton:
+            HistoryLoadingSkeleton()
+                .accessibilityLabel("\(entityName) history loading")
+        case .noNumericData:
+            Text("No history data")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("\(entityName) history has no numeric data")
+        case let .statistics(series, statistics):
+            VStack(alignment: .leading, spacing: 8) {
+                HistorySparkline(series: series)
+                    .stroke(.primary, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                    .frame(height: 46)
+                    .accessibilityHidden(true)
+                historyStats(statistics)
+            }
+        case let .unavailable(message):
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel("\(entityName) history unavailable: \(message)")
+        }
+    }
+
+    private func historyStats(_ statistics: PerchHAHistoryStatistics) -> some View {
+        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+            GridRow {
+                statisticLabel("Current")
+                statisticValue(menuBarNumberLabel(statistics.current))
+            }
+            GridRow {
+                statisticLabel("Min")
+                statisticValue(menuBarNumberLabel(statistics.minimum))
+                statisticLabel("Avg")
+                statisticValue(menuBarNumberLabel(statistics.average))
+                statisticLabel("Max")
+                statisticValue(menuBarNumberLabel(statistics.maximum))
+            }
+        }
+        .font(.caption)
+    }
+
+    @ViewBuilder
+    private func statisticLabel(_ text: String) -> some View {
+        Text(text)
+            .foregroundStyle(historyLabelForegroundStyle)
+    }
+
+    @ViewBuilder
+    private func statisticValue(_ text: String) -> some View {
+        Text(text)
+            .monospacedDigit()
+            .foregroundStyle(historyValueForegroundStyle)
+    }
+
+    private var historyLabelForegroundStyle: Color {
+        if isIncreasedContrast {
+            return Color.primary
+        }
+        return colorScheme == .dark ? Color.white.opacity(0.72) : Color.black.opacity(0.62)
+    }
+
+    private var historyValueForegroundStyle: Color {
+        if isIncreasedContrast {
+            return Color.primary
+        }
+        return colorScheme == .dark ? Color.white.opacity(0.9) : Color.black.opacity(0.78)
+    }
+
+    private var isIncreasedContrast: Bool {
+        increaseContrastOverride ?? (colorSchemeContrast == .increased)
+    }
+}
+
+fileprivate func menuBarNumberLabel(_ value: Double?) -> String {
+    guard let value else {
+        return "Off"
+    }
+    if value.rounded() == value {
+        return "\(Int(value))"
+    }
+    return String(format: "%.1f", value)
+}
+
 public struct PerchHAPanelView: View {
+    private enum CustomActionEditorLayout {
+        static let serviceDataTypePickerWidth: CGFloat = 92
+        static let serviceDataValueMinWidth: CGFloat = 144
+    }
+
     @ObservedObject private var model: PerchHAPanelModel
     private let accessibilityPreferencesOverride: PerchHAAccessibilityPreferences?
     @State private var draggedSelectionItem: SelectionDragItem?
@@ -2926,7 +4001,7 @@ public struct PerchHAPanelView: View {
             Divider()
             footer
         }
-        .frame(minWidth: 360, idealWidth: 360, maxWidth: 360, minHeight: 320)
+        .frame(width: 360, height: 420, alignment: .top)
         .background(.regularMaterial)
         .contrast(accessibility.contrastPolicy == .increased ? 1.12 : 1)
         .overlay {
@@ -3066,6 +4141,10 @@ public struct PerchHAPanelView: View {
                 "Access token",
                 text: tokenBinding
             )
+            Toggle(
+                "Self-signed cert for current HTTPS hosts",
+                isOn: selfSignedCertificateBinding
+            )
             if let failureDescription = model.snapshot.failureDescription {
                 Text(failureDescription)
                     .font(.callout)
@@ -3079,6 +4158,17 @@ public struct PerchHAPanelView: View {
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("Sign-in error: \(oauthFailureDescription)")
+            }
+            if let connectionProgressMessage {
+                HStack(spacing: 6) {
+                    Image(systemName: "hourglass")
+                        .accessibilityHidden(true)
+                    Text(connectionProgressMessage)
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(connectionProgressMessage)
             }
             HStack {
                 Button("Connect") {
@@ -3106,6 +4196,16 @@ public struct PerchHAPanelView: View {
 
     private var oauthSignInButtonTitle: String {
         model.oauthSignInState == .signingIn ? "Signing in..." : "Sign in"
+    }
+
+    private var connectionProgressMessage: String? {
+        if model.oauthSignInState == .signingIn {
+            return "Signing in"
+        }
+        if model.snapshot.connectionState == .connecting {
+            return "Connecting to Home Assistant"
+        }
+        return nil
     }
 
     private var isConnectionBusy: Bool {
@@ -3259,45 +4359,73 @@ public struct PerchHAPanelView: View {
 
     private func menuBarControls(for entity: DiscoveredEntity) -> some View {
         let configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entity.id)
-        return VStack(alignment: .leading, spacing: 4) {
+        let isPromoted = model.snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
+        return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Toggle("Menu bar", isOn: menuBarVisibilityBinding(for: entity.id))
                     .toggleStyle(.checkbox)
+                    .fixedSize()
                     .accessibilityLabel("Show \(entity.name) in menu bar")
-                if model.snapshot.menuBarDisplayConfiguration.isPromoted(entity.id) {
+                if isPromoted {
                     menuBarMoveButtons(for: entity)
+                    Spacer(minLength: 0)
                 }
-                Picker("Style", selection: menuBarStyleBinding(for: entity.id)) {
-                    ForEach(MenuBarDisplayStyle.allCases, id: \.rawValue) { style in
-                        Text(style.displayName).tag(style)
-                    }
-                }
-                .frame(width: 94)
-                .accessibilityLabel("\(entity.name) menu bar style")
-                Toggle("Label", isOn: menuBarLabelBinding(for: entity.id))
-                    .toggleStyle(.checkbox)
-                    .accessibilityLabel("Show \(entity.name) label in menu bar")
-                Toggle("Unit", isOn: menuBarUnitBinding(for: entity.id))
-                    .toggleStyle(.checkbox)
-                    .accessibilityLabel("Show \(entity.name) unit in menu bar")
-                Stepper(
-                    "Decimals \(configuration.maximumFractionDigits)",
-                    value: menuBarDecimalsBinding(for: entity.id),
-                    in: 0...3
-                )
-                .accessibilityLabel("\(entity.name) decimals")
-                Picker("History", selection: menuBarHistoryRangeBinding(for: entity.id)) {
-                    ForEach(HistoryRange.allCases, id: \.rawValue) { range in
-                        Text(range.displayName).tag(range)
-                    }
-                }
-                .frame(width: 86)
-                .accessibilityLabel("\(entity.name) default history range")
             }
-            if configuration.style != .text && menuBarCanUseGaugeTotal(for: entity) {
-                menuBarTotalControls(for: entity, configuration: configuration)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if isPromoted {
+                HStack(spacing: 10) {
+                    Text("Style")
+                        .foregroundStyle(.secondary)
+                    Picker("Style", selection: menuBarStyleBinding(for: entity.id)) {
+                        ForEach(MenuBarDisplayStyle.allCases, id: \.rawValue) { style in
+                            Text(style.displayName).tag(style)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 110)
+                    .accessibilityLabel("\(entity.name) menu bar style")
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack(spacing: 12) {
+                    Toggle("Label", isOn: menuBarLabelBinding(for: entity.id))
+                        .toggleStyle(.checkbox)
+                        .fixedSize()
+                        .accessibilityLabel("Show \(entity.name) label in menu bar")
+                    Toggle("Unit", isOn: menuBarUnitBinding(for: entity.id))
+                        .toggleStyle(.checkbox)
+                        .fixedSize()
+                        .accessibilityLabel("Show \(entity.name) unit in menu bar")
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack(spacing: 8) {
+                    Stepper(
+                        "Decimals \(configuration.maximumFractionDigits)",
+                        value: menuBarDecimalsBinding(for: entity.id),
+                        in: 0...3
+                    )
+                    .fixedSize()
+                    .accessibilityLabel("\(entity.name) decimals")
+                    Picker("History", selection: menuBarHistoryRangeBinding(for: entity.id)) {
+                        ForEach(HistoryRange.allCases, id: \.rawValue) { range in
+                            Text(range.displayName).tag(range)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 86)
+                    .accessibilityLabel("\(entity.name) default history range")
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if configuration.style != .text && menuBarCanUseGaugeTotal(for: entity) {
+                    menuBarTotalControls(for: entity, configuration: configuration)
+                }
+                menuBarThresholdControls(for: entity, configuration: configuration)
             }
-            menuBarThresholdControls(for: entity, configuration: configuration)
         }
         .font(.caption)
         .controlSize(.small)
@@ -3461,54 +4589,230 @@ public struct PerchHAPanelView: View {
                 .accessibilityLabel("Add service data for \(action.title)")
             }
             ForEach(keys, id: \.self) { key in
-                customActionServiceDataRow(action, key: key)
+                customActionServiceDataObjectEntry(action, parentPath: [], key: key, nesting: 0)
             }
         }
     }
 
+    private func customActionServiceDataObjectEntry(
+        _ action: EntityCustomAction,
+        parentPath: [PerchHACustomActionServiceDataPathComponent],
+        key: String,
+        nesting: Int
+    ) -> AnyView {
+        let path = parentPath + [.key(key)]
+        let value = customActionServiceDataValue(for: action.id, path: path) ?? .null
+        return AnyView(
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    TextField("Key", text: customActionServiceDataKeyBinding(for: action.id, parentPath: parentPath, key: key))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(minWidth: 92, idealWidth: 118)
+                        .accessibilityLabel("\(action.title) service data key")
+                    customActionServiceDataTypePicker(action, path: path, value: value)
+                    customActionServiceDataInlineValueField(action, path: path, value: value)
+                    Button {
+                        model.removeCustomActionServiceDataValue(action.id, path: path)
+                    } label: {
+                        Image(systemName: "trash")
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help("Delete service data")
+                    .accessibilityLabel("Delete \(key) from \(action.title)")
+                }
+                .padding(.leading, CGFloat(nesting) * 12)
+                customActionNestedServiceDataControls(action, path: path, value: value, nesting: nesting)
+            }
+        )
+    }
+
+    private func customActionServiceDataArrayEntry(
+        _ action: EntityCustomAction,
+        parentPath: [PerchHACustomActionServiceDataPathComponent],
+        index: Int,
+        count: Int,
+        nesting: Int
+    ) -> AnyView {
+        let path = parentPath + [.index(index)]
+        let value = customActionServiceDataValue(for: action.id, path: path) ?? .null
+        return AnyView(
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text("#\(index + 1)")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 42, alignment: .leading)
+                    customActionServiceDataTypePicker(action, path: path, value: value)
+                    customActionServiceDataInlineValueField(action, path: path, value: value)
+                    Button {
+                        model.moveCustomActionServiceDataArrayValue(action.id, path: path, direction: .up)
+                    } label: {
+                        Image(systemName: "chevron.up")
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .disabled(index == 0)
+                    .help("Move item up")
+                    .accessibilityLabel("Move item \(index + 1) up in \(action.title)")
+                    Button {
+                        model.moveCustomActionServiceDataArrayValue(action.id, path: path, direction: .down)
+                    } label: {
+                        Image(systemName: "chevron.down")
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .disabled(index >= count - 1)
+                    .help("Move item down")
+                    .accessibilityLabel("Move item \(index + 1) down in \(action.title)")
+                    Button {
+                        model.removeCustomActionServiceDataValue(action.id, path: path)
+                    } label: {
+                        Image(systemName: "trash")
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help("Delete list item")
+                    .accessibilityLabel("Delete item \(index + 1) from \(action.title)")
+                }
+                .padding(.leading, CGFloat(nesting) * 12)
+                customActionNestedServiceDataControls(action, path: path, value: value, nesting: nesting)
+            }
+        )
+    }
+
+    private func customActionServiceDataTypePicker(
+        _ action: EntityCustomAction,
+        path: [PerchHACustomActionServiceDataPathComponent],
+        value: ActionValue
+    ) -> some View {
+        Picker("Type", selection: customActionServiceDataTypeBinding(for: action.id, path: path)) {
+            Text("Text").tag(PerchHACustomActionServiceDataValueKind.string)
+            Text("Number").tag(PerchHACustomActionServiceDataValueKind.number)
+            Text("Bool").tag(PerchHACustomActionServiceDataValueKind.bool)
+            Text("Object").tag(PerchHACustomActionServiceDataValueKind.object)
+            Text("List").tag(PerchHACustomActionServiceDataValueKind.array)
+        }
+        .labelsHidden()
+        .frame(width: CustomActionEditorLayout.serviceDataTypePickerWidth)
+        .disabled(model.isSensitiveServiceDataPath(path))
+        .accessibilityLabel("\(action.title) service data type")
+    }
+
     @ViewBuilder
-    private func customActionServiceDataRow(_ action: EntityCustomAction, key: String) -> some View {
-        let value = action.action.serviceData[key] ?? .null
-        HStack(spacing: 6) {
-            TextField("Key", text: customActionServiceDataKeyBinding(for: action.id, key: key))
+    private func customActionServiceDataInlineValueField(
+        _ action: EntityCustomAction,
+        path: [PerchHACustomActionServiceDataPathComponent],
+        value: ActionValue
+    ) -> some View {
+        if value.isInlineEditable {
+            if model.isSensitiveServiceDataPath(path) {
+                SecureField(
+                    customActionProtectedValuePlaceholder(for: action.id, path: path),
+                    text: customActionProtectedValueBinding(for: action.id, path: path)
+                )
                 .textFieldStyle(.roundedBorder)
-                .accessibilityLabel("\(action.title) service data key")
-            Picker("Type", selection: customActionServiceDataTypeBinding(for: action.id, key: key)) {
-                Text("Text").tag(PerchHACustomActionServiceDataValueKind.string)
-                Text("Number").tag(PerchHACustomActionServiceDataValueKind.number)
-                Text("Bool").tag(PerchHACustomActionServiceDataValueKind.bool)
+                .frame(minWidth: CustomActionEditorLayout.serviceDataValueMinWidth)
+                .layoutPriority(1)
+                .accessibilityLabel("\(action.title) protected service data value")
+            } else {
+                TextField("Value", text: customActionServiceDataValueBinding(for: action.id, path: path))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(minWidth: CustomActionEditorLayout.serviceDataValueMinWidth)
+                    .layoutPriority(1)
+                    .accessibilityLabel("\(action.title) service data value")
             }
-            .frame(width: 92)
-            .disabled(!value.isInlineEditable)
-            .accessibilityLabel("\(action.title) service data type")
-            TextField("Value", text: customActionServiceDataValueBinding(for: action.id, key: key))
-                .textFieldStyle(.roundedBorder)
-                .disabled(!value.isInlineEditable)
-                .accessibilityLabel("\(action.title) service data value")
-            Button {
-                model.removeCustomActionServiceDataKey(action.id, key: key)
-            } label: {
-                Image(systemName: "trash")
-                    .frame(width: 18, height: 18)
-            }
-            .buttonStyle(.borderless)
-            .controlSize(.small)
-            .help("Delete service data")
-            .accessibilityLabel("Delete \(key) from \(action.title)")
+        } else {
+            Text(value.editorText)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: CustomActionEditorLayout.serviceDataValueMinWidth, maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityLabel("\(action.title) service data nested value")
+        }
+    }
+
+    private func customActionNestedServiceDataControls(
+        _ action: EntityCustomAction,
+        path: [PerchHACustomActionServiceDataPathComponent],
+        value: ActionValue,
+        nesting: Int
+    ) -> AnyView {
+        switch value {
+        case let .object(values):
+            let keys = values.keys.sorted()
+            return AnyView(
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(keys, id: \.self) { childKey in
+                        customActionServiceDataObjectEntry(action, parentPath: path, key: childKey, nesting: nesting + 1)
+                    }
+                    Button {
+                        addCustomActionObjectServiceDataValue(action.id, parentPath: path)
+                    } label: {
+                        Label("Add field", systemImage: "plus")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .padding(.leading, CGFloat(nesting + 1) * 12)
+                    .accessibilityLabel("Add nested service data field for \(action.title)")
+                }
+            )
+        case let .array(values):
+            return AnyView(
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(values.indices), id: \.self) { index in
+                        customActionServiceDataArrayEntry(
+                            action,
+                            parentPath: path,
+                            index: index,
+                            count: values.count,
+                            nesting: nesting + 1
+                        )
+                    }
+                    Button {
+                        model.appendCustomActionServiceDataArrayValue(action.id, path: path, value: .string(""))
+                    } label: {
+                        Label("Add item", systemImage: "plus")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .padding(.leading, CGFloat(nesting + 1) * 12)
+                    .accessibilityLabel("Add list item for \(action.title)")
+                }
+            )
+        case .string, .protectedString, .number, .bool, .null:
+            return AnyView(EmptyView())
         }
     }
 
     private func addCustomActionServiceDataValue(_ id: CustomActionID) {
+        addCustomActionObjectServiceDataValue(id, parentPath: [])
+    }
+
+    private func addCustomActionObjectServiceDataValue(
+        _ id: CustomActionID,
+        parentPath: [PerchHACustomActionServiceDataPathComponent]
+    ) {
         guard let action = model.customAction(id: id) else {
+            return
+        }
+        let values: [String: ActionValue]
+        if parentPath.isEmpty {
+            values = action.action.serviceData
+        } else if case let .object(nestedValues) = customActionServiceDataValue(for: id, path: parentPath) {
+            values = nestedValues
+        } else {
             return
         }
         var index = 1
         var key = "value\(index)"
-        while action.action.serviceData[key] != nil {
+        while values[key] != nil {
             index += 1
             key = "value\(index)"
         }
-        model.setCustomActionServiceDataValue(id, key: key, value: .string(""))
+        model.setCustomActionServiceDataValue(id, path: parentPath + [.key(key)], value: .string(""))
     }
 
     private var metadataDomains: [String] {
@@ -3550,42 +4854,116 @@ public struct PerchHAPanelView: View {
         )
     }
 
-    private func customActionServiceDataKeyBinding(for id: CustomActionID, key: String) -> Binding<String> {
+    private func customActionServiceDataKeyBinding(
+        for id: CustomActionID,
+        parentPath: [PerchHACustomActionServiceDataPathComponent],
+        key: String
+    ) -> Binding<String> {
         Binding(
             get: {
                 key
             },
             set: { newKey in
-                model.renameCustomActionServiceDataKey(id, from: key, to: newKey)
+                model.renameCustomActionServiceDataKey(id, parentPath: parentPath, from: key, to: newKey)
             }
         )
     }
 
     private func customActionServiceDataTypeBinding(
         for id: CustomActionID,
-        key: String
+        path: [PerchHACustomActionServiceDataPathComponent]
     ) -> Binding<PerchHACustomActionServiceDataValueKind> {
         Binding(
             get: {
-                model.customAction(id: id)?.action.serviceData[key]?.editorType ?? .string
+                customActionServiceDataValue(for: id, path: path)?.editorType ?? .string
             },
             set: { type in
-                let text = model.customAction(id: id)?.action.serviceData[key]?.editorText ?? ""
-                model.setCustomActionServiceDataText(id, key: key, text: text, kind: type)
+                model.setCustomActionServiceDataType(id, path: path, kind: type)
             }
         )
     }
 
-    private func customActionServiceDataValueBinding(for id: CustomActionID, key: String) -> Binding<String> {
+    private func customActionServiceDataValueBinding(
+        for id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent]
+    ) -> Binding<String> {
         Binding(
             get: {
-                model.customAction(id: id)?.action.serviceData[key]?.editorText ?? ""
+                customActionServiceDataValue(for: id, path: path)?.editorText ?? ""
             },
             set: { text in
-                let type = model.customAction(id: id)?.action.serviceData[key]?.editorType ?? .string
-                model.setCustomActionServiceDataText(id, key: key, text: text, kind: type)
+                let type = customActionServiceDataValue(for: id, path: path)?.editorType ?? .string
+                model.setCustomActionServiceDataText(id, path: path, text: text, kind: type)
             }
         )
+    }
+
+    private func customActionProtectedValueBinding(
+        for id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent]
+    ) -> Binding<String> {
+        Binding(
+            get: {
+                model.protectedValueDraft(for: id, path: path)
+            },
+            set: { text in
+                model.setCustomActionServiceDataText(id, path: path, text: text, kind: .string)
+            }
+        )
+    }
+
+    private func customActionProtectedValuePlaceholder(
+        for id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent]
+    ) -> String {
+        if case .protectedString = customActionServiceDataValue(for: id, path: path) {
+            return "Stored in Keychain"
+        }
+        return "Value"
+    }
+
+    private func customActionServiceDataValue(
+        for id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent]
+    ) -> ActionValue? {
+        guard let first = path.first,
+              case let .key(rawKey) = first
+        else {
+            return nil
+        }
+        let trimmedKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var value = model.customAction(id: id)?.action.serviceData[trimmedKey] else {
+            return nil
+        }
+        for component in path.dropFirst() {
+            switch (component, value) {
+            case let (.key(key), .object(values)):
+                let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let nextValue = values[trimmedKey] else {
+                    return nil
+                }
+                value = nextValue
+            case let (.index(index), .array(values)):
+                guard values.indices.contains(index) else {
+                    return nil
+                }
+                value = values[index]
+            case (.key, .string),
+                 (.key, .protectedString),
+                 (.key, .number),
+                 (.key, .bool),
+                 (.key, .array),
+                 (.key, .null),
+                 (.index, .string),
+                 (.index, .protectedString),
+                 (.index, .number),
+                 (.index, .bool),
+                 (.index, .object),
+                 (.index, .null):
+                return nil
+            }
+        }
+        return value
     }
 
     private func nextCustomActionID(for entityID: EntityID) -> CustomActionID {
@@ -4117,79 +5495,13 @@ public struct PerchHAPanelView: View {
     }
 
     private func historyPopover(for entity: DiscoveredEntity) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(entity.name)
-                    .font(.headline)
-                    .lineLimit(1)
-                Spacer()
-                Text(entityValue(entity).text)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            Picker("Range", selection: historyRangeBinding(for: entity)) {
-                ForEach(HistoryRange.allCases, id: \.rawValue) { range in
-                    Text(range.displayName).tag(range)
-                }
-            }
-            .pickerStyle(.segmented)
-            .accessibilityLabel("\(entity.name) history range")
-            historyBody(for: entity)
-        }
-        .padding(12)
-        .frame(width: 280)
-    }
-
-    @ViewBuilder
-    private func historyBody(for entity: DiscoveredEntity) -> some View {
-        switch PerchHAHistoryBodyPresentation(state: model.snapshot.historyState, entityID: entity.id) {
-        case .hidden:
-            EmptyView()
-        case .loadingSkeleton:
-            HistoryLoadingSkeleton()
-                .accessibilityLabel("\(entity.name) history loading")
-        case .noNumericData:
-            Text("No history data")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .accessibilityLabel("\(entity.name) history has no numeric data")
-        case let .statistics(series, statistics):
-            VStack(alignment: .leading, spacing: 8) {
-                HistorySparkline(series: series)
-                    .stroke(.primary, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
-                    .frame(height: 46)
-                    .accessibilityHidden(true)
-                historyStats(statistics)
-            }
-        case let .unavailable(message):
-            Text(message)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityLabel("\(entity.name) history unavailable: \(message)")
-        }
-    }
-
-    private func historyStats(_ statistics: PerchHAHistoryStatistics) -> some View {
-        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
-            GridRow {
-                Text("Current")
-                Text(menuBarNumberLabel(statistics.current)).monospacedDigit()
-            }
-            GridRow {
-                Text("Min")
-                Text(menuBarNumberLabel(statistics.minimum)).monospacedDigit()
-            }
-            GridRow {
-                Text("Avg")
-                Text(menuBarNumberLabel(statistics.average)).monospacedDigit()
-            }
-            GridRow {
-                Text("Max")
-                Text(menuBarNumberLabel(statistics.maximum)).monospacedDigit()
-            }
-        }
-        .font(.caption)
+        PerchHAHistoryPopoverContent(
+            entityID: entity.id,
+            entityName: entity.name,
+            valueText: entityValue(entity).text,
+            state: model.snapshot.historyState,
+            selectedRange: historyRangeBinding(for: entity)
+        )
     }
 
     private var footer: some View {
@@ -4242,6 +5554,17 @@ public struct PerchHAPanelView: View {
             },
             set: { value in
                 model.updateConnectionForm(token: value)
+            }
+        )
+    }
+
+    private var selfSignedCertificateBinding: Binding<Bool> {
+        Binding(
+            get: {
+                model.snapshot.connectionForm.allowsSelfSignedCertificates
+            },
+            set: { value in
+                model.updateConnectionForm(allowsSelfSignedCertificates: value)
             }
         )
     }
@@ -4504,15 +5827,6 @@ public struct PerchHAPanelView: View {
         return trimmed
     }
 
-    private func menuBarNumberLabel(_ value: Double?) -> String {
-        guard let value else {
-            return "Off"
-        }
-        if value.rounded() == value {
-            return "\(Int(value))"
-        }
-        return String(format: "%.1f", value)
-    }
 }
 
 private extension PerchHAPanelSnapshot {

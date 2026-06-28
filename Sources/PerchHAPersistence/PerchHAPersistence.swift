@@ -225,7 +225,7 @@ public enum PerchHASecret: String, Codable, CaseIterable, Sendable {
     case accessToken = "access_token"
     case refreshToken = "refresh_token"
     case oauthClientID = "oauth_client_id"
-    case selfSignedHostAllowance = "self_signed_host_allowance"
+    case customActionProtectedValues = "custom_action_protected_values"
 }
 
 public enum SecretWriteResult: Equatable, Sendable {
@@ -384,6 +384,70 @@ public struct PerchHAAuthSessionStore: Sendable {
 private enum PerchHASecretSnapshot: Equatable, Sendable {
     case present(String)
     case missing
+}
+
+public struct KeychainProtectedActionValueStore: ProtectedActionValueStore, Sendable {
+    private let secretStore: any SecretStore
+
+    public init(secretStore: any SecretStore = KeychainSecretStore()) {
+        self.secretStore = secretStore
+    }
+
+    public func save(_ value: String, for reference: ProtectedActionValueReference) throws {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            throw SecretStoreError.emptySecret(.customActionProtectedValues)
+        }
+
+        var manifest = try loadManifest()
+        manifest[reference.rawValue] = normalized
+        try saveManifest(manifest)
+    }
+
+    public func load(_ reference: ProtectedActionValueReference) throws -> String {
+        let manifest = try loadManifest()
+        guard let value = manifest[reference.rawValue] else {
+            throw ProtectedActionValueStoreError.missingValue(reference)
+        }
+        return value
+    }
+
+    public func delete(_ reference: ProtectedActionValueReference) throws {
+        var manifest = try loadManifest()
+        guard manifest.removeValue(forKey: reference.rawValue) != nil else {
+            return
+        }
+        if manifest.isEmpty {
+            _ = try secretStore.delete(.customActionProtectedValues)
+            return
+        }
+        try saveManifest(manifest)
+    }
+
+    private func loadManifest() throws -> [String: String] {
+        do {
+            let data = Data(try secretStore.read(.customActionProtectedValues).utf8)
+            return try JSONDecoder().decode([String: String].self, from: data)
+        } catch SecretStoreError.notFound(_) {
+            return [:]
+        } catch is DecodingError {
+            throw ProtectedActionValueStoreError.invalidStoredValues
+        } catch let error as ProtectedActionValueStoreError {
+            throw error
+        } catch {
+            throw error
+        }
+    }
+
+    private func saveManifest(_ manifest: [String: String]) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let data = try encoder.encode(manifest)
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw ProtectedActionValueStoreError.invalidStoredValues
+        }
+        _ = try secretStore.save(text, for: .customActionProtectedValues)
+    }
 }
 
 public struct KeychainSecretStore: SecretStore {

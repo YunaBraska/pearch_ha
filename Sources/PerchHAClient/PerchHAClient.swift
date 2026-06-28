@@ -1,6 +1,7 @@
 import Foundation
 import PerchHACore
 import PerchHASupport
+import Security
 
 public struct HAEndpoint: Equatable, Sendable {
     public let primaryURL: URL
@@ -15,10 +16,44 @@ public struct HAEndpoint: Equatable, Sendable {
 public struct HAConnectionInput: Equatable, Sendable {
     public let endpoint: HAEndpoint
     public let token: String
+    public let serverTrustPolicy: HAServerTrustPolicy
 
-    public init(endpoint: HAEndpoint, token: String) {
+    public init(endpoint: HAEndpoint, token: String, serverTrustPolicy: HAServerTrustPolicy = .default) {
         self.endpoint = endpoint
         self.token = token
+        self.serverTrustPolicy = serverTrustPolicy
+    }
+}
+
+public struct HAServerTrustPolicy: Equatable, Sendable {
+    public static let `default` = HAServerTrustPolicy()
+
+    public let allowedSelfSignedCertificateHosts: Set<String>
+
+    public init(allowedSelfSignedCertificateHosts: Set<String> = []) {
+        self.allowedSelfSignedCertificateHosts = Set(
+            allowedSelfSignedCertificateHosts.compactMap(Self.normalizedHost)
+        )
+    }
+
+    public func allowsSelfSignedCertificate(for url: URL) -> Bool {
+        let scheme = url.scheme?.lowercased() ?? ""
+        guard ["https", "wss"].contains(scheme) else {
+            return false
+        }
+        return allowsSelfSignedCertificate(forHost: url.host)
+    }
+
+    public func allowsSelfSignedCertificate(forHost host: String?) -> Bool {
+        guard let host = host.flatMap(Self.normalizedHost) else {
+            return false
+        }
+        return allowedSelfSignedCertificateHosts.contains(host)
+    }
+
+    private static func normalizedHost(_ host: String) -> String? {
+        let normalized = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized.isEmpty ? nil : normalized
     }
 }
 
@@ -27,12 +62,20 @@ public struct HARESTRequest: Equatable, Sendable {
     public let url: URL
     public let headers: [String: String]
     public let body: Data?
+    public let serverTrustPolicy: HAServerTrustPolicy
 
-    public init(method: String, url: URL, headers: [String: String], body: Data? = nil) {
+    public init(
+        method: String,
+        url: URL,
+        headers: [String: String],
+        body: Data? = nil,
+        serverTrustPolicy: HAServerTrustPolicy = .default
+    ) {
         self.method = method
         self.url = url
         self.headers = headers
         self.body = body
+        self.serverTrustPolicy = serverTrustPolicy
     }
 }
 
@@ -63,7 +106,23 @@ public struct URLSessionHARESTTransport: HARESTTransport {
         }
         urlRequest.httpBody = request.body
 
-        let (data, response) = try await URLSession.shared.data(for: urlRequest)
+        let session: URLSession
+        if request.serverTrustPolicy.allowsSelfSignedCertificate(for: request.url) {
+            session = URLSession(
+                configuration: .ephemeral,
+                delegate: HAServerTrustPolicyURLSessionDelegate(policy: request.serverTrustPolicy),
+                delegateQueue: nil
+            )
+        } else {
+            session = .shared
+        }
+        defer {
+            if session !== URLSession.shared {
+                session.finishTasksAndInvalidate()
+            }
+        }
+
+        let (data, response) = try await session.data(for: urlRequest)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw HAClientTransportError.nonHTTPResponse
         }
@@ -77,6 +136,50 @@ public struct URLSessionHARESTTransport: HARESTTransport {
         }
 
         return HARESTResponse(statusCode: httpResponse.statusCode, headers: headers, body: data)
+    }
+}
+
+private final class HAServerTrustPolicyURLSessionDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
+    private let policy: HAServerTrustPolicy
+
+    init(policy: HAServerTrustPolicy) {
+        self.policy = policy
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge
+    ) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              policy.allowsSelfSignedCertificate(forHost: challenge.protectionSpace.host),
+              let trust = challenge.protectionSpace.serverTrust,
+              Self.isAllowedSelfSignedTrust(trust, host: challenge.protectionSpace.host)
+        else {
+            return (.performDefaultHandling, nil)
+        }
+        return (.useCredential, URLCredential(trust: trust))
+    }
+
+    private static func isAllowedSelfSignedTrust(_ trust: SecTrust, host: String) -> Bool {
+        guard let certificateChain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+              certificateChain.count == 1,
+              isSelfIssued(certificateChain[0])
+        else {
+            return false
+        }
+        SecTrustSetPolicies(trust, SecPolicyCreateSSL(true, host as CFString))
+        SecTrustSetAnchorCertificates(trust, certificateChain as CFArray)
+        SecTrustSetAnchorCertificatesOnly(trust, true)
+        return SecTrustEvaluateWithError(trust, nil)
+    }
+
+    private static func isSelfIssued(_ certificate: SecCertificate) -> Bool {
+        guard let subject = SecCertificateCopyNormalizedSubjectSequence(certificate) as Data?,
+              let issuer = SecCertificateCopyNormalizedIssuerSequence(certificate) as Data?
+        else {
+            return false
+        }
+        return subject == issuer
     }
 }
 
@@ -416,7 +519,12 @@ public struct HomeAssistantClient: HAClient {
         }
     }
 
-    public func exchangeAuthorizationCode(baseURL: URL, code: String, clientID: String) async -> HAClientResult<HAOAuthToken> {
+    public func exchangeAuthorizationCode(
+        baseURL: URL,
+        code: String,
+        clientID: String,
+        serverTrustPolicy: HAServerTrustPolicy = .default
+    ) async -> HAClientResult<HAOAuthToken> {
         await sendAuthTokenRequest(
             baseURL: baseURL,
             formItems: [
@@ -424,11 +532,30 @@ public struct HomeAssistantClient: HAClient {
                 URLQueryItem(name: "code", value: code.trimmingCharacters(in: .whitespacesAndNewlines)),
                 URLQueryItem(name: "client_id", value: clientID.trimmingCharacters(in: .whitespacesAndNewlines))
             ],
-            requiresRefreshToken: true
+            requiresRefreshToken: true,
+            serverTrustPolicy: serverTrustPolicy
         )
     }
 
-    public func refreshAccessToken(baseURL: URL, refreshToken: String, clientID: String) async -> HAClientResult<HAOAuthToken> {
+    public func refreshAccessToken(
+        baseURL: URL,
+        refreshToken: String,
+        clientID: String
+    ) async -> HAClientResult<HAOAuthToken> {
+        await refreshAccessToken(
+            baseURL: baseURL,
+            refreshToken: refreshToken,
+            clientID: clientID,
+            serverTrustPolicy: .default
+        )
+    }
+
+    public func refreshAccessToken(
+        baseURL: URL,
+        refreshToken: String,
+        clientID: String,
+        serverTrustPolicy: HAServerTrustPolicy
+    ) async -> HAClientResult<HAOAuthToken> {
         await sendAuthTokenRequest(
             baseURL: baseURL,
             formItems: [
@@ -436,17 +563,23 @@ public struct HomeAssistantClient: HAClient {
                 URLQueryItem(name: "refresh_token", value: refreshToken.trimmingCharacters(in: .whitespacesAndNewlines)),
                 URLQueryItem(name: "client_id", value: clientID.trimmingCharacters(in: .whitespacesAndNewlines))
             ],
-            requiresRefreshToken: false
+            requiresRefreshToken: false,
+            serverTrustPolicy: serverTrustPolicy
         )
     }
 
-    public func revokeRefreshToken(baseURL: URL, refreshToken: String) async -> HAClientResult<HAOAuthRevokeResult> {
+    public func revokeRefreshToken(
+        baseURL: URL,
+        refreshToken: String,
+        serverTrustPolicy: HAServerTrustPolicy = .default
+    ) async -> HAClientResult<HAOAuthRevokeResult> {
         await sendAuthRevokeRequest(
             baseURL: baseURL,
             formItems: [
                 URLQueryItem(name: "token", value: refreshToken.trimmingCharacters(in: .whitespacesAndNewlines)),
                 URLQueryItem(name: "action", value: "revoke")
-            ]
+            ],
+            serverTrustPolicy: serverTrustPolicy
         )
     }
 
@@ -470,7 +603,7 @@ public struct HomeAssistantClient: HAClient {
         let result = await authenticateWebSocket(input)
         switch result {
         case let .success(session):
-            session.task.cancel(with: .goingAway, reason: nil)
+            session.close(code: .goingAway)
             return .success(session.check)
         case let .failure(failure):
             return .failure(failure)
@@ -482,7 +615,7 @@ public struct HomeAssistantClient: HAClient {
         switch result {
         case let .success(session):
             defer {
-                session.task.cancel(with: .goingAway, reason: nil)
+                session.close(code: .goingAway)
             }
             return await sendGetStates(on: session.task)
         case let .failure(failure):
@@ -507,7 +640,7 @@ public struct HomeAssistantClient: HAClient {
         switch result {
         case let .success(session):
             defer {
-                session.task.cancel(with: .goingAway, reason: nil)
+                session.close(code: .goingAway)
             }
             return await subscribeForOneEntityUpdateThenFallback(on: session.task)
         case let .failure(failure):
@@ -520,7 +653,7 @@ public struct HomeAssistantClient: HAClient {
         switch result {
         case let .success(session):
             defer {
-                session.task.cancel(with: .goingAway, reason: nil)
+                session.close(code: .goingAway)
             }
             return await sendCallService(on: session.task, call: call)
         case let .failure(failure):
@@ -533,7 +666,7 @@ public struct HomeAssistantClient: HAClient {
         switch result {
         case let .success(session):
             defer {
-                session.task.cancel(with: .goingAway, reason: nil)
+                session.close(code: .goingAway)
             }
             return await sendGetServices(on: session.task)
         case let .failure(failure):
@@ -546,7 +679,7 @@ public struct HomeAssistantClient: HAClient {
         switch result {
         case let .success(session):
             defer {
-                session.task.cancel(with: .goingAway, reason: nil)
+                session.close(code: .goingAway)
             }
 
             let areas = await registryValuesOrEmptyIfUnavailable(
@@ -654,7 +787,7 @@ public struct HomeAssistantClient: HAClient {
         switch result {
         case let .success(session):
             defer {
-                session.task.cancel(with: .goingAway, reason: nil)
+                session.close(code: .goingAway)
             }
             return await sendRecorderStatisticsHistory(
                 on: session.task,
@@ -674,7 +807,13 @@ public struct HomeAssistantClient: HAClient {
         input: HAConnectionInput,
         transform: @Sendable (HARESTResponse) -> HAClientResult<Value>
     ) async -> HAClientResult<Value> {
-        let primary = await sendGET(path: path, queryItems: queryItems, baseURL: input.endpoint.primaryURL, token: input.token)
+        let primary = await sendGET(
+            path: path,
+            queryItems: queryItems,
+            baseURL: input.endpoint.primaryURL,
+            token: input.token,
+            serverTrustPolicy: input.serverTrustPolicy
+        )
         switch primary {
         case let .success(response):
             return transform(response)
@@ -682,7 +821,13 @@ public struct HomeAssistantClient: HAClient {
             guard shouldRetryOnFallback(failure), let fallbackURL = input.endpoint.fallbackURL else {
                 return .failure(failure)
             }
-            let fallback = await sendGET(path: path, queryItems: queryItems, baseURL: fallbackURL, token: input.token)
+            let fallback = await sendGET(
+                path: path,
+                queryItems: queryItems,
+                baseURL: fallbackURL,
+                token: input.token,
+                serverTrustPolicy: input.serverTrustPolicy
+            )
             switch fallback {
             case let .success(response):
                 return transform(response)
@@ -692,7 +837,13 @@ public struct HomeAssistantClient: HAClient {
         }
     }
 
-    private func sendGET(path: String, queryItems: [URLQueryItem] = [], baseURL: URL, token: String) async -> HAClientResult<HARESTResponse> {
+    private func sendGET(
+        path: String,
+        queryItems: [URLQueryItem] = [],
+        baseURL: URL,
+        token: String,
+        serverTrustPolicy: HAServerTrustPolicy
+    ) async -> HAClientResult<HARESTResponse> {
         let url: URL
         do {
             url = try baseURL.homeAssistantURL(path: path, queryItems: queryItems)
@@ -706,7 +857,8 @@ public struct HomeAssistantClient: HAClient {
             headers: [
                 "Accept": "application/json",
                 "Authorization": "Bearer \(token)"
-            ]
+            ],
+            serverTrustPolicy: serverTrustPolicy
         )
 
         do {
@@ -734,10 +886,16 @@ public struct HomeAssistantClient: HAClient {
     private func sendAuthTokenRequest(
         baseURL: URL,
         formItems: [URLQueryItem],
-        requiresRefreshToken: Bool
+        requiresRefreshToken: Bool,
+        serverTrustPolicy: HAServerTrustPolicy
     ) async -> HAClientResult<HAOAuthToken> {
         guard let validationFailure = authFormValidationFailure(path: "/auth/token", formItems: formItems) else {
-            return await postForm(path: "/auth/token", baseURL: baseURL, formItems: formItems).flatMap { response in
+            return await postForm(
+                path: "/auth/token",
+                baseURL: baseURL,
+                formItems: formItems,
+                serverTrustPolicy: serverTrustPolicy
+            ).flatMap { response in
                 decodeOAuthToken(response: response, requiresRefreshToken: requiresRefreshToken)
             }
         }
@@ -746,15 +904,26 @@ public struct HomeAssistantClient: HAClient {
 
     private func sendAuthRevokeRequest(
         baseURL: URL,
-        formItems: [URLQueryItem]
+        formItems: [URLQueryItem],
+        serverTrustPolicy: HAServerTrustPolicy
     ) async -> HAClientResult<HAOAuthRevokeResult> {
         guard let validationFailure = authFormValidationFailure(path: "/auth/token", formItems: formItems) else {
-            return await postForm(path: "/auth/token", baseURL: baseURL, formItems: formItems).map { _ in .revoked }
+            return await postForm(
+                path: "/auth/token",
+                baseURL: baseURL,
+                formItems: formItems,
+                serverTrustPolicy: serverTrustPolicy
+            ).map { _ in .revoked }
         }
         return .failure(validationFailure)
     }
 
-    private func postForm(path: String, baseURL: URL, formItems: [URLQueryItem]) async -> HAClientResult<HARESTResponse> {
+    private func postForm(
+        path: String,
+        baseURL: URL,
+        formItems: [URLQueryItem],
+        serverTrustPolicy: HAServerTrustPolicy
+    ) async -> HAClientResult<HARESTResponse> {
         guard isHTTPHomeAssistantBaseURL(baseURL) else {
             return .failure(.invalidURL(path: path))
         }
@@ -773,7 +942,8 @@ public struct HomeAssistantClient: HAClient {
                 "Accept": "application/json",
                 "Content-Type": "application/x-www-form-urlencoded"
             ],
-            body: Self.formURLEncodedData(formItems)
+            body: Self.formURLEncodedData(formItems),
+            serverTrustPolicy: serverTrustPolicy
         )
 
         do {
@@ -941,9 +1111,9 @@ public struct HomeAssistantClient: HAClient {
 
     private func shouldRetryOnFallback(_ failure: HAClientFailure) -> Bool {
         switch failure {
-        case .unreachable, .tlsRejected:
+        case .unreachable, .tlsRejected, .transport:
             true
-        case .authentication, .invalidURL, .invalidResponse, .invalidPayload, .httpStatus, .webSocketProtocol, .webSocketCommand, .transport:
+        case .authentication, .invalidURL, .invalidResponse, .invalidPayload, .httpStatus, .webSocketProtocol, .webSocketCommand:
             false
         }
     }
@@ -975,8 +1145,26 @@ public struct HomeAssistantClient: HAClient {
         }
     }
 
+    private func map(transportError error: Error, baseURL: URL) -> HAClientFailure {
+        if let urlError = error as? URLError {
+            return map(urlError: urlError, baseURL: baseURL)
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            return map(
+                urlError: URLError(URLError.Code(rawValue: nsError.code)),
+                baseURL: baseURL
+            )
+        }
+        return .transport(redactor.redact(message: String(describing: error)))
+    }
+
     private func authenticateWebSocket(_ input: HAConnectionInput) async -> HAWebSocketAuthenticationResult {
-        let primary = await authenticateWebSocket(baseURL: input.endpoint.primaryURL, token: input.token)
+        let primary = await authenticateWebSocket(
+            baseURL: input.endpoint.primaryURL,
+            token: input.token,
+            serverTrustPolicy: input.serverTrustPolicy
+        )
         switch primary {
         case .success:
             return primary
@@ -984,11 +1172,19 @@ public struct HomeAssistantClient: HAClient {
             guard shouldRetryOnFallback(failure), let fallbackURL = input.endpoint.fallbackURL else {
                 return .failure(failure)
             }
-            return await authenticateWebSocket(baseURL: fallbackURL, token: input.token)
+            return await authenticateWebSocket(
+                baseURL: fallbackURL,
+                token: input.token,
+                serverTrustPolicy: input.serverTrustPolicy
+            )
         }
     }
 
-    private func authenticateWebSocket(baseURL: URL, token: String) async -> HAWebSocketAuthenticationResult {
+    private func authenticateWebSocket(
+        baseURL: URL,
+        token: String,
+        serverTrustPolicy: HAServerTrustPolicy
+    ) async -> HAWebSocketAuthenticationResult {
         let url: URL
         do {
             url = try baseURL.homeAssistantWebSocketURL(path: "/api/websocket")
@@ -996,7 +1192,8 @@ public struct HomeAssistantClient: HAClient {
             return .failure(.invalidURL(path: "/api/websocket"))
         }
 
-        let task = URLSession.shared.webSocketTask(with: url)
+        let context = makeWebSocketTask(url: url, serverTrustPolicy: serverTrustPolicy)
+        let task = context.task
         task.resume()
 
         let required = await receiveWebSocketEnvelope(task: task, path: "/api/websocket")
@@ -1004,44 +1201,78 @@ public struct HomeAssistantClient: HAClient {
         case let .success(envelope):
             guard envelope.type == "auth_required" else {
                 task.cancel(with: .protocolError, reason: nil)
+                context.invalidate()
                 return .failure(.webSocketProtocol("expected auth_required, received \(envelope.type)"))
             }
         case let .failure(failure):
             task.cancel(with: .goingAway, reason: nil)
+            context.invalidate()
             return .failure(failure)
         }
 
         let auth = HAWebSocketAuthCommand(accessToken: token)
         guard let authMessage = encodeWebSocketMessage(auth) else {
             task.cancel(with: .protocolError, reason: nil)
+            context.invalidate()
             return .failure(.invalidPayload(path: "/api/websocket", reason: "could not encode auth command"))
         }
         do {
             try await task.send(.string(authMessage))
-        } catch let error as URLError {
-            task.cancel(with: .goingAway, reason: nil)
-            return .failure(map(urlError: error, baseURL: baseURL))
         } catch {
             task.cancel(with: .goingAway, reason: nil)
-            return .failure(.transport(redactor.redact(message: String(describing: error))))
+            context.invalidate()
+            return .failure(map(transportError: error, baseURL: baseURL))
         }
 
         let response = await receiveWebSocketEnvelope(task: task, path: "/api/websocket")
         switch response {
         case let .success(envelope):
             if envelope.type == "auth_ok" {
-                return .success(AuthenticatedWebSocket(task: task, check: HAWebSocketCheck(haVersion: envelope.haVersion ?? "")))
+                return .success(
+                    AuthenticatedWebSocket(
+                        task: task,
+                        session: context.session,
+                        shouldInvalidateSession: context.shouldInvalidateSession,
+                        check: HAWebSocketCheck(haVersion: envelope.haVersion ?? "")
+                    )
+                )
             }
             if envelope.type == "auth_invalid" {
                 task.cancel(with: .goingAway, reason: nil)
+                context.invalidate()
                 return .failure(.authentication)
             }
             task.cancel(with: .protocolError, reason: nil)
+            context.invalidate()
             return .failure(.webSocketProtocol("expected auth_ok, received \(envelope.type)"))
         case let .failure(failure):
             task.cancel(with: .goingAway, reason: nil)
+            context.invalidate()
             return .failure(failure)
         }
+    }
+
+    private func makeWebSocketTask(
+        url: URL,
+        serverTrustPolicy: HAServerTrustPolicy
+    ) -> HAWebSocketTaskContext {
+        if serverTrustPolicy.allowsSelfSignedCertificate(for: url) {
+            let session = URLSession(
+                configuration: .ephemeral,
+                delegate: HAServerTrustPolicyURLSessionDelegate(policy: serverTrustPolicy),
+                delegateQueue: nil
+            )
+            return HAWebSocketTaskContext(
+                task: session.webSocketTask(with: url),
+                session: session,
+                shouldInvalidateSession: true
+            )
+        }
+        return HAWebSocketTaskContext(
+            task: URLSession.shared.webSocketTask(with: url),
+            session: URLSession.shared,
+            shouldInvalidateSession: false
+        )
     }
 
     private func sendGetStates(on task: URLSessionWebSocketTask, id: Int = 1) async -> HAClientResult<[EntityState]> {
@@ -1187,7 +1418,12 @@ public struct HomeAssistantClient: HAClient {
         do {
             try await task.send(.string(message))
         } catch {
-            return .failure(.transport(redactor.redact(message: String(describing: error))))
+            return .failure(
+                map(
+                    transportError: error,
+                    baseURL: task.currentRequest?.url ?? URL(fileURLWithPath: "/")
+                )
+            )
         }
 
         let ack = await receiveWebSocketEnvelope(task: task, path: "/api/websocket")
@@ -1226,7 +1462,12 @@ public struct HomeAssistantClient: HAClient {
         do {
             try await task.send(.string(message))
         } catch {
-            return .failure(.transport(redactor.redact(message: String(describing: error))))
+            return .failure(
+                map(
+                    transportError: error,
+                    baseURL: task.currentRequest?.url ?? URL(fileURLWithPath: "/")
+                )
+            )
         }
 
         let ack = await receiveWebSocketEnvelope(task: task, path: "/api/websocket")
@@ -1342,7 +1583,12 @@ public struct HomeAssistantClient: HAClient {
         do {
             try await task.send(.string(message))
         } catch {
-            return .failure(.transport(redactor.redact(message: String(describing: error))))
+            return .failure(
+                map(
+                    transportError: error,
+                    baseURL: task.currentRequest?.url ?? URL(fileURLWithPath: "/")
+                )
+            )
         }
 
         let response = await receiveWebSocketEnvelope(task: task, path: "/api/websocket")
@@ -1376,10 +1622,13 @@ public struct HomeAssistantClient: HAClient {
                 return .failure(.invalidPayload(path: path, reason: "unknown WebSocket message"))
             }
             return decode(path: path, response: HARESTResponse(statusCode: 200, headers: [:], body: data), as: HAWebSocketEnvelopeDTO.self)
-        } catch let error as URLError {
-            return .failure(map(urlError: error, baseURL: task.currentRequest?.url ?? URL(fileURLWithPath: "/")))
         } catch {
-            return .failure(.transport(redactor.redact(message: String(describing: error))))
+            return .failure(
+                map(
+                    transportError: error,
+                    baseURL: task.currentRequest?.url ?? URL(fileURLWithPath: "/")
+                )
+            )
         }
     }
 
@@ -1966,11 +2215,11 @@ private extension HAClientFailure {
 
     var shouldFallbackFromRecorderStatisticsToREST: Bool {
         switch self {
-        case .unreachable, .tlsRejected:
+        case .unreachable, .tlsRejected, .transport:
             true
         case .webSocketCommand:
             isUnavailableCommand
-        case .authentication, .invalidURL, .invalidResponse, .invalidPayload, .httpStatus, .webSocketProtocol, .transport:
+        case .authentication, .invalidURL, .invalidResponse, .invalidPayload, .httpStatus, .webSocketProtocol:
             false
         }
     }
@@ -2040,7 +2289,28 @@ private enum HAWebSocketAuthenticationResult {
 
 private struct AuthenticatedWebSocket: @unchecked Sendable {
     let task: URLSessionWebSocketTask
+    let session: URLSession
+    let shouldInvalidateSession: Bool
     let check: HAWebSocketCheck
+
+    func close(code: URLSessionWebSocketTask.CloseCode) {
+        task.cancel(with: code, reason: nil)
+        if shouldInvalidateSession {
+            session.finishTasksAndInvalidate()
+        }
+    }
+}
+
+private struct HAWebSocketTaskContext: @unchecked Sendable {
+    let task: URLSessionWebSocketTask
+    let session: URLSession
+    let shouldInvalidateSession: Bool
+
+    func invalidate() {
+        if shouldInvalidateSession {
+            session.finishTasksAndInvalidate()
+        }
+    }
 }
 
 private extension URL {

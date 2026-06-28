@@ -93,6 +93,73 @@ final class FakeHATests: XCTestCase {
 
         XCTAssertEqual(fixtures.apiBody, #"{"message":"API running."}"#)
         XCTAssertEqual(fixtures.statesBody, #"[{"entity_id":"sensor.one"}]"#)
+        XCTAssertEqual(fixtures.entityRegistryDisplayBody, #"{"entities":[{"ei":"sensor.one"}]}"#)
+        XCTAssertEqual(fixtures.entityRegistryBody, #"[{"entity_id":"sensor.one"}]"#)
+    }
+
+    func testFakeHALoadsMirrorFixturesAndSynthesizesDisplayRegistryResults() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("fakeha-fixtures-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try #"{"bodyText":"{\"message\":\"API running.\"}"}"#.write(
+            to: directory.appendingPathComponent("api.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try #"{"bodyText":"[{\"entity_id\":\"sensor.one\",\"attributes\":{\"friendly_name\":\"Kitchen sensor\"}}]"}"#.write(
+            to: directory.appendingPathComponent("states.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let fixtures = try FakeHAFixtures.load(from: directory)
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+
+        let task = URLSession.shared.webSocketTask(with: try webSocketURL(baseURL: server.baseURL))
+        task.resume()
+        defer {
+            task.cancel(with: .goingAway, reason: nil)
+        }
+
+        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
+        try await task.send(.string(#"{"type":"auth","access_token":"fake-token"}"#))
+        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
+        try await task.send(.string(#"{"id":7,"type":"config/entity_registry/list_for_display"}"#))
+
+        let result = try await receiveString(task)
+
+        XCTAssertTrue(result.contains(#""id":7"#))
+        XCTAssertTrue(result.contains(#""success":true"#))
+        XCTAssertTrue(result.contains(#""ei":"sensor.one""#))
+        XCTAssertTrue(result.contains(#""en":"Kitchen sensor""#))
+    }
+
+    func testFakeHAMirroredWebSocketModePreservesPerCommandAvailabilityCodes() {
+        let mode = FakeHAWebSocketMode.mirrored(
+            commandAvailability: [
+                FakeHAWebSocketCommandAvailability(
+                    command: "config/entity_registry/list_for_display",
+                    available: false,
+                    errorCode: "unsupported_command"
+                ),
+                FakeHAWebSocketCommandAvailability(
+                    command: "subscribe_entities",
+                    available: false,
+                    errorCode: "unknown_command"
+                )
+            ]
+        )
+
+        XCTAssertEqual(mode.unavailableCommandCode(for: "config/entity_registry/list_for_display"), .unsupportedCommand)
+        XCTAssertEqual(mode.unavailableCommandCode(for: "subscribe_entities"), .unknownCommand)
+        XCTAssertNil(mode.unavailableCommandCode(for: "get_states"))
     }
 
     func testFakeHAWebSocketAuthHandshake() {

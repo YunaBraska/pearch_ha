@@ -6,6 +6,44 @@ final class PerchHASupportTests: XCTestCase {
     func testModuleDeclaresResponsibility() {
         XCTAssertEqual(PerchHASupport.module.name, "PerchHASupport")
         XCTAssertTrue(PerchHASupport.module.responsibility.contains("rate limits"))
+        XCTAssertTrue(PerchHASupport.module.responsibility.contains("command-line parsing"))
+    }
+
+    func testCommandLineOptionsParseFlagsAndRepeatedValues() throws {
+        let options = try PerchHACommandLineOptions(
+            arguments: ["--env", ".env.local", "--strict", "--require-screenshot", "one.png", "--require-screenshot", "two.png"],
+            valueOptions: ["--env", "--require-screenshot"],
+            flagOptions: ["--strict"]
+        )
+
+        XCTAssertEqual(options.value(for: "--env"), ".env.local")
+        XCTAssertEqual(options.values(for: "--require-screenshot"), ["one.png", "two.png"])
+        XCTAssertTrue(options.has("--strict"))
+    }
+
+    func testCommandLineOptionsRejectMissingValueWhenNextTokenIsAnotherOption() {
+        XCTAssertThrowsError(
+            try PerchHACommandLineOptions(
+                arguments: ["--env", "--json"],
+                valueOptions: ["--env"],
+                flagOptions: ["--json"]
+            )
+        ) { error in
+            XCTAssertEqual(error as? PerchHACommandLineParseError, .missingValue("--env"))
+        }
+    }
+
+    func testCommandLineOptionsCanTreatBareArgumentsAsInvalid() {
+        XCTAssertThrowsError(
+            try PerchHACommandLineOptions(
+                arguments: ["fixtures"],
+                valueOptions: [],
+                flagOptions: [],
+                nonOptionBehavior: .invalidArgument
+            )
+        ) { error in
+            XCTAssertEqual(error as? PerchHACommandLineParseError, .invalidArgument("fixtures"))
+        }
     }
 
     func testRateLimiterRefillsOverTime() {

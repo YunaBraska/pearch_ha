@@ -141,7 +141,7 @@ A custom action is a saved row action that wraps a Home Assistant service call:
 
 Custom actions can attach to any entity row, including sensors. Sensor-attached actions render as buttons and never imply that the sensor itself is writable.
 
-Custom action configuration is plaintext JSON. Service data must not contain protected key names such as token, password, pin, code, or secret unless a later Keychain-backed protected-field path exists.
+Custom action configuration stores opaque protected-string references in JSON when a field needs secrecy. The actual secret scalar strings live in Keychain, are resolved before service execution, and fail explicitly if the referenced secret is missing.
 
 Acceptance: a saved custom action sends the configured `action` payload exactly as stored.
 
@@ -157,7 +157,7 @@ Acceptance: FakeHA service failure causes rollback and a visible error.
 - Steady-state memory target is under 80 MB.
 - Cold panel open target is under 150 ms to first paint from cached state.
 - REST calls use rate limiting, jitter, backoff, coalescing, and hover debounce.
-- Secrets are stored in Keychain only and never logged.
+- Secrets are stored in Keychain only, never logged, and never implied to live in plaintext JSON.
 - No telemetry by default.
 - Dark and light mode are first-class.
 - Full keyboard operation and useful VoiceOver labels are required.

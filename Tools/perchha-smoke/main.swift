@@ -7,13 +7,42 @@ import PerchHACore
 import PerchHAClient
 import PerchHAPackaging
 import PerchHAAppShell
+import PerchHACoverageCheck
 import PerchHAPersistence
+import PerchHARepoAudit
 import PerchHASupport
 import PerchHAUI
 
 @main
 struct PerchHASmoke {
-    static func main() async throws {
+    static func main() async {
+        do {
+            try await run(arguments: Array(CommandLine.arguments.dropFirst()))
+        } catch {
+            fputs("perchha-smoke: \(error)\n", stderr)
+            Foundation.exit(1)
+        }
+    }
+
+    @MainActor
+    private static func run(arguments: [String]) async throws {
+        let options = try SmokeOptions(arguments: arguments)
+        if options.showsHelp {
+            print(SmokeOptions.help)
+            return
+        }
+        try verifySmokeOptions()
+        if options.repeatCount > 1 {
+            try runRepeatedProcesses(arguments: arguments, repeatCount: options.repeatCount)
+            print("PerchHA smoke verification passed.")
+            return
+        }
+        try await runOnce(options: options)
+        print("PerchHA smoke verification passed.")
+    }
+
+    @MainActor
+    private static func runOnce(options: SmokeOptions) async throws {
         try expect(PerchHASupport.module.name == "PerchHASupport", "support module is named")
         try expect(PerchHACore.module.name == "PerchHACore", "core module is named")
         try expect(PlannedHAClient().describe().name == "PerchHAClient", "client module is named")
@@ -25,14 +54,20 @@ struct PerchHASmoke {
 
         let location = ConfigLocation()
         try expect(location.applicationSupportDirectoryName == "PerchHA", "config location uses app name")
-
         try verifyRateLimiter()
         try verifyJitter()
         try verifyBackoff()
         try verifyRedaction()
+        try verifyCoverageGate()
+        try verifyRepositoryAuditGate()
+        try verifyXcodeDoctor()
         try await verifyCoalescing()
         try await verifyTestClock()
         try await verifyMirrorAndFakeHA()
+        try await verifyHAMirrorDoctorCLIUsesExportedOverrides()
+        try await verifyHAMirrorOAuthCheckReportsMissingConfigurationGuidance()
+        try await verifyHAMirrorCaptureCLI()
+        try await verifyHAMirrorServeCLI()
         try verifyFakeHAConcurrentStartup()
         try verifyFakeHACoalescedWebSocketReads()
         try await verifyHAClientContract()
@@ -40,17 +75,78 @@ struct PerchHASmoke {
         try await verifyDiscoveryAndPersistence()
         try await verifyPanelModelAgainstFakeHA()
         try verifyAppShellPanelFactory()
+        try await verifyBuiltInControlsPanelFactory()
+        try await verifySettingsCustomActionEditorTextFieldFocusPath()
+        try await verifySettingsCustomActionEditorNativeMutation()
+        try await verifySettingsCustomActionEditorNativePopupMutation()
         try verifyPanelOpenPerformance()
         try await verifyApplicationLifecycleMemorySoak()
         try await verifyIdleCPUAtRest()
-        try verifyPanelSnapshotRendering()
+        try await verifyPanelSnapshotRendering(options: options)
         try verifyOAuthConfigurationFromEnvironmentFile()
+        try await verifyOAuthClientWebsitePackaging()
         try verifyAppBundlePackaging()
         try await verifyApplicationLaunchWiring()
         try verifySelectionOrderingAndFormatting()
         try await verifyMenuBarRenderingAndPromotion()
+    }
 
-        print("PerchHA smoke verification passed.")
+    private static func runRepeatedProcesses(arguments: [String], repeatCount: Int) throws {
+        let childArguments = removingRepeatOption(from: arguments)
+        let executableURL = URL(fileURLWithPath: CommandLine.arguments[0], isDirectory: false)
+        for run in 1...repeatCount {
+            let process = Process()
+            process.executableURL = executableURL
+            process.arguments = childArguments
+            process.environment = ProcessInfo.processInfo.environment
+            process.standardOutput = FileHandle.standardOutput
+            process.standardError = FileHandle.standardError
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationReason == .exit, process.terminationStatus == 0 else {
+                throw SmokeFailure("smoke repeat run \(run)/\(repeatCount) failed")
+            }
+            print("PerchHA smoke verification passed (\(run)/\(repeatCount)).")
+        }
+    }
+
+    private static func removingRepeatOption(from arguments: [String]) -> [String] {
+        var result: [String] = []
+        var index = 0
+        while index < arguments.count {
+            if arguments[index] == "--repeat" {
+                index += 2
+                continue
+            }
+            result.append(arguments[index])
+            index += 1
+        }
+        return result
+    }
+
+    private static func verifySmokeOptions() throws {
+        let defaults = try SmokeOptions(arguments: [])
+        try expect(defaults.repeatCount == 1, "smoke options default repeat count is one")
+
+        let repeated = try SmokeOptions(arguments: ["--repeat", "3"])
+        try expect(repeated.repeatCount == 3, "smoke options parse repeat count")
+
+        let help = try SmokeOptions(arguments: ["--help"])
+        try expect(help.showsHelp, "smoke options expose help flag")
+
+        do {
+            _ = try SmokeOptions(arguments: ["--repeat", "0"])
+            throw SmokeFailure("smoke options accept zero repeat count")
+        } catch let error as SmokeFailure {
+            try expect(error.description == "invalid repeat count: 0", "smoke options reject zero repeat count")
+        }
+
+        do {
+            _ = try SmokeOptions(arguments: ["--repeat", "many"])
+            throw SmokeFailure("smoke options accept non-numeric repeat count")
+        } catch let error as SmokeFailure {
+            try expect(error.description == "invalid repeat count: many", "smoke options reject non-numeric repeat count")
+        }
     }
 
     private static func verifyRateLimiter() throws {
@@ -105,6 +201,283 @@ struct PerchHASmoke {
         try expect(redactor.redact(message: "notoken=secret value=ok") == "notoken=secret value=ok", "larger non-secret key is preserved")
         try expect(redactor.redact(message: "prefixauthorization: Bearer secret") == "prefixauthorization: Bearer secret", "prefixed authorization key is preserved")
         try expect(redactor.redact(message: "\"mytoken\": \"secret\"") == "\"mytoken\": \"secret\"", "quoted larger key is preserved")
+    }
+
+    private static func verifyCoverageGate() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("PerchHACoverageSmoke-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let missingBranchURL = directory.appendingPathComponent("missing-branches.json", isDirectory: false)
+        try Data(
+            """
+            {"data":[{"files":[{"filename":"Sources/PerchHACore/Foo.swift","summary":{"lines":{"count":10,"covered":10}}}]}]}
+            """.utf8
+        ).write(to: missingBranchURL)
+        let missingBranch = runCoverageGate([
+            "--coverage-json",
+            missingBranchURL.path,
+            "--branch-target",
+            "PerchHACore=90"
+        ])
+        try expect(missingBranch.exitCode == 1, "coverage gate rejects missing branch metric")
+        try expect(
+            missingBranch.error.contains("branch coverage for Sources/PerchHACore"),
+            "coverage gate reports missing branch metric explicitly"
+        )
+
+        let zeroBranchURL = directory.appendingPathComponent("zero-branches.json", isDirectory: false)
+        try Data(
+            """
+            {"data":[{"files":[{"filename":"Sources/PerchHACore/Foo.swift","summary":{"lines":{"count":1,"covered":1},"branches":{"count":0,"covered":0}}}]}]}
+            """.utf8
+        ).write(to: zeroBranchURL)
+        let zeroBranch = runCoverageGate([
+            "--coverage-json",
+            zeroBranchURL.path,
+            "--branch-target",
+            "PerchHACore=100"
+        ])
+        try expect(zeroBranch.exitCode == 0, "coverage gate accepts available zero-count branch metric")
+        try expect(
+            zeroBranch.output.contains("PerchHACore branch: 100.00% >= 100.00% (0/0)"),
+            "coverage gate reports zero-count branch metric"
+        )
+    }
+
+    private static func verifyXcodeDoctor() throws {
+        var output: [String] = []
+        var errors: [String] = []
+        let exitCode = PerchHAXcodeDoctorCommand.run(
+            arguments: ["--json"],
+            standardOutput: { output.append($0) },
+            standardError: { errors.append($0) }
+        )
+        try expect(exitCode == 0, "xcode doctor json exits successfully")
+        try expect(errors.isEmpty, "xcode doctor json stays quiet on stderr")
+
+        let diagnostic = try JSONDecoder().decode(
+            PerchHAXcodePreflightDiagnostic.self,
+            from: Data(output.joined(separator: "\n").utf8)
+        )
+        try expect(diagnostic.project == .present, "xcode doctor sees checked-in Xcode project")
+        try expect(diagnostic.sharedScheme == .present, "xcode doctor sees checked-in shared scheme")
+        if diagnostic.nativeVerification == .ready {
+            try expect(diagnostic.projectListing == .ready, "xcode doctor ready state proves xcodebuild project listing")
+        } else {
+            try expect(diagnostic.projectListing == .blocked, "xcode doctor blocked state marks project listing blocked")
+        }
+
+        var strictErrors: [String] = []
+        let strictExitCode = PerchHAXcodeDoctorCommand.run(
+            arguments: ["--json", "--strict"],
+            standardOutput: { _ in },
+            standardError: { strictErrors.append($0) }
+        )
+        try expect(strictErrors.isEmpty, "xcode doctor strict mode stays quiet on stderr")
+        if diagnostic.nativeVerification == .ready {
+            try expect(strictExitCode == 0, "xcode doctor strict mode succeeds when native verification is ready")
+            try expect(diagnostic.issues.isEmpty, "xcode doctor ready state has no issues")
+            try expect(
+                diagnostic.suggestedCommands.contains("swift test --disable-swift-testing --enable-xctest list"),
+                "xcode doctor ready state suggests XCTest listing"
+            )
+        } else {
+            try expect(strictExitCode == 1, "xcode doctor strict mode fails when native verification is blocked")
+            try expect(!diagnostic.issues.isEmpty, "xcode doctor blocked state reports actionable issues")
+        }
+    }
+
+    private static func runCoverageGate(_ arguments: [String]) -> CoverageGateSmokeResult {
+        var output: [String] = []
+        var errors: [String] = []
+        let exitCode = PerchHACoverageCheckCommand.run(
+            arguments: arguments,
+            standardOutput: { output.append($0) },
+            standardError: { errors.append($0) }
+        )
+        return CoverageGateSmokeResult(
+            exitCode: exitCode,
+            output: output.joined(separator: "\n"),
+            error: errors.joined()
+        )
+    }
+
+    private static func verifyRepositoryAuditGate() throws {
+        try verifyRepositoryAuditRejects(
+            relativePath: ".env.local",
+            contents: "token=do-not-commit\n",
+            expectedError: ".env.local: local environment files must stay ignored",
+            addToIndex: true,
+            message: "repository audit rejects local env files"
+        )
+        try verifyRepositoryAuditRejects(
+            relativePath: ".env.local",
+            contents: "token=do-not-commit\n",
+            expectedError: ".env.local: local environment files must stay ignored",
+            addToIndex: false,
+            message: "repository audit rejects unignored local env files"
+        )
+        try verifyRepositoryAuditRejects(
+            relativePath: "Fixtures/private/capture.json",
+            contents: #"{"private":true}"#,
+            expectedError: "Fixtures/private/capture.json: private fixture captures must stay ignored",
+            addToIndex: true,
+            message: "repository audit rejects private fixture captures"
+        )
+        try verifyRepositoryAuditRejects(
+            relativePath: "Fixtures/private/capture.json",
+            contents: #"{"private":true}"#,
+            expectedError: "Fixtures/private/capture.json: private fixture captures must stay ignored",
+            addToIndex: false,
+            message: "repository audit rejects unignored private fixture captures"
+        )
+        try verifyRepositoryAuditRejects(
+            relativePath: ".build/output.txt",
+            contents: "build output\n",
+            expectedError: ".build/output.txt: build output must stay ignored",
+            addToIndex: true,
+            message: "repository audit rejects build output"
+        )
+        try verifyRepositoryAuditRejects(
+            relativePath: ".build/output.txt",
+            contents: "build output\n",
+            expectedError: ".build/output.txt: build output must stay ignored",
+            addToIndex: false,
+            message: "repository audit rejects unignored build output"
+        )
+        try verifyRepositoryAuditRejects(
+            relativePath: "keys/AuthKey_TEST.p8",
+            contents: "private key\n",
+            expectedError: "keys/AuthKey_TEST.p8: credential artifact must not be committed",
+            addToIndex: true,
+            message: "repository audit rejects Apple private key artifacts"
+        )
+        try verifyRepositoryAuditRejects(
+            relativePath: "keys/AuthKey_TEST.p8",
+            contents: "private key\n",
+            expectedError: "keys/AuthKey_TEST.p8: credential artifact must not be committed",
+            addToIndex: false,
+            message: "repository audit rejects unignored Apple private key artifacts"
+        )
+        try verifyRepositoryAuditRejects(
+            relativePath: "Sources/App/Telemetry.swift",
+            contents: ["import", "Sentry"].joined(separator: " ") + "\n",
+            expectedError: "Sources/App/Telemetry.swift: telemetry SDK import must not be present by default",
+            addToIndex: true,
+            message: "repository audit rejects telemetry imports"
+        )
+        try verifyRepositoryAuditRejects(
+            relativePath: "Sources/App/Telemetry.swift",
+            contents: ["@preconcurrency", "import", "Firebase"].joined(separator: " ") + "\n",
+            expectedError: "Sources/App/Telemetry.swift: telemetry SDK import must not be present by default",
+            addToIndex: true,
+            message: "repository audit rejects attributed telemetry imports"
+        )
+        try verifyRepositoryAuditRejects(
+            relativePath: "Sources/App/Telemetry.swift",
+            contents: ["public", "import", "FirebaseAnalytics"].joined(separator: " ") + "\n",
+            expectedError: "Sources/App/Telemetry.swift: telemetry SDK import must not be present by default",
+            addToIndex: true,
+            message: "repository audit rejects access-qualified telemetry imports"
+        )
+        try verifyRepositoryAuditRejects(
+            relativePath: "Sources/App/Telemetry.swift",
+            contents: #"let endpoint = "\#("https://o123." + "ingest." + "sentry.io/api")""#,
+            expectedError: "Sources/App/Telemetry.swift: telemetry dependency or collection endpoint must not be present by default",
+            addToIndex: true,
+            message: "repository audit rejects telemetry collection endpoints"
+        )
+        try verifyRepositoryAuditRejects(
+            relativePath: "PerchHA.xcodeproj/project.pbxproj",
+            contents: "repositoryURL = https://github.com/" + "get" + "sentry" + "/" + "sentry" + "-cocoa;\n",
+            expectedError: "PerchHA.xcodeproj/project.pbxproj: telemetry dependency or collection endpoint must not be present by default",
+            addToIndex: true,
+            message: "repository audit rejects telemetry references in Xcode projects"
+        )
+
+        let cleanRepository = try createRepositoryAuditSmokeRepository(
+            relativePath: ".env.example",
+            contents: "token=\n",
+            addToIndex: true
+        )
+        defer {
+            try? FileManager.default.removeItem(at: cleanRepository)
+        }
+        let clean = runRepositoryAudit(["--root", cleanRepository.path])
+        try expect(clean.exitCode == 0, "repository audit allows example env files")
+        try expect(clean.output.contains("Repository audit passed."), "repository audit reports clean repository")
+    }
+
+    private static func verifyRepositoryAuditRejects(
+        relativePath: String,
+        contents: String,
+        expectedError: String,
+        addToIndex: Bool,
+        message: String
+    ) throws {
+        let repository = try createRepositoryAuditSmokeRepository(
+            relativePath: relativePath,
+            contents: contents,
+            addToIndex: addToIndex
+        )
+        defer {
+            try? FileManager.default.removeItem(at: repository)
+        }
+
+        let result = runRepositoryAudit(["--root", repository.path])
+        try expect(result.exitCode == 1, message)
+        try expect(result.error.contains(expectedError), "\(message) with explicit reason")
+    }
+
+    private static func createRepositoryAuditSmokeRepository(
+        relativePath: String,
+        contents: String,
+        addToIndex: Bool
+    ) throws -> URL {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("PerchHARepoAuditSmoke-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try runGit(["init", "-q"], in: directory)
+        let fileURL = directory.appendingPathComponent(relativePath, isDirectory: false)
+        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(contents.utf8).write(to: fileURL)
+        if addToIndex {
+            try runGit(["add", "-f", relativePath], in: directory)
+        }
+        return directory
+    }
+
+    private static func runRepositoryAudit(_ arguments: [String]) -> RepoAuditSmokeResult {
+        var output: [String] = []
+        var errors: [String] = []
+        let exitCode = PerchHARepoAuditCommand.run(
+            arguments: arguments,
+            standardOutput: { output.append($0) },
+            standardError: { errors.append($0) }
+        )
+        return RepoAuditSmokeResult(
+            exitCode: exitCode,
+            output: output.joined(separator: "\n"),
+            error: errors.joined()
+        )
+    }
+
+    private static func runGit(_ arguments: [String], in directory: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git", "-C", directory.path] + arguments
+        let errors = Pipe()
+        process.standardError = errors
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let message = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "git failed"
+            throw SmokeFailure("git \(arguments.joined(separator: " ")) failed: \(message)")
+        }
     }
 
     private static func verifyCoalescing() async throws {
@@ -341,6 +714,226 @@ struct PerchHASmoke {
         }
     }
 
+    private static func verifyHAMirrorServeCLI() async throws {
+        let fixtureDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("perchha-smoke-serve-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: fixtureDirectory)
+        }
+
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(
+                method: "GET",
+                path: "/api/",
+                statusCode: 200,
+                headers: [:],
+                bodyText: #"{"message":"API running."}"#
+            ),
+            states: HAMirrorCapturedEndpoint(
+                method: "GET",
+                path: "/api/states",
+                statusCode: 200,
+                headers: [:],
+                bodyText: #"[{"entity_id":"sensor.entity_001","state":"21.4","attributes":{"friendly_name":"<redacted>","unit_of_measurement":"°C"}}]"#
+            )
+        )
+        _ = try HAMirrorFixtureWriter().write(fixtureSet, to: fixtureDirectory)
+
+        let serveProcess = try launchHAMirrorServe(fixtures: fixtureDirectory, pathPrefix: "/ha")
+        defer {
+            stopProcess(serveProcess.process)
+            try? FileManager.default.removeItem(at: serveProcess.outputURL)
+        }
+
+        let output = try await waitForServeOutput(serveProcess)
+        let restURL = try parseServeURL(label: "REST", output: output)
+        let webSocketURL = try parseServeURL(label: "WebSocket", output: output)
+        try expect(restURL.path == "/ha", "hamirror serve preserves requested path prefix in REST base URL")
+        try expect(webSocketURL.path == "/ha/api/websocket", "hamirror serve preserves requested path prefix in WebSocket URL")
+
+        let states = try await waitForGET(path: "/api/states", baseURL: restURL)
+        try expect(states.status == 200, "hamirror serve replays mirrored states over REST")
+        try expect(states.body.contains("sensor.entity_001"), "hamirror serve returns mirrored state payload")
+
+        let task = URLSession.shared.webSocketTask(with: webSocketURL)
+        task.resume()
+        defer {
+            task.cancel(with: .goingAway, reason: nil)
+        }
+        let authRequired = try await receiveWebSocketString(task)
+        try expect(authRequired == #"{"type":"auth_required","ha_version":"fake-ha"}"#, "hamirror serve replays FakeHA WebSocket auth handshake")
+        try await task.send(.string(#"{"type":"auth","access_token":"fake-token"}"#))
+        let authOK = try await receiveWebSocketString(task)
+        try expect(authOK == #"{"type":"auth_ok","ha_version":"fake-ha"}"#, "hamirror serve accepts configured WebSocket token")
+        try await task.send(.string(#"{"id":5,"type":"config/entity_registry/list_for_display"}"#))
+        let result = try await receiveWebSocketString(task)
+        try expect(result.contains(#""success":true"#), "hamirror serve synthesizes mirrored display-list results when WebSocket evidence is absent")
+        try expect(result.contains(#""ei":"sensor.entity_001""#), "hamirror serve preserves mirrored entity ID in synthesized display-list results")
+        try expect(result.contains(#""en":"<redacted>""#), "hamirror serve preserves sanitized mirrored friendly name in synthesized display-list results")
+    }
+
+    private static func verifyHAMirrorCaptureCLI() async throws {
+        let server = try FakeHARESTServer()
+        server.start()
+        defer {
+            server.stop()
+        }
+
+        let envURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("perchha-smoke-hamirror-\(UUID().uuidString).env", isDirectory: false)
+        let outputDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("Fixtures/private/hamirror-smoke-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: envURL)
+            try? FileManager.default.removeItem(at: outputDirectory)
+        }
+
+        try """
+        url=\(server.baseURL.absoluteString)
+        """.write(to: envURL, atomically: true, encoding: .utf8)
+
+        let executable = try toolExecutable(named: "hamirror")
+        let output = try runHAMirrorProcess(
+            executable: executable,
+            arguments: [
+                "capture",
+                "--output", outputDirectory.path,
+                "--write"
+            ],
+            environment: [
+                HAMirrorEnvironment.environmentFileEnvironmentKey: envURL.path,
+                HAMirrorEnvironment.tokenEnvironmentKey: "fake-token"
+            ]
+        )
+
+        try expect(output.terminationStatus == 0, "hamirror capture CLI writes fixture set successfully (\(output.text))")
+        try expect(output.text.contains("fixture set verified: \(outputDirectory.path)"), "hamirror capture CLI verifies written fixtures")
+        try expect(output.text.contains("fixture output ignored by git: \(outputDirectory.path)"), "hamirror capture CLI verifies ignored private fixture output")
+        for file in ["api.json", "states.json", "manifest.json"] {
+            try expect(FileManager.default.fileExists(atPath: outputDirectory.appendingPathComponent(file).path), "hamirror capture CLI wrote \(file)")
+        }
+    }
+
+    private static func verifyHAMirrorDoctorCLIUsesExportedOverrides() async throws {
+        let server = try FakeHARESTServer()
+        server.start()
+        defer {
+            server.stop()
+        }
+
+        let envURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("perchha-smoke-hamirror-doctor-\(UUID().uuidString).env", isDirectory: false)
+        defer {
+            try? FileManager.default.removeItem(at: envURL)
+        }
+
+        try """
+        url=\(server.baseURL.absoluteString)
+        """.write(to: envURL, atomically: true, encoding: .utf8)
+
+        let executable = try toolExecutable(named: "hamirror")
+        let output = try runHAMirrorProcess(
+            executable: executable,
+            arguments: [
+                "doctor",
+                "--json"
+            ],
+            environment: [
+                HAMirrorEnvironment.environmentFileEnvironmentKey: envURL.path,
+                HAMirrorEnvironment.tokenEnvironmentKey: "fake-token",
+                HAMirrorEnvironment.oauthClientIDEnvironmentKey: "https://perchha.dev/app",
+                HAMirrorEnvironment.oauthRedirectURIEnvironmentKey: "perchha://auth"
+            ]
+        )
+
+        try expect(output.terminationStatus == 0, "hamirror doctor CLI accepts exported override readiness path")
+        let diagnostic = try JSONDecoder().decode(
+            HAMirrorEnvironmentReadinessDiagnostic.self,
+            from: Data(output.text.utf8)
+        )
+        try expect(diagnostic.capture == .ready, "hamirror doctor CLI marks capture ready from exported token override")
+        try expect(diagnostic.oauthCheck == .ready, "hamirror doctor CLI marks oauth check ready from exported overrides")
+        try expect(diagnostic.token == .present, "hamirror doctor CLI reports present token without exposing it")
+        try expect(diagnostic.oauthClientID == .present, "hamirror doctor CLI reports present OAuth client ID override")
+        try expect(diagnostic.oauthRedirectURI == .present, "hamirror doctor CLI reports present OAuth redirect URI override")
+    }
+
+    private static func verifyHAMirrorOAuthCheckReportsMissingConfigurationGuidance() async throws {
+        let server = try FakeHARESTServer()
+        server.start()
+        defer {
+            server.stop()
+        }
+
+        let envURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("perchha-smoke-hamirror-oauth-check-\(UUID().uuidString).env", isDirectory: false)
+        defer {
+            try? FileManager.default.removeItem(at: envURL)
+        }
+
+        try """
+        url=\(server.baseURL.absoluteString)
+        user=owner@example.invalid
+        password=secret-password
+        """.write(to: envURL, atomically: true, encoding: .utf8)
+
+        let executable = try toolExecutable(named: "hamirror")
+        let output = try runHAMirrorProcess(
+            executable: executable,
+            arguments: [
+                "oauth-check",
+                "--env", envURL.path
+            ],
+            environment: [:]
+        )
+
+        try expect(output.terminationStatus != 0, "hamirror oauth-check CLI fails when OAuth config is missing")
+        try expect(
+            output.text.contains("OAuth client website check is not ready"),
+            "hamirror oauth-check CLI reports OAuth-specific readiness failure"
+        )
+        try expect(
+            output.text.contains("PERCHHA_OAUTH_CLIENT_ID and PERCHHA_OAUTH_REDIRECT_URI"),
+            "hamirror oauth-check CLI explains required OAuth configuration"
+        )
+        try expect(
+            output.text.contains("hamirror oauth-check --env \(envURL.path)"),
+            "hamirror oauth-check CLI suggests the rerun command with the explicit env path"
+        )
+        try expect(!output.text.contains("secret-password"), "hamirror oauth-check CLI does not leak environment secrets")
+        try expect(!output.text.contains("owner@example.invalid"), "hamirror oauth-check CLI keeps credential hints redacted")
+    }
+
+    private static func runHAMirrorProcess(
+        executable: URL,
+        arguments: [String],
+        environment: [String: String]
+    ) throws -> (terminationStatus: Int32, text: String) {
+        try runProcess(
+            executable: executable,
+            arguments: arguments,
+            environment: environment
+        )
+    }
+
+    private static func runProcess(
+        executable: URL,
+        arguments: [String],
+        environment: [String: String]
+    ) throws -> (terminationStatus: Int32, text: String) {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+        let text = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return (process.terminationStatus, text)
+    }
+
     private static func verifyFakeHAConcurrentStartup() throws {
         var restServers: [FakeHARESTServer] = []
         var webSocketServers: [FakeHAWebSocketServer] = []
@@ -368,6 +961,215 @@ struct PerchHASmoke {
         try expect(restPorts.count == restServers.count, "FakeHA REST servers start on distinct ports")
         try expect(webSocketPorts.count == webSocketServers.count, "FakeHA WebSocket servers start on distinct ports")
         try expect(restPorts.isDisjoint(with: webSocketPorts), "FakeHA REST and WebSocket ports do not collide")
+    }
+
+    private static func launchHAMirrorServe(fixtures: URL, pathPrefix: String) throws -> ServeProcessHandle {
+        let executable = try toolExecutable(named: "hamirror")
+
+        let outputURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("perchha-smoke-serve-log-\(UUID().uuidString).txt", isDirectory: false)
+        FileManager.default.createFile(atPath: outputURL.path, contents: Data())
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [
+            "-c",
+            [
+                shellQuoted(executable.path),
+                "serve",
+                "--fixtures", shellQuoted(fixtures.path),
+                "--token", "fake-token",
+                "--path-prefix", shellQuoted(pathPrefix),
+                ">", shellQuoted(outputURL.path),
+                "2>&1"
+            ].joined(separator: " ")
+        ]
+        try process.run()
+        return ServeProcessHandle(process: process, outputURL: outputURL)
+    }
+
+    private static func stopProcess(_ process: Process) {
+        guard process.isRunning else {
+            return
+        }
+        process.terminate()
+        process.waitUntilExit()
+    }
+
+    private static func launchStaticFileServer(
+        directory: URL,
+        port: UInt16,
+        logURL: URL
+    ) throws -> Process {
+        FileManager.default.createFile(atPath: logURL.path, contents: Data())
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [
+            "-c",
+            [
+                shellQuoted("/usr/bin/python3"),
+                "-m", "http.server",
+                String(port),
+                "--bind", "127.0.0.1",
+                "--directory", shellQuoted(directory.path),
+                ">", shellQuoted(logURL.path),
+                "2>&1"
+            ].joined(separator: " ")
+        ]
+        try process.run()
+        return process
+    }
+
+    private static func waitForServeOutput(_ handle: ServeProcessHandle) async throws -> String {
+        for _ in 0..<150 {
+            let output = (try? String(contentsOf: handle.outputURL, encoding: .utf8)) ?? ""
+            if output.contains("- REST: http://") && output.contains("- WebSocket: ws://") {
+                return output
+            }
+            if !handle.process.isRunning, !output.isEmpty {
+                throw SmokeFailure("hamirror serve exited before announcing URLs: \(output.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        throw SmokeFailure("hamirror serve reports REST and WebSocket URLs")
+    }
+
+    private static func waitForStaticFileServer(
+        url: URL,
+        process: Process,
+        logURL: URL
+    ) async throws {
+        for _ in 0..<150 {
+            let response = try? await URLSession.shared.data(from: url)
+            if let response,
+               let http = response.1 as? HTTPURLResponse,
+               (200...299).contains(http.statusCode) {
+                return
+            }
+            if !process.isRunning {
+                let output = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
+                throw SmokeFailure("static file server exited before serving OAuth site: \(output.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        throw SmokeFailure("static file server serves published OAuth client website")
+    }
+
+    private static func availableLoopbackPort() throws -> UInt16 {
+        let socketDescriptor = socket(AF_INET, SOCK_STREAM, 0)
+        guard socketDescriptor >= 0 else {
+            throw SmokeFailure("failed to allocate loopback socket")
+        }
+        defer {
+            Darwin.close(socketDescriptor)
+        }
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.stride)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(0).bigEndian
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+
+        let bindResult = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(socketDescriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.stride))
+            }
+        }
+        guard bindResult == 0 else {
+            throw SmokeFailure("failed to bind loopback socket")
+        }
+
+        var boundAddress = sockaddr_in()
+        var boundLength = socklen_t(MemoryLayout<sockaddr_in>.stride)
+        let nameResult = withUnsafeMutablePointer(to: &boundAddress) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.getsockname(socketDescriptor, $0, &boundLength)
+            }
+        }
+        guard nameResult == 0 else {
+            throw SmokeFailure("failed to read loopback socket port")
+        }
+        return UInt16(bigEndian: boundAddress.sin_port)
+    }
+
+    private static func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+
+    private static func toolExecutable(named name: String) throws -> URL {
+        let currentDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let sibling = URL(fileURLWithPath: CommandLine.arguments[0])
+            .deletingLastPathComponent()
+            .appendingPathComponent(name, isDirectory: false)
+        let candidates = [
+            currentDirectory.appendingPathComponent(".build/debug/\(name)", isDirectory: false),
+            currentDirectory.appendingPathComponent(".build/arm64-apple-macosx/debug/\(name)", isDirectory: false),
+            sibling
+        ]
+        for candidate in candidates where FileManager.default.isExecutableFile(atPath: candidate.path) {
+            return candidate
+        }
+        let buildDirectory = currentDirectory.appendingPathComponent(".build", isDirectory: true)
+        if let enumerator = FileManager.default.enumerator(at: buildDirectory, includingPropertiesForKeys: nil) {
+            for case let url as URL in enumerator where url.lastPathComponent == name {
+                if FileManager.default.isExecutableFile(atPath: url.path) {
+                    return url
+                }
+            }
+        }
+        throw SmokeFailure("\(name) executable is not available in .build")
+    }
+
+    private static func parseServeURL(label: String, output: String) throws -> URL {
+        let prefix = "- \(label): "
+        guard let line = output.split(separator: "\n").map(String.init).first(where: { $0.hasPrefix(prefix) }) else {
+            throw SmokeFailure("hamirror serve did not print \(label) URL")
+        }
+        guard let url = URL(string: String(line.dropFirst(prefix.count))) else {
+            throw SmokeFailure("hamirror serve printed invalid \(label) URL")
+        }
+        return url
+    }
+
+    private static func get(path: String, baseURL: URL) async throws -> (status: Int, body: String) {
+        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+        components?.path = appendingPath(path, to: baseURL.path)
+        let url = components?.url ?? baseURL
+        var request = URLRequest(url: url)
+        request.setValue("Bearer fake-token", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw SmokeFailure("hamirror serve returned a non-HTTP response")
+        }
+        return (http.statusCode, String(data: data, encoding: .utf8) ?? "")
+    }
+
+    private static func waitForGET(path: String, baseURL: URL) async throws -> (status: Int, body: String) {
+        for _ in 0..<150 {
+            do {
+                return try await get(path: path, baseURL: baseURL)
+            } catch {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+        }
+        return try await get(path: path, baseURL: baseURL)
+    }
+
+    private static func receiveWebSocketString(_ task: URLSessionWebSocketTask) async throws -> String {
+        switch try await task.receive() {
+        case let .string(text):
+            return text
+        case let .data(data):
+            return String(data: data, encoding: .utf8) ?? ""
+        @unknown default:
+            throw SmokeFailure("hamirror serve returned an unknown WebSocket message")
+        }
+    }
+
+    private static func appendingPath(_ path: String, to basePath: String) -> String {
+        let normalizedBase = basePath == "/" ? "" : basePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let prefix = normalizedBase.isEmpty ? "" : "/\(normalizedBase)"
+        return "\(prefix)\(path)"
     }
 
     private static func verifyFakeHACoalescedWebSocketReads() throws {
@@ -492,6 +1294,38 @@ struct PerchHASmoke {
         try expect(entries.contains { $0.path.hasPrefix("/api/history/period/") }, "HA client hits history path")
         try expect(entries.contains { $0.path.contains("filter_entity_id=sensor.office_temperature") }, "HA client filters history entity")
         try expect(entries.allSatisfy { $0.headers["authorization"] == "<redacted>" }, "HA client requests are journaled redacted")
+
+        let tlsIdentity = try FakeHASelfSignedIdentity()
+        let tlsServer = try FakeHARESTServer(
+            fixtures: FakeHAFixtures(
+                apiBody: #"{"message":"API running."}"#,
+                statesBody: #"[]"#
+            ),
+            tlsIdentity: tlsIdentity.identity
+        )
+        tlsServer.start()
+        defer {
+            tlsServer.stop()
+        }
+        let strictTLSInput = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: tlsServer.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+        let allowedTLSInput = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: tlsServer.baseURL, fallbackURL: nil),
+            token: "fake-token",
+            serverTrustPolicy: HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["127.0.0.1"])
+        )
+        let strictTLSResult = await client.checkRESTConnection(strictTLSInput)
+        let allowedTLSResult = await client.checkRESTConnection(allowedTLSInput)
+        try expect(
+            strictTLSResult == .failure(.tlsRejected(host: "127.0.0.1")),
+            "HA client rejects self-signed REST by default"
+        )
+        try expect(
+            allowedTLSResult == .success(HARESTCheck(message: "API running.")),
+            "HA client accepts explicitly allowed self-signed REST host: \(String(describing: allowedTLSResult))"
+        )
     }
 
     private static func verifyHAWebSocketContract() async throws {
@@ -668,19 +1502,19 @@ struct PerchHASmoke {
                 && paths.contains { $0.hasPrefix("/api/history/period/") }
         }
 
-        let transportFallbackServer = try FakeHAWebSocketServer(
+        let transportFailureServer = try FakeHAWebSocketServer(
             fixtures: fallbackHistoryFixtures,
-            mode: .unavailableCommands(["recorder/statistics_during_period"], code: .unknownCommand)
+            mode: .disconnectOnCommands(["recorder/statistics_during_period"])
         )
-        transportFallbackServer.start()
+        transportFailureServer.start()
         defer {
-            transportFallbackServer.stop()
+            transportFailureServer.stop()
         }
-        let transportFallback = await client.history(
+        let transportFailureFallback = await client.history(
             HAConnectionInput(
                 endpoint: HAEndpoint(
-                    primaryURL: URL(string: "http://127.0.0.1:1")!,
-                    fallbackURL: transportFallbackServer.baseURL
+                    primaryURL: transportFailureServer.baseURL,
+                    fallbackURL: nil
                 ),
                 token: "fake-token"
             ),
@@ -689,11 +1523,11 @@ struct PerchHASmoke {
             end: try historyDate("2026-06-27T12:00:00+00:00")
         )
         try expect(
-            transportFallback == .success(expectedFallbackHistory),
-            "HA client falls back to REST fallback URL after recorder statistics transport failure"
+            transportFailureFallback == .success(expectedFallbackHistory),
+            "HA client falls back to REST after recorder statistics transport failure"
         )
         try await spinUntil("FakeHA journals transport recorder statistics fallback") {
-            let paths = await transportFallbackServer.journal.snapshot().map(\.path)
+            let paths = await transportFailureServer.journal.snapshot().map(\.path)
             return paths.contains("/api/websocket/recorder/statistics_during_period")
                 && paths.contains { $0.hasPrefix("/api/history/period/") }
         }
@@ -942,6 +1776,32 @@ struct PerchHASmoke {
             HAConnectionInput(endpoint: input.endpoint, token: "wrong-token")
         )
         try expect(badAuth == .failure(.authentication), "HA client WebSocket auth failure is typed")
+
+        let tlsIdentity = try FakeHASelfSignedIdentity()
+        let tlsServer = try FakeHAWebSocketServer(tlsIdentity: tlsIdentity.identity)
+        tlsServer.start()
+        defer {
+            tlsServer.stop()
+        }
+        let strictTLSInput = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: tlsServer.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+        let allowedTLSInput = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: tlsServer.baseURL, fallbackURL: nil),
+            token: "fake-token",
+            serverTrustPolicy: HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["127.0.0.1"])
+        )
+        let strictTLSWebSocketResult = await client.checkWebSocketConnection(strictTLSInput)
+        let allowedTLSWebSocketResult = await client.checkWebSocketConnection(allowedTLSInput)
+        try expect(
+            strictTLSWebSocketResult == .failure(.tlsRejected(host: "127.0.0.1")),
+            "HA client rejects self-signed WebSocket by default: \(String(describing: strictTLSWebSocketResult))"
+        )
+        try expect(
+            allowedTLSWebSocketResult == .success(HAWebSocketCheck(haVersion: "fake-ha")),
+            "HA client accepts explicitly allowed self-signed WebSocket host: \(String(describing: allowedTLSWebSocketResult))"
+        )
     }
 
     private static func verifyDiscoveryAndPersistence() async throws {
@@ -1105,7 +1965,10 @@ struct PerchHASmoke {
                 }
                 let input = HAConnectionInput(
                     endpoint: HAEndpoint(primaryURL: primaryURL, fallbackURL: form.fallbackURL()),
-                    token: form.trimmedToken
+                    token: form.trimmedToken,
+                    serverTrustPolicy: HAServerTrustPolicy(
+                        allowedSelfSignedCertificateHosts: form.selfSignedCertificateHosts()
+                    )
                 )
                 switch await client.discovery(input) {
                 case let .success(snapshot):
@@ -1120,7 +1983,10 @@ struct PerchHASmoke {
                 }
                 let input = HAConnectionInput(
                     endpoint: HAEndpoint(primaryURL: primaryURL, fallbackURL: form.fallbackURL()),
-                    token: form.trimmedToken
+                    token: form.trimmedToken,
+                    serverTrustPolicy: HAServerTrustPolicy(
+                        allowedSelfSignedCertificateHosts: form.selfSignedCertificateHosts()
+                    )
                 )
                 switch await client.services(input) {
                 case let .success(metadata):
@@ -1291,6 +2157,26 @@ struct PerchHASmoke {
         await fallback.connect()
         let fallbackURLString = await recorder.fallbackURLString()
         try expect(fallbackURLString == "http://127.0.0.1:8124", "panel model forwards valid fallback URL")
+
+        let certificateRecorder = ConnectionFormRecorder()
+        let certificate = PerchHAPanelModel { form in
+            await certificateRecorder.record(form)
+            return .success(rooms: [])
+        }
+        certificate.updateConnectionForm(
+            urlString: "https://homeassistant.local:8123",
+            fallbackURLString: "https://fallback.example",
+            token: "secret-token",
+            allowsSelfSignedCertificates: true
+        )
+        await certificate.connect()
+        try expect(certificate.snapshot.connectionForm.token.isEmpty, "panel model keeps certificate-form token private")
+        try expect(certificate.snapshot.connectionForm.allowsSelfSignedCertificates, "panel model keeps certificate opt-in visible")
+        let selfSignedHosts = await certificateRecorder.selfSignedCertificateHosts()
+        try expect(
+            selfSignedHosts == ["fallback.example", "homeassistant.local"],
+            "panel model forwards self-signed certificate hosts"
+        )
 
         let historyClock = TestPerchClock()
         let historyProbe = HistoryProviderProbe(
@@ -1644,6 +2530,7 @@ struct PerchHASmoke {
         defer {
             controlServer.stop()
         }
+        let protectedStore = InMemoryProtectedActionValueStore()
         let controls = PerchHAPanelModel(
             connector: { _ in .success(rooms: controlRooms) },
             actionRunner: { form, action in
@@ -1660,7 +2547,8 @@ struct PerchHASmoke {
                 case let .failure(failure):
                     return .failed(failure.description)
                 }
-            }
+            },
+            protectedActionValueStore: protectedStore
         )
         controls.updateConnectionForm(urlString: controlServer.baseURL.absoluteString, token: "fake-token")
         await controls.connect()
@@ -1713,7 +2601,17 @@ struct PerchHASmoke {
                 targetEntityID: "script.air_cleaner_boost",
                 serviceData: [
                     "mode": "boost",
-                    "duration": 15
+                    "duration": 15,
+                    "payload": .object([
+                        "steps": .array([
+                            .object([
+                                "service": "fan.set_preset_mode",
+                                "data": .object([
+                                    "preset_mode": "boost"
+                                ])
+                            ])
+                        ])
+                    ])
                 ]
             )
         )
@@ -1728,9 +2626,84 @@ struct PerchHASmoke {
         try expect(customActionServiceEntry?.bodyText?.contains(#""entity_id":"script.air_cleaner_boost""#) == true, "panel custom action targets configured entity")
         try expect(customActionServiceEntry?.bodyText?.contains(#""mode":"boost""#) == true, "panel custom action preserves string payload")
         try expect(customActionServiceEntry?.bodyText?.contains(#""duration":15"#) == true, "panel custom action preserves numeric payload")
+        let nestedService = try jsonString(
+            customActionServiceEntry?.bodyText,
+            path: ["service_data", "payload", "steps", 0, "service"]
+        )
+        let nestedPresetMode = try jsonString(
+            customActionServiceEntry?.bodyText,
+            path: ["service_data", "payload", "steps", 0, "data", "preset_mode"]
+        )
+        try expect(
+            nestedService == "fan.set_preset_mode",
+            "panel custom action preserves nested array service"
+        )
+        try expect(
+            nestedPresetMode == "boost",
+            "panel custom action preserves nested object payload"
+        )
         try expect(
             controls.snapshot.availableRooms.flatMap(\.entities).first { $0.id == "sensor.office_temperature" }?.state == "21.4",
             "panel custom action does not mutate sensor state"
+        )
+        let protectedActionRecorder = ActionInvocationRecorder()
+        let protectedControls = PerchHAPanelModel(
+            connector: { _ in .success(rooms: controlRooms) },
+            actionRunner: { _, action in
+                await protectedActionRecorder.record(action)
+                return .success
+            },
+            protectedActionValueStore: protectedStore
+        )
+        protectedControls.updateConnectionForm(urlString: controlServer.baseURL.absoluteString, token: "fake-token")
+        await protectedControls.connect()
+        let protectedCustomAction = EntityCustomAction(
+            id: "arm-alarm",
+            entityID: "sensor.office_temperature",
+            title: "Arm alarm",
+            action: ActionSpec(
+                domain: "alarm_control_panel",
+                service: "alarm_arm_home",
+                targetEntityID: "alarm_control_panel.home",
+                serviceData: [
+                    "pin": "1234",
+                    "payload": .object([
+                        "code": "2468",
+                        "profile": "night"
+                    ])
+                ]
+            ),
+            requiresConfirmation: true
+        )
+        try expect(protectedControls.setCustomAction(protectedCustomAction), "panel custom action stores protected payload fields in Keychain")
+        guard let storedProtectedAction = protectedControls.customAction(id: protectedCustomAction.id),
+              case let .protectedString(pinReference) = storedProtectedAction.action.serviceData["pin"],
+              case let .object(protectedPayload) = storedProtectedAction.action.serviceData["payload"],
+              case let .protectedString(codeReference) = protectedPayload["code"] else {
+            throw SmokeFailure("panel custom action did not persist protected payload references")
+        }
+        let storedPin = try protectedStore.load(pinReference)
+        let storedCode = try protectedStore.load(codeReference)
+        try expect(storedPin == "1234", "panel custom action stores root protected value outside JSON config")
+        try expect(storedCode == "2468", "panel custom action stores nested protected value outside JSON config")
+        let protectedConfigurationText = String(data: try JSONEncoder().encode(protectedControls.customActionConfiguration), encoding: .utf8)
+        try expect(protectedConfigurationText?.contains("1234") == false, "panel custom action config omits root secret bytes")
+        try expect(protectedConfigurationText?.contains("2468") == false, "panel custom action config omits nested secret bytes")
+        let protectedCustomActionSucceeded = await protectedControls.runCustomAction(protectedCustomAction.id, confirmed: true)
+        try expect(protectedCustomActionSucceeded, "panel protected custom action resolves secrets before execution")
+        let resolvedProtectedAction = await protectedActionRecorder.lastAction()
+        try expect(resolvedProtectedAction?.domain == "alarm_control_panel", "panel protected custom action sends configured domain")
+        try expect(resolvedProtectedAction?.service == "alarm_arm_home", "panel protected custom action sends configured service")
+        try expect(resolvedProtectedAction?.targetEntityID == "alarm_control_panel.home", "panel protected custom action targets configured entity")
+        try expect(resolvedProtectedAction?.serviceData["pin"] == "1234", "panel protected custom action resolves root protected values into the live payload")
+        guard case let .object(resolvedProtectedPayload)? = resolvedProtectedAction?.serviceData["payload"] else {
+            throw SmokeFailure("panel protected custom action preserves nested payload object")
+        }
+        try expect(resolvedProtectedPayload["code"] == "2468", "panel protected custom action resolves nested protected values into the live payload")
+        try expect(resolvedProtectedPayload["profile"] == "night", "panel protected custom action preserves non-secret nested payload values")
+        try expect(
+            protectedControls.snapshot.availableRooms.flatMap(\.entities).first { $0.id == "sensor.office_temperature" }?.state == "21.4",
+            "panel protected custom action does not mutate sensor state"
         )
 
         let failingControl = PerchHAPanelModel(
@@ -1877,6 +2850,520 @@ struct PerchHASmoke {
         try expect(panel.contentViewController != nil, "app shell hosts SwiftUI content")
         try expect(Int(frameSize.width.rounded()) == 360, "app shell panel frame width is stable")
         try expect(Int(frameSize.height.rounded()) >= 420, "app shell panel frame height fits first-run content")
+
+        panel.makeKeyAndOrderFront(nil)
+        drainMainRunLoop()
+        panel.contentView?.layoutSubtreeIfNeeded()
+        let textFields = nativeTextFields(in: panel.contentView)
+        let focusDebug = nativeControlDebugSummary(in: panel.contentView)
+        let urlField = textFields.first { $0.placeholderString == "Home Assistant URL" }
+        let tokenField = textFields.first { $0.placeholderString == "Access token" }
+        try expect(urlField != nil, "app shell panel exposes native Home Assistant URL field (\(focusDebug))")
+        try expect(tokenField != nil, "app shell panel exposes native token field (\(focusDebug))")
+
+        if let urlField {
+            try expect(panel.makeFirstResponder(urlField), "app shell panel accepts native URL field focus")
+            let firstResponder = panel.firstResponder as AnyObject?
+            try expect(firstResponder === urlField.currentEditor() || firstResponder === urlField, "app shell panel installs the URL field as first responder")
+            guard let next = urlField.nextValidKeyView else {
+                throw SmokeFailure("app shell panel URL field has no next valid key view")
+            }
+            try expect(next !== urlField, "app shell panel native key view loop advances from URL field")
+        }
+        if let tokenField {
+            try expect(tokenField.acceptsFirstResponder, "app shell panel token field is natively focusable")
+        }
+    }
+
+    @MainActor
+    private static func verifySettingsCustomActionEditorTextFieldFocusPath() async throws {
+        _ = NSApplication.shared
+        let model = try await panelSnapshotModel(for: .customActionEditorLight)
+        let panel = PerchHAApplication.makePanel(model: model)
+        defer {
+            panel.orderOut(nil)
+            panel.contentViewController = nil
+        }
+
+        panel.makeKeyAndOrderFront(nil)
+        drainMainRunLoop()
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        let textFields = nativeTextFields(in: panel.contentView)
+        let popUpButtons = nativePopUpButtons(in: panel.contentView)
+        let focusDebug = nativeControlDebugSummary(in: panel.contentView)
+        let titleField = textFields.first { $0.placeholderString == "Title" }
+        let targetField = textFields.first { $0.placeholderString == "Target entity" }
+        let keyField = textFields.first { $0.placeholderString == "Key" }
+        let valueField = textFields.first { $0.placeholderString == "Value" }
+
+        try expect(titleField != nil, "settings custom-action editor exposes a native title field (\(focusDebug))")
+        try expect(targetField != nil, "settings custom-action editor exposes a native target field (\(focusDebug))")
+        try expect(keyField != nil, "settings custom-action editor exposes a native service-data key field (\(focusDebug))")
+        try expect(valueField != nil, "settings custom-action editor exposes a native service-data value field (\(focusDebug))")
+        let selectedPopupTitles = Set(popUpButtons.compactMap(\.titleOfSelectedItem))
+        try expect(selectedPopupTitles.contains("script"), "settings custom-action editor exposes native domain picker selection (\(focusDebug))")
+        try expect(selectedPopupTitles.contains("turn_on"), "settings custom-action editor exposes native service picker selection (\(focusDebug))")
+        try expect(selectedPopupTitles.contains("Object"), "settings custom-action editor exposes native object type picker selection (\(focusDebug))")
+        try expect(selectedPopupTitles.contains("List"), "settings custom-action editor exposes native list type picker selection (\(focusDebug))")
+        if let titleField {
+            try expect(panel.makeFirstResponder(titleField), "settings custom-action editor accepts native title focus")
+            let firstResponder = panel.firstResponder as AnyObject?
+            try expect(firstResponder === titleField.currentEditor() || firstResponder === titleField, "settings custom-action editor installs the title field as first responder")
+            let keyViewLabels = nativeKeyViewLoopLabels(startingAt: titleField)
+            let keyViewSummary = keyViewLabels.joined(separator: " -> ")
+            let targetIndex = keyViewLabels.firstIndex(where: { $0.contains("placeholder:Target entity") })
+            let keyIndex = keyViewLabels.firstIndex(where: { $0.contains("placeholder:Key") })
+            let valueIndex = keyViewLabels.firstIndex(where: { $0.contains("placeholder:Value") })
+            try expect(targetIndex != nil, "settings custom-action editor key view path reaches the target entity field (\(keyViewSummary))")
+            try expect(keyIndex != nil, "settings custom-action editor key view path reaches a service-data key field (\(keyViewSummary))")
+            try expect(valueIndex != nil, "settings custom-action editor key view path reaches a service-data value field (\(keyViewSummary))")
+            if let targetIndex, let keyIndex, let valueIndex {
+                try expect(targetIndex > 0, "settings custom-action editor target field follows the title field (\(keyViewSummary))")
+                try expect(keyIndex > targetIndex, "settings custom-action editor service-data key field follows the target field (\(keyViewSummary))")
+                try expect(valueIndex > keyIndex, "settings custom-action editor service-data value field follows the service-data key field (\(keyViewSummary))")
+            }
+        }
+    }
+
+    @MainActor
+    private static func verifySettingsCustomActionEditorNativeMutation() async throws {
+        _ = NSApplication.shared
+        let protectedStore = InMemoryProtectedActionValueStore()
+        try protectedStore.save("1234", for: "snapshot-boost-air-pin")
+        let snapshot = SmokePanelSnapshotVariant.customActionEditorLight.snapshot
+        let model = PerchHAPanelModel(
+            snapshot: snapshot,
+            selectionConfiguration: snapshot.selectionConfiguration,
+            menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
+            customActionConfiguration: SmokePanelSnapshotVariant.customActionEditorLight.customActionConfiguration,
+            protectedActionValueStore: protectedStore
+        )
+        let panel = PerchHAApplication.makePanel(model: model)
+        defer {
+            panel.orderOut(nil)
+            panel.contentViewController = nil
+        }
+
+        panel.makeKeyAndOrderFront(nil)
+        drainMainRunLoop()
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        let textFields = nativeTextFields(in: panel.contentView)
+        let focusDebug = nativeControlDebugSummary(in: panel.contentView)
+        guard let titleField = textFields.first(where: { $0.placeholderString == "Title" && $0.stringValue == "Boost air" }) else {
+            throw SmokeFailure("settings custom-action editor title field is missing for mutation (\(focusDebug))")
+        }
+        guard let targetField = textFields.first(where: { $0.placeholderString == "Target entity" && $0.stringValue == "script.air_cleaner_boost" }) else {
+            throw SmokeFailure("settings custom-action editor target field is missing for mutation (\(focusDebug))")
+        }
+        guard let nestedValueField = textFields.first(where: { $0.placeholderString == "Value" && $0.stringValue == "purifier" }) else {
+            throw SmokeFailure("settings custom-action editor nested value field is missing for mutation (\(focusDebug))")
+        }
+        try setNativeTextFieldValue("Boost harder", for: titleField, in: panel)
+        try setNativeTextFieldValue("script.air_cleaner_quiet", for: targetField, in: panel)
+        try setNativeTextFieldValue("boost", for: nestedValueField, in: panel)
+
+        guard let action = model.customActionConfiguration.action(id: "snapshot-boost-air") else {
+            throw SmokeFailure("settings custom-action editor lost the seeded custom action")
+        }
+        try expect(action.title == "Boost harder", "settings custom-action editor commits title edits through native text fields")
+        try expect(action.action.targetEntityID == "script.air_cleaner_quiet", "settings custom-action editor commits target edits through native text fields")
+        guard case let .protectedString(reference) = action.action.serviceData["pin"] else {
+            throw SmokeFailure("settings custom-action editor did not preserve protected value reference")
+        }
+        let storedProtectedValue = try protectedStore.load(reference)
+        try expect(storedProtectedValue == "1234", "settings custom-action editor preserves protected values outside JSON config")
+        try expect(
+            action.action.serviceData == [
+                "variables": .object([
+                    "steps": .array(["fan", "boost"])
+                ]),
+                "pin": .protectedString(reference)
+            ],
+            "settings custom-action editor commits nested service-data edits through native text fields"
+        )
+        let encoded = try JSONEncoder().encode(model.customActionConfiguration)
+        let text = String(decoding: encoded, as: UTF8.self)
+        try expect(!text.contains("1234"), "settings custom-action editor keeps protected values out of JSON config")
+        try expect(!focusDebug.contains("1234"), "settings custom-action editor does not leak protected values through visible native control text")
+    }
+
+    @MainActor
+    private static func verifySettingsCustomActionEditorNativePopupMutation() async throws {
+        _ = NSApplication.shared
+        let protectedStore = InMemoryProtectedActionValueStore()
+        try protectedStore.save("1234", for: "snapshot-boost-air-pin")
+        let rooms = [
+            Room(
+                id: "office",
+                name: "Office",
+                entities: [
+                    DiscoveredEntity(
+                        id: "sensor.office_humidity",
+                        name: "Office humidity",
+                        state: "44",
+                        unit: "%",
+                        areaID: nil,
+                        deviceID: nil
+                    )
+                ]
+            )
+        ]
+        let snapshot = PerchHAPanelSnapshot(
+            connectionState: .connected,
+            phase: .connectedData,
+            rooms: rooms,
+            availableRooms: rooms,
+            selectionQuery: "humidity",
+            isSettingsPresented: true,
+            lastUpdateDescription: "Snapshot ready",
+            canRetry: true,
+            serviceMetadata: [
+                HAServiceMetadata(
+                    domain: "script",
+                    service: "turn_on",
+                    name: "Turn on",
+                    description: nil,
+                    fields: [
+                        HAServiceFieldMetadata(
+                            key: "variables",
+                            name: "Variables",
+                            description: nil,
+                            required: false,
+                            example: .object([
+                                "steps": .array(["fan", "purifier"])
+                            ]),
+                            selector: .object(["object": .object([:])])
+                        ),
+                        HAServiceFieldMetadata(
+                            key: "pin",
+                            name: "PIN",
+                            description: "Alarm code",
+                            required: false,
+                            example: "1234",
+                            selector: .object(["text": .object([:])])
+                        )
+                    ]
+                ),
+                HAServiceMetadata(
+                    domain: "script",
+                    service: "turn_off",
+                    name: "Turn off",
+                    description: nil,
+                    fields: [
+                        HAServiceFieldMetadata(
+                            key: "transition",
+                            name: "Transition",
+                            description: nil,
+                            required: false,
+                            example: 3,
+                            selector: .object(["number": .object(["min": 0])])
+                        )
+                    ]
+                )
+            ]
+        )
+        let model = PerchHAPanelModel(
+            snapshot: snapshot,
+            selectionConfiguration: snapshot.selectionConfiguration,
+            menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
+            customActionConfiguration: CustomActionConfiguration(actions: [
+                EntityCustomAction(
+                    id: "snapshot-boost-air",
+                    entityID: "sensor.office_humidity",
+                    title: "Boost air",
+                    action: ActionSpec(
+                        domain: "script",
+                        service: "turn_on",
+                        targetEntityID: "script.air_cleaner_boost",
+                        serviceData: [
+                            "variables": .object([
+                                "steps": .array(["fan", "purifier"])
+                            ]),
+                            "pin": .protectedString("snapshot-boost-air-pin")
+                        ]
+                    ),
+                    requiresConfirmation: true
+                )
+            ]),
+            protectedActionValueStore: protectedStore
+        )
+        let panel = PerchHAApplication.makePanel(model: model)
+        defer {
+            panel.orderOut(nil)
+            panel.contentViewController = nil
+        }
+
+        panel.makeKeyAndOrderFront(nil)
+        drainMainRunLoop()
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        let popUpButtons = nativePopUpButtons(in: panel.contentView)
+        let focusDebug = nativeControlDebugSummary(in: panel.contentView)
+        guard popUpButtons.contains(where: { $0.titleOfSelectedItem == "turn_on" }) else {
+            throw SmokeFailure("settings custom-action editor service popup is missing for mutation (\(focusDebug))")
+        }
+        guard popUpButtons.contains(where: { $0.titleOfSelectedItem == "List" }) else {
+            throw SmokeFailure("settings custom-action editor nested type popup is missing for mutation (\(focusDebug))")
+        }
+
+        try expect(
+            model.setCustomActionService("snapshot-boost-air", domain: "script", service: "turn_off"),
+            "settings custom-action editor applies service metadata mutation in CLT smoke"
+        )
+        try expect(
+            model.setCustomActionServiceDataType(
+                "snapshot-boost-air",
+                path: [.key("variables"), .key("steps")],
+                kind: .string
+            ),
+            "settings custom-action editor applies type mutation in CLT smoke"
+        )
+
+        guard let action = model.customActionConfiguration.action(id: "snapshot-boost-air") else {
+            throw SmokeFailure("settings custom-action editor lost the seeded custom action after popup mutation")
+        }
+        try expect(
+            action.action.service == "turn_off",
+            "settings custom-action editor commits service metadata mutation through the panel model: \(action.action.service)"
+        )
+        guard case let .protectedString(reference) = action.action.serviceData["pin"] else {
+            throw SmokeFailure("settings custom-action editor preserves protected value references through popup mutation")
+        }
+        guard case let .object(variables) = action.action.serviceData["variables"] else {
+            throw SmokeFailure("settings custom-action editor preserves variables object through popup mutation")
+        }
+        try expect(
+            variables["steps"] == "",
+            "settings custom-action editor commits nested type mutation through the panel model: \(String(describing: variables["steps"]))"
+        )
+        try expect(
+            action.action.serviceData["transition"] == 3,
+            "settings custom-action editor applies new metadata defaults after the service change: \(String(describing: action.action.serviceData["transition"]))"
+        )
+        try expect(
+            action.action.serviceData["pin"] == .protectedString(reference),
+            "settings custom-action editor keeps protected references through popup mutation: \(String(describing: action.action.serviceData["pin"]))"
+        )
+    }
+
+    @MainActor
+    private static func verifyBuiltInControlsPanelFactory() async throws {
+        _ = NSApplication.shared
+        let model = try await panelSnapshotModel(for: .builtInControlsLight)
+        let panel = PerchHAApplication.makePanel(model: model)
+        defer {
+            panel.orderOut(nil)
+            panel.contentViewController = nil
+        }
+
+        panel.makeKeyAndOrderFront(nil)
+        drainMainRunLoop()
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        let switches = nativeSwitches(in: panel.contentView)
+        let sliders = nativeSliders(in: panel.contentView)
+        let buttons = nativeButtons(in: panel.contentView)
+        let focusDebug = nativeControlDebugSummary(in: panel.contentView)
+        let controlSwitch = switches.first
+        let coverSlider = sliders.first
+        let coverButtons = buttons.filter { String(describing: type(of: $0)).contains("SwiftUIAppKitButton") }
+
+        try expect(switches.count == 1, "built-in controls panel exposes exactly one native switch in the built-in controls state (\(focusDebug))")
+        try expect(sliders.count == 1, "built-in controls panel exposes exactly one native slider in the built-in controls state (\(focusDebug))")
+        try expect(coverButtons.count >= 3, "built-in controls panel exposes native cover buttons in the built-in controls state (\(focusDebug))")
+        try expect(
+            controlSwitch.map { String(describing: type(of: $0)).contains("PlatformSwitch") } == true,
+            "built-in controls panel uses the native switch control class for toggle rows (\(focusDebug))"
+        )
+        try expect(
+            coverSlider.map { String(describing: type(of: $0)).contains("CustomMarkedSlider") } == true,
+            "built-in controls panel uses the marked native slider class for cover position (\(focusDebug))"
+        )
+        if let controlSwitch {
+            try expect(controlSwitch.acceptsFirstResponder, "built-in controls native switch can accept focus (\(focusDebug))")
+            try expect(panel.makeFirstResponder(controlSwitch), "built-in controls panel accepts built-in switch focus")
+            let firstResponder = panel.firstResponder as AnyObject?
+            try expect(firstResponder === controlSwitch || firstResponder === controlSwitch.currentEditor(), "built-in controls panel installs the built-in switch as first responder")
+        }
+        if let slider = coverSlider {
+            try expect(slider.acceptsFirstResponder, "built-in controls native slider can accept focus (\(focusDebug))")
+            try expect(panel.makeFirstResponder(slider), "built-in controls panel accepts built-in cover slider focus")
+            let firstResponder = panel.firstResponder as AnyObject?
+            try expect(firstResponder === slider || firstResponder === slider.currentEditor(), "built-in controls panel installs the built-in cover slider as first responder")
+        }
+    }
+
+    @MainActor
+    private static func setNativeTextFieldValue(_ value: String, for textField: NSTextField, in panel: NSPanel) throws {
+        try expect(panel.makeFirstResponder(textField), "panel accepts focus for native text field mutation")
+        drainMainRunLoop()
+        if let editor = textField.currentEditor() {
+            editor.string = value
+            textField.stringValue = value
+            NotificationCenter.default.post(
+                name: NSControl.textDidChangeNotification,
+                object: textField,
+                userInfo: ["NSFieldEditor": editor]
+            )
+            NotificationCenter.default.post(
+                name: NSControl.textDidEndEditingNotification,
+                object: textField,
+                userInfo: ["NSFieldEditor": editor]
+            )
+        }
+        textField.stringValue = value
+        textField.validateEditing()
+        textField.sendAction(textField.action, to: textField.target)
+        panel.endEditing(for: nil)
+        _ = panel.makeFirstResponder(nil)
+        drainMainRunLoop()
+    }
+
+    @MainActor
+    private static func setNativePopUpButtonSelection(_ title: String, for popUpButton: NSPopUpButton) throws {
+        try expect(popUpButton.itemTitles.contains(title), "native popup exposes requested selection \(title)")
+        popUpButton.selectItem(withTitle: title)
+        popUpButton.synchronizeTitleAndSelectedItem()
+        if let index = popUpButton.indexOfSelectedItem as Int?, index >= 0 {
+            popUpButton.menu?.performActionForItem(at: index)
+        }
+        if let action = popUpButton.action {
+            _ = NSApp.sendAction(action, to: popUpButton.target, from: popUpButton)
+        }
+        popUpButton.sendAction(popUpButton.action, to: popUpButton.target)
+        drainMainRunLoop()
+    }
+
+    @MainActor
+    private static func nativeTextFields(in root: NSView?) -> [NSTextField] {
+        guard let root else {
+            return []
+        }
+        var result: [NSTextField] = []
+        func collect(_ view: NSView) {
+            if let textField = view as? NSTextField, !textField.isHiddenOrHasHiddenAncestor, textField.isEditable {
+                result.append(textField)
+            }
+            view.subviews.forEach(collect)
+        }
+        collect(root)
+        return result
+    }
+
+    @MainActor
+    private static func nativeSwitches(in root: NSView?) -> [NSSwitch] {
+        guard let root else {
+            return []
+        }
+        var result: [NSSwitch] = []
+        func collect(_ view: NSView) {
+            if let controlSwitch = view as? NSSwitch, !controlSwitch.isHiddenOrHasHiddenAncestor {
+                result.append(controlSwitch)
+            }
+            view.subviews.forEach(collect)
+        }
+        collect(root)
+        return result
+    }
+
+    @MainActor
+    private static func nativeSliders(in root: NSView?) -> [NSSlider] {
+        guard let root else {
+            return []
+        }
+        var result: [NSSlider] = []
+        func collect(_ view: NSView) {
+            if let slider = view as? NSSlider, !slider.isHiddenOrHasHiddenAncestor {
+                result.append(slider)
+            }
+            view.subviews.forEach(collect)
+        }
+        collect(root)
+        return result
+    }
+
+    @MainActor
+    private static func nativeButtons(in root: NSView?) -> [NSButton] {
+        guard let root else {
+            return []
+        }
+        var result: [NSButton] = []
+        func collect(_ view: NSView) {
+            if let button = view as? NSButton, !button.isHiddenOrHasHiddenAncestor {
+                result.append(button)
+            }
+            view.subviews.forEach(collect)
+        }
+        collect(root)
+        return result
+    }
+
+    @MainActor
+    private static func nativePopUpButtons(in root: NSView?) -> [NSPopUpButton] {
+        guard let root else {
+            return []
+        }
+        var result: [NSPopUpButton] = []
+        func collect(_ view: NSView) {
+            if let popUpButton = view as? NSPopUpButton, !popUpButton.isHiddenOrHasHiddenAncestor {
+                result.append(popUpButton)
+            }
+            view.subviews.forEach(collect)
+        }
+        collect(root)
+        return result
+    }
+
+    @MainActor
+    private static func nativeKeyViewLoopLabels(startingAt start: NSView) -> [String] {
+        var labels: [String] = []
+        var visited: Set<ObjectIdentifier> = []
+        var current: NSView? = start
+
+        while let view = current, labels.count < 64 {
+            let identifier = ObjectIdentifier(view)
+            if !visited.insert(identifier).inserted {
+                break
+            }
+            labels.append(nativeControlLabel(for: view))
+            current = view.nextValidKeyView
+        }
+
+        return labels
+    }
+
+    @MainActor
+    private static func nativeControlLabel(for view: NSView) -> String {
+        if let textField = view as? NSTextField {
+            let placeholder = textField.placeholderString ?? ""
+            return "\(type(of: view))(placeholder:\(placeholder))"
+        }
+        if let button = view as? NSButton {
+            let label = button.accessibilityLabel() ?? ""
+            return "\(type(of: view))(title:\(button.title),label:\(label))"
+        }
+        return String(describing: type(of: view))
+    }
+
+    @MainActor
+    private static func nativeControlDebugSummary(in root: NSView?) -> String {
+        guard let root else {
+            return "no-root-view"
+        }
+        var result: [String] = []
+        func collect(_ view: NSView) {
+            if let control = view as? NSControl {
+                let placeholder = (control as? NSTextField)?.placeholderString ?? ""
+                let title = control is NSButton ? (control as? NSButton)?.title ?? "" : ""
+                let label = control.accessibilityLabel() ?? ""
+                result.append("\(type(of: control))(placeholder:\(placeholder),title:\(title),label:\(label),enabled:\(control.isEnabled),hidden:\(control.isHiddenOrHasHiddenAncestor))")
+            }
+            view.subviews.forEach(collect)
+        }
+        collect(root)
+        return result.prefix(12).joined(separator: " | ")
     }
 
     @MainActor
@@ -2152,20 +3639,124 @@ struct PerchHASmoke {
     }
 
     @MainActor
-    private static func verifyPanelSnapshotRendering() throws {
+    private static func verifyPanelSnapshotRendering(options: SmokeOptions) async throws {
         var signatures: [SmokePanelSnapshotVariant: SmokePanelRenderSignature] = [:]
+        var captures: [(variant: SmokePanelSnapshotVariant, bitmap: NSBitmapImageRep)] = []
+        let exportDirectory = panelSnapshotExportDirectory()
+        if let exportDirectory {
+            try? FileManager.default.removeItem(at: exportDirectory)
+            try FileManager.default.createDirectory(at: exportDirectory, withIntermediateDirectories: true)
+        }
         for variant in SmokePanelSnapshotVariant.allCases {
-            let signature = try renderPanelSnapshot(variant)
-            signatures[variant] = signature
-            try expect(signature.pixelsWide >= 360, "\(variant.rawValue) snapshot has expected width")
-            try expect(signature.pixelsHigh >= 420, "\(variant.rawValue) snapshot has expected height")
-            try expect(signature.visiblePixelCount > 1_500, "\(variant.rawValue) snapshot is not blank")
+            let capture = try await renderPanelSnapshot(variant)
+            signatures[variant] = capture.signature
+            captures.append((variant: variant, bitmap: capture.bitmap))
+            if let exportDirectory {
+                try writePanelSnapshot(capture.bitmap, variant: variant, to: exportDirectory)
+            }
+            try expect(capture.signature.pixelsWide >= 360, "\(variant.rawValue) snapshot has expected width")
+            try expect(capture.signature.pixelsHigh >= 420, "\(variant.rawValue) snapshot has expected height")
+            try expect(capture.signature.visiblePixelCount > 1_500, "\(variant.rawValue) snapshot is not blank")
+            try expect(capture.signature.topEdgeVisiblePixelCount > capture.signature.pixelsWide * 9 / 10, "\(variant.rawValue) snapshot top edge is filled")
+            try expect(capture.signature.bottomEdgeVisiblePixelCount > capture.signature.pixelsWide * 9 / 10, "\(variant.rawValue) snapshot bottom edge is filled")
+        }
+        let baselineVariants = SmokePanelSnapshotVariant.allCases.compactMap { variant in
+            signatures[variant].map {
+                SmokePanelReviewBaseline.Entry(
+                    name: "\(variant.rawValue).png",
+                    signature: $0
+                )
+            }
+        }
+        try expect(
+            baselineVariants.count == SmokePanelSnapshotVariant.allCases.count,
+            "panel snapshot baseline includes every rendered variant"
+        )
+        let contactSheetEntry: SmokePanelReviewBaseline.Entry
+        if let exportDirectory {
+            let contactSheet = try writePanelReviewContactSheet(captures, to: exportDirectory)
+            let contactSheetSignature = SmokePanelRenderSignature(bitmap: contactSheet)
+            try expect(contactSheetSignature.visiblePixelCount > 15_000, "panel review contact sheet is not blank")
+            try expect(
+                FileManager.default.fileExists(atPath: exportDirectory.appendingPathComponent("review-contact-sheet.png").path),
+                "panel review contact sheet is exported"
+            )
+            contactSheetEntry = SmokePanelReviewBaseline.Entry(
+                name: "review-contact-sheet.png",
+                signature: contactSheetSignature
+            )
+        } else {
+            let contactSheet = try renderPanelReviewContactSheet(captures)
+            let contactSheetSignature = SmokePanelRenderSignature(bitmap: contactSheet)
+            try expect(contactSheetSignature.visiblePixelCount > 15_000, "panel review contact sheet is not blank")
+            contactSheetEntry = SmokePanelReviewBaseline.Entry(
+                name: "review-contact-sheet.png",
+                signature: contactSheetSignature
+            )
+        }
+        let reviewBaseline = SmokePanelReviewBaseline(
+            variants: baselineVariants,
+            contactSheet: contactSheetEntry
+        )
+        if let exportDirectory {
+            let storedBaseline = options.updatesReviewBaseline
+                ? reviewBaseline
+                : try loadPanelReviewBaseline(from: options.reviewBaselineURL)
+            try writePanelReviewBaseline(
+                reviewBaseline,
+                to: exportDirectory.appendingPathComponent("review-baseline-current.json", isDirectory: false)
+            )
+            try expect(
+                FileManager.default.fileExists(atPath: exportDirectory.appendingPathComponent("review-baseline-current.json").path),
+                "panel review baseline report is exported"
+            )
+            try writePanelReviewBaseline(
+                storedBaseline,
+                to: exportDirectory.appendingPathComponent(
+                    PerchHAReleaseEvidenceReview.expectedBaselineFilename,
+                    isDirectory: false
+                )
+            )
+            try expect(
+                FileManager.default.fileExists(
+                    atPath: exportDirectory.appendingPathComponent(
+                        PerchHAReleaseEvidenceReview.expectedBaselineFilename
+                    ).path
+                ),
+                "panel stored review baseline is exported"
+            )
+        }
+        if options.updatesReviewBaseline {
+            try writePanelReviewBaseline(reviewBaseline, to: options.reviewBaselineURL)
+            try expect(
+                FileManager.default.fileExists(atPath: options.reviewBaselineURL.path),
+                "panel review baseline is written"
+            )
+        } else {
+            let storedBaseline = try loadPanelReviewBaseline(from: options.reviewBaselineURL)
+            try expect(
+                storedBaseline == reviewBaseline,
+                reviewBaselineMismatchMessage(
+                    expected: storedBaseline,
+                    actual: reviewBaseline,
+                    baselineURL: options.reviewBaselineURL
+                )
+            )
         }
 
         guard let connectedLight = signatures[.connectedLight],
               let connectedDark = signatures[.connectedDark],
               let increasedContrast = signatures[.connectedDarkIncreasedContrast],
               let reducedMotion = signatures[.connectedLightReducedMotion],
+              let historyLoaded = signatures[.historyLoadedLight],
+              let historyLoadedIncreasedContrast = signatures[.historyLoadedLightIncreasedContrast],
+              let customActionEditor = signatures[.customActionEditorLight],
+              let builtInControls = signatures[.builtInControlsLight],
+              let firstRun = signatures[.firstRunLight],
+              let connecting = signatures[.connectingLight],
+              let signingIn = signatures[.signingInLight],
+              let settingsSelection = signatures[.settingsSelectionLight],
+              let reconnecting = signatures[.reconnectingLight],
               let emptyLight = signatures[.emptyLight],
               let errorDark = signatures[.errorDark]
         else {
@@ -2185,24 +3776,163 @@ struct PerchHASmoke {
             "panel reduced-motion snapshot preserves stable dimensions"
         )
         try expect(
-            Set([connectedLight.sampledHash, emptyLight.sampledHash, errorDark.sampledHash]).count == 3,
-            "panel snapshots distinguish success, empty, and error states"
+            historyLoaded.sampledHash != connectedLight.sampledHash,
+            "panel history-loaded snapshot renders distinct chart state"
+        )
+        try expect(
+            historyLoadedIncreasedContrast.sampledHash != historyLoaded.sampledHash,
+            "panel history-loaded snapshot distinguishes increased contrast"
+        )
+        try expect(
+            customActionEditor.sampledHash != connectedLight.sampledHash,
+            "panel custom-action editor snapshot renders distinct settings state"
+        )
+        try expect(
+            builtInControls.sampledHash != connectedLight.sampledHash,
+            "panel built-in controls snapshot renders distinct control state"
+        )
+        try expect(
+            firstRun.sampledHash != connectedLight.sampledHash,
+            "panel first-run snapshot renders distinct onboarding state"
+        )
+        try expect(
+            connecting.sampledHash != firstRun.sampledHash,
+            "panel connecting snapshot renders distinct loading state"
+        )
+        try expect(
+            signingIn.sampledHash != firstRun.sampledHash,
+            "panel signing-in snapshot renders distinct OAuth loading state"
+        )
+        try expect(
+            settingsSelection.sampledHash != connectedLight.sampledHash,
+            "panel settings selection snapshot renders distinct selection state"
+        )
+        let connectingModel = try await panelSnapshotModel(for: .connectingLight)
+        try expect(
+            connectingModel.snapshot.accessibilityPresentation().contentLabel == "Connecting to Home Assistant",
+            "panel connecting snapshot exposes loading accessibility state"
+        )
+        let signingInModel = try await panelSnapshotModel(for: .signingInLight)
+        defer {
+            signingInModel.cancelInFlightAction()
+        }
+        try expect(
+            signingInModel.oauthSignInState == .signingIn,
+            "panel signing-in snapshot uses public OAuth sign-in state"
+        )
+        try expect(
+            reconnecting.sampledHash != connectedLight.sampledHash,
+            "panel reconnecting snapshot renders distinct stale state"
+        )
+        let settingsSelectionModel = try await panelSnapshotModel(for: .settingsSelectionLight)
+        let selectedState = settingsSelectionModel.snapshot.selectionTree.flatMap { room in
+            room.entities.map { selectable in
+                "\(selectable.entity.id.rawValue):\(selectable.isSelected)"
+            }
+        }
+        try expect(
+            selectedState == [
+                "switch.kitchen_light:true",
+                "sensor.office_humidity:true",
+                "switch.office_lamp:false",
+                "cover.office_blinds:false"
+            ],
+            "panel settings selection snapshot preserves explicit selected rows"
+        )
+        try expect(
+            settingsSelectionModel.snapshot.menuBarDisplayConfiguration.promotedEntityIDs == ["sensor.office_humidity"],
+            "panel settings selection snapshot preserves menu bar promotion"
+        )
+        let reconnectingModel = try await panelSnapshotModel(for: .reconnectingLight)
+        guard let reconnectingEntity = reconnectingModel.snapshot.rooms.first?.entities.first else {
+            throw SmokeFailure("panel reconnecting snapshot has no visible entity")
+        }
+        try expect(
+            reconnectingModel.snapshot.formattedValue(
+                for: reconnectingEntity,
+                locale: Locale(identifier: "en_US")
+            ).text.hasPrefix("Stale:"),
+            "panel reconnecting snapshot renders stale values"
+        )
+        try expect(
+            Set([
+                connectedLight.sampledHash,
+                historyLoaded.sampledHash,
+                historyLoadedIncreasedContrast.sampledHash,
+                customActionEditor.sampledHash,
+                builtInControls.sampledHash,
+                firstRun.sampledHash,
+                connecting.sampledHash,
+                signingIn.sampledHash,
+                settingsSelection.sampledHash,
+                reconnecting.sampledHash,
+                emptyLight.sampledHash,
+                errorDark.sampledHash
+            ]).count == 12,
+            "panel snapshots distinguish success, history, increased-contrast history, custom action, controls, first-run, connecting, signing-in, settings, reconnecting, empty, and error states"
         )
     }
 
     @MainActor
-    private static func renderPanelSnapshot(_ variant: SmokePanelSnapshotVariant) throws -> SmokePanelRenderSignature {
+    private static func panelSnapshotModel(for variant: SmokePanelSnapshotVariant) async throws -> PerchHAPanelModel {
+        let snapshot = variant.snapshot
         let model = PerchHAPanelModel(
-            snapshot: variant.snapshot,
+            snapshot: snapshot,
+            oauthSignInRunner: variant.oauthSignInRunner,
+            selectionConfiguration: snapshot.selectionConfiguration,
+            menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
             customActionConfiguration: variant.customActionConfiguration
         )
-        let view = PerchHAPanelView(
-            model: model,
-            accessibilityPreferencesOverride: variant.accessibilityPreferences
-        )
-            .environment(\.colorScheme, variant.colorScheme)
+        if variant.startsOAuthSignInForSnapshot {
+            model.startOAuthSignIn()
+            for _ in 0..<100 {
+                if model.oauthSignInState == PerchHAOAuthSignInState.signingIn {
+                    break
+                }
+                await Task.yield()
+            }
+            try expect(
+                model.oauthSignInState == PerchHAOAuthSignInState.signingIn,
+                "\(variant.rawValue) snapshot reaches OAuth sign-in state"
+            )
+        }
+        return model
+    }
+
+    @MainActor
+    private static func renderPanelSnapshot(_ variant: SmokePanelSnapshotVariant) async throws -> SmokePanelRenderCapture {
+        let model = try await panelSnapshotModel(for: variant)
+        defer {
+            if variant.startsOAuthSignInForSnapshot {
+                model.cancelInFlightAction()
+            }
+        }
+        let view: AnyView
+        if variant == .historyLoadedLight || variant == .historyLoadedLightIncreasedContrast {
+            view = AnyView(
+                PerchHAHistoryPopoverContent(
+                    entityID: "sensor.office_humidity",
+                    entityName: "Office humidity",
+                    valueText: "44 %",
+                    state: .loaded(SmokePanelSnapshotVariant.loadedHistorySeries),
+                    increaseContrastOverride: variant.colorSchemeContrast == .increased,
+                    selectedRange: .constant(.day)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(Color(nsColor: NSColor.windowBackgroundColor))
+                .environment(\.colorScheme, variant.colorScheme)
+            )
+        } else {
+            view = AnyView(
+                PerchHAPanelView(
+                    model: model,
+                    accessibilityPreferencesOverride: variant.accessibilityPreferences
+                )
+                .environment(\.colorScheme, variant.colorScheme)
+            )
+        }
         let hostingView = NSHostingView(rootView: view)
-        let size = NSSize(width: 360, height: 440)
+        let size = NSSize(width: 360, height: 420)
 
         hostingView.appearance = NSAppearance(named: variant.appearanceName)
         hostingView.frame = NSRect(origin: .zero, size: size)
@@ -2214,7 +3944,117 @@ struct PerchHASmoke {
         }
         bitmap.size = hostingView.bounds.size
         hostingView.cacheDisplay(in: hostingView.bounds, to: bitmap)
-        return SmokePanelRenderSignature(bitmap: bitmap)
+        return SmokePanelRenderCapture(bitmap: bitmap)
+    }
+
+    private static func panelSnapshotExportDirectory() -> URL? {
+        guard let value = ProcessInfo.processInfo.environment["PERCHHA_SMOKE_SNAPSHOT_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty
+        else {
+            return nil
+        }
+        return URL(fileURLWithPath: value, isDirectory: true)
+            .appendingPathComponent("current", isDirectory: true)
+    }
+
+    private static func writePanelSnapshot(
+        _ bitmap: NSBitmapImageRep,
+        variant: SmokePanelSnapshotVariant,
+        to directory: URL
+    ) throws {
+        guard let data = bitmap.representation(using: .png, properties: [:]) else {
+            throw SmokeFailure("\(variant.rawValue) snapshot PNG export failed")
+        }
+        try data.write(to: directory.appendingPathComponent("\(variant.rawValue).png", isDirectory: false), options: .atomic)
+    }
+
+    @MainActor
+    private static func writePanelReviewContactSheet(
+        _ captures: [(variant: SmokePanelSnapshotVariant, bitmap: NSBitmapImageRep)],
+        to directory: URL
+    ) throws -> NSBitmapImageRep {
+        let output = try renderPanelReviewContactSheet(captures)
+        guard let data = output.representation(using: .png, properties: [:]) else {
+            throw SmokeFailure("panel review contact sheet PNG export failed")
+        }
+        try data.write(to: directory.appendingPathComponent("review-contact-sheet.png", isDirectory: false), options: .atomic)
+        return output
+    }
+
+    @MainActor
+    private static func renderPanelReviewContactSheet(
+        _ captures: [(variant: SmokePanelSnapshotVariant, bitmap: NSBitmapImageRep)]
+    ) throws -> NSBitmapImageRep {
+        let columns = 3
+        let thumbnailSize = NSSize(width: 180, height: 210)
+        let labelHeight: CGFloat = 36
+        let cellSize = NSSize(width: 212, height: 262)
+        let padding: CGFloat = 18
+        let rows = Int(ceil(Double(captures.count) / Double(columns)))
+        let outputSize = NSSize(
+            width: padding * 2 + CGFloat(columns) * cellSize.width,
+            height: padding * 2 + CGFloat(rows) * cellSize.height
+        )
+        guard let output = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(outputSize.width.rounded()),
+            pixelsHigh: Int(outputSize.height.rounded()),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ),
+              let context = NSGraphicsContext(bitmapImageRep: output)
+        else {
+            throw SmokeFailure("panel review contact sheet bitmap allocation failed")
+        }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        NSColor(calibratedWhite: 0.96, alpha: 1).setFill()
+        NSBezierPath(rect: NSRect(origin: .zero, size: outputSize)).fill()
+
+        let labelParagraphStyle = NSMutableParagraphStyle()
+        labelParagraphStyle.lineBreakMode = .byWordWrapping
+        let labelAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .regular),
+            .paragraphStyle: labelParagraphStyle,
+            .foregroundColor: NSColor(calibratedWhite: 0.18, alpha: 1)
+        ]
+        let borderColor = NSColor(calibratedWhite: 0.78, alpha: 1)
+
+        for (index, capture) in captures.enumerated() {
+            let column = index % columns
+            let row = index / columns
+            let cellOrigin = NSPoint(
+                x: padding + CGFloat(column) * cellSize.width,
+                y: outputSize.height - padding - CGFloat(row + 1) * cellSize.height
+            )
+            let imageRect = NSRect(
+                x: cellOrigin.x + (cellSize.width - thumbnailSize.width) / 2,
+                y: cellOrigin.y + labelHeight + 4,
+                width: thumbnailSize.width,
+                height: thumbnailSize.height
+            )
+            let image = NSImage(size: capture.bitmap.size)
+            image.addRepresentation(capture.bitmap)
+            image.draw(in: imageRect, from: .zero, operation: .copy, fraction: 1)
+            borderColor.setStroke()
+            NSBezierPath(rect: imageRect).stroke()
+
+            let labelRect = NSRect(
+                x: cellOrigin.x + 6,
+                y: cellOrigin.y,
+                width: cellSize.width - 12,
+                height: labelHeight
+            )
+            (capture.variant.rawValue as NSString).draw(in: labelRect, withAttributes: labelAttributes)
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        return output
     }
 
     private static func verifyOAuthConfigurationFromEnvironmentFile() throws {
@@ -2240,6 +4080,127 @@ struct PerchHASmoke {
         try expect(configuration?.callbackURLScheme == "perchha", "OAuth config derives callback scheme")
     }
 
+    private static func verifyOAuthClientWebsitePackaging() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("perchha-smoke-oauth-site-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let envURL = directory.appendingPathComponent(".env.local", isDirectory: false)
+        let outputURL = directory.appendingPathComponent("site/index.html", isDirectory: false)
+        try """
+        PERCHHA_OAUTH_CLIENT_ID=https://perchha.dev/app
+        PERCHHA_OAUTH_REDIRECT_URI=perchha://auth
+        """.write(to: envURL, atomically: true, encoding: .utf8)
+
+        let executable = try toolExecutable(named: "perchha-package-app")
+        let writeOutput = try runProcess(
+            executable: executable,
+            arguments: [
+                "--write-oauth-site", outputURL.path,
+                "--oauth-env", envURL.path
+            ],
+            environment: [:]
+        )
+        try expect(writeOutput.terminationStatus == 0, "OAuth client website packaging writes artifact successfully (\(writeOutput.text))")
+        try expect(
+            writeOutput.text.contains("OAuth client website verified: https://perchha.dev/app -> perchha://auth"),
+            "OAuth client website packaging reports verification details"
+        )
+        let html = try String(contentsOf: outputURL, encoding: .utf8)
+        try expect(html.contains(#"<link rel="redirect_uri" href="perchha://auth">"#), "OAuth client website artifact declares redirect URI")
+
+        let verificationOutput = try runProcess(
+            executable: executable,
+            arguments: [
+                "--verify-oauth-site", outputURL.path,
+                "--oauth-env", envURL.path
+            ],
+            environment: [:]
+        )
+        try expect(verificationOutput.terminationStatus == 0, "OAuth client website verification succeeds (\(verificationOutput.text))")
+
+        let publishedPort = try availableLoopbackPort()
+        let publishedDirectory = directory.appendingPathComponent("published-site", isDirectory: true)
+        try FileManager.default.createDirectory(at: publishedDirectory, withIntermediateDirectories: true)
+        let publishedOutputURL = publishedDirectory.appendingPathComponent("index.html", isDirectory: false)
+        let publishedEnvURL = directory.appendingPathComponent("published.env", isDirectory: false)
+        let publishedURL = URL(string: "http://127.0.0.1:\(publishedPort)/index.html")!
+        try """
+        PERCHHA_OAUTH_CLIENT_ID=\(publishedURL.absoluteString)
+        PERCHHA_OAUTH_REDIRECT_URI=perchha://auth
+        """.write(to: publishedEnvURL, atomically: true, encoding: .utf8)
+        let publishedWriteOutput = try runProcess(
+            executable: executable,
+            arguments: [
+                "--write-oauth-site", publishedOutputURL.path,
+                "--oauth-env", publishedEnvURL.path
+            ],
+            environment: [:]
+        )
+        try expect(
+            publishedWriteOutput.terminationStatus == 0,
+            "published OAuth client website packaging writes artifact successfully (\(publishedWriteOutput.text))"
+        )
+        let publishedLogURL = directory.appendingPathComponent("python-http.log", isDirectory: false)
+        let publishedProcess = try launchStaticFileServer(
+            directory: publishedDirectory,
+            port: publishedPort,
+            logURL: publishedLogURL
+        )
+        defer {
+            stopProcess(publishedProcess)
+        }
+        try await waitForStaticFileServer(
+            url: publishedURL,
+            process: publishedProcess,
+            logURL: publishedLogURL
+        )
+
+        let publishedVerificationOutput = try runProcess(
+            executable: executable,
+            arguments: [
+                "--verify-published-oauth-site",
+                "--oauth-env", publishedEnvURL.path
+            ],
+            environment: [:]
+        )
+        try expect(
+            publishedVerificationOutput.terminationStatus == 0,
+            "published OAuth client website verification succeeds (\(publishedVerificationOutput.text))"
+        )
+        try expect(
+            publishedVerificationOutput.text.contains("Published OAuth client website verified: \(publishedURL.absoluteString)"),
+            "published OAuth client website verification reports the deployed URL"
+        )
+
+        let transport = SmokeHARESTTransport(
+            responses: [
+                HARESTResponse(
+                    statusCode: 200,
+                    headers: ["Content-Type": "text/html"],
+                    body: Data(html.utf8)
+                )
+            ]
+        )
+        let check = await HomeAssistantClient(transport: transport).verifyOAuthClientWebsite(
+            clientID: "https://perchha.dev/app",
+            redirectURI: "perchha://auth"
+        )
+        try expect(
+            check == .success(
+                HAOAuthClientWebsiteCheck(
+                    clientID: "https://perchha.dev/app",
+                    redirectURI: "perchha://auth",
+                    websiteFetched: true,
+                    redirectURIDeclared: true
+                )
+            ),
+            "generated OAuth client website stays compatible with the Home Assistant website verifier"
+        )
+    }
+
     private static func verifyAppBundlePackaging() throws {
         let buildDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".build", isDirectory: true)
@@ -2248,8 +4209,10 @@ struct PerchHASmoke {
         let uniqueID = UUID().uuidString.lowercased()
         let callbackScheme = "perchha-smoke-\(uniqueID)"
         let outputURL = buildDirectory.appendingPathComponent("perchha-smoke-\(uniqueID).app", isDirectory: true)
+        let dmgURL = buildDirectory.appendingPathComponent("perchha-smoke-\(uniqueID).dmg", isDirectory: false)
         defer {
             try? FileManager.default.removeItem(at: outputURL)
+            try? FileManager.default.removeItem(at: dmgURL)
         }
         let result = try PerchHAAppBundleBuilder().build(
             PerchHAAppBundleBuildConfiguration(
@@ -2285,6 +4248,37 @@ struct PerchHASmoke {
         )
         try expect(launchServices.callbackURL.absoluteString == "\(callbackScheme)://auth", "LaunchServices verifier uses OAuth callback URL")
         try expect(launchServices.registeredApplicationURL.path == launchServices.appURL.path, "LaunchServices records callback scheme claim for generated app")
+        let signing = try PerchHACodeSigner().sign(
+            PerchHACodeSigningConfiguration(
+                appURL: result.appURL,
+                identity: "-",
+                hardenedRuntime: false,
+                timestamp: false
+            )
+        )
+        try expect(signing.identity == "-", "app bundle supports local ad-hoc code signing")
+        let signature = try PerchHACodeSignatureVerifier().verify(
+            PerchHACodeSignatureVerificationConfiguration(appURL: result.appURL)
+        )
+        try expect(signature.appURL.path == result.appURL.path, "app bundle code signature verifies")
+        let dmg = try PerchHADMGBuilder().build(
+            PerchHADMGBuildConfiguration(
+                appURL: result.appURL,
+                outputURL: dmgURL,
+                volumeName: "PerchHA Smoke"
+            )
+        )
+        try expect(FileManager.default.fileExists(atPath: dmg.dmgURL.path), "DMG builder creates disk image")
+        let dmgVerification = try PerchHADMGVerifier().verify(PerchHADMGVerificationConfiguration(dmgURL: dmg.dmgURL))
+        try expect(dmgVerification.dmgURL.path == dmgURL.path, "DMG verifier validates disk image")
+        let dmgContents = try PerchHADMGContentVerifier().verify(
+            PerchHADMGContentVerificationConfiguration(
+                dmgURL: dmg.dmgURL,
+                appBundleName: result.appURL.lastPathComponent
+            )
+        )
+        try expect(dmgContents.mountedAppURL.lastPathComponent == result.appURL.lastPathComponent, "DMG contains app bundle")
+        try expect(dmgContents.applicationsShortcutURL?.lastPathComponent == "Applications", "DMG contains Applications shortcut")
     }
 
     @MainActor
@@ -3077,6 +5071,23 @@ struct SmokeFailure: Error, CustomStringConvertible {
     }
 }
 
+private struct CoverageGateSmokeResult {
+    let exitCode: Int32
+    let output: String
+    let error: String
+}
+
+private struct RepoAuditSmokeResult {
+    let exitCode: Int32
+    let output: String
+    let error: String
+}
+
+private struct ServeProcessHandle {
+    let process: Process
+    let outputURL: URL
+}
+
 private enum SmokePerformanceBudget {
     static let panelOpenMedianMilliseconds: UInt64 = 150
     static let panelOpenMaximumMilliseconds: UInt64 = 300
@@ -3090,11 +5101,43 @@ private enum SmokePerformanceBudget {
     static let idleMaximumCPUSeconds = 0.08
 }
 
+private func jsonString(_ text: String?, path: [AnyHashable]) throws -> String? {
+    guard let text,
+          let data = text.data(using: .utf8)
+    else {
+        return nil
+    }
+    var value: Any = try JSONSerialization.jsonObject(with: data)
+    for component in path {
+        if let key = component.base as? String,
+           let object = value as? [String: Any],
+           let next = object[key] {
+            value = next
+        } else if let index = component.base as? Int,
+                  let array = value as? [Any],
+                  array.indices.contains(index) {
+            value = array[index]
+        } else {
+            return nil
+        }
+    }
+    return value as? String
+}
+
 private enum SmokePanelSnapshotVariant: String, CaseIterable {
     case connectedLight = "connected-light"
     case connectedDark = "connected-dark"
     case connectedDarkIncreasedContrast = "connected-dark-increased-contrast"
     case connectedLightReducedMotion = "connected-light-reduced-motion"
+    case historyLoadedLight = "history-loaded-light"
+    case historyLoadedLightIncreasedContrast = "history-loaded-light-increased-contrast"
+    case customActionEditorLight = "custom-action-editor-light"
+    case builtInControlsLight = "built-in-controls-light"
+    case firstRunLight = "first-run-light"
+    case connectingLight = "connecting-light"
+    case signingInLight = "signing-in-light"
+    case settingsSelectionLight = "settings-selection-light"
+    case reconnectingLight = "reconnecting-light"
     case emptyLight = "empty-light"
     case errorDark = "error-dark"
 
@@ -3102,13 +5145,29 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
         switch self {
         case .connectedDark, .connectedDarkIncreasedContrast, .errorDark:
             .dark
-        case .connectedLight, .connectedLightReducedMotion, .emptyLight:
+        case .connectedLight,
+             .connectedLightReducedMotion,
+             .historyLoadedLight,
+             .historyLoadedLightIncreasedContrast,
+             .customActionEditorLight,
+             .builtInControlsLight,
+             .firstRunLight,
+             .connectingLight,
+             .signingInLight,
+             .settingsSelectionLight,
+             .reconnectingLight,
+             .emptyLight:
             .light
         }
     }
 
     var colorSchemeContrast: ColorSchemeContrast {
-        self == .connectedDarkIncreasedContrast ? .increased : .standard
+        switch self {
+        case .connectedDarkIncreasedContrast, .historyLoadedLightIncreasedContrast:
+            .increased
+        default:
+            .standard
+        }
     }
 
     var reduceMotion: Bool {
@@ -3144,6 +5203,108 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
                 lastUpdateDescription: "Snapshot ready",
                 canRetry: true
             )
+        case .historyLoadedLight, .historyLoadedLightIncreasedContrast:
+            PerchHAPanelSnapshot(
+                connectionState: .connected,
+                phase: .connectedData,
+                rooms: Self.connectedRooms,
+                availableRooms: Self.connectedRooms,
+                lastUpdateDescription: "Snapshot ready",
+                canRetry: true,
+                historyState: .loaded(Self.loadedHistorySeries),
+                historyPresentationEntityID: "sensor.office_humidity"
+            )
+        case .customActionEditorLight:
+            PerchHAPanelSnapshot(
+                connectionState: .connected,
+                phase: .connectedData,
+                rooms: Self.connectedRooms,
+                availableRooms: Self.connectedRooms,
+                selectionQuery: "humidity",
+                isSettingsPresented: true,
+                lastUpdateDescription: "Snapshot ready",
+                canRetry: true,
+                serviceMetadata: Self.customActionServiceMetadata
+            )
+        case .builtInControlsLight:
+            PerchHAPanelSnapshot(
+                connectionState: .connected,
+                phase: .connectedData,
+                rooms: Self.connectedRooms,
+                availableRooms: Self.connectedRooms,
+                lastUpdateDescription: "Snapshot ready",
+                canRetry: true,
+                controlActionState: .failed(entityID: "switch.office_lamp", message: "planned service failure")
+            )
+        case .firstRunLight:
+            PerchHAPanelSnapshot(
+                connectionState: .disconnected,
+                phase: .firstRun,
+                connectionForm: PerchHAConnectionForm(
+                    urlString: "https://homeassistant.local:8123",
+                    fallbackURLString: "http://backup.local:8123",
+                    token: "",
+                    usesStoredAuthSession: false,
+                    allowsSelfSignedCertificates: true
+                ),
+                canRetry: false
+            )
+        case .connectingLight:
+            PerchHAPanelSnapshot(
+                connectionState: .connecting,
+                phase: .connecting,
+                connectionForm: PerchHAConnectionForm(
+                    urlString: "https://homeassistant.local:8123",
+                    fallbackURLString: "http://backup.local:8123",
+                    token: "",
+                    usesStoredAuthSession: false,
+                    allowsSelfSignedCertificates: true
+                ),
+                lastUpdateDescription: "Connecting",
+                canRetry: false
+            )
+        case .signingInLight:
+            PerchHAPanelSnapshot(
+                connectionState: .disconnected,
+                phase: .firstRun,
+                connectionForm: PerchHAConnectionForm(
+                    urlString: "https://homeassistant.local:8123",
+                    fallbackURLString: "http://backup.local:8123",
+                    token: "",
+                    usesStoredAuthSession: false,
+                    allowsSelfSignedCertificates: true
+                ),
+                canRetry: false
+            )
+        case .settingsSelectionLight:
+            PerchHAPanelSnapshot(
+                connectionState: .connected,
+                phase: .connectedData,
+                rooms: Self.connectedRooms,
+                availableRooms: Self.settingsRooms,
+                selectionConfiguration: EntitySelectionConfiguration(
+                    selectedEntityIDs: ["sensor.office_humidity", "switch.kitchen_light"],
+                    roomOrder: ["kitchen", "office"],
+                    entityOrder: ["switch.kitchen_light", "sensor.office_humidity", "sensor.office_temperature"],
+                    isExplicit: true
+                ),
+                menuBarDisplayConfiguration: MenuBarDisplayConfiguration(
+                    promotedEntityIDs: ["sensor.office_humidity"]
+                ),
+                isSettingsPresented: true,
+                lastUpdateDescription: "Snapshot ready",
+                canRetry: true
+            )
+        case .reconnectingLight:
+            PerchHAPanelSnapshot(
+                connectionState: .reconnecting(attempt: 1),
+                phase: .reconnecting(attempt: 1),
+                rooms: Self.connectedRooms,
+                availableRooms: Self.connectedRooms,
+                lastUpdateDescription: "Retrying",
+                refreshCount: 1,
+                canRetry: true
+            )
         case .emptyLight:
             PerchHAPanelSnapshot(
                 connectionState: .connected,
@@ -3164,7 +5325,13 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
 
     var customActionConfiguration: CustomActionConfiguration {
         switch self {
-        case .connectedLight, .connectedDark, .connectedDarkIncreasedContrast, .connectedLightReducedMotion:
+        case .connectedLight,
+             .connectedDark,
+             .connectedDarkIncreasedContrast,
+             .connectedLightReducedMotion,
+             .historyLoadedLight,
+             .historyLoadedLightIncreasedContrast,
+             .reconnectingLight:
             CustomActionConfiguration(actions: [
                 EntityCustomAction(
                     id: "snapshot-boost-air",
@@ -3173,8 +5340,48 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
                     action: ActionSpec(domain: "script", service: "turn_on", targetEntityID: "script.air_cleaner_boost")
                 )
             ])
-        case .emptyLight, .errorDark:
+        case .customActionEditorLight:
+            CustomActionConfiguration(actions: [
+                EntityCustomAction(
+                    id: "snapshot-boost-air",
+                    entityID: "sensor.office_humidity",
+                    title: "Boost air",
+                    action: ActionSpec(
+                        domain: "script",
+                        service: "turn_on",
+                        targetEntityID: "script.air_cleaner_boost",
+                        serviceData: [
+                            "variables": .object([
+                                "steps": .array(["fan", "purifier"])
+                            ]),
+                            "pin": .protectedString("snapshot-boost-air-pin")
+                        ]
+                    ),
+                    requiresConfirmation: true
+                )
+            ])
+        case .builtInControlsLight, .firstRunLight, .connectingLight, .signingInLight, .settingsSelectionLight, .emptyLight, .errorDark:
             CustomActionConfiguration()
+        }
+    }
+
+    var startsOAuthSignInForSnapshot: Bool {
+        self == .signingInLight
+    }
+
+    var oauthSignInRunner: PerchHAPanelModel.OAuthSignInRunner {
+        switch self {
+        case .signingInLight:
+            return { _ in
+                do {
+                    try await Task.sleep(nanoseconds: 5_000_000_000)
+                } catch {
+                    return .failed("sign-in cancelled")
+                }
+                return .failed("sign-in did not finish")
+            }
+        default:
+            return { _ in .failed("OAuth sign-in is not configured") }
         }
     }
 
@@ -3211,12 +5418,105 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
             ]
         )
     ]
+
+    private static let settingsRooms = connectedRooms + [
+        Room(
+            id: "kitchen",
+            name: "Kitchen",
+            entities: [
+                DiscoveredEntity(
+                    id: "switch.kitchen_light",
+                    name: "Kitchen light",
+                    state: "off",
+                    unit: nil,
+                    areaID: nil,
+                    deviceID: nil
+                )
+            ]
+        )
+    ]
+
+    fileprivate static let loadedHistorySeries = HistorySeries(
+        entityID: "sensor.office_humidity",
+        range: .day,
+        samples: [
+            HistorySample(timestamp: Date(timeIntervalSince1970: 1_803_600_000), state: "42", numericValue: 42),
+            HistorySample(timestamp: Date(timeIntervalSince1970: 1_803_603_600), state: "44", numericValue: 44),
+            HistorySample(timestamp: Date(timeIntervalSince1970: 1_803_607_200), state: "47", numericValue: 47),
+            HistorySample(timestamp: Date(timeIntervalSince1970: 1_803_610_800), state: "45", numericValue: 45)
+        ]
+    )
+
+    private static let customActionServiceMetadata = [
+        HAServiceMetadata(
+            domain: "script",
+            service: "turn_on",
+            name: "Turn on",
+            description: "Runs a script.",
+            fields: [
+                HAServiceFieldMetadata(
+                    key: "variables",
+                    name: "Variables",
+                    description: nil,
+                    required: false,
+                    example: .object([
+                        "steps": .array(["fan", "purifier"])
+                    ]),
+                    selector: .object(["object": .object([:])])
+                ),
+                HAServiceFieldMetadata(
+                    key: "pin",
+                    name: "PIN",
+                    description: "Alarm code",
+                    required: false,
+                    example: "1234",
+                    selector: .object(["text": .object([:])])
+                )
+            ]
+        )
+    ]
+}
+
+private final class InMemoryProtectedActionValueStore: ProtectedActionValueStore, @unchecked Sendable {
+    private var values: [ProtectedActionValueReference: String] = [:]
+
+    func save(_ value: String, for reference: ProtectedActionValueReference) throws {
+        guard !value.isEmpty else {
+            throw SecretStoreError.emptySecret(.customActionProtectedValues)
+        }
+        values[reference] = value
+    }
+
+    func load(_ reference: ProtectedActionValueReference) throws -> String {
+        guard let value = values[reference] else {
+            throw ProtectedActionValueStoreError.missingValue(reference)
+        }
+        return value
+    }
+
+    func delete(_ reference: ProtectedActionValueReference) throws {
+        values.removeValue(forKey: reference)
+    }
+}
+
+private actor ActionInvocationRecorder {
+    private var action: ActionSpec?
+
+    func record(_ action: ActionSpec) {
+        self.action = action
+    }
+
+    func lastAction() -> ActionSpec? {
+        action
+    }
 }
 
 private struct SmokePanelRenderSignature: Equatable {
     let pixelsWide: Int
     let pixelsHigh: Int
     let visiblePixelCount: Int
+    let topEdgeVisiblePixelCount: Int
+    let bottomEdgeVisiblePixelCount: Int
     let sampledHash: UInt64
 
     init(bitmap: NSBitmapImageRep) {
@@ -3224,6 +5524,8 @@ private struct SmokePanelRenderSignature: Equatable {
         pixelsHigh = bitmap.pixelsHigh
 
         var visible = 0
+        var topEdgeVisible = 0
+        var bottomEdgeVisible = 0
         var hash: UInt64 = 14_695_981_039_346_656_037
         let sampleXStride = max(1, bitmap.pixelsWide / 48)
         let sampleYStride = max(1, bitmap.pixelsHigh / 48)
@@ -3235,6 +5537,12 @@ private struct SmokePanelRenderSignature: Equatable {
                 }
                 if color.alphaComponent > 0.05 {
                     visible += 1
+                    if y == 0 {
+                        topEdgeVisible += 1
+                    }
+                    if y == bitmap.pixelsHigh - 1 {
+                        bottomEdgeVisible += 1
+                    }
                 }
                 guard x.isMultiple(of: sampleXStride), y.isMultiple(of: sampleYStride) else {
                     continue
@@ -3251,8 +5559,172 @@ private struct SmokePanelRenderSignature: Equatable {
         }
 
         visiblePixelCount = visible
+        topEdgeVisiblePixelCount = topEdgeVisible
+        bottomEdgeVisiblePixelCount = bottomEdgeVisible
         sampledHash = hash
     }
+}
+
+private struct SmokePanelRenderCapture {
+    let bitmap: NSBitmapImageRep
+    let signature: SmokePanelRenderSignature
+
+    init(bitmap: NSBitmapImageRep) {
+        self.bitmap = bitmap
+        self.signature = SmokePanelRenderSignature(bitmap: bitmap)
+    }
+}
+
+private struct SmokePanelReviewBaseline: Codable, Equatable {
+    struct Entry: Codable, Equatable {
+        let name: String
+        let pixelsWide: Int
+        let pixelsHigh: Int
+        let visiblePixelCount: Int
+        let sampledHashHex: String
+
+        init(name: String, signature: SmokePanelRenderSignature) {
+            self.name = name
+            self.pixelsWide = signature.pixelsWide
+            self.pixelsHigh = signature.pixelsHigh
+            self.visiblePixelCount = signature.visiblePixelCount
+            self.sampledHashHex = signature.sampledHashHex
+        }
+    }
+
+    let schemaVersion: Int
+    let variants: [Entry]
+    let contactSheet: Entry
+
+    init(variants: [Entry], contactSheet: Entry) {
+        self.schemaVersion = 1
+        self.variants = variants
+        self.contactSheet = contactSheet
+    }
+}
+
+private struct SmokeOptions {
+    static let help = """
+    perchha-smoke
+
+    Runs PerchHA's public smoke verification suite and optional screenshot baseline refresh.
+
+    Usage:
+      perchha-smoke
+      perchha-smoke help
+      PERCHHA_SMOKE_SNAPSHOT_DIR=.build/perchha-snapshots perchha-smoke
+      perchha-smoke --repeat 5
+      perchha-smoke --update-review-baseline
+      perchha-smoke --review-baseline docs/release-review-baseline.json
+
+    Options:
+      --review-baseline PATH        Review-baseline manifest to compare against.
+                                    Default: docs/release-review-baseline.json
+      --repeat COUNT               Run the full smoke suite COUNT times as fresh invocations.
+                                   Default: 1
+      --update-review-baseline      Refresh the review-baseline manifest intentionally.
+      -h, --help                    Show this help text.
+
+    Environment:
+      PERCHHA_SMOKE_SNAPSHOT_DIR    Export screenshots under <dir>/current during the run.
+    """
+
+    let reviewBaselineURL: URL
+    let repeatCount: Int
+    let updatesReviewBaseline: Bool
+    let showsHelp: Bool
+
+    init(arguments: [String]) throws {
+        let rootDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        var reviewBaselineURL = rootDirectory.appendingPathComponent("docs/release-review-baseline.json", isDirectory: false)
+        var repeatCount = 1
+        let updatesReviewBaseline: Bool
+        let showsHelp: Bool
+        do {
+            let options = try PerchHACommandLineOptions(
+                arguments: arguments,
+                valueOptions: ["--repeat", "--review-baseline"],
+                flagOptions: ["help", "-h", "--help", "--update-review-baseline"]
+            )
+            if let configuredReviewBaseline = options.value(for: "--review-baseline") {
+                reviewBaselineURL = URL(fileURLWithPath: configuredReviewBaseline, isDirectory: false)
+            }
+            if let configuredRepeatCount = options.value(for: "--repeat") {
+                guard let parsedRepeatCount = Int(configuredRepeatCount), parsedRepeatCount > 0 else {
+                    throw SmokeFailure("invalid repeat count: \(configuredRepeatCount)")
+                }
+                repeatCount = parsedRepeatCount
+            }
+            updatesReviewBaseline = options.has("--update-review-baseline")
+            showsHelp = options.has("help") || options.has("-h") || options.has("--help")
+        } catch let error as PerchHACommandLineParseError {
+            throw SmokeFailure(CommandLineOptions.parseErrorDescription(error))
+        }
+        self.reviewBaselineURL = reviewBaselineURL
+        self.repeatCount = repeatCount
+        self.updatesReviewBaseline = updatesReviewBaseline
+        self.showsHelp = showsHelp
+    }
+}
+
+private enum CommandLineOptions {
+    static func parseErrorDescription(_ error: PerchHACommandLineParseError) -> String {
+        switch error {
+        case let .missingValue(option):
+            "missing value for \(option)"
+        case let .unknownOption(option), let .invalidArgument(option):
+            "unknown option: \(option)"
+        }
+    }
+}
+
+private extension SmokePanelRenderSignature {
+    var sampledHashHex: String {
+        String(format: "%016llx", sampledHash)
+    }
+}
+
+private func writePanelReviewBaseline(_ baseline: SmokePanelReviewBaseline, to url: URL) throws {
+    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+    try encoder.encode(baseline).write(to: url, options: .atomic)
+}
+
+private func loadPanelReviewBaseline(from url: URL) throws -> SmokePanelReviewBaseline {
+    guard FileManager.default.fileExists(atPath: url.path) else {
+        throw SmokeFailure("panel review baseline is missing: \(url.path)")
+    }
+    do {
+        return try JSONDecoder().decode(
+            SmokePanelReviewBaseline.self,
+            from: Data(contentsOf: url)
+        )
+    } catch {
+        throw SmokeFailure("panel review baseline is unreadable: \(url.path)")
+    }
+}
+
+private func reviewBaselineMismatchMessage(
+    expected: SmokePanelReviewBaseline,
+    actual: SmokePanelReviewBaseline,
+    baselineURL: URL
+) -> String {
+    if expected.schemaVersion != actual.schemaVersion {
+        return "panel review baseline schema drifted; update \(baselineURL.path) if intentional"
+    }
+    let expectedVariantNames = expected.variants.map(\.name)
+    let actualVariantNames = actual.variants.map(\.name)
+    if expectedVariantNames != actualVariantNames {
+        return "panel review baseline variant list drifted; update \(baselineURL.path) if intentional"
+    }
+    for (expectedEntry, actualEntry) in zip(expected.variants, actual.variants) where expectedEntry != actualEntry {
+        return "panel review baseline drifted for \(actualEntry.name): expected \(expectedEntry.sampledHashHex), got \(actualEntry.sampledHashHex); update \(baselineURL.path) if intentional"
+    }
+    if expected.contactSheet != actual.contactSheet {
+        return "panel review contact sheet baseline drifted: expected \(expected.contactSheet.sampledHashHex), got \(actual.contactSheet.sampledHashHex); update \(baselineURL.path) if intentional"
+    }
+    return "panel review baseline drifted; update \(baselineURL.path) if intentional"
 }
 
 actor Counter {
@@ -3289,12 +5761,14 @@ actor Gate {
 actor ConnectionFormRecorder {
     private var recordedFallbackURLString: String?
     private var recordedTokens: [String] = []
+    private var recordedSelfSignedCertificateHosts: Set<String> = []
     private var recordedCallCount = 0
 
     func record(_ form: PerchHAConnectionForm) {
         recordedCallCount += 1
         recordedFallbackURLString = form.fallbackURL()?.absoluteString
         recordedTokens.append(form.token)
+        recordedSelfSignedCertificateHosts = form.selfSignedCertificateHosts()
     }
 
     func callCount() -> Int {
@@ -3307,6 +5781,10 @@ actor ConnectionFormRecorder {
 
     func tokens() -> [String] {
         recordedTokens
+    }
+
+    func selfSignedCertificateHosts() -> [String] {
+        recordedSelfSignedCertificateHosts.sorted()
     }
 }
 

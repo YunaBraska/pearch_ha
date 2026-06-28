@@ -11,6 +11,6 @@ public struct PerchHAModule: Equatable, Sendable {
 public enum PerchHASupport {
     public static let module = PerchHAModule(
         name: "PerchHASupport",
-        responsibility: "Shared support primitives for scheduling, rate limits, logging, and clocks."
+        responsibility: "Shared support primitives for command-line parsing, scheduling, rate limits, logging, and clocks."
     )
 }

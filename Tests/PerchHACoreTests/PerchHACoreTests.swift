@@ -3,6 +3,71 @@ import XCTest
 import PerchHACore
 
 final class PerchHACoreTests: XCTestCase {
+    func testActionValueRoundTripsNestedJSONShapes() throws {
+        let payload: ActionValue = .object([
+            "sequence": .array([
+                .object([
+                    "service": "light.turn_on",
+                    "data": .object([
+                        "brightness": 120,
+                        "transition": 1.5,
+                        "enabled": true,
+                        "note": .null
+                    ])
+                ])
+            ])
+        ])
+
+        let encoded = try JSONEncoder().encode(payload)
+        let decoded = try JSONDecoder().decode(ActionValue.self, from: encoded)
+
+        XCTAssertEqual(decoded, payload)
+    }
+
+    func testActionValueRoundTripsProtectedReferenceEnvelope() throws {
+        let payload: ActionValue = .object([
+            "alarm_code": .protectedString("protected-ref")
+        ])
+
+        let encoded = try JSONEncoder().encode(payload)
+        let text = try XCTUnwrap(String(data: encoded, encoding: .utf8))
+        let decoded = try JSONDecoder().decode(ActionValue.self, from: encoded)
+
+        XCTAssertTrue(text.contains(#""$perchha":"protected_string""#))
+        XCTAssertTrue(text.contains(#""reference":"protected-ref""#))
+        XCTAssertEqual(decoded, payload)
+    }
+
+    func testActionSpecResolvesProtectedReferencesAndCollectsReferenceSet() throws {
+        let action = ActionSpec(
+            domain: "alarm_control_panel",
+            service: "alarm_arm_home",
+            targetEntityID: "alarm_control_panel.home",
+            serviceData: [
+                "payload": .object([
+                    "pin": .protectedString("pin-ref"),
+                    "label": "home"
+                ])
+            ]
+        )
+
+        let resolved = try action.resolvedProtectedValues { reference in
+            XCTAssertEqual(reference, "pin-ref")
+            return "1234"
+        }
+
+        XCTAssertEqual(action.protectedValueReferences, ["pin-ref"])
+        XCTAssertEqual(
+            resolved.serviceData,
+            [
+                "payload": .object([
+                    "pin": "1234",
+                    "label": "home"
+                ])
+            ]
+        )
+    }
+
     func testEntityIDPreservesRawValue() {
         let id: EntityID = "sensor.office_temperature"
 

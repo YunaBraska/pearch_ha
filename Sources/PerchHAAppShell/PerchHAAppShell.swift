@@ -98,7 +98,17 @@ public protocol PerchHARefreshingHomeAssistantClient: Sendable {
     func refreshAccessToken(baseURL: URL, refreshToken: String, clientID: String) async -> HAClientResult<HAOAuthToken>
 }
 
+public protocol PerchHAServerTrustRefreshingHomeAssistantClient: PerchHARefreshingHomeAssistantClient {
+    func refreshAccessToken(
+        baseURL: URL,
+        refreshToken: String,
+        clientID: String,
+        serverTrustPolicy: HAServerTrustPolicy
+    ) async -> HAClientResult<HAOAuthToken>
+}
+
 extension HomeAssistantClient: PerchHARefreshingHomeAssistantClient {}
+extension HomeAssistantClient: PerchHAServerTrustRefreshingHomeAssistantClient {}
 
 public struct PerchHAAuthorizedHomeAssistantGateway: Sendable {
     private let client: any PerchHARefreshingHomeAssistantClient
@@ -190,44 +200,43 @@ public struct PerchHAAuthorizedHomeAssistantGateway: Sendable {
         case let .failure(failure):
             return .failure(failure)
         case let .success(authorizedInput):
-            let first = await operation(authorizedInput.input)
-            guard case .failure(.authentication) = first, let session = authorizedInput.session else {
-                return first
-            }
-            guard let clientID = session.clientID else {
-                _ = try? authSessionStore.clear()
-                return .failure(.authentication)
-            }
-            let refresh = await client.refreshAccessToken(
-                baseURL: primaryURL,
-                refreshToken: session.refreshToken,
-                clientID: clientID
-            )
-            switch refresh {
-            case let .success(token):
-                do {
-                    try persistRefreshedToken(token, previousSession: session)
-                } catch {
-                    return .failure(.transport(String(describing: error)))
-                }
-                let retryInput = HAConnectionInput(
-                    endpoint: authorizedInput.input.endpoint,
-                    token: token.accessToken
+            let primaryInput = authorizedInput.input(for: primaryURL)
+            let primary = await operation(primaryInput)
+            if case let .failure(failure) = primary,
+               shouldRetryOnFallback(failure),
+               let fallbackURL = form.fallbackURL() {
+                let fallbackInput = authorizedInput.input(for: fallbackURL)
+                return await resolveAuthenticationFailure(
+                    await operation(fallbackInput),
+                    authorizedInput: authorizedInput,
+                    attemptedInput: fallbackInput,
+                    refreshBaseURL: fallbackURL,
+                    operation: operation
                 )
-                return await operation(retryInput)
-            case .failure:
-                _ = try? authSessionStore.clear()
-                return .failure(.authentication)
             }
+            return await resolveAuthenticationFailure(
+                primary,
+                authorizedInput: authorizedInput,
+                attemptedInput: primaryInput,
+                refreshBaseURL: primaryURL,
+                operation: operation
+            )
         }
     }
 
     private func resolveInput(form: PerchHAConnectionForm, primaryURL: URL) -> HAClientResult<PerchHAAuthorizedInput> {
         let endpoint = HAEndpoint(primaryURL: primaryURL, fallbackURL: form.fallbackURL())
+        let serverTrustPolicy = HAServerTrustPolicy(
+            allowedSelfSignedCertificateHosts: form.selfSignedCertificateHosts()
+        )
         if !form.trimmedToken.isEmpty {
             return .success(
                 PerchHAAuthorizedInput(
-                    input: HAConnectionInput(endpoint: endpoint, token: form.trimmedToken),
+                    input: HAConnectionInput(
+                        endpoint: endpoint,
+                        token: form.trimmedToken,
+                        serverTrustPolicy: serverTrustPolicy
+                    ),
                     session: nil
                 )
             )
@@ -239,7 +248,11 @@ public struct PerchHAAuthorizedHomeAssistantGateway: Sendable {
             let session = try authSessionStore.load()
             return .success(
                 PerchHAAuthorizedInput(
-                    input: HAConnectionInput(endpoint: endpoint, token: session.accessToken),
+                    input: HAConnectionInput(
+                        endpoint: endpoint,
+                        token: session.accessToken,
+                        serverTrustPolicy: serverTrustPolicy
+                    ),
                     session: session
                 )
             )
@@ -247,6 +260,71 @@ public struct PerchHAAuthorizedHomeAssistantGateway: Sendable {
             return .failure(.authentication)
         } catch {
             return .failure(.transport(String(describing: error)))
+        }
+    }
+
+    private func resolveAuthenticationFailure<Value: Sendable>(
+        _ result: HAClientResult<Value>,
+        authorizedInput: PerchHAAuthorizedInput,
+        attemptedInput: HAConnectionInput,
+        refreshBaseURL: URL,
+        operation: @Sendable (HAConnectionInput) async -> HAClientResult<Value>
+    ) async -> HAClientResult<Value> {
+        guard case .failure(.authentication) = result, let session = authorizedInput.session else {
+            return result
+        }
+        guard let clientID = session.clientID else {
+            _ = try? authSessionStore.clear()
+            return .failure(.authentication)
+        }
+        let refresh = await refreshAccessToken(
+            baseURL: refreshBaseURL,
+            refreshToken: session.refreshToken,
+            clientID: clientID,
+            serverTrustPolicy: attemptedInput.serverTrustPolicy
+        )
+        switch refresh {
+        case let .success(token):
+            do {
+                try persistRefreshedToken(token, previousSession: session)
+            } catch {
+                return .failure(.transport(String(describing: error)))
+            }
+            let retryInput = HAConnectionInput(
+                endpoint: attemptedInput.endpoint,
+                token: token.accessToken,
+                serverTrustPolicy: attemptedInput.serverTrustPolicy
+            )
+            return await operation(retryInput)
+        case .failure:
+            _ = try? authSessionStore.clear()
+            return .failure(.authentication)
+        }
+    }
+
+    private func refreshAccessToken(
+        baseURL: URL,
+        refreshToken: String,
+        clientID: String,
+        serverTrustPolicy: HAServerTrustPolicy
+    ) async -> HAClientResult<HAOAuthToken> {
+        if let trustPolicyClient = client as? any PerchHAServerTrustRefreshingHomeAssistantClient {
+            return await trustPolicyClient.refreshAccessToken(
+                baseURL: baseURL,
+                refreshToken: refreshToken,
+                clientID: clientID,
+                serverTrustPolicy: serverTrustPolicy
+            )
+        }
+        return await client.refreshAccessToken(baseURL: baseURL, refreshToken: refreshToken, clientID: clientID)
+    }
+
+    private func shouldRetryOnFallback(_ failure: HAClientFailure) -> Bool {
+        switch failure {
+        case .unreachable, .tlsRejected, .transport:
+            true
+        case .authentication, .invalidURL, .invalidResponse, .invalidPayload, .httpStatus, .webSocketProtocol, .webSocketCommand:
+            false
         }
     }
 
@@ -268,6 +346,14 @@ public struct PerchHAAuthorizedHomeAssistantGateway: Sendable {
 private struct PerchHAAuthorizedInput: Sendable {
     let input: HAConnectionInput
     let session: PerchHAAuthSession?
+
+    func input(for baseURL: URL) -> HAConnectionInput {
+        HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: baseURL, fallbackURL: nil),
+            token: input.token,
+            serverTrustPolicy: input.serverTrustPolicy
+        )
+    }
 }
 
 public struct PerchHAOAuthApplicationConfiguration: Equatable, Sendable {
@@ -550,7 +636,10 @@ public struct PerchHAOAuthSignInCoordinator: Sendable {
         let exchange = await client.exchangeAuthorizationCode(
             baseURL: primaryURL,
             code: callback.code,
-            clientID: configuration.clientID
+            clientID: configuration.clientID,
+            serverTrustPolicy: HAServerTrustPolicy(
+                allowedSelfSignedCertificateHosts: form.selfSignedCertificateHosts()
+            )
         )
         let token: HAOAuthToken
         switch exchange {
@@ -679,6 +768,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     private let serviceMetadataProvider: PerchHAPanelModel.ServiceMetadataProvider
     private let actionRunner: PerchHAPanelModel.ActionRunner
     private let oauthSignInRunner: PerchHAPanelModel.OAuthSignInRunner
+    private let protectedActionValueStore: any ProtectedActionValueStore
     private let oauthApplicationConfiguration: PerchHAOAuthApplicationConfiguration?
     private let menuBarPresenter: PerchHAMenuBarPresenter
     private let gaugeImageRenderer: any PerchHAStatusItemGaugeImageRendering
@@ -713,6 +803,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             historyProvider: gateway.history(form:entityID:range:),
             serviceMetadataProvider: gateway.services(form:),
             actionRunner: gateway.action(form:action:),
+            protectedActionValueStore: KeychainProtectedActionValueStore(),
             oauthSignInRunner: oauthSignInRunner,
             oauthApplicationConfiguration: oauthApplicationConfiguration
         )
@@ -733,6 +824,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             historyProvider: gateway.history(form:entityID:range:),
             serviceMetadataProvider: gateway.services(form:),
             actionRunner: gateway.action(form:action:),
+            protectedActionValueStore: KeychainProtectedActionValueStore(),
             oauthSignInRunner: { _ in .failed("OAuth sign-in is not configured") },
             oauthApplicationConfiguration: nil
         )
@@ -742,6 +834,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         configStore: ConfigStore?,
         connector: @escaping PerchHAPanelModel.Connector,
         serviceMetadataProvider: @escaping PerchHAPanelModel.ServiceMetadataProvider = { _ in .success([]) },
+        protectedActionValueStore: any ProtectedActionValueStore = KeychainProtectedActionValueStore(),
         oauthApplicationConfiguration: PerchHAOAuthApplicationConfiguration? = nil,
         menuBarPresenter: PerchHAMenuBarPresenter = PerchHAMenuBarPresenter(),
         gaugeImageRenderer: any PerchHAStatusItemGaugeImageRendering = PerchHAStatusItemGaugeImageRenderer()
@@ -752,6 +845,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             historyProvider: PerchHAApplication.history(form:entityID:range:),
             serviceMetadataProvider: serviceMetadataProvider,
             actionRunner: PerchHAApplication.action(form:action:),
+            protectedActionValueStore: protectedActionValueStore,
             oauthApplicationConfiguration: oauthApplicationConfiguration,
             menuBarPresenter: menuBarPresenter,
             gaugeImageRenderer: gaugeImageRenderer
@@ -764,6 +858,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         historyProvider: @escaping PerchHAPanelModel.HistoryProvider,
         serviceMetadataProvider: @escaping PerchHAPanelModel.ServiceMetadataProvider = { _ in .success([]) },
         actionRunner: @escaping PerchHAPanelModel.ActionRunner = PerchHAApplication.action(form:action:),
+        protectedActionValueStore: any ProtectedActionValueStore = KeychainProtectedActionValueStore(),
         oauthSignInRunner: @escaping PerchHAPanelModel.OAuthSignInRunner = { _ in .failed("OAuth sign-in is not configured") },
         oauthApplicationConfiguration: PerchHAOAuthApplicationConfiguration? = nil,
         menuBarPresenter: PerchHAMenuBarPresenter = PerchHAMenuBarPresenter(),
@@ -774,6 +869,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         self.historyProvider = historyProvider
         self.serviceMetadataProvider = serviceMetadataProvider
         self.actionRunner = actionRunner
+        self.protectedActionValueStore = protectedActionValueStore
         self.oauthSignInRunner = oauthSignInRunner
         self.oauthApplicationConfiguration = oauthApplicationConfiguration
         self.menuBarPresenter = menuBarPresenter
@@ -816,6 +912,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             customActionSink: { [weak self] customActions in
                 self?.persist(customActionConfiguration: customActions) ?? .failed("configuration store unavailable")
             },
+            protectedActionValueStore: protectedActionValueStore,
             snapshotSink: { [weak self] snapshot in
                 self?.updateStatusItem(from: snapshot)
             }
@@ -886,13 +983,15 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         urlString: String? = nil,
         fallbackURLString: String? = nil,
         token: String? = nil,
-        usesStoredAuthSession: Bool? = nil
+        usesStoredAuthSession: Bool? = nil,
+        allowsSelfSignedCertificates: Bool? = nil
     ) {
         panelModel?.updateConnectionForm(
             urlString: urlString,
             fallbackURLString: fallbackURLString,
             token: token,
-            usesStoredAuthSession: usesStoredAuthSession
+            usesStoredAuthSession: usesStoredAuthSession,
+            allowsSelfSignedCertificates: allowsSelfSignedCertificates
         )
     }
 
@@ -949,6 +1048,24 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     }
 
     @discardableResult
+    public func setCustomActionServiceDataValue(
+        _ id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent],
+        value: ActionValue
+    ) -> Bool {
+        panelModel?.setCustomActionServiceDataValue(id, path: path, value: value) ?? false
+    }
+
+    @discardableResult
+    public func appendCustomActionServiceDataArrayValue(
+        _ id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent],
+        value: ActionValue
+    ) -> Bool {
+        panelModel?.appendCustomActionServiceDataArrayValue(id, path: path, value: value) ?? false
+    }
+
+    @discardableResult
     public func setCustomActionServiceDataText(
         _ id: CustomActionID,
         key: String,
@@ -959,13 +1076,50 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     }
 
     @discardableResult
+    public func setCustomActionServiceDataText(
+        _ id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent],
+        text: String,
+        kind: PerchHACustomActionServiceDataValueKind
+    ) -> Bool {
+        panelModel?.setCustomActionServiceDataText(id, path: path, text: text, kind: kind) ?? false
+    }
+
+    @discardableResult
     public func renameCustomActionServiceDataKey(_ id: CustomActionID, from oldKey: String, to newKey: String) -> Bool {
         panelModel?.renameCustomActionServiceDataKey(id, from: oldKey, to: newKey) ?? false
     }
 
     @discardableResult
+    public func renameCustomActionServiceDataKey(
+        _ id: CustomActionID,
+        parentPath: [PerchHACustomActionServiceDataPathComponent],
+        from oldKey: String,
+        to newKey: String
+    ) -> Bool {
+        panelModel?.renameCustomActionServiceDataKey(id, parentPath: parentPath, from: oldKey, to: newKey) ?? false
+    }
+
+    @discardableResult
     public func removeCustomActionServiceDataKey(_ id: CustomActionID, key: String) -> Bool {
         panelModel?.removeCustomActionServiceDataKey(id, key: key) ?? false
+    }
+
+    @discardableResult
+    public func removeCustomActionServiceDataValue(
+        _ id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent]
+    ) -> Bool {
+        panelModel?.removeCustomActionServiceDataValue(id, path: path) ?? false
+    }
+
+    @discardableResult
+    public func moveCustomActionServiceDataArrayValue(
+        _ id: CustomActionID,
+        path: [PerchHACustomActionServiceDataPathComponent],
+        direction: SelectionMoveDirection
+    ) -> Bool {
+        panelModel?.moveCustomActionServiceDataArrayValue(id, path: path, direction: direction) ?? false
     }
 
     @discardableResult

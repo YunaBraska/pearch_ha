@@ -62,7 +62,16 @@ final class PerchHAPersistenceTests: XCTestCase {
                             "duration": 15,
                             "metadata": .object([
                                 "source": "perchha",
-                                "pinned": true
+                                "pinned": true,
+                                "steps": .array([
+                                    .object([
+                                        "service": "fan.set_preset_mode",
+                                        "data": .object([
+                                            "preset_mode": "boost",
+                                            "duration": 15
+                                        ])
+                                    ])
+                                ])
                             ])
                         ]
                     ),
@@ -199,6 +208,35 @@ final class PerchHAPersistenceTests: XCTestCase {
                 }
                 """,
                 "protected service data key serviceData.alarm.pin"
+            ),
+            (
+                "protected service data inside array",
+                """
+                {
+                  "schemaVersion": 1,
+                  "customActions": [
+                    {
+                      "id": "arm-alarm",
+                      "entityID": "sensor.office_temperature",
+                      "title": "Arm alarm",
+                      "action": {
+                        "domain": "alarm_control_panel",
+                        "service": "alarm_arm_home",
+                        "targetEntityID": "alarm_control_panel.home",
+                        "serviceData": {
+                          "steps": [
+                            {
+                              "pin": "1234"
+                            }
+                          ]
+                        }
+                      },
+                      "requiresConfirmation": true
+                    }
+                  ]
+                }
+                """,
+                "protected service data key serviceData.steps[0].pin"
             )
         ]
 
@@ -223,7 +261,7 @@ final class PerchHAPersistenceTests: XCTestCase {
         }
     }
 
-    func testJSONConfigStoreRejectsProtectedCustomActionServiceDataOnSave() throws {
+    func testJSONConfigStoreRoundTripsProtectedCustomActionReferencesWithoutSecretBytes() throws {
         let url = temporaryConfigURL()
         defer {
             try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
@@ -239,22 +277,19 @@ final class PerchHAPersistenceTests: XCTestCase {
                         domain: "alarm_control_panel",
                         service: "alarm_arm_home",
                         targetEntityID: "alarm_control_panel.home",
-                        serviceData: ["alarm_code": "1234"]
+                        serviceData: ["alarm_code": .protectedString("protected-ref")]
                     ),
                     requiresConfirmation: true
                 )
             ]
         )
 
-        XCTAssertThrowsError(try store.save(configuration)) { error in
-            XCTAssertEqual(
-                error as? ConfigStoreError,
-                .invalidConfiguration(
-                    message: "custom action arm-alarm uses protected service data key serviceData.alarm_code"
-                )
-            )
-        }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertEqual(try store.save(configuration), configuration)
+        XCTAssertEqual(try store.load(), configuration)
+        let text = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(text.contains(#""$perchha" : "protected_string""#))
+        XCTAssertTrue(text.contains(#""reference" : "protected-ref""#))
+        XCTAssertFalse(text.contains("1234"))
     }
 
     func testJSONConfigStoreRejectsUnsupportedSchemaWithoutOverwritingExistingConfig() throws {
@@ -374,6 +409,33 @@ final class PerchHAPersistenceTests: XCTestCase {
             XCTAssertEqual(error as? SecretStoreError, .notFound(.accessToken))
             XCTAssertFalse(String(describing: error).contains("rotated-token"))
         }
+    }
+
+    func testKeychainProtectedActionValueStoreRoundsTripsAndDeletesValues() throws {
+        let secretStore = KeychainSecretStore(service: "dev.perchha.tests.\(UUID().uuidString)")
+        let store = KeychainProtectedActionValueStore(secretStore: secretStore)
+        let first: ProtectedActionValueReference = "action.pin"
+        let second: ProtectedActionValueReference = "action.code"
+
+        XCTAssertNoThrow(try store.delete(first))
+        XCTAssertNoThrow(try store.delete(second))
+        XCTAssertThrowsError(try store.load(first)) { error in
+            XCTAssertEqual(error as? ProtectedActionValueStoreError, .missingValue(first))
+        }
+
+        XCTAssertNoThrow(try store.save("1234", for: first))
+        XCTAssertEqual(try store.load(first), "1234")
+        XCTAssertNoThrow(try store.save("5678", for: first))
+        XCTAssertEqual(try store.load(first), "5678")
+        XCTAssertNoThrow(try store.save("abcd", for: second))
+        XCTAssertEqual(try store.load(second), "abcd")
+
+        XCTAssertNoThrow(try store.delete(first))
+        XCTAssertThrowsError(try store.load(first)) { error in
+            XCTAssertEqual(error as? ProtectedActionValueStoreError, .missingValue(first))
+        }
+        XCTAssertEqual(try store.load(second), "abcd")
+        XCTAssertNoThrow(try store.delete(second))
     }
 
     func testAuthSessionStoreSavesRotatesLoadsAndClearsTokens() throws {
