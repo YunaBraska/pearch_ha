@@ -59,6 +59,7 @@ Implemented locally:
 - M14 cached panel-open performance smoke measurement, idle CPU budget, AppKit lifecycle memory soak, bounded reconnect request-volume evidence, status-item gauge redraw throttling, and live WebSocket restart recovery at the public AppKit/SwiftUI and FakeHA journal boundaries.
 - Full-Xcode CI coverage gate for `PerchHACore` and `PerchHAClient` through LLVM coverage JSON.
 - M15 native app signing and signature verification, Developer ID/notary preflight, `notarytool`/stapler command support, release evidence manifests and verification, and DMG packaging through `hdiutil`, with app staging, mounted content verification, Applications shortcut, overwrite refusal, smoke coverage, and CI traceability.
+- Manual GitHub Actions release workflow for branch-test local evidence and credentialed main-branch release packaging.
 - `perchha-package-app --release-preflight` reports redacted readiness, next-step hints, and suggested credentialed-release commands in both human and JSON output.
 - Repository safety audit for local env files, private fixtures, build output, credential artifacts, and default telemetry SDKs/endpoints.
 

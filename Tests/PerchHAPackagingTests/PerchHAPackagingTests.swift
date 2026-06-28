@@ -542,6 +542,60 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertTrue(retainedArtifacts.contains(PerchHAReleaseEvidenceReview.expectedBaselineFilename))
     }
 
+    func testReleaseWorkflowSupportsLocalEvidenceAndCredentialedReleaseModes() throws {
+        let rootURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let workflowURL = rootURL.appendingPathComponent(".github/workflows/release.yml", isDirectory: false)
+        let workflow = try String(contentsOf: workflowURL, encoding: .utf8)
+
+        XCTAssertTrue(workflow.contains("workflow_dispatch:"))
+        XCTAssertTrue(workflow.contains("local-evidence"))
+        XCTAssertTrue(workflow.contains("credentialed-release"))
+        XCTAssertTrue(workflow.contains("publish_release"))
+        XCTAssertTrue(workflow.contains("oauth_client_id"))
+        XCTAssertTrue(workflow.contains("oauth_redirect_uri"))
+        XCTAssertTrue(workflow.contains("swift run perchha-xcode-doctor --json --strict"))
+        XCTAssertTrue(
+            workflow.contains(
+                "swift test --disable-swift-testing --enable-xctest -Xswiftc -warnings-as-errors --enable-code-coverage"
+            )
+        )
+        XCTAssertTrue(workflow.contains("swift run perchha-coverage-check"))
+        XCTAssertTrue(workflow.contains("swift run perchha-repo-audit"))
+        XCTAssertTrue(workflow.contains("swift run perchha-package-app --write-oauth-site"))
+        XCTAssertTrue(workflow.contains("swift run perchha-package-app --verify-oauth-site"))
+        XCTAssertTrue(workflow.contains("--bundle-release-evidence .build/perchha-release-evidence"))
+        XCTAssertTrue(workflow.contains("--sign-ad-hoc"))
+        XCTAssertTrue(workflow.contains("--sign-identity \"$PERCHHA_DEVELOPER_ID_IDENTITY\""))
+        XCTAssertTrue(workflow.contains("--notary-profile \"$PERCHHA_NOTARY_PROFILE\""))
+        XCTAssertTrue(workflow.contains("xcrun notarytool store-credentials"))
+        XCTAssertTrue(workflow.contains("gh release create"))
+        XCTAssertTrue(workflow.contains("actions/upload-artifact@v4"))
+        XCTAssertTrue(workflow.contains("publish_release is only allowed from main"))
+    }
+
+    func testReleaseGuideDocumentsWorkflowVariablesAndSecrets() throws {
+        let rootURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let releaseGuideURL = rootURL.appendingPathComponent("docs/RELEASE.md", isDirectory: false)
+        let releaseGuide = try String(contentsOf: releaseGuideURL, encoding: .utf8)
+
+        XCTAssertTrue(releaseGuide.contains(".github/workflows/release.yml"))
+        XCTAssertTrue(releaseGuide.contains("mode=local-evidence"))
+        XCTAssertTrue(releaseGuide.contains("mode=credentialed-release"))
+        XCTAssertTrue(releaseGuide.contains("publish_release=true"))
+        XCTAssertTrue(releaseGuide.contains("oauth_client_id"))
+        XCTAssertTrue(releaseGuide.contains("oauth_redirect_uri"))
+        XCTAssertTrue(releaseGuide.contains("PERCHHA_OAUTH_CLIENT_ID"))
+        XCTAssertTrue(releaseGuide.contains("PERCHHA_OAUTH_REDIRECT_URI"))
+        XCTAssertTrue(releaseGuide.contains("PERCHHA_DEVELOPER_ID_IDENTITY"))
+        XCTAssertTrue(releaseGuide.contains("PERCHHA_NOTARY_PROFILE"))
+        XCTAssertTrue(releaseGuide.contains("PERCHHA_APP_STORE_CONNECT_KEY_ID"))
+        XCTAssertTrue(releaseGuide.contains("PERCHHA_APP_STORE_CONNECT_ISSUER_ID"))
+        XCTAssertTrue(releaseGuide.contains("PERCHHA_DEVELOPER_ID_CERTIFICATE_P12_BASE64"))
+        XCTAssertTrue(releaseGuide.contains("PERCHHA_DEVELOPER_ID_CERTIFICATE_PASSWORD"))
+        XCTAssertTrue(releaseGuide.contains("PERCHHA_KEYCHAIN_PASSWORD"))
+        XCTAssertTrue(releaseGuide.contains("PERCHHA_APP_STORE_CONNECT_KEY_P8_BASE64"))
+    }
+
     func testDMGBuilderStagesAppApplicationsShortcutAndRunsHdiutilCreate() throws {
         let directory = temporaryDirectory()
         defer {

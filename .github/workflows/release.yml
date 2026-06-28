@@ -1,0 +1,322 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Release mode"
+        required: true
+        default: local-evidence
+        type: choice
+        options:
+          - local-evidence
+          - credentialed-release
+      version:
+        description: "Optional version override. Default: UTC timestamp %Y.%m.%d.%H%M"
+        required: false
+        type: string
+      oauth_client_id:
+        description: "Optional OAuth client website URL override for workflow testing. Falls back to repository variable."
+        required: false
+        type: string
+      oauth_redirect_uri:
+        description: "Optional OAuth redirect URI override for workflow testing. Falls back to repository variable."
+        required: false
+        type: string
+      smoke_repeat_count:
+        description: "Optional repeat count for perchha-smoke --repeat. Must be >= 1."
+        required: false
+        default: "1"
+        type: string
+      publish_release:
+        description: "Create a GitHub release from this run. Requires mode=credentialed-release on main."
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Package release candidate
+    runs-on: macos-latest
+    env:
+      PERCHHA_OAUTH_CLIENT_ID: ${{ vars.PERCHHA_OAUTH_CLIENT_ID }}
+      PERCHHA_OAUTH_REDIRECT_URI: ${{ vars.PERCHHA_OAUTH_REDIRECT_URI }}
+      PERCHHA_DEVELOPER_ID_IDENTITY: ${{ vars.PERCHHA_DEVELOPER_ID_IDENTITY }}
+      PERCHHA_NOTARY_PROFILE: ${{ vars.PERCHHA_NOTARY_PROFILE }}
+      PERCHHA_APP_STORE_CONNECT_KEY_ID: ${{ vars.PERCHHA_APP_STORE_CONNECT_KEY_ID }}
+      PERCHHA_APP_STORE_CONNECT_ISSUER_ID: ${{ vars.PERCHHA_APP_STORE_CONNECT_ISSUER_ID }}
+      PERCHHA_DEVELOPER_ID_CERTIFICATE_P12_BASE64: ${{ secrets.PERCHHA_DEVELOPER_ID_CERTIFICATE_P12_BASE64 }}
+      PERCHHA_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.PERCHHA_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+      PERCHHA_KEYCHAIN_PASSWORD: ${{ secrets.PERCHHA_KEYCHAIN_PASSWORD }}
+      PERCHHA_APP_STORE_CONNECT_KEY_P8_BASE64: ${{ secrets.PERCHHA_APP_STORE_CONNECT_KEY_P8_BASE64 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Toolchain versions
+        shell: sh
+        run: |
+          set -eu
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+          xcrun --find xctest
+          swift --version
+
+      - name: Resolve release inputs
+        id: release_inputs
+        shell: sh
+        run: |
+          set -eu
+          version='${{ inputs.version }}'
+          oauth_client_id='${{ inputs.oauth_client_id }}'
+          oauth_redirect_uri='${{ inputs.oauth_redirect_uri }}'
+          if [ -z "$version" ]; then
+            version="$(date -u '+%Y.%m.%d.%H%M')"
+          fi
+          if [ -n "$oauth_client_id" ]; then
+            PERCHHA_OAUTH_CLIENT_ID="$oauth_client_id"
+          fi
+          if [ -n "$oauth_redirect_uri" ]; then
+            PERCHHA_OAUTH_REDIRECT_URI="$oauth_redirect_uri"
+          fi
+          repeat='${{ inputs.smoke_repeat_count }}'
+          case "$repeat" in
+            ''|*[!0-9]*)
+              echo "smoke_repeat_count must be a positive integer" >&2
+              exit 1
+              ;;
+          esac
+          if [ "$repeat" -lt 1 ]; then
+            echo "smoke_repeat_count must be >= 1" >&2
+            exit 1
+          fi
+          if [ -z "$PERCHHA_OAUTH_CLIENT_ID" ] || [ -z "$PERCHHA_OAUTH_REDIRECT_URI" ]; then
+            echo "PERCHHA_OAUTH_CLIENT_ID and PERCHHA_OAUTH_REDIRECT_URI repository variables are required" >&2
+            exit 1
+          fi
+          if [ '${{ inputs.publish_release }}' = 'true' ] && [ '${{ inputs.mode }}' != 'credentialed-release' ]; then
+            echo "publish_release requires mode=credentialed-release" >&2
+            exit 1
+          fi
+          if [ '${{ inputs.publish_release }}' = 'true' ] && [ '${{ github.ref_name }}' != 'main' ]; then
+            echo "publish_release is only allowed from main" >&2
+            exit 1
+          fi
+          if [ '${{ inputs.mode }}' = 'credentialed-release' ]; then
+            if [ -z "$PERCHHA_DEVELOPER_ID_IDENTITY" ] || [ -z "$PERCHHA_NOTARY_PROFILE" ]; then
+              echo "PERCHHA_DEVELOPER_ID_IDENTITY and PERCHHA_NOTARY_PROFILE repository variables are required for credentialed-release" >&2
+              exit 1
+            fi
+            if [ -z "$PERCHHA_APP_STORE_CONNECT_KEY_ID" ] || [ -z "$PERCHHA_APP_STORE_CONNECT_ISSUER_ID" ]; then
+              echo "PERCHHA_APP_STORE_CONNECT_KEY_ID and PERCHHA_APP_STORE_CONNECT_ISSUER_ID repository variables are required for credentialed-release" >&2
+              exit 1
+            fi
+            if [ -z "$PERCHHA_DEVELOPER_ID_CERTIFICATE_P12_BASE64" ] || [ -z "$PERCHHA_DEVELOPER_ID_CERTIFICATE_PASSWORD" ] || [ -z "$PERCHHA_KEYCHAIN_PASSWORD" ] || [ -z "$PERCHHA_APP_STORE_CONNECT_KEY_P8_BASE64" ]; then
+              echo "Developer ID certificate, keychain password, and App Store Connect API key secrets are required for credentialed-release" >&2
+              exit 1
+            fi
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'smoke_repeat_count=%s\n' "$repeat" >> "$GITHUB_OUTPUT"
+          printf 'oauth_client_id=%s\n' "$PERCHHA_OAUTH_CLIENT_ID" >> "$GITHUB_OUTPUT"
+          printf 'oauth_redirect_uri=%s\n' "$PERCHHA_OAUTH_REDIRECT_URI" >> "$GITHUB_OUTPUT"
+
+      - name: Verify native test toolchain
+        shell: sh
+        run: |
+          set -eu
+          swift run perchha-xcode-doctor --json --strict
+          swift test --disable-swift-testing --enable-xctest list | tee .build/perchha-test-list.txt
+          test -s .build/perchha-test-list.txt
+
+      - name: Build and coverage gates
+        shell: sh
+        run: |
+          set -eu
+          swift build -Xswiftc -warnings-as-errors
+          swift test --disable-swift-testing --enable-xctest -Xswiftc -warnings-as-errors --enable-code-coverage
+          coverage_path="$(swift test --disable-swift-testing --enable-xctest --enable-code-coverage --show-codecov-path | tail -n 1)"
+          cp "$coverage_path" .build/perchha-codecov.json
+          swift run perchha-coverage-check \
+            --coverage-json .build/perchha-codecov.json \
+            --line-target PerchHACore=95 \
+            --line-target PerchHAClient=95 \
+            --branch-target PerchHACore=90
+          swift run perchha-repo-audit
+
+      - name: Build release executable
+        shell: sh
+        run: |
+          set -eu
+          swift build -c release -Xswiftc -warnings-as-errors
+          xcodebuild -project PerchHA.xcodeproj -scheme PerchHA -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
+
+      - name: Generate and verify OAuth client website artifact
+        shell: sh
+        run: |
+          set -eu
+          mkdir -p .build/perchha-oauth-site
+          cat > .build/perchha-oauth.env <<EOF
+          PERCHHA_OAUTH_CLIENT_ID=${{ steps.release_inputs.outputs.oauth_client_id }}
+          PERCHHA_OAUTH_REDIRECT_URI=${{ steps.release_inputs.outputs.oauth_redirect_uri }}
+          EOF
+          swift run perchha-package-app --write-oauth-site .build/perchha-oauth-site/index.html --oauth-env .build/perchha-oauth.env
+          swift run perchha-package-app --verify-oauth-site .build/perchha-oauth-site/index.html --oauth-env .build/perchha-oauth.env
+
+      - name: Run smoke evidence
+        shell: sh
+        run: |
+          set -eu
+          PERCHHA_SMOKE_SNAPSHOT_DIR=.build/perchha-snapshots swift run perchha-smoke
+          repeat='${{ steps.release_inputs.outputs.smoke_repeat_count }}'
+          if [ "$repeat" -gt 1 ]; then
+            PERCHHA_SMOKE_SNAPSHOT_DIR=.build/perchha-snapshots swift run perchha-smoke --repeat "$repeat"
+          fi
+
+      - name: Verify clean working tree
+        shell: sh
+        run: |
+          set -eu
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "working tree changed during release verification" >&2
+            git status --short
+            exit 1
+          fi
+
+      - name: Import Developer ID certificate and notary profile
+        if: ${{ inputs.mode == 'credentialed-release' }}
+        shell: sh
+        run: |
+          set -eu
+          KEYCHAIN_PATH="$RUNNER_TEMP/perchha-release.keychain-db"
+          CERT_PATH="$RUNNER_TEMP/perchha-developer-id.p12"
+          KEY_PATH="$RUNNER_TEMP/AuthKey_PerchHA.p8"
+          printf '%s' "$PERCHHA_DEVELOPER_ID_CERTIFICATE_P12_BASE64" | base64 -d > "$CERT_PATH"
+          printf '%s' "$PERCHHA_APP_STORE_CONNECT_KEY_P8_BASE64" | base64 -d > "$KEY_PATH"
+          security create-keychain -p "$PERCHHA_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$PERCHHA_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$PERCHHA_DEVELOPER_ID_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$PERCHHA_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security find-identity -v "$KEYCHAIN_PATH" | grep -F "$PERCHHA_DEVELOPER_ID_IDENTITY"
+          xcrun notarytool store-credentials "$PERCHHA_NOTARY_PROFILE" \
+            --key "$KEY_PATH" \
+            --key-id "$PERCHHA_APP_STORE_CONNECT_KEY_ID" \
+            --issuer "$PERCHHA_APP_STORE_CONNECT_ISSUER_ID" \
+            --keychain "$KEYCHAIN_PATH" \
+            --validate
+          swift run perchha-package-app \
+            --release-preflight \
+            --sign-identity "$PERCHHA_DEVELOPER_ID_IDENTITY" \
+            --notary-profile "$PERCHHA_NOTARY_PROFILE"
+
+      - name: Package local release evidence
+        if: ${{ inputs.mode == 'local-evidence' }}
+        shell: sh
+        run: |
+          set -eu
+          swift run perchha-package-app \
+            --executable .build/release/PerchHA \
+            --output .build/PerchHA.app \
+            --callback-scheme perchha \
+            --replace \
+            --version '${{ steps.release_inputs.outputs.version }}' \
+            --build-version '${{ steps.release_inputs.outputs.version }}' \
+            --verify-launch-services \
+            --sign-ad-hoc \
+            --verify-signature \
+            --package-dmg \
+            --verify-dmg \
+            --verify-dmg-contents \
+            --release-manifest .build/perchha-release-manifest.json \
+            --bundle-release-evidence .build/perchha-release-evidence \
+            --oauth-site .build/perchha-oauth-site/index.html \
+            --snapshot-dir .build/perchha-snapshots/current
+          swift run perchha-package-app --verify-release-manifest .build/perchha-release-manifest.json
+          swift run perchha-package-app --verify-release-manifest .build/perchha-release-evidence/perchha-release-manifest.json
+
+      - name: Package signed and notarized release
+        if: ${{ inputs.mode == 'credentialed-release' }}
+        shell: sh
+        run: |
+          set -eu
+          swift run perchha-package-app \
+            --executable .build/release/PerchHA \
+            --output .build/PerchHA.app \
+            --callback-scheme perchha \
+            --replace \
+            --version '${{ steps.release_inputs.outputs.version }}' \
+            --build-version '${{ steps.release_inputs.outputs.version }}' \
+            --verify-launch-services \
+            --sign-identity "$PERCHHA_DEVELOPER_ID_IDENTITY" \
+            --verify-signature \
+            --package-dmg \
+            --verify-dmg \
+            --verify-dmg-contents \
+            --notary-profile "$PERCHHA_NOTARY_PROFILE" \
+            --release-manifest .build/perchha-release-manifest.json \
+            --bundle-release-evidence .build/perchha-release-evidence \
+            --oauth-site .build/perchha-oauth-site/index.html \
+            --snapshot-dir .build/perchha-snapshots/current
+          swift run perchha-package-app --verify-release-manifest .build/perchha-release-manifest.json
+          swift run perchha-package-app --verify-release-manifest .build/perchha-release-evidence/perchha-release-manifest.json
+
+      - name: Prepare release assets
+        shell: sh
+        run: |
+          set -eu
+          version='${{ steps.release_inputs.outputs.version }}'
+          mkdir -p .build/perchha-release-assets
+          cp .build/PerchHA.dmg ".build/perchha-release-assets/PerchHA-${version}.dmg"
+          tar -C .build -czf ".build/perchha-release-assets/perchha-release-evidence-${version}.tar.gz" perchha-release-evidence
+          cp .build/perchha-release-manifest.json ".build/perchha-release-assets/perchha-release-manifest-${version}.json"
+
+      - name: Upload smoke screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: perchha-smoke-snapshots-${{ steps.release_inputs.outputs.version }}
+          path: .build/perchha-snapshots/current
+          if-no-files-found: error
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: perchha-release-assets-${{ steps.release_inputs.outputs.version }}
+          path: .build/perchha-release-assets
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: ${{ inputs.publish_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: sh
+        run: |
+          set -eu
+          version='${{ steps.release_inputs.outputs.version }}'
+          gh release create "$version" .build/perchha-release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "PerchHA $version" \
+            --notes "Automated credentialed release from $GITHUB_SHA."
+
+      - name: Cleanup temporary signing material
+        if: ${{ always() && inputs.mode == 'credentialed-release' }}
+        shell: sh
+        run: |
+          set -eu
+          security delete-keychain "$RUNNER_TEMP/perchha-release.keychain-db" || true
+          rm -f "$RUNNER_TEMP/perchha-developer-id.p12" "$RUNNER_TEMP/AuthKey_PerchHA.p8"

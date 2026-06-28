@@ -104,6 +104,33 @@ swift run perchha-package-app \
 `--notary-profile` is valid for `--release-preflight` on its own. For an actual notarization submission, use it with `--package-dmg` and a Developer ID `--sign-identity` so the submitted artifact is produced and signed by the same command.
 `--release-preflight` now reports redacted next steps and suggested commands in both human output and `--json`, so release scripts and humans get the same readiness guidance without echoing the configured identity or profile values.
 
+## GitHub Actions release workflow
+
+GitHub Actions now includes `.github/workflows/release.yml` for two manual paths:
+
+- `mode=local-evidence`: safe branch-test run that builds, enforces coverage, renders smoke screenshots, generates the OAuth site artifact, ad-hoc signs the app, packages a DMG, and uploads release evidence artifacts without publishing a release.
+- `mode=credentialed-release`: full Developer ID + notarization path that imports signing material, stores a `notarytool` keychain profile, runs release preflight, packages the signed DMG, and can publish a GitHub release when `publish_release=true`.
+
+Optional workflow-dispatch inputs `oauth_client_id` and `oauth_redirect_uri` can override the repository variables for branch testing. That is mainly for `mode=local-evidence`; the normal release path should still use the repository variables that describe the real published OAuth client website and native redirect URI.
+
+Required repository variables:
+
+- `PERCHHA_OAUTH_CLIENT_ID`
+- `PERCHHA_OAUTH_REDIRECT_URI`
+- `PERCHHA_DEVELOPER_ID_IDENTITY` for `credentialed-release`
+- `PERCHHA_NOTARY_PROFILE` for `credentialed-release`
+- `PERCHHA_APP_STORE_CONNECT_KEY_ID` for `credentialed-release`
+- `PERCHHA_APP_STORE_CONNECT_ISSUER_ID` for `credentialed-release`
+
+Required repository secrets for `credentialed-release`:
+
+- `PERCHHA_DEVELOPER_ID_CERTIFICATE_P12_BASE64`
+- `PERCHHA_DEVELOPER_ID_CERTIFICATE_PASSWORD`
+- `PERCHHA_KEYCHAIN_PASSWORD`
+- `PERCHHA_APP_STORE_CONNECT_KEY_P8_BASE64`
+
+Branch testing is intentional: run the workflow on `codex/*` or other non-`main` branches with `mode=local-evidence`. `publish_release=true` is accepted only from `main` and only with `mode=credentialed-release`.
+
 ## Release gate
 
 - Full Xcode-selected XCTest and app verification passed.

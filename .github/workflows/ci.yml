@@ -203,6 +203,8 @@ jobs:
           rg -q "func testReleaseReviewBaselineListsCanonicalSmokeSnapshotsAndContactSheet" Tests
           rg -q "func testReleaseGuideListsCanonicalRequiredScreenshotNames" Tests
           rg -q "func testCIWorkflowRetainsCanonicalRequiredScreenshotArtifacts" Tests
+          rg -q "func testReleaseWorkflowSupportsLocalEvidenceAndCredentialedReleaseModes" Tests
+          rg -q "func testReleaseGuideDocumentsWorkflowVariablesAndSecrets" Tests
           rg -q "func testReleaseEvidenceVerifierRejectsRecordedSignatureThatNoLongerVerifies" Tests
           rg -q "func testReleaseEvidenceVerifierRejectsRecordedStapledArtifactThatNoLongerValidates" Tests
           rg -q "func testReleaseEvidenceVerifierRejectsMissingScreenshotsAndInvalidReleaseStatus" Tests
@@ -240,6 +242,10 @@ jobs:
           rg -q "reconnecting-light" Tools/perchha-smoke/main.swift docs/TESTING.md
           rg -q "review-contact-sheet" Tools/perchha-smoke/main.swift docs/TESTING.md
           rg -q "release-review-baseline.json" README.md docs/ROADMAP.md docs/TESTING.md docs/RELEASE.md
+          test -f .github/workflows/release.yml
+          rg -q "credentialed-release" .github/workflows/release.yml
+          rg -q "local-evidence" .github/workflows/release.yml
+          rg -q "gh release create" .github/workflows/release.yml
           rg -q "xcodebuild -project PerchHA.xcodeproj" docs/RELEASE.md
           rg -q "update-review-baseline" Tools/perchha-smoke/main.swift docs/RELEASE.md README.md
           rg -q "func verifyCoverageGate" Tools/perchha-smoke/main.swift
