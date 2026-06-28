@@ -1,0 +1,9 @@
+{
+  "bodyText" : "[]",
+  "headers" : {
+
+  },
+  "method" : "GET",
+  "path" : "/api/states",
+  "statusCode" : 200
+}

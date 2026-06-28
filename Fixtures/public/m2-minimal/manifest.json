@@ -1,0 +1,20 @@
+{
+  "api" : {
+    "bodyText" : "{\"message\":\"API running.\"}",
+    "headers" : {
+
+    },
+    "method" : "GET",
+    "path" : "/api/",
+    "statusCode" : 200
+  },
+  "states" : {
+    "bodyText" : "[]",
+    "headers" : {
+
+    },
+    "method" : "GET",
+    "path" : "/api/states",
+    "statusCode" : 200
+  }
+}
