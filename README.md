@@ -142,6 +142,7 @@ swift run hamirror --help
 swift run hamirror verify --fixtures Fixtures/public/m2-minimal
 swift run hamirror doctor --env .env.local
 swift run hamirror doctor --env .env.local --json
+swift run hamirror doctor --env .env.local --probe
 swift run hamirror doctor --env .env.local --strict
 swift run hamirror oauth-check --env .env.local   # reports redacted guidance when OAuth vars are missing
 swift run hamirror capture --env .env.local --output Fixtures/private/m8-real --websocket --write

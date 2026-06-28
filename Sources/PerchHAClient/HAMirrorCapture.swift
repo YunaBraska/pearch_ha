@@ -110,6 +110,40 @@ public struct HAMirrorFixtureSet: Codable, Equatable, Sendable {
     }
 }
 
+public enum HAMirrorCaptureProbeState: String, Codable, Equatable, Sendable {
+    case ready
+    case blocked
+    case unavailable
+}
+
+public struct HAMirrorCaptureEndpointProbe: Codable, Equatable, Sendable {
+    public let state: HAMirrorCaptureProbeState
+    public let message: String
+
+    public init(state: HAMirrorCaptureProbeState, message: String) {
+        self.state = state
+        self.message = message
+    }
+
+    public var isReady: Bool {
+        state == .ready
+    }
+}
+
+public struct HAMirrorCaptureProbeReport: Codable, Equatable, Sendable {
+    public let primary: HAMirrorCaptureEndpointProbe
+    public let fallback: HAMirrorCaptureEndpointProbe?
+
+    public init(primary: HAMirrorCaptureEndpointProbe, fallback: HAMirrorCaptureEndpointProbe?) {
+        self.primary = primary
+        self.fallback = fallback
+    }
+
+    public var anyReady: Bool {
+        primary.isReady || fallback?.isReady == true
+    }
+}
+
 public enum HAMirrorFixtureOutputPolicy {
     public static func requiresIgnoredDirectoryVerification(_ directoryURL: URL) -> Bool {
         let components = URL(fileURLWithPath: directoryURL.path, isDirectory: true)
@@ -152,6 +186,17 @@ public struct HAMirrorCaptureService: Sendable {
             )
             : nil
         return HAMirrorFixtureSet(api: api.endpoint, states: states, webSocket: webSocket)
+    }
+
+    public func probe(environment: HAMirrorEnvironment) async -> HAMirrorCaptureProbeReport {
+        let primary = await probeEndpoint(baseURL: environment.primaryURL, token: environment.token, path: "/api/")
+        let fallback: HAMirrorCaptureEndpointProbe?
+        if let fallbackURL = environment.fallbackURL {
+            fallback = await probeEndpoint(baseURL: fallbackURL, token: environment.token, path: "/api/")
+        } else {
+            fallback = nil
+        }
+        return HAMirrorCaptureProbeReport(primary: primary, fallback: fallback)
     }
 
     public func captureOptimizedWebSocketEvidence(
@@ -265,6 +310,49 @@ public struct HAMirrorCaptureService: Sendable {
             headers: redactor.redact(headers: response.headers),
             bodyText: try sanitizer.sanitize(path: path, body: response.body)
         )
+    }
+
+    private func probeEndpoint(
+        baseURL: URL,
+        token: String?,
+        path: String
+    ) async -> HAMirrorCaptureEndpointProbe {
+        guard let token, !token.isEmpty else {
+            return HAMirrorCaptureEndpointProbe(
+                state: .blocked,
+                message: HAMirrorCaptureError.missingToken.description
+            )
+        }
+        do {
+            let _ = try await captureEndpoint(path: path, baseURL: baseURL, token: token)
+            return HAMirrorCaptureEndpointProbe(state: .ready, message: "Home Assistant API responded successfully")
+        } catch let error as HAMirrorCaptureError {
+            return probe(from: error)
+        } catch {
+            return HAMirrorCaptureEndpointProbe(
+                state: .blocked,
+                message: sanitizedTransportMessage(error)
+            )
+        }
+    }
+
+    private func probe(from error: HAMirrorCaptureError) -> HAMirrorCaptureEndpointProbe {
+        switch error {
+        case .missingToken:
+            return HAMirrorCaptureEndpointProbe(state: .blocked, message: error.description)
+        case let .unexpectedStatus(_, statusCode):
+            let state: HAMirrorCaptureProbeState = statusCode == 401 || statusCode == 403 ? .blocked : .unavailable
+            return HAMirrorCaptureEndpointProbe(state: state, message: error.description)
+        case .webSocketAuthentication:
+            return HAMirrorCaptureEndpointProbe(state: .blocked, message: error.description)
+        case .nonHTTPResponse,
+             .invalidPath,
+             .transportFailure,
+             .primaryAndFallbackFailed,
+             .webSocketProtocol,
+             .webSocketTimeout:
+            return HAMirrorCaptureEndpointProbe(state: .unavailable, message: error.description)
+        }
     }
 
     private func authenticateWebSocket(baseURL: URL, token: String) async throws -> URLSessionWebSocketTask {

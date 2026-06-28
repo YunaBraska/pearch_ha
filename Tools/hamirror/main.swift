@@ -45,9 +45,9 @@ struct HAMirrorCommand {
             let options = try parseOptions(
                 arguments: Array(arguments.dropFirst()),
                 valueOptions: ["--env"],
-                flagOptions: ["--strict", "--json"]
+                flagOptions: ["--strict", "--json", "--probe"]
             )
-            try doctor(options: options, environment: environment)
+            try await doctor(options: options, environment: environment)
         case "oauth-check":
             let options = try parseOptions(
                 arguments: Array(arguments.dropFirst()),
@@ -121,19 +121,26 @@ struct HAMirrorCommand {
         print("fixture set verified: \(directory.path)")
     }
 
-    private static func doctor(options: CommandOptions, environment: [String: String]) throws {
+    private static func doctor(options: CommandOptions, environment: [String: String]) async throws {
         let envPath = resolvedEnvironmentFilePath(options: options, environment: environment)
         let mirrorEnvironment = try HAMirrorEnvironment.fromEnvironment(
             environment,
             environmentFilePath: options.value(for: "--env")
         )
         let report = mirrorEnvironment.readinessReport
+        let liveProbe = options.has("--probe")
+            ? await HAMirrorCaptureService().probe(environment: mirrorEnvironment)
+            : nil
 
         if options.has("--json") {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-            let data = try encoder.encode(report.diagnostic(envPath: envPath))
-            print(String(data: data, encoding: .utf8) ?? "{}")
+            if let liveProbe {
+                print(try renderDoctorProbeJSON(report: report, envPath: envPath, probe: liveProbe))
+            } else {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+                let data = try encoder.encode(report.diagnostic(envPath: envPath))
+                print(String(data: data, encoding: .utf8) ?? "{}")
+            }
         } else {
             print("Mirror environment readiness: \(envPath)")
             print("- url: present")
@@ -145,6 +152,13 @@ struct HAMirrorCommand {
             print("- PERCHHA_OAUTH_REDIRECT_URI: \(presence(report.hasOAuthRedirectURI))")
             print("- Capture: \(report.canCaptureMirror ? "ready" : "blocked")")
             print("- OAuth check: \(report.canCheckOAuthClientWebsite ? "ready" : "blocked")")
+            if let liveProbe {
+                print("- Live probe: \(liveProbe.anyReady ? "ready" : "blocked")")
+                print("- Primary /api/: \(liveProbe.primary.state.rawValue) - \(liveProbe.primary.message)")
+                if let fallback = liveProbe.fallback {
+                    print("- Fallback /api/: \(fallback.state.rawValue) - \(fallback.message)")
+                }
+            }
             if !report.issues.isEmpty {
                 print("Issues:")
                 report.issues.forEach { print("- \($0.description)") }
@@ -163,6 +177,11 @@ struct HAMirrorCommand {
 
         if options.has("--strict") && !report.canCaptureMirror {
             throw CommandError.mirrorEnvironmentBlocked(report.blockingMessages(envPath: envPath))
+        }
+        if options.has("--strict"), let liveProbe, !liveProbe.anyReady {
+            throw CommandError.mirrorEnvironmentBlocked(
+                probeBlockingMessages(probe: liveProbe)
+            )
         }
     }
 
@@ -256,13 +275,14 @@ struct HAMirrorCommand {
       hamirror verify --fixtures Fixtures/mirror
       hamirror doctor --env .env.local
       hamirror doctor --env .env.local --json
+      hamirror doctor --env .env.local --probe
       hamirror oauth-check --env .env.local
       hamirror serve --fixtures Fixtures/mirror --token fake-token
       hamirror serve --fixtures Fixtures/private/m8-real --token fake-token --path-prefix /ha
 
     Capture reads url, url2, and token from the env file. It tries url first and reuses url2 when the primary capture endpoint fails. User/password are not sent to REST.
     Capture with --write re-verifies the written fixture set immediately; private outputs under Fixtures/private/ also prove they stay ignored by Git.
-    Doctor prints redacted key presence/status plus next-step hints. Pass --json for scriptable output and --strict to fail when capture is blocked.
+    Doctor prints redacted key presence/status plus next-step hints. Pass --probe for a live /api/ probe against primary and fallback URLs, --json for scriptable output, and --strict to fail when capture is blocked.
     OAuth check reads only PERCHHA_OAUTH_CLIENT_ID and PERCHHA_OAUTH_REDIRECT_URI, and reports redacted readiness guidance when they are missing.
     """
 
@@ -359,6 +379,60 @@ struct HAMirrorCommand {
 
     private static func presence(_ value: Bool) -> String {
         value ? "present" : "missing"
+    }
+
+    private static func probeBlockingMessages(
+        probe: HAMirrorCaptureProbeReport
+    ) -> [String] {
+        var messages = [probe.primary.message]
+        if let fallback = probe.fallback {
+            messages.append(fallback.message)
+        }
+        return messages
+    }
+
+    private static func renderDoctorProbeJSON(
+        report: HAMirrorEnvironmentReadinessReport,
+        envPath: String,
+        probe: HAMirrorCaptureProbeReport
+    ) throws -> String {
+        let baseDiagnostic = report.diagnostic(envPath: envPath)
+        let probeObject: [String: Any] = [
+            "ready": probe.anyReady,
+            "primary": [
+                "state": probe.primary.state.rawValue,
+                "message": probe.primary.message
+            ],
+            "fallback": probe.fallback.map {
+                [
+                    "state": $0.state.rawValue,
+                    "message": $0.message
+                ]
+            } ?? NSNull()
+        ]
+        let object: [String: Any] = [
+            "envPath": baseDiagnostic.envPath,
+            "url": baseDiagnostic.url.rawValue,
+            "url2": baseDiagnostic.url2.rawValue,
+            "token": baseDiagnostic.token.rawValue,
+            "user": baseDiagnostic.user.rawValue,
+            "password": baseDiagnostic.password.rawValue,
+            "oauthClientID": baseDiagnostic.oauthClientID.rawValue,
+            "oauthRedirectURI": baseDiagnostic.oauthRedirectURI.rawValue,
+            "capture": baseDiagnostic.capture.rawValue,
+            "oauthCheck": baseDiagnostic.oauthCheck.rawValue,
+            "issues": baseDiagnostic.issues.map {
+                [
+                    "code": $0.code.rawValue,
+                    "description": $0.description
+                ]
+            },
+            "nextSteps": baseDiagnostic.nextSteps,
+            "suggestedCommands": baseDiagnostic.suggestedCommands,
+            "probe": probeObject
+        ]
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+        return String(data: data, encoding: .utf8) ?? "{}"
     }
 
     private static func parseOptions(

@@ -3095,6 +3095,64 @@ final class PerchHAClientTests: XCTestCase {
         XCTAssertEqual(requests.map { $0.url.path }, ["/api/"])
     }
 
+    func testMirrorProbeReportsPrimaryReadyWithoutFallback() async throws {
+        let transport = RecordingMirrorTransport()
+        let service = HAMirrorCaptureService(transport: transport)
+        let environment = HAMirrorEnvironment(
+            primaryURL: try XCTUnwrap(URL(string: "http://127.0.0.1:8123")),
+            fallbackURL: nil,
+            token: "secret-token",
+            user: nil,
+            password: nil
+        )
+
+        let report = await service.probe(environment: environment)
+
+        XCTAssertEqual(
+            report,
+            HAMirrorCaptureProbeReport(
+                primary: HAMirrorCaptureEndpointProbe(
+                    state: .ready,
+                    message: "Home Assistant API responded successfully"
+                ),
+                fallback: nil
+            )
+        )
+        let requests = await transport.requests
+        XCTAssertEqual(requests.map { $0.url.path }, ["/api/"])
+    }
+
+    func testMirrorProbeReportsRedactedPrimaryAndFallbackFailures() async throws {
+        let transport = RecordingMirrorTransport { request in
+            if request.url.host == "primary.local" {
+                throw URLError(.cannotConnectToHost)
+            }
+            return HAMirrorResponse(
+                statusCode: 401,
+                headers: ["Authorization": "Bearer should-redact"],
+                body: Data(#"{"message":"Unauthorized","token":"secret"}"#.utf8)
+            )
+        }
+        let service = HAMirrorCaptureService(transport: transport)
+        let environment = HAMirrorEnvironment(
+            primaryURL: try XCTUnwrap(URL(string: "http://primary.local:8123")),
+            fallbackURL: try XCTUnwrap(URL(string: "https://fallback.example")),
+            token: "secret-token",
+            user: nil,
+            password: nil
+        )
+
+        let report = await service.probe(environment: environment)
+
+        XCTAssertEqual(report.primary.state, .unavailable)
+        XCTAssertEqual(report.primary.message, "Home Assistant request for /api/ failed: Could not connect to the server.")
+        XCTAssertEqual(report.fallback?.state, .blocked)
+        XCTAssertEqual(report.fallback?.message, "Home Assistant returned HTTP 401 for /api/")
+        XCTAssertFalse(report.anyReady)
+        XCTAssertFalse(report.primary.message.contains("primary.local"))
+        XCTAssertFalse(report.fallback?.message.contains("fallback.example") == true)
+    }
+
     func testMirrorCaptureFallsBackToConfiguredFallbackURLOnPrimaryTransportFailure() async throws {
         let transport = RecordingMirrorTransport { request in
             if request.url.host == "primary.local" {
