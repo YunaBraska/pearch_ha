@@ -4876,54 +4876,34 @@ public struct PerchHAPanelView: View {
         }
     }
 
+    /// A graph-forward, iStat-Menus-style entity block.
+    ///
+    /// The top line carries the domain icon and muted entity name on the left and
+    /// the hero value (plus its gauge or state pill) and any controls on the
+    /// right. Beneath it, spanning the full row width, a history graph is drawn
+    /// **only** from already-cached series (``PerchHAPanelModel/cachedHistorySeries(for:)``):
+    /// numeric series become a taller line sparkline, non-numeric series a colored
+    /// state-timeline band. When nothing is cached the graph area collapses to
+    /// nothing — the row never fetches on render or while scrolling, so
+    /// control-only rooms stay compact. Generous vertical padding gives the calm,
+    /// spacious rhythm between rows.
     private func entityRow(_ entity: DiscoveredEntity) -> some View {
         let value = entityValue(entity)
         let presentation = rowPresentation(for: entity)
-        let ringHero = ringGaugeHero(presentation: presentation, available: value.status == .available)
-        return VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 10) {
-                if let gauge = ringHero {
-                    ringGaugeAnchor(gauge: gauge, value: value)
-                } else {
-                    Image(systemName: entityIconName(for: entity))
-                        .font(.system(size: 14))
-                        .frame(width: 24, alignment: .center)
-                        .foregroundStyle(value.status == .available ? PerchHATheme.accent : Color.secondary)
-                        .accessibilityHidden(true)
-                }
-                VStack(alignment: .leading, spacing: 1) {
-                    if ringHero == nil {
-                        rowHero(entity: entity, value: value, presentation: presentation)
-                    }
-                    Text(entity.name)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Image(systemName: entityIconName(for: entity))
+                    .font(.system(size: 13))
+                    .frame(width: 18, alignment: .center)
+                    .foregroundStyle(value.status == .available ? PerchHATheme.accent : Color.secondary)
+                    .accessibilityHidden(true)
+                Text(entity.name)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 Spacer(minLength: 8)
-                if ringHero == nil {
-                    rowAccessory(entity: entity, value: value, presentation: presentation)
-                }
-                if let control = model.snapshot.control(for: entity) {
-                    Toggle("", isOn: entityControlBinding(for: entity))
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .tint(PerchHATheme.accent)
-                        .controlSize(.small)
-                        .disabled(control.isRunning)
-                        .help(entityControlHelp(for: entity, control: control))
-                        .accessibilityLabel("\(control.isOn ? "Turn off" : "Turn on") \(entity.name)")
-                        .accessibilityHint(entityControlHelp(for: entity, control: control))
-                }
-                if let coverControl = model.snapshot.coverControl(for: entity),
-                   model.coverControlMode(for: entity).showsButtons {
-                    coverButtons(for: entity, control: coverControl)
-                }
-                ForEach(model.customActions(for: entity), id: \.id.rawValue) { action in
-                    customActionButton(action)
-                }
+                rowTopLineTrailing(entity: entity, value: value, presentation: presentation)
             }
-            .font(.body)
             if let coverControl = model.snapshot.coverControl(for: entity),
                model.coverControlMode(for: entity).showsSlider,
                let position = coverControl.position {
@@ -4934,20 +4914,20 @@ public struct PerchHAPanelView: View {
                 ) { position in
                     model.startCoverPositionChange(entity.id, position: position)
                 }
-                .frame(width: 132)
-                .padding(.leading, 32)
+                .frame(maxWidth: .infinity)
             }
+            historyGraph(for: entity)
             if let failureMessage = model.snapshot.controlActionState.failureMessage(for: entity.id) {
                 Text(failureMessage)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, 32)
                     .accessibilityLabel("\(entity.name) control failed: \(failureMessage)")
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
+        .font(.body)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
         .contentShape(Rectangle())
         .onAppear {
             markEntityVisible(entity.id, isVisible: true)
@@ -5187,34 +5167,85 @@ public struct PerchHAPanelView: View {
         )
     }
 
-    /// The hero element of a row: a big value, a state pill, or an icon symbol.
-    ///
-    /// Numeric/gauge and plain-numeric rows show the big monospaced value; the
-    /// name lives in the caption line. On/off & open/closed rows show a colored
-    /// pill carrying the value text. Icon-unit entities render their dynamic
-    /// glyph as the hero.
+    /// The trailing cluster of the top line: the hero value with its gauge or
+    /// state pill, followed by any controls (toggle, cover buttons, custom
+    /// actions). Laid out right-aligned so the big number is the visual anchor.
     @ViewBuilder
-    private func rowHero(
+    private func rowTopLineTrailing(
         entity: DiscoveredEntity,
         value: FormattedEntityValue,
         presentation: PerchHAEntityRowPresentation
     ) -> some View {
-        if let iconSymbolName = value.iconSymbolName {
-            Image(systemName: iconSymbolName)
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(value.status == .available ? Color.primary : Color.secondary)
-                .accessibilityLabel(value.text)
-        } else if case let .statePill(isActive) = presentation {
+        HStack(spacing: 10) {
+            heroValueAndGauge(entity: entity, value: value, presentation: presentation)
+            rowControls(for: entity)
+        }
+    }
+
+    /// The hero value paired with its gauge.
+    ///
+    /// On/off & open/closed states render a colored state pill carrying the value
+    /// text. Icon-unit entities render their dynamic glyph beside the value.
+    /// Fraction-resolvable entities pair the big number with a ring/bar/battery
+    /// gauge; plain numerics show the number alone. The number is the hero
+    /// (title2/title3 medium monospaced); accessibility is carried by the row.
+    @ViewBuilder
+    private func heroValueAndGauge(
+        entity: DiscoveredEntity,
+        value: FormattedEntityValue,
+        presentation: PerchHAEntityRowPresentation
+    ) -> some View {
+        if case let .statePill(isActive) = presentation, value.iconSymbolName == nil {
             statePill(text: value.text, isActive: isActive, available: value.status == .available)
         } else {
-            Text(value.text)
-                .font(.title2)
-                .fontWeight(.medium)
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-                .foregroundStyle(value.status == .available ? heroSeverityColor(presentation) : Color.secondary)
-                .accessibilityHidden(true)
+            HStack(spacing: 8) {
+                if let iconSymbolName = value.iconSymbolName {
+                    Image(systemName: iconSymbolName)
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(value.status == .available ? Color.primary : Color.secondary)
+                        .accessibilityHidden(true)
+                }
+                heroValueText(value: value, presentation: presentation)
+                heroGauge(value: value, presentation: presentation)
+            }
+        }
+    }
+
+    private func heroValueText(
+        value: FormattedEntityValue,
+        presentation: PerchHAEntityRowPresentation
+    ) -> some View {
+        Text(value.text)
+            .font(.title3)
+            .fontWeight(.medium)
+            .monospacedDigit()
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .foregroundStyle(value.status == .available ? heroSeverityColor(presentation) : Color.secondary)
+            .accessibilityHidden(true)
+    }
+
+    /// The gauge that sits beside the hero value for fraction-resolvable rows.
+    ///
+    /// Ring gauges are compact squares; bar and battery gauges are fixed widths.
+    /// Nothing is drawn for value/pill rows or unavailable values.
+    @ViewBuilder
+    private func heroGauge(
+        value: FormattedEntityValue,
+        presentation: PerchHAEntityRowPresentation
+    ) -> some View {
+        if case let .gauge(gauge) = presentation, value.status == .available {
+            switch gauge.style {
+            case .ring:
+                PerchHAEntityGaugeView(gauge: gauge)
+                    .frame(width: 22, height: 22)
+            case .bar:
+                PerchHAEntityGaugeView(gauge: gauge)
+                    .frame(width: 64, height: 10)
+            case .battery:
+                PerchHAEntityGaugeView(gauge: gauge)
+                    .frame(width: 38, height: 18)
+            }
         }
     }
 
@@ -5232,10 +5263,12 @@ public struct PerchHAPanelView: View {
     private func statePill(text: String, isActive: Bool, available: Bool) -> some View {
         let isAccent = isActive && available
         return Text(text)
-            .font(.caption.weight(.semibold))
+            .font(.callout.weight(.semibold))
+            .lineLimit(1)
+            .fixedSize()
             .foregroundStyle(isAccent ? Color.white : Color.secondary)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 3)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 4)
             .background(
                 Capsule(style: .continuous)
                     .fill(isAccent ? PerchHATheme.accent : Color.primary.opacity(0.08))
@@ -5243,68 +5276,49 @@ public struct PerchHAPanelView: View {
             .accessibilityHidden(true)
     }
 
-    /// The trailing accessory: a gauge for fraction-resolvable entities, or an
-    /// opportunistic inline sparkline drawn only from already-cached history.
+    /// The controls a row exposes on its top line: a switch toggle, cover
+    /// buttons, and any configured custom-action buttons. Drawn in entity order;
+    /// each keeps its own accessibility label and hint.
     @ViewBuilder
-    private func rowAccessory(
-        entity: DiscoveredEntity,
-        value: FormattedEntityValue,
-        presentation: PerchHAEntityRowPresentation
-    ) -> some View {
-        if case let .gauge(gauge) = presentation, value.status == .available {
-            gaugeAccessory(gauge)
-        } else if let series = model.cachedHistorySeries(for: entity.id) {
-            // OPPORTUNISTIC ONLY: never fetches. Draws only when already cached.
+    private func rowControls(for entity: DiscoveredEntity) -> some View {
+        if let control = model.snapshot.control(for: entity) {
+            Toggle("", isOn: entityControlBinding(for: entity))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .tint(PerchHATheme.accent)
+                .controlSize(.small)
+                .disabled(control.isRunning)
+                .help(entityControlHelp(for: entity, control: control))
+                .accessibilityLabel("\(control.isOn ? "Turn off" : "Turn on") \(entity.name)")
+                .accessibilityHint(entityControlHelp(for: entity, control: control))
+        }
+        if let coverControl = model.snapshot.coverControl(for: entity),
+           model.coverControlMode(for: entity).showsButtons {
+            coverButtons(for: entity, control: coverControl)
+        }
+        ForEach(model.customActions(for: entity), id: \.id.rawValue) { action in
+            customActionButton(action)
+        }
+    }
+
+    /// The full-width history graph drawn beneath a row's top line.
+    ///
+    /// Reads only the already-warmed prefetch cache via
+    /// ``PerchHAPanelModel/cachedHistorySeries(for:)`` — it never fetches on render
+    /// or while scrolling. Numeric series render as a taller line sparkline;
+    /// non-numeric series render as the compact colored state-timeline band. When
+    /// no series is cached (a control-only entity, or one not yet warmed) the area
+    /// collapses to nothing so the row stays compact. The graph is purely visual;
+    /// the value is carried by the row's accessibility label.
+    @ViewBuilder
+    private func historyGraph(for entity: DiscoveredEntity) -> some View {
+        if let series = model.cachedHistorySeries(for: entity.id) {
+            let isNumeric = PerchHAHistoryCursor.numericSamples(of: series).count > 1
             PerchHAInlineSparkline(series: series, color: PerchHATheme.accent.opacity(0.85))
-                .frame(width: 48, height: 16)
+                .frame(maxWidth: .infinity)
+                .frame(height: isNumeric ? 32 : 14)
+                .accessibilityHidden(true)
         }
-    }
-
-    @ViewBuilder
-    private func gaugeAccessory(_ gauge: PerchHAEntityGauge) -> some View {
-        switch gauge.style {
-        case .ring:
-            PerchHAEntityGaugeView(gauge: gauge)
-                .frame(width: 22, height: 22)
-        case .bar:
-            PerchHAEntityGaugeView(gauge: gauge)
-                .frame(width: 60, height: 10)
-        case .battery:
-            PerchHAEntityGaugeView(gauge: gauge)
-                .frame(width: 36, height: 18)
-        }
-    }
-
-    /// The ring gauge to draw as the row's leading anchor, or `nil` when the row
-    /// is not an available ring-style gauge (bar/battery/value/pill rows keep the
-    /// leading icon and a trailing accessory).
-    private func ringGaugeHero(presentation: PerchHAEntityRowPresentation, available: Bool) -> PerchHAEntityGauge? {
-        guard available, case let .gauge(gauge) = presentation, gauge.style == .ring else {
-            return nil
-        }
-        return gauge
-    }
-
-    /// A ~42 pt ring gauge with the hero value centered inside it, used as the
-    /// clear visual anchor of a ring-gauge row. The value is the row hero; the
-    /// entity name sits in the caption line beside it.
-    private func ringGaugeAnchor(gauge: PerchHAEntityGauge, value: FormattedEntityValue) -> some View {
-        ZStack {
-            PerchHARingGauge(
-                fraction: gauge.fraction,
-                color: PerchHATheme.color(for: gauge.severity),
-                lineWidth: 4
-            )
-            Text(value.text)
-                .font(.system(.callout, design: .rounded).weight(.semibold))
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.5)
-                .foregroundStyle(gauge.severity == .normal ? Color.primary : PerchHATheme.color(for: gauge.severity))
-                .padding(.horizontal, 4)
-        }
-        .frame(width: 42, height: 42)
-        .accessibilityHidden(true)
     }
 
 }

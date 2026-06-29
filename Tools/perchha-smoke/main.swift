@@ -3962,6 +3962,9 @@ struct PerchHASmoke {
     @MainActor
     private static func panelSnapshotModel(for variant: SmokePanelSnapshotVariant) async throws -> PerchHAPanelModel {
         let snapshot = variant.snapshot
+        if variant.warmsInlineHistory {
+            return try await warmedInlineHistoryModel(for: variant)
+        }
         let model = PerchHAPanelModel(
             snapshot: snapshot,
             oauthSignInRunner: variant.oauthSignInRunner,
@@ -3982,6 +3985,59 @@ struct PerchHASmoke {
                 "\(variant.rawValue) snapshot reaches OAuth sign-in state"
             )
         }
+        return model
+    }
+
+    /// Builds a connected panel model whose inline-history cache has been warmed
+    /// through the real public prefetch path (panel active + visible entities +
+    /// settle-delay clock advance), so the graph-forward rows render their
+    /// full-width sparkline and state-timeline bands from cache without any
+    /// render-time fetch. Mirrors the prefetch coordinator's own flow rather than
+    /// poking private cache state.
+    @MainActor
+    private static func warmedInlineHistoryModel(
+        for variant: SmokePanelSnapshotVariant
+    ) async throws -> PerchHAPanelModel {
+        let snapshot = variant.snapshot
+        let clock = TestPerchClock()
+        let settleDelay = PerchDuration.milliseconds(250)
+        let series = SmokePanelSnapshotVariant.inlineHistorySeries
+        let model = PerchHAPanelModel(
+            snapshot: snapshot,
+            connector: { _ in .success(rooms: snapshot.rooms) },
+            historyProvider: { _, entityID, range in
+                guard let match = series[entityID], match.range == range else {
+                    return .unavailable("no warmed series")
+                }
+                return .success(match)
+            },
+            oauthSignInRunner: variant.oauthSignInRunner,
+            clock: clock,
+            historyPrefetchConfiguration: PerchHAHistoryPrefetchConfiguration(settleDelay: settleDelay),
+            selectionConfiguration: snapshot.selectionConfiguration,
+            menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
+            customActionConfiguration: variant.customActionConfiguration
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.setPanelActive(true)
+        model.updateVisibleEntities(snapshot.rooms.flatMap(\.entities).map(\.id))
+        for _ in 0..<200 where await clock.sleepingTaskCount() != 1 {
+            await Task.yield()
+        }
+        _ = await clock.advance(by: settleDelay)
+        let expected = series.keys.count
+        for _ in 0..<200 {
+            let warmed = series.keys.filter { model.cachedHistorySeries(for: $0) != nil }.count
+            if warmed >= expected {
+                break
+            }
+            await Task.yield()
+        }
+        try expect(
+            series.keys.allSatisfy { model.cachedHistorySeries(for: $0) != nil },
+            "\(variant.rawValue) snapshot warms inline history cache"
+        )
         return model
     }
 
@@ -5469,6 +5525,45 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
     var startsOAuthSignInForSnapshot: Bool {
         self == .signingInLight
     }
+
+    /// Whether this variant warms the inline-history cache so the graph-forward
+    /// rows render their full-width sparkline and state-timeline bands.
+    var warmsInlineHistory: Bool {
+        switch self {
+        case .connectedLight, .connectedDark, .connectedDarkIncreasedContrast, .connectedLightReducedMotion:
+            true
+        case .historyLoadedLight, .historyLoadedLightIncreasedContrast, .customActionEditorLight,
+             .builtInControlsLight, .firstRunLight, .connectingLight, .signingInLight,
+             .settingsSelectionLight, .reconnectingLight, .emptyLight, .errorDark:
+            false
+        }
+    }
+
+    /// Warmed inline-history series for connected snapshots: a numeric humidity
+    /// trend (rendered as a line sparkline) and a cover state timeline (rendered
+    /// as a colored band). Keyed by entity ID at the default `.hour` range.
+    fileprivate static let inlineHistorySeries: [EntityID: HistorySeries] = [
+        "sensor.office_humidity": HistorySeries(
+            entityID: "sensor.office_humidity",
+            range: .hour,
+            samples: [
+                HistorySample(timestamp: Date(timeIntervalSince1970: 1_803_600_000), state: "41", numericValue: 41),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 1_803_601_800), state: "43", numericValue: 43),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 1_803_603_600), state: "47", numericValue: 47),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 1_803_605_400), state: "45", numericValue: 45),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 1_803_607_200), state: "44", numericValue: 44)
+            ]
+        ),
+        "cover.office_blinds": HistorySeries(
+            entityID: "cover.office_blinds",
+            range: .hour,
+            samples: [
+                HistorySample(timestamp: Date(timeIntervalSince1970: 1_803_600_000), state: "closed", numericValue: nil),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 1_803_604_000), state: "open", numericValue: nil),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 1_803_607_200), state: "open", numericValue: nil)
+            ]
+        )
+    ]
 
     var oauthSignInRunner: PerchHAPanelModel.OAuthSignInRunner {
         switch self {
