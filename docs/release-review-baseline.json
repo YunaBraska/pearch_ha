@@ -3,7 +3,7 @@
     "name" : "review-contact-sheet.png",
     "pixelsHigh" : 1346,
     "pixelsWide" : 672,
-    "sampledHashHex" : "d15818de7aaac3fc",
+    "sampledHashHex" : "c8992d4186b60511",
     "visiblePixelCount" : 904512
   },
   "schemaVersion" : 1,
@@ -68,21 +68,21 @@
       "name" : "first-run-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "d7cc6e331f751ac4",
+      "sampledHashHex" : "f04b18ff0ff08217",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "connecting-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "f452a69c9e3d9434",
+      "sampledHashHex" : "26317300ed3ddd27",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "signing-in-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "0411f7bab0224ac6",
+      "sampledHashHex" : "7effb7217d00f246",
       "visiblePixelCount" : 604800
     },
     {
@@ -103,14 +103,14 @@
       "name" : "empty-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "e29e524755578730",
+      "sampledHashHex" : "9d6c99cf03d09ce9",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "error-dark.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "a471479fb0ed1289",
+      "sampledHashHex" : "0d7238c14cfe2dd3",
       "visiblePixelCount" : 604800
     }
   ]

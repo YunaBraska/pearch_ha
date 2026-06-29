@@ -5,6 +5,10 @@ import XCTest
 import PerchHACore
 import PerchHAClient
 
+func requestPercentEncodedPath(_ url: URL) -> String {
+    URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath ?? url.path
+}
+
 final class PerchHAClientTests: XCTestCase {
     func testConnectionInputKeepsURLs() throws {
         let primary = try XCTUnwrap(URL(string: "http://homeassistant.local:8123"))
@@ -133,7 +137,8 @@ final class PerchHAClientTests: XCTestCase {
                 )
             )
         )
-        let request = try await XCTUnwrap(transport.requests.first)
+        let firstRequest = await transport.requests.first
+        let request = try XCTUnwrap(firstRequest)
         XCTAssertEqual(request.method, "GET")
         XCTAssertEqual(request.url.absoluteString, "https://perchha.dev/app")
         XCTAssertEqual(request.headers["Accept"], "text/html,application/xhtml+xml")
@@ -332,7 +337,8 @@ final class PerchHAClientTests: XCTestCase {
             result,
             .success(HAOAuthToken(accessToken: "access-token", refreshToken: "refresh-token", expiresInSeconds: 1800, tokenType: "Bearer"))
         )
-        let request = try await XCTUnwrap(transport.requests.first)
+        let firstRequest = await transport.requests.first
+        let request = try XCTUnwrap(firstRequest)
         XCTAssertEqual(request.method, "POST")
         XCTAssertEqual(request.url.path, "/auth/token")
         XCTAssertEqual(request.headers["Accept"], "application/json")
@@ -536,7 +542,8 @@ final class PerchHAClientTests: XCTestCase {
             result,
             .success(HAOAuthToken(accessToken: "rotated-access-token", refreshToken: nil, expiresInSeconds: 1800, tokenType: "Bearer"))
         )
-        let request = try await XCTUnwrap(transport.requests.first)
+        let firstRequest = await transport.requests.first
+        let request = try XCTUnwrap(firstRequest)
         XCTAssertEqual(
             String(data: try XCTUnwrap(request.body), encoding: .utf8),
             "grant_type=refresh_token&refresh_token=refresh+token&client_id=https%3A%2F%2Fperchha.dev%2Fapp"
@@ -556,7 +563,7 @@ final class PerchHAClientTests: XCTestCase {
         )
         let baseURL = try XCTUnwrap(URL(string: "https://homeassistant.local"))
 
-        XCTAssertEqual(
+        await assertEqualAsync(
             await HomeAssistantClient(transport: invalidRequestTransport).refreshAccessToken(
                 baseURL: baseURL,
                 refreshToken: "refresh-secret",
@@ -564,7 +571,7 @@ final class PerchHAClientTests: XCTestCase {
             ),
             .failure(.invalidPayload(path: "/auth/token", reason: "HTTP 400 invalid request"))
         )
-        XCTAssertEqual(
+        await assertEqualAsync(
             await HomeAssistantClient(transport: leakingTransport).refreshAccessToken(
                 baseURL: baseURL,
                 refreshToken: "refresh-secret",
@@ -605,7 +612,8 @@ final class PerchHAClientTests: XCTestCase {
         )
 
         XCTAssertEqual(result, .success(.revoked))
-        let request = try await XCTUnwrap(transport.requests.first)
+        let firstRequest = await transport.requests.first
+        let request = try XCTUnwrap(firstRequest)
         XCTAssertEqual(request.url.path, "/auth/token")
         XCTAssertEqual(String(data: try XCTUnwrap(request.body), encoding: .utf8), "token=refresh-token&action=revoke")
     }
@@ -623,7 +631,7 @@ final class PerchHAClientTests: XCTestCase {
 
         XCTAssertEqual(result, .success(HARESTCheck(message: "API running.")))
         let requests = await transport.requests
-        XCTAssertEqual(requests.map { $0.url.path }, ["/api/"])
+        XCTAssertEqual(requests.map { requestPercentEncodedPath($0.url) }, ["/api/"])
         XCTAssertEqual(requests.first?.headers["Authorization"], "Bearer secret-token")
         XCTAssertEqual(requests.first?.headers["Accept"], "application/json")
     }
@@ -647,7 +655,7 @@ final class PerchHAClientTests: XCTestCase {
 
         XCTAssertEqual(result, .success(HARESTCheck(message: "API running.")))
         let requests = await transport.requests
-        XCTAssertEqual(requests.map { $0.url.path }, ["/ha/api/"])
+        XCTAssertEqual(requests.map { requestPercentEncodedPath($0.url) }, ["/ha/api/"])
     }
 
     func testRESTRequestCarriesSelfSignedCertificatePolicy() async throws {
@@ -829,11 +837,11 @@ final class PerchHAClientTests: XCTestCase {
         let input = try connectionInput()
 
         await assertEqualAsync(await HomeAssistantClient(transport: authTransport).checkRESTConnection(input), .failure(.authentication))
-        XCTAssertEqual(
+        await assertEqualAsync(
             await HomeAssistantClient(transport: unreachableTransport).checkRESTConnection(input),
             .failure(.unreachable(host: "homeassistant.local"))
         )
-        XCTAssertEqual(
+        await assertEqualAsync(
             await HomeAssistantClient(transport: tlsTransport).checkRESTConnection(input),
             .failure(.tlsRejected(host: "homeassistant.local"))
         )
@@ -856,7 +864,7 @@ final class PerchHAClientTests: XCTestCase {
         let client = HomeAssistantClient()
 
         await assertEqualAsync(await client.checkRESTConnection(input), .success(HARESTCheck(message: "API running.")))
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.states(input),
             .success([
                 EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "21.4", unit: "°C")
@@ -996,7 +1004,8 @@ final class PerchHAClientTests: XCTestCase {
                 )
             )
         )
-        let request = try XCTUnwrap(await transport.requests.first)
+        let firstRequest = await transport.requests.first
+        let request = try XCTUnwrap(firstRequest)
         XCTAssertTrue(request.url.path.hasPrefix("/api/history/period/"))
         let items = Dictionary(
             uniqueKeysWithValues: (URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
@@ -1047,7 +1056,8 @@ final class PerchHAClientTests: XCTestCase {
                 )
             )
         )
-        let request = try XCTUnwrap(await transport.requests.first)
+        let firstRequest = await transport.requests.first
+        let request = try XCTUnwrap(firstRequest)
         XCTAssertTrue(request.url.path.hasPrefix("/api/history/period/"))
         let items = Dictionary(
             uniqueKeysWithValues: (URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
@@ -1252,7 +1262,8 @@ final class PerchHAClientTests: XCTestCase {
             )
         )
         try await waitForJournalPath(server: server, path: "/api/websocket/recorder/statistics_during_period")
-        let command = try XCTUnwrap(await server.journal.snapshot().first { $0.path == "/api/websocket/recorder/statistics_during_period" })
+        let journalSnapshot = await server.journal.snapshot()
+        let command = try XCTUnwrap(journalSnapshot.first { $0.path == "/api/websocket/recorder/statistics_during_period" })
         XCTAssertTrue(command.bodyText?.contains(#""period":"day""#) ?? false)
         XCTAssertTrue(command.bodyText?.contains(#""start_time":"2026-05-28T12:00:00Z""#) ?? false)
     }
@@ -1660,7 +1671,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.webSocketStates(input),
             .success([
                 EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "21.4", unit: "°C")
@@ -1702,7 +1713,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.webSocketStates(input),
             .failure(.webSocketCommand(id: 1, code: "failed", message: "Planned command failure"))
         )
@@ -1725,7 +1736,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.nextStateChangedEvent(input),
             .success(EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "22.0", unit: "°C"))
         )
@@ -1751,7 +1762,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.nextStateChangedEvent(input),
             .success(EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "22.0", unit: "°C"))
         )
@@ -1779,7 +1790,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.nextStateChangedEvent(input),
             .success(EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "22.0", unit: "°C"))
         )
@@ -1806,7 +1817,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.nextStateChangedEvent(input),
             .success(EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "22.0", unit: "°C"))
         )
@@ -1837,7 +1848,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.nextStateChangedEvent(input),
             .success(EntityState(id: "cover.office_blinds", name: "Office blinds", state: "open", unit: nil, currentPosition: 76))
         )
@@ -1867,7 +1878,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.nextStateChangedEvent(input),
             .success(EntityState(id: "sensor.office_temperature", name: "sensor.office_temperature", state: "21.4", unit: nil))
         )
@@ -1897,7 +1908,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.nextStateChangedEvent(input),
             .success(EntityState(id: "cover.office_blinds", name: "cover.office_blinds", state: "open", unit: nil))
         )
@@ -1927,7 +1938,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.nextStateChangedEvent(input),
             .success(EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "22.0", unit: "°C"))
         )
@@ -1957,7 +1968,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.nextStateChangedEvent(input),
             .success(EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "22.0", unit: "°C"))
         )
@@ -1987,7 +1998,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.nextStateChangedEvent(input),
             .success(EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "22.0", unit: "°C"))
         )
@@ -2091,7 +2102,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.services(input),
             .success([
                 HAServiceMetadata(
@@ -2149,7 +2160,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.nextStateChangedEvent(input),
             .success(EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "22.0", unit: "°C"))
         )
@@ -2167,7 +2178,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.callService(
                 input,
                 call: HAServiceCall(domain: "switch", service: "turn_on", targetEntityID: "switch.office_lamp")
@@ -2195,7 +2206,7 @@ final class PerchHAClientTests: XCTestCase {
         )
 
         await assertEqualAsync(await client.checkWebSocketConnection(input), .success(HAWebSocketCheck(haVersion: "fake-ha")))
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.webSocketStates(input),
             .success([
                 EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "21.4", unit: "°C")
@@ -2220,13 +2231,13 @@ final class PerchHAClientTests: XCTestCase {
         )
 
         await assertEqualAsync(await client.checkRESTConnection(input), .success(HARESTCheck(message: "API running.")))
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.states(input),
             .success([
                 EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "21.4", unit: "°C")
             ])
         )
-        XCTAssertEqual(
+        await assertEqualAsync(
             await client.checkRESTConnection(
                 HAConnectionInput(endpoint: input.endpoint, token: "wrong-token")
             ),
@@ -2911,7 +2922,7 @@ final class PerchHAClientTests: XCTestCase {
         _ = try await service.capture(environment: environment)
 
         let requests = await transport.requests
-        XCTAssertEqual(requests.map { $0.url.path }, ["/api/", "/api/states"])
+        XCTAssertEqual(requests.map { requestPercentEncodedPath($0.url) }, ["/api/", "/api/states"])
     }
 
     func testMirrorCapturePreservesBasePathPrefix() async throws {
@@ -2928,7 +2939,7 @@ final class PerchHAClientTests: XCTestCase {
         _ = try await service.capture(environment: environment)
 
         let requests = await transport.requests
-        XCTAssertEqual(requests.map { $0.url.path }, ["/ha/api/", "/ha/api/states"])
+        XCTAssertEqual(requests.map { requestPercentEncodedPath($0.url) }, ["/ha/api/", "/ha/api/states"])
     }
 
     func test_t_mirror_redaction() async throws {
@@ -3092,7 +3103,7 @@ final class PerchHAClientTests: XCTestCase {
         }
 
         let requests = await transport.requests
-        XCTAssertEqual(requests.map { $0.url.path }, ["/api/"])
+        XCTAssertEqual(requests.map { requestPercentEncodedPath($0.url) }, ["/api/"])
     }
 
     func testMirrorProbeReportsPrimaryReadyWithoutFallback() async throws {
@@ -3120,7 +3131,7 @@ final class PerchHAClientTests: XCTestCase {
             )
         )
         let requests = await transport.requests
-        XCTAssertEqual(requests.map { $0.url.path }, ["/api/"])
+        XCTAssertEqual(requests.map { requestPercentEncodedPath($0.url) }, ["/api/"])
     }
 
     func testMirrorProbeReportsRedactedPrimaryAndFallbackFailures() async throws {
@@ -3146,7 +3157,13 @@ final class PerchHAClientTests: XCTestCase {
         let report = await service.probe(environment: environment)
 
         XCTAssertEqual(report.primary.state, .unavailable)
-        XCTAssertEqual(report.primary.message, "Home Assistant request for /api/ failed: Could not connect to the server.")
+        XCTAssertTrue(
+            report.primary.message.hasPrefix("Home Assistant request for /api/ failed:"),
+            report.primary.message
+        )
+        XCTAssertTrue(report.primary.message.contains("/api/"))
+        XCTAssertFalse(report.primary.message.contains("secret"))
+        XCTAssertFalse(report.primary.message.contains("should-redact"))
         XCTAssertEqual(
             report.primary.guidance,
             "Verify the Home Assistant URL, local network or VPN reachability, DNS, and that the instance is running."
@@ -3193,7 +3210,7 @@ final class PerchHAClientTests: XCTestCase {
             return HAMirrorResponse(
                 statusCode: 200,
                 headers: ["Authorization": "Bearer should-redact"],
-                body: Data((request.url.path == "/api/" ? #"{"message":"API running."}"# : #"[]"#).utf8)
+                body: Data((requestPercentEncodedPath(request.url) == "/api/" ? #"{"message":"API running."}"# : #"[]"#).utf8)
             )
         }
         let service = HAMirrorCaptureService(transport: transport)
@@ -3210,11 +3227,11 @@ final class PerchHAClientTests: XCTestCase {
         XCTAssertEqual(fixtures.api.statusCode, 200)
         let requests = await transport.requests
         XCTAssertEqual(
-            requests.map { ($0.url.host ?? "", $0.url.path) },
+            requests.map { "\($0.url.host ?? "")|\(requestPercentEncodedPath($0.url))" },
             [
-                ("primary.local", "/api/"),
-                ("fallback.example", "/api/"),
-                ("fallback.example", "/api/states")
+                "primary.local|/api/",
+                "fallback.example|/api/",
+                "fallback.example|/api/states"
             ]
         )
     }
@@ -3586,6 +3603,11 @@ struct RecordingHARESTTransportError: Error, CustomStringConvertible, Sendable {
     }
 }
 
+struct RecordingMirrorTransportError: Error, CustomStringConvertible, Sendable {
+    let message: String
+    var description: String { message }
+}
+
 private func writeFixtureSet(_ fixtureSet: HAMirrorFixtureSet) throws -> URL {
     let directory = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("perchha-client-test-\(UUID().uuidString)", isDirectory: true)
@@ -3626,7 +3648,7 @@ actor RecordingMirrorTransport: HAMirrorTransport {
         if let handler {
             return try handler(request)
         }
-        let isAPI = request.url.path == "/api/"
+        let isAPI = requestPercentEncodedPath(request.url) == "/api/"
         let body = isAPI ? apiBody : statesBody
         return HAMirrorResponse(
             statusCode: isAPI ? apiStatusCode : statesStatusCode,

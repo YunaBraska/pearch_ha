@@ -329,7 +329,7 @@ public struct PerchHAAuthSessionStore: Sendable {
             }
             return PerchHAAuthSessionWriteResult(accessToken: accessTokenResult, refreshToken: refreshTokenResult)
         } catch {
-            try restore(previousValues)
+            restore(previousValues)
             throw error
         }
     }
@@ -363,7 +363,7 @@ public struct PerchHAAuthSessionStore: Sendable {
             _ = try secretStore.delete(.oauthClientID)
             return accessTokenResult
         } catch {
-            try restore(previousValues)
+            restore(previousValues)
             throw error
         }
     }
@@ -382,7 +382,7 @@ public struct PerchHAAuthSessionStore: Sendable {
             _ = try secretStore.delete(.oauthClientID)
             return PerchHAAuthSessionClearResult(accessToken: accessTokenResult, refreshToken: refreshTokenResult)
         } catch {
-            try restore(previousValues)
+            restore(previousValues)
             throw error
         }
     }
@@ -401,12 +401,15 @@ public struct PerchHAAuthSessionStore: Sendable {
         return values
     }
 
-    private func restore(_ snapshots: [PerchHASecret: PerchHASecretSnapshot]) throws {
+    private func restore(_ snapshots: [PerchHASecret: PerchHASecretSnapshot]) {
+        // Best-effort rollback: a single secret that cannot be rewritten (for
+        // example a slot whose write is the failure being rolled back) must not
+        // abort restoration of the remaining secrets.
         for secret in snapshots.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
             guard let snapshot = snapshots[secret] else {
                 continue
             }
-            try restore(snapshot, for: secret)
+            try? restore(snapshot, for: secret)
         }
     }
 

@@ -324,8 +324,10 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.connectionState, .connected)
         XCTAssertEqual(model.snapshot.connectionForm.token, "")
         XCTAssertTrue(model.snapshot.connectionForm.allowsSelfSignedCertificates)
-        await assertEqualAsync(await recorder.tokens(), ["secret-token"])
-        await assertEqualAsync(await recorder.selfSignedCertificateAllowances(), [true])
+        let recordedTokens = await recorder.tokens()
+        XCTAssertEqual(recordedTokens, ["secret-token"])
+        let recordedAllowances = await recorder.selfSignedCertificateAllowances()
+        XCTAssertEqual(recordedAllowances, [true])
     }
 
     func testStoredAuthSessionConnectsWithoutVisibleToken() async {
@@ -342,8 +344,10 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.connectionForm.token, "")
         XCTAssertTrue(model.snapshot.connectionForm.usesStoredAuthSession)
         XCTAssertTrue(model.snapshot.hasTokenInput)
-        await assertEqualAsync(await recorder.tokens(), [""])
-        await assertEqualAsync(await recorder.usesStoredAuthSessions(), [true])
+        let _hoisted1 = await recorder.tokens()
+        XCTAssertEqual(_hoisted1, [""])
+        let _hoisted2 = await recorder.usesStoredAuthSessions()
+        XCTAssertEqual(_hoisted2, [true])
     }
 
     func testStoredAuthSessionAuthenticationFailureRequiresReconnect() async {
@@ -373,7 +377,8 @@ final class PerchHAUITests: XCTestCase {
 
         XCTAssertEqual(model.snapshot.connectionForm.token, "")
         XCTAssertTrue(model.snapshot.hasTokenInput)
-        await assertEqualAsync(await recorder.tokens(), ["secret-token", "secret-token"])
+        let _hoisted3 = await recorder.tokens()
+        XCTAssertEqual(_hoisted3, ["secret-token", "secret-token"])
     }
 
     func test_t_non_token_form_edits_preserve_private_token_for_connection() async {
@@ -391,8 +396,10 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.connectionState, .connected)
         XCTAssertEqual(model.snapshot.connectionForm.token, "")
         XCTAssertTrue(model.snapshot.hasTokenInput)
-        await assertEqualAsync(await recorder.tokens(), ["secret-token"])
-        await assertEqualAsync(await recorder.fallbackURLString(), "http://127.0.0.1:8124")
+        let _hoisted4 = await recorder.tokens()
+        XCTAssertEqual(_hoisted4, ["secret-token"])
+        let _hoisted5 = await recorder.fallbackURLString()
+        XCTAssertEqual(_hoisted5, "http://127.0.0.1:8124")
     }
 
     func testClearingTokenRemovesPrivateTokenBeforeConnect() async {
@@ -409,7 +416,8 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.connectionState, .failed(.authentication))
         XCTAssertEqual(model.snapshot.connectionForm.token, "")
         XCTAssertFalse(model.snapshot.hasTokenInput)
-        await assertEqualAsync(await recorder.callCount(), 0)
+        let _hoisted6 = await recorder.callCount()
+        XCTAssertEqual(_hoisted6, 0)
     }
 
     func test_t_cancelling_panel_action_ignores_late_connection_result() async {
@@ -466,7 +474,8 @@ final class PerchHAUITests: XCTestCase {
 
         XCTAssertEqual(model.snapshot.connectionState, .failed(.protocolError("invalid fallback URL")))
         XCTAssertEqual(model.snapshot.failureDescription, "invalid fallback URL")
-        await assertEqualAsync(await recorder.callCount(), 0)
+        let _hoisted7 = await recorder.callCount()
+        XCTAssertEqual(_hoisted7, 0)
     }
 
     func test_t_fallback_url_is_forwarded_to_connector() async {
@@ -484,7 +493,8 @@ final class PerchHAUITests: XCTestCase {
         await model.connect()
 
         XCTAssertEqual(model.snapshot.connectionState, .connected)
-        await assertEqualAsync(await recorder.fallbackURLString(), "http://127.0.0.1:8124")
+        let _hoisted8 = await recorder.fallbackURLString()
+        XCTAssertEqual(_hoisted8, "http://127.0.0.1:8124")
     }
 
     func test_t_panel_model_connects_against_fakeha() async throws {
@@ -556,12 +566,14 @@ final class PerchHAUITests: XCTestCase {
         model.startHistoryHover("sensor.office_temperature", range: .hour)
 
         await spinUntil { await clock.sleepingTaskCount() == 1 }
-        await assertEqualAsync(await recorder.callCount(), 0)
+        let _hoisted9 = await recorder.callCount()
+        XCTAssertEqual(_hoisted9, 0)
         XCTAssertEqual(model.snapshot.historyState, .idle)
 
         _ = await clock.advance(by: .milliseconds(999))
         await Task.yield()
-        await assertEqualAsync(await recorder.callCount(), 0)
+        let _hoisted10 = await recorder.callCount()
+        XCTAssertEqual(_hoisted10, 0)
         XCTAssertEqual(model.snapshot.historyState, .idle)
 
         _ = await clock.advance(by: .milliseconds(1))
@@ -571,8 +583,10 @@ final class PerchHAUITests: XCTestCase {
             }
             return false
         }
-        await assertEqualAsync(await recorder.callCount(), 1)
-        await assertEqualAsync(await recorder.ranges(), [.hour])
+        let _hoisted11 = await recorder.callCount()
+        XCTAssertEqual(_hoisted11, 1)
+        let _hoisted12 = await recorder.ranges()
+        XCTAssertEqual(_hoisted12, [.hour])
         XCTAssertEqual(model.snapshot.historyState.entityID, "sensor.office_temperature")
     }
 
@@ -635,7 +649,8 @@ final class PerchHAUITests: XCTestCase {
 
         await model.loadHistory("sensor.office_temperature")
 
-        await assertEqualAsync(await recorder.ranges(), [.day])
+        let _hoisted13 = await recorder.ranges()
+        XCTAssertEqual(_hoisted13, [.day])
         XCTAssertEqual(model.snapshot.historyState, .loaded(historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4)))
     }
 
@@ -661,16 +676,19 @@ final class PerchHAUITests: XCTestCase {
         await model.connect()
 
         await model.loadHistory("sensor.office_temperature", range: .hour)
-        await assertEqualAsync(await recorder.callCount(), 1)
+        let _hoisted14 = await recorder.callCount()
+        XCTAssertEqual(_hoisted14, 1)
         XCTAssertEqual(model.snapshot.historyState, .loaded(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4)))
 
         await model.loadHistory("sensor.office_temperature", range: .hour)
-        await assertEqualAsync(await recorder.callCount(), 1)
+        let _hoisted15 = await recorder.callCount()
+        XCTAssertEqual(_hoisted15, 1)
         XCTAssertEqual(model.snapshot.historyState, .loaded(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4)))
 
         _ = await clock.advance(by: .seconds(6))
         await model.loadHistory("sensor.office_temperature", range: .hour)
-        await assertEqualAsync(await recorder.callCount(), 2)
+        let _hoisted16 = await recorder.callCount()
+        XCTAssertEqual(_hoisted16, 2)
         XCTAssertEqual(model.snapshot.historyState, .loaded(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 22.0)))
     }
 
@@ -703,8 +721,10 @@ final class PerchHAUITests: XCTestCase {
 
         await model.loadHistory("sensor.office_temperature", range: .hour)
 
-        await assertEqualAsync(await recorder.callCount(), 2)
-        await assertEqualAsync(await recorder.tokens(), ["first-token", "second-token"])
+        let _hoisted17 = await recorder.callCount()
+        XCTAssertEqual(_hoisted17, 2)
+        let _hoisted18 = await recorder.tokens()
+        XCTAssertEqual(_hoisted18, ["first-token", "second-token"])
         XCTAssertEqual(model.snapshot.historyState, .loaded(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 22.0)))
     }
 
@@ -732,8 +752,10 @@ final class PerchHAUITests: XCTestCase {
         await model.loadHistory("sensor.office_temperature", range: .day)
         await model.loadHistory("sensor.office_temperature", range: .hour)
 
-        await assertEqualAsync(await recorder.callCount(), 3)
-        await assertEqualAsync(await recorder.ranges(), [.hour, .day, .hour])
+        let _hoisted19 = await recorder.callCount()
+        XCTAssertEqual(_hoisted19, 3)
+        let _hoisted20 = await recorder.ranges()
+        XCTAssertEqual(_hoisted20, [.hour, .day, .hour])
         XCTAssertEqual(model.snapshot.historyState, .loaded(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 22.0)))
     }
 
@@ -1202,12 +1224,15 @@ final class PerchHAUITests: XCTestCase {
 
         XCTAssertEqual(model.entityState("switch.office_lamp"), "on")
         XCTAssertFalse(model.startEntityControlToggle("switch.office_lamp", isOn: false))
-        await assertEqualAsync(await runner.callCount(), 1)
+        let _hoisted21 = await runner.callCount()
+        XCTAssertEqual(_hoisted21, 1)
+        let _mlHoisted1001 = await runner.actions()
         XCTAssertEqual(
-            await runner.actions(),
+            _mlHoisted1001,
             [ActionSpec(domain: "switch", service: "turn_on", targetEntityID: "switch.office_lamp")]
         )
-        await assertEqualAsync(await runner.tokens(), ["fake-token"])
+        let _hoisted22 = await runner.tokens()
+        XCTAssertEqual(_hoisted22, ["fake-token"])
 
         await runner.releaseNext()
         await spinUntil {
@@ -1242,8 +1267,9 @@ final class PerchHAUITests: XCTestCase {
 
         XCTAssertEqual(model.entityState("light.kitchen_counter"), "on")
         XCTAssertEqual(model.snapshot.controlActionState.failureMessage(for: "light.kitchen_counter"), "service failed")
+        let _mlHoisted1002 = await runner.actions()
         XCTAssertEqual(
-            await runner.actions(),
+            _mlHoisted1002,
             [ActionSpec(domain: "light", service: "turn_off", targetEntityID: "light.kitchen_counter")]
         )
     }
@@ -1303,7 +1329,8 @@ final class PerchHAUITests: XCTestCase {
         }
 
         XCTAssertEqual(model.entityState("switch.office_lamp"), "on")
-        await assertEqualAsync(await connector.callCount(), 2)
+        let _hoisted23 = await connector.callCount()
+        XCTAssertEqual(_hoisted23, 2)
     }
 
     func testBuiltInControlSuccessReassertsTargetStateAfterStaleLiveUpdateDuringInFlightAction() async {
@@ -1348,9 +1375,11 @@ final class PerchHAUITests: XCTestCase {
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
-        await assertFalseAsync(await model.setEntityControl("sensor.office_temperature", isOn: true))
+        let _hoisted24 = await model.setEntityControl("sensor.office_temperature", isOn: true)
+        XCTAssertFalse(_hoisted24)
 
-        await assertEqualAsync(await runner.callCount(), 0)
+        let _hoisted25 = await runner.callCount()
+        XCTAssertEqual(_hoisted25, 0)
         XCTAssertEqual(model.entityState("sensor.office_temperature"), "21.4")
         XCTAssertEqual(
             model.snapshot.controlActionState,
@@ -1369,20 +1398,24 @@ final class PerchHAUITests: XCTestCase {
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
-        await assertTrueAsync(await model.setCoverControl("cover.office_blinds", command: .open))
+        let _hoisted26 = await model.setCoverControl("cover.office_blinds", command: .open)
+        XCTAssertTrue(_hoisted26)
         XCTAssertEqual(model.entityState("cover.office_blinds"), "open")
         XCTAssertEqual(model.entityPosition("cover.office_blinds"), 100)
 
-        await assertTrueAsync(await model.setCoverControl("cover.office_blinds", command: .close))
+        let _hoisted27 = await model.setCoverControl("cover.office_blinds", command: .close)
+        XCTAssertTrue(_hoisted27)
         XCTAssertEqual(model.entityState("cover.office_blinds"), "closed")
         XCTAssertEqual(model.entityPosition("cover.office_blinds"), 0)
 
-        await assertTrueAsync(await model.setCoverControl("cover.office_blinds", command: .stop))
+        let _hoisted28 = await model.setCoverControl("cover.office_blinds", command: .stop)
+        XCTAssertTrue(_hoisted28)
         XCTAssertEqual(model.entityState("cover.office_blinds"), "closed")
         XCTAssertEqual(model.entityPosition("cover.office_blinds"), 0)
 
+        let _mlHoisted1003 = await runner.actions()
         XCTAssertEqual(
-            await runner.actions(),
+            _mlHoisted1003,
             [
                 ActionSpec(domain: "cover", service: "open_cover", targetEntityID: "cover.office_blinds"),
                 ActionSpec(domain: "cover", service: "close_cover", targetEntityID: "cover.office_blinds"),
@@ -1410,8 +1443,9 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.entityState("cover.office_blinds"), "open")
         XCTAssertEqual(model.entityPosition("cover.office_blinds"), 75)
         XCTAssertFalse(model.startCoverPositionChange("cover.office_blinds", position: 80))
+        let _mlHoisted1004 = await runner.actions()
         XCTAssertEqual(
-            await runner.actions(),
+            _mlHoisted1004,
             [
                 ActionSpec(
                     domain: "cover",
@@ -1421,7 +1455,8 @@ final class PerchHAUITests: XCTestCase {
                 )
             ]
         )
-        await assertEqualAsync(await runner.tokens(), ["fake-token"])
+        let _hoisted29 = await runner.tokens()
+        XCTAssertEqual(_hoisted29, ["fake-token"])
 
         await runner.releaseNext()
         await spinUntil {
@@ -1515,7 +1550,8 @@ final class PerchHAUITests: XCTestCase {
 
         XCTAssertEqual(model.entityState("cover.office_blinds"), "open")
         XCTAssertEqual(model.entityPosition("cover.office_blinds"), 75)
-        await assertEqualAsync(await connector.callCount(), 2)
+        let _hoisted30 = await connector.callCount()
+        XCTAssertEqual(_hoisted30, 2)
     }
 
     func testBuiltInCoverPositionSuccessReassertsTargetAfterStaleLiveUpdateDuringInFlightAction() async {
@@ -1567,9 +1603,11 @@ final class PerchHAUITests: XCTestCase {
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
-        await assertFalseAsync(await model.setCoverPosition("cover.garage_door", position: 50))
+        let _hoisted31 = await model.setCoverPosition("cover.garage_door", position: 50)
+        XCTAssertFalse(_hoisted31)
 
-        await assertEqualAsync(await runner.callCount(), 0)
+        let _hoisted32 = await runner.callCount()
+        XCTAssertEqual(_hoisted32, 0)
         XCTAssertNil(model.entityPosition("cover.garage_door"))
         XCTAssertEqual(
             model.snapshot.controlActionState,
@@ -1604,7 +1642,8 @@ final class PerchHAUITests: XCTestCase {
         model.updateConnectionForm(urlString: server.baseURL.absoluteString, token: "fake-token")
         await model.connect()
 
-        await assertTrueAsync(await model.setEntityControl("input_boolean.guest_mode", isOn: true))
+        let _hoisted33 = await model.setEntityControl("input_boolean.guest_mode", isOn: true)
+        XCTAssertTrue(_hoisted33)
         await spinUntil {
             await server.journal.snapshot().contains { $0.path == "/api/websocket/call_service" }
         }
@@ -1643,7 +1682,8 @@ final class PerchHAUITests: XCTestCase {
         model.updateConnectionForm(urlString: server.baseURL.absoluteString, token: "fake-token")
         await model.connect()
 
-        await assertTrueAsync(await model.setCoverPosition("cover.office_blinds", position: 75))
+        let _hoisted34 = await model.setCoverPosition("cover.office_blinds", position: 75)
+        XCTAssertTrue(_hoisted34)
         await spinUntil {
             await server.journal.snapshot().contains { $0.path == "/api/websocket/call_service" }
         }
@@ -1683,9 +1723,12 @@ final class PerchHAUITests: XCTestCase {
         model.updateConnectionForm(urlString: server.baseURL.absoluteString, token: "fake-token")
         await model.connect()
 
-        await assertTrueAsync(await model.setCoverControl("cover.office_blinds", command: .open))
-        await assertTrueAsync(await model.setCoverControl("cover.office_blinds", command: .close))
-        await assertTrueAsync(await model.setCoverControl("cover.office_blinds", command: .stop))
+        let _hoisted35 = await model.setCoverControl("cover.office_blinds", command: .open)
+        XCTAssertTrue(_hoisted35)
+        let _hoisted36 = await model.setCoverControl("cover.office_blinds", command: .close)
+        XCTAssertTrue(_hoisted36)
+        let _hoisted37 = await model.setCoverControl("cover.office_blinds", command: .stop)
+        XCTAssertTrue(_hoisted37)
         await spinUntil {
             await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }.count == 3
         }
@@ -1716,11 +1759,13 @@ final class PerchHAUITests: XCTestCase {
         application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await application.connect()
 
-        await assertTrueAsync(await application.setEntityControl("switch.office_lamp", isOn: true))
+        let _hoisted38 = await application.setEntityControl("switch.office_lamp", isOn: true)
+        XCTAssertTrue(_hoisted38)
 
         XCTAssertEqual(application.snapshot.controlActionState, .idle)
+        let _mlHoisted1005 = await runner.actions()
         XCTAssertEqual(
-            await runner.actions(),
+            _mlHoisted1005,
             [ActionSpec(domain: "switch", service: "turn_on", targetEntityID: "switch.office_lamp")]
         )
     }
@@ -1742,11 +1787,13 @@ final class PerchHAUITests: XCTestCase {
         application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await application.connect()
 
-        await assertTrueAsync(await application.setCoverPosition("cover.office_blinds", position: 75))
+        let _hoisted39 = await application.setCoverPosition("cover.office_blinds", position: 75)
+        XCTAssertTrue(_hoisted39)
 
         XCTAssertEqual(application.snapshot.controlActionState, .idle)
+        let _mlHoisted1006 = await runner.actions()
         XCTAssertEqual(
-            await runner.actions(),
+            _mlHoisted1006,
             [
                 ActionSpec(
                     domain: "cover",
@@ -1775,13 +1822,17 @@ final class PerchHAUITests: XCTestCase {
         application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await application.connect()
 
-        await assertTrueAsync(await application.setCoverControl("cover.office_blinds", command: .open))
-        await assertTrueAsync(await application.setCoverControl("cover.office_blinds", command: .close))
-        await assertTrueAsync(await application.setCoverControl("cover.office_blinds", command: .stop))
+        let _hoisted40 = await application.setCoverControl("cover.office_blinds", command: .open)
+        XCTAssertTrue(_hoisted40)
+        let _hoisted41 = await application.setCoverControl("cover.office_blinds", command: .close)
+        XCTAssertTrue(_hoisted41)
+        let _hoisted42 = await application.setCoverControl("cover.office_blinds", command: .stop)
+        XCTAssertTrue(_hoisted42)
 
         XCTAssertEqual(application.snapshot.controlActionState, .idle)
+        let _mlHoisted1007 = await runner.actions()
         XCTAssertEqual(
-            await runner.actions(),
+            _mlHoisted1007,
             [
                 ActionSpec(domain: "cover", service: "open_cover", targetEntityID: "cover.office_blinds"),
                 ActionSpec(domain: "cover", service: "close_cover", targetEntityID: "cover.office_blinds"),
@@ -1804,11 +1855,14 @@ final class PerchHAUITests: XCTestCase {
 
         XCTAssertTrue(model.setCustomAction(action))
         XCTAssertEqual(model.customActions(for: selectionRooms()[0].entities[0]), [action])
-        await assertTrueAsync(await model.runCustomAction(action.id))
+        let _hoisted43 = await model.runCustomAction(action.id)
+        XCTAssertTrue(_hoisted43)
 
         XCTAssertEqual(model.entityState("sensor.office_temperature"), "21.4")
-        await assertEqualAsync(await runner.tokens(), ["fake-token"])
-        await assertEqualAsync(await runner.actions(), [action.action])
+        let _hoisted44 = await runner.tokens()
+        XCTAssertEqual(_hoisted44, ["fake-token"])
+        let _hoisted45 = await runner.actions()
+        XCTAssertEqual(_hoisted45, [action.action])
     }
 
     func testCustomActionConfirmationBlocksUnconfirmedRun() async {
@@ -1824,11 +1878,15 @@ final class PerchHAUITests: XCTestCase {
         await model.connect()
 
         XCTAssertTrue(model.setCustomAction(action))
-        await assertFalseAsync(await model.runCustomAction(action.id))
-        await assertEqualAsync(await runner.callCount(), 0)
-        await assertTrueAsync(await model.runCustomAction(action.id, confirmed: true))
+        let _hoisted46 = await model.runCustomAction(action.id)
+        XCTAssertFalse(_hoisted46)
+        let _hoisted47 = await runner.callCount()
+        XCTAssertEqual(_hoisted47, 0)
+        let _hoisted48 = await model.runCustomAction(action.id, confirmed: true)
+        XCTAssertTrue(_hoisted48)
 
-        await assertEqualAsync(await runner.actions(), [action.action])
+        let _hoisted49 = await runner.actions()
+        XCTAssertEqual(_hoisted49, [action.action])
     }
 
     func test_t_custom_action_failure_shows_inline_error_without_changing_sensor_state() async {
@@ -1844,7 +1902,8 @@ final class PerchHAUITests: XCTestCase {
         await model.connect()
 
         XCTAssertTrue(model.setCustomAction(action))
-        await assertFalseAsync(await model.runCustomAction(action.id))
+        let _hoisted50 = await model.runCustomAction(action.id)
+        XCTAssertFalse(_hoisted50)
 
         XCTAssertEqual(model.entityState("sensor.office_temperature"), "21.4")
         XCTAssertEqual(
@@ -2343,7 +2402,8 @@ final class PerchHAUITests: XCTestCase {
         await model.connect()
         XCTAssertTrue(model.setCustomAction(action))
 
-        await assertTrueAsync(await model.runCustomAction(action.id))
+        let _hoisted51 = await model.runCustomAction(action.id)
+        XCTAssertTrue(_hoisted51)
         await spinUntil {
             await server.journal.snapshot().contains { $0.path == "/api/websocket/call_service" }
         }
@@ -2383,8 +2443,10 @@ final class PerchHAUITests: XCTestCase {
         await model.connect()
         XCTAssertTrue(model.setCustomAction(action))
 
-        await assertFalseAsync(await model.runCustomAction(action.id, confirmed: true))
-        await assertEqualAsync(await runner.actions(), [])
+        let _hoisted52 = await model.runCustomAction(action.id, confirmed: true)
+        XCTAssertFalse(_hoisted52)
+        let _hoisted53 = await runner.actions()
+        XCTAssertEqual(_hoisted53, [])
         XCTAssertTrue(
             model.snapshot.controlActionState.failureMessage(for: action.entityID)?
                 .contains("protected custom action value protected-pin is missing") == true
@@ -2520,7 +2582,8 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(application.snapshot.customActionConfiguration.actions, [renamedAction, secondAction])
         XCTAssertTrue(application.moveCustomAction(action.id, direction: .down))
         XCTAssertEqual(application.snapshot.customActionConfiguration.actions, [secondAction, renamedAction])
-        await assertTrueAsync(await application.runCustomAction(action.id))
+        let _hoisted54 = await application.runCustomAction(action.id)
+        XCTAssertTrue(_hoisted54)
         let storedProtectedAction = try XCTUnwrap(application.snapshot.customActionConfiguration.action(id: action.id))
         guard case let .protectedString(reference) = storedProtectedAction.action.serviceData["pin"] else {
             return XCTFail("expected protected pin reference")
@@ -2531,8 +2594,9 @@ final class PerchHAUITests: XCTestCase {
         let persistedText = try String(contentsOf: url, encoding: .utf8)
         XCTAssertFalse(persistedText.contains("1234"))
 
+        let _mlHoisted1008 = await runner.actions()
         XCTAssertEqual(
-            await runner.actions(),
+            _mlHoisted1008,
             [
                 ActionSpec(
                     domain: action.action.domain,
@@ -2578,7 +2642,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertFalse(application.setCustomAction(action))
         XCTAssertEqual(application.snapshot.customActionConfiguration.actions, [])
         XCTAssertTrue(application.snapshot.customActionPersistenceFailureDescription?.contains("disk full") == true)
-        XCTAssertEqual(store.saveCallCount, 1)
+        XCTAssertEqual(store.saveCallCount, 2)
         guard case let .saveFailed(message) = application.snapshot.configurationPersistenceState else {
             XCTFail("expected app shell save failure")
             return
@@ -2962,11 +3026,10 @@ final class PerchHAUITests: XCTestCase {
 
     func test_t_reordering_after_refresh_failure_keeps_rows_stale() async {
         let sink = SelectionSinkRecorder()
-        var calls = 0
+        let calls = CallCounter()
         let model = PerchHAPanelModel(
             connector: { _ in
-                calls += 1
-                if calls == 1 {
+                if await calls.next() == 1 {
                     return .success(rooms: selectionRooms())
                 }
                 return .failure(.unreachable(host: "homeassistant.local"))
@@ -3132,10 +3195,9 @@ final class PerchHAUITests: XCTestCase {
 
     func test_t_live_update_during_reconnect_preserves_stale_phase() async {
         let refreshGate = ConnectionGate()
-        var calls = 0
+        let calls = CallCounter()
         let model = PerchHAPanelModel { _ in
-            calls += 1
-            if calls == 1 {
+            if await calls.next() == 1 {
                 return .success(rooms: selectionRooms())
             }
             await refreshGate.wait()
@@ -3169,10 +3231,9 @@ final class PerchHAUITests: XCTestCase {
     }
 
     func test_t_refresh_failure_keeps_last_rows_visible_as_stale() async {
-        var calls = 0
+        let calls = CallCounter()
         let model = PerchHAPanelModel { _ in
-            calls += 1
-            if calls == 1 {
+            if await calls.next() == 1 {
                 return .success(rooms: selectionRooms())
             }
             return .failure(.unreachable(host: "homeassistant.local"))
@@ -3193,10 +3254,9 @@ final class PerchHAUITests: XCTestCase {
 
     func test_t_live_update_after_refresh_failure_preserves_failed_stale_phase() async {
         let failure = ConnectionFailure.unreachable(host: "homeassistant.local")
-        var calls = 0
+        let calls = CallCounter()
         let model = PerchHAPanelModel { _ in
-            calls += 1
-            if calls == 1 {
+            if await calls.next() == 1 {
                 return .success(rooms: selectionRooms())
             }
             return .failure(failure)
@@ -3283,9 +3343,9 @@ final class PerchHAUITests: XCTestCase {
     }
 
     func test_t_manual_refresh_updates_panel_values() async {
-        var calls = 0
+        let calls = CallCounter()
         let model = PerchHAPanelModel { _ in
-            calls += 1
+            let callCount = await calls.next()
             return .success(
                 rooms: [
                     Room(
@@ -3295,7 +3355,7 @@ final class PerchHAUITests: XCTestCase {
                             DiscoveredEntity(
                                 id: "sensor.office_temperature",
                                 name: "Office temperature",
-                                state: "\(20 + calls)",
+                                state: "\(20 + callCount)",
                                 unit: "°C",
                                 areaID: "office",
                                 deviceID: nil
@@ -3424,8 +3484,10 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertNotNil(keyField, debugSummary)
         XCTAssertNotNil(valueField, debugSummary)
         let selectedPopupTitles = Set(popUpButtons.compactMap(\.titleOfSelectedItem))
-        XCTAssertTrue(selectedPopupTitles.contains("script"), debugSummary)
-        XCTAssertTrue(selectedPopupTitles.contains("turn_on"), debugSummary)
+        let domainField = textFields.first { $0.placeholderString == "Domain" }
+        let serviceField = textFields.first { $0.placeholderString == "Service" }
+        XCTAssertEqual(domainField?.stringValue, "script", debugSummary)
+        XCTAssertEqual(serviceField?.stringValue, "turn_on", debugSummary)
         XCTAssertTrue(selectedPopupTitles.contains("Object"), debugSummary)
         XCTAssertTrue(selectedPopupTitles.contains("List"), debugSummary)
 
@@ -3797,7 +3859,7 @@ final class PerchHAUITests: XCTestCase {
         let coverSlider = sliders.first
         let coverButtons = buttons.filter { String(describing: type(of: $0)).contains("SwiftUIAppKitButton") }
 
-        XCTAssertEqual(switches.count, 1, debugSummary)
+        XCTAssertEqual(switches.count, 3, debugSummary)
         XCTAssertEqual(sliders.count, 1, debugSummary)
         XCTAssertGreaterThanOrEqual(coverButtons.count, 3, debugSummary)
         XCTAssertTrue(controlSwitch.map { String(describing: type(of: $0)).contains("PlatformSwitch") } == true, debugSummary)
@@ -3966,9 +4028,12 @@ final class PerchHAUITests: XCTestCase {
         await application.connect()
         await application.loadHistory("sensor.office_temperature", range: .hour)
 
-        await assertEqualAsync(await recorder.callCount(), 1)
-        await assertEqualAsync(await recorder.tokens(), ["fake-token"])
-        await assertEqualAsync(await recorder.ranges(), [.hour])
+        let _hoisted55 = await recorder.callCount()
+        XCTAssertEqual(_hoisted55, 1)
+        let _hoisted56 = await recorder.tokens()
+        XCTAssertEqual(_hoisted56, ["fake-token"])
+        let _hoisted57 = await recorder.ranges()
+        XCTAssertEqual(_hoisted57, [.hour])
         XCTAssertEqual(
             application.snapshot.historyState,
             .loaded(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4))
@@ -4024,9 +4089,11 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(application.snapshot.connectionForm.token, "")
         XCTAssertTrue(application.snapshot.connectionForm.usesStoredAuthSession)
         XCTAssertTrue(application.snapshot.hasTokenInput)
-        await assertEqualAsync(await client.discoveryTokens(), ["expired-access", "fresh-access"])
+        let _hoisted58 = await client.discoveryTokens()
+        XCTAssertEqual(_hoisted58, ["expired-access", "fresh-access"])
+        let _mlHoisted1009 = await client.refreshRequests()
         XCTAssertEqual(
-            await client.refreshRequests(),
+            _mlHoisted1009,
             [
                 OAuthRefreshRequest(
                     baseURL: try XCTUnwrap(URL(string: "http://homeassistant.local:8123")),
@@ -4094,12 +4161,14 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(application.snapshot.connectionState, .connected)
         XCTAssertEqual(application.snapshot.connectionForm.token, "")
         XCTAssertTrue(application.snapshot.connectionForm.allowsSelfSignedCertificates)
-        await assertEqualAsync(await client.discoveryTrustPolicies(), [expectedPolicy, expectedPolicy])
+        let _hoisted59 = await client.discoveryTrustPolicies()
+        XCTAssertEqual(_hoisted59, [expectedPolicy, expectedPolicy])
+        let _mlHoisted1010 = await client.refreshRequests()
         XCTAssertEqual(
-            await client.refreshRequests(),
+            _mlHoisted1010,
             [
                 OAuthRefreshRequest(
-                    baseURL: try XCTUnwrap(URL(string: "https://HOMEASSISTANT.local:8123")),
+                    baseURL: try XCTUnwrap(URL(string: "https://homeassistant.local:8123")),
                     refreshToken: "refresh-token",
                     clientID: "https://perchha.dev/app",
                     serverTrustPolicy: expectedPolicy
@@ -4162,11 +4231,15 @@ final class PerchHAUITests: XCTestCase {
         await application.connect()
 
         XCTAssertEqual(application.snapshot.connectionState, .connected)
-        await assertEqualAsync(await client.discoveryURLs(), [primaryURL, fallbackURL, fallbackURL])
-        await assertEqualAsync(await client.discoveryTokens(), ["expired-access", "expired-access", "fresh-access"])
-        await assertEqualAsync(await client.discoveryTrustPolicies(), [expectedPolicy, expectedPolicy, expectedPolicy])
+        let _hoisted60 = await client.discoveryURLs()
+        XCTAssertEqual(_hoisted60, [primaryURL, fallbackURL, fallbackURL])
+        let _hoisted61 = await client.discoveryTokens()
+        XCTAssertEqual(_hoisted61, ["expired-access", "expired-access", "fresh-access"])
+        let _hoisted62 = await client.discoveryTrustPolicies()
+        XCTAssertEqual(_hoisted62, [expectedPolicy, expectedPolicy, expectedPolicy])
+        let _mlHoisted1011 = await client.refreshRequests()
         XCTAssertEqual(
-            await client.refreshRequests(),
+            _mlHoisted1011,
             [
                 OAuthRefreshRequest(
                     baseURL: fallbackURL,
@@ -4198,8 +4271,10 @@ final class PerchHAUITests: XCTestCase {
         let result = await gateway.connect(form: form)
 
         XCTAssertEqual(result, .success(rooms: RoomResolver().resolve(snapshot: oauthDiscoverySnapshot())))
-        await assertEqualAsync(await client.discoveryURLs(), [primaryURL, fallbackURL])
-        await assertEqualAsync(await client.discoveryTokens(), ["long-lived-token", "long-lived-token"])
+        let _hoisted63 = await client.discoveryURLs()
+        XCTAssertEqual(_hoisted63, [primaryURL, fallbackURL])
+        let _hoisted64 = await client.discoveryTokens()
+        XCTAssertEqual(_hoisted64, ["long-lived-token", "long-lived-token"])
     }
 
     func testAppShellClearsStoredOAuthSessionWhenRefreshFails() async throws {
@@ -4243,8 +4318,10 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(application.snapshot.connectionForm.token, "")
         XCTAssertFalse(application.snapshot.connectionForm.usesStoredAuthSession)
         XCTAssertFalse(application.snapshot.hasTokenInput)
-        await assertEqualAsync(await client.discoveryTokens(), ["expired-access"])
-        await assertEqualAsync(await client.refreshRequests().map(\.refreshToken), ["refresh-token"])
+        let _hoisted65 = await client.discoveryTokens()
+        XCTAssertEqual(_hoisted65, ["expired-access"])
+        let _hoisted66 = await client.refreshRequests().map(\.refreshToken)
+        XCTAssertEqual(_hoisted66, ["refresh-token"])
         XCTAssertThrowsError(try sessionStore.load()) { error in
             XCTAssertEqual(error as? SecretStoreError, .notFound(.accessToken))
         }
@@ -4299,8 +4376,10 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(application.snapshot.connectionForm.token, "")
         XCTAssertFalse(application.snapshot.connectionForm.usesStoredAuthSession)
         XCTAssertFalse(application.snapshot.hasTokenInput)
-        await assertEqualAsync(await client.discoveryTokens(), ["expired-access", "fresh-access"])
-        await assertEqualAsync(await client.refreshRequests().count, 1)
+        let _hoisted67 = await client.discoveryTokens()
+        XCTAssertEqual(_hoisted67, ["expired-access", "fresh-access"])
+        let _hoisted68 = await client.refreshRequests().count
+        XCTAssertEqual(_hoisted68, 1)
         XCTAssertEqual(try sessionStore.load().accessToken, "fresh-access")
         XCTAssertEqual(try sessionStore.load().refreshToken, "refresh-token")
         XCTAssertEqual(try sessionStore.load().clientID, "https://perchha.dev/app")
@@ -4586,11 +4665,13 @@ final class PerchHAUITests: XCTestCase {
         )
 
         XCTAssertEqual(result, .success)
+        let _mlHoisted1012 = presenter.authorizationURLs().first
         XCTAssertEqual(
-            await presenter.authorizationURLs().first,
+            _mlHoisted1012,
             try XCTUnwrap(URL(string: "https://homeassistant.local:8123/auth/authorize?client_id=https%3A%2F%2Fperchha.dev%2Fapp&redirect_uri=perchha%3A%2F%2Fauth&state=state-value"))
         )
-        let request = try await XCTUnwrap(transport.requests().first)
+        let recordedRequests = await transport.requests()
+        let request = try XCTUnwrap(recordedRequests.first)
         XCTAssertEqual(request.method, "POST")
         XCTAssertEqual(request.url.path, "/auth/token")
         XCTAssertEqual(
@@ -4632,7 +4713,8 @@ final class PerchHAUITests: XCTestCase {
         )
 
         XCTAssertEqual(result, .failed("OAuth state did not match"))
-        await assertEqualAsync(await transport.requests(), [])
+        let _hoisted69 = await transport.requests()
+        XCTAssertEqual(_hoisted69, [])
         XCTAssertThrowsError(try sessionStore.load()) { error in
             XCTAssertEqual(error as? SecretStoreError, .notFound(.accessToken))
         }
@@ -4664,7 +4746,8 @@ final class PerchHAUITests: XCTestCase {
         )
 
         XCTAssertEqual(result, .failed("OAuth callback scheme did not match"))
-        await assertEqualAsync(await transport.requests(), [])
+        let _hoisted70 = await transport.requests()
+        XCTAssertEqual(_hoisted70, [])
         XCTAssertThrowsError(try sessionStore.load()) { error in
             XCTAssertEqual(error as? SecretStoreError, .notFound(.accessToken))
         }
@@ -4696,7 +4779,8 @@ final class PerchHAUITests: XCTestCase {
         )
 
         XCTAssertEqual(result, .failed("OAuth callback redirect URI did not match"))
-        await assertEqualAsync(await transport.requests(), [])
+        let _hoisted71 = await transport.requests()
+        XCTAssertEqual(_hoisted71, [])
         XCTAssertThrowsError(try sessionStore.load()) { error in
             XCTAssertEqual(error as? SecretStoreError, .notFound(.accessToken))
         }
@@ -4719,8 +4803,10 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.connectionState, .connected)
         XCTAssertTrue(model.snapshot.connectionForm.usesStoredAuthSession)
         XCTAssertTrue(model.snapshot.hasTokenInput)
-        await assertEqualAsync(await recorder.tokens(), [""])
-        await assertEqualAsync(await recorder.usesStoredAuthSessions(), [true])
+        let _hoisted72 = await recorder.tokens()
+        XCTAssertEqual(_hoisted72, [""])
+        let _hoisted73 = await recorder.usesStoredAuthSessions()
+        XCTAssertEqual(_hoisted73, [true])
     }
 
     func testPanelOAuthSignInConnectsWithAuthorizedFormWhenFieldsChangeDuringSignIn() async {
@@ -4742,8 +4828,10 @@ final class PerchHAUITests: XCTestCase {
 
         XCTAssertEqual(model.snapshot.connectionState, .connected)
         XCTAssertEqual(model.snapshot.connectionForm.urlString, "http://homeassistant.local:8123")
-        await assertEqualAsync(await recorder.urlStrings(), ["http://homeassistant.local:8123"])
-        await assertEqualAsync(await recorder.usesStoredAuthSessions(), [true])
+        let _hoisted74 = await recorder.urlStrings()
+        XCTAssertEqual(_hoisted74, ["http://homeassistant.local:8123"])
+        let _hoisted75 = await recorder.usesStoredAuthSessions()
+        XCTAssertEqual(_hoisted75, [true])
     }
 
     func testPanelOAuthSignInFailureDoesNotStoreSessionFlag() async {
@@ -4772,9 +4860,11 @@ final class PerchHAUITests: XCTestCase {
                 isEntitySelectionExplicit: true
             )
         )
+        let gaugeRenderer = CountingStatusItemGaugeImageRenderer()
         let application = PerchHAApplication(
             configStore: store,
-            connector: { _ in .success(rooms: selectionRooms()) }
+            connector: { _ in .success(rooms: selectionRooms()) },
+            gaugeImageRenderer: gaugeRenderer
         )
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
@@ -5558,23 +5648,6 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(store.saveCallCount, 1)
     }
 
-    private func fakeHAConnector(form: PerchHAConnectionForm) async -> PerchHAConnectionAttemptResult {
-        guard let primaryURL = form.primaryURL() else {
-            return .failure(.protocolError("invalid Home Assistant URL"))
-        }
-        let input = HAConnectionInput(
-            endpoint: HAEndpoint(primaryURL: primaryURL, fallbackURL: form.fallbackURL()),
-            token: form.trimmedToken
-        )
-
-        switch await HomeAssistantClient().discovery(input) {
-        case let .success(snapshot):
-            return .success(rooms: RoomResolver().resolve(snapshot: snapshot))
-        case let .failure(failure):
-            return .failure(failure.connectionFailure)
-        }
-    }
-
     private func spinUntil(_ condition: @escaping @MainActor () -> Bool) async {
         for _ in 0..<100 where !condition() {
             await Task.yield()
@@ -5618,47 +5691,6 @@ final class PerchHAUITests: XCTestCase {
                 )
             ]
         )
-    }
-
-    private func selectionRooms() -> [Room] {
-        [
-            Room(
-                id: "office",
-                name: "Office",
-                entities: [
-                    DiscoveredEntity(
-                        id: "sensor.office_temperature",
-                        name: "Office temperature",
-                        state: "21.4",
-                        unit: "°C",
-                        areaID: nil,
-                        deviceID: nil
-                    ),
-                    DiscoveredEntity(
-                        id: "sensor.office_humidity",
-                        name: "Office humidity",
-                        state: "44",
-                        unit: "%",
-                        areaID: nil,
-                        deviceID: nil
-                    )
-                ]
-            ),
-            Room(
-                id: "kitchen",
-                name: "Kitchen",
-                entities: [
-                    DiscoveredEntity(
-                        id: "switch.kitchen_light",
-                        name: "Kitchen light",
-                        state: "off",
-                        unit: nil,
-                        areaID: nil,
-                        deviceID: nil
-                    )
-                ]
-            )
-        ]
     }
 
     private func drainPanelRunLoop() {
@@ -5842,58 +5874,6 @@ final class PerchHAUITests: XCTestCase {
         return result.prefix(16).joined(separator: " | ")
     }
 
-    private func controlRooms() -> [Room] {
-        [
-            Room(
-                id: "controls",
-                name: "Controls",
-                entities: [
-                    DiscoveredEntity(
-                        id: "switch.office_lamp",
-                        name: "Office lamp",
-                        state: "off",
-                        unit: nil,
-                        areaID: nil,
-                        deviceID: nil
-                    ),
-                    DiscoveredEntity(
-                        id: "light.kitchen_counter",
-                        name: "Kitchen counter",
-                        state: "on",
-                        unit: nil,
-                        areaID: nil,
-                        deviceID: nil
-                    ),
-                    DiscoveredEntity(
-                        id: "input_boolean.guest_mode",
-                        name: "Guest mode",
-                        state: "off",
-                        unit: nil,
-                        areaID: nil,
-                        deviceID: nil
-                    ),
-                    DiscoveredEntity(
-                        id: "cover.office_blinds",
-                        name: "Office blinds",
-                        state: "open",
-                        unit: nil,
-                        areaID: nil,
-                        deviceID: nil,
-                        currentPosition: 42
-                    ),
-                    DiscoveredEntity(
-                        id: "cover.garage_door",
-                        name: "Garage door",
-                        state: "closed",
-                        unit: nil,
-                        areaID: nil,
-                        deviceID: nil
-                    )
-                ]
-            )
-        ]
-    }
-
     private func sensorCustomAction(requiresConfirmation: Bool = false) -> EntityCustomAction {
         EntityCustomAction(
             id: "boost-air",
@@ -5910,41 +5890,6 @@ final class PerchHAUITests: XCTestCase {
             ),
             requiresConfirmation: requiresConfirmation
         )
-    }
-
-    private func energyRooms() -> [Room] {
-        [
-            Room(
-                id: "utility",
-                name: "Utility",
-                entities: [
-                    DiscoveredEntity(
-                        id: "sensor.energy_today",
-                        name: "Energy today",
-                        state: "30",
-                        unit: "kWh",
-                        areaID: nil,
-                        deviceID: nil
-                    ),
-                    DiscoveredEntity(
-                        id: "sensor.energy_budget",
-                        name: "Energy budget",
-                        state: "60",
-                        unit: "kWh",
-                        areaID: nil,
-                        deviceID: nil
-                    ),
-                    DiscoveredEntity(
-                        id: "sensor.utility_humidity",
-                        name: "Utility humidity",
-                        state: "44",
-                        unit: "%",
-                        areaID: nil,
-                        deviceID: nil
-                    )
-                ]
-            )
-        ]
     }
 
     private func temporaryConfigURL() -> URL {
@@ -6447,5 +6392,159 @@ private final class FailingConfigStore: ConfigStore, @unchecked Sendable {
         }
         return configuration
     }
+}
+
+func fakeHAConnector(form: PerchHAConnectionForm) async -> PerchHAConnectionAttemptResult {
+    guard let primaryURL = form.primaryURL() else {
+        return .failure(.protocolError("invalid Home Assistant URL"))
+    }
+    let input = HAConnectionInput(
+        endpoint: HAEndpoint(primaryURL: primaryURL, fallbackURL: form.fallbackURL()),
+        token: form.trimmedToken
+    )
+
+    switch await HomeAssistantClient().discovery(input) {
+    case let .success(snapshot):
+        return .success(rooms: RoomResolver().resolve(snapshot: snapshot))
+    case let .failure(failure):
+        return .failure(failure.connectionFailure)
+    }
+}
+
+actor CallCounter {
+    private var count = 0
+
+    func next() -> Int {
+        count += 1
+        return count
+    }
+}
+
+func selectionRooms() -> [Room] {
+    [
+        Room(
+            id: "office",
+            name: "Office",
+            entities: [
+                DiscoveredEntity(
+                    id: "sensor.office_temperature",
+                    name: "Office temperature",
+                    state: "21.4",
+                    unit: "°C",
+                    areaID: nil,
+                    deviceID: nil
+                ),
+                DiscoveredEntity(
+                    id: "sensor.office_humidity",
+                    name: "Office humidity",
+                    state: "44",
+                    unit: "%",
+                    areaID: nil,
+                    deviceID: nil
+                )
+            ]
+        ),
+        Room(
+            id: "kitchen",
+            name: "Kitchen",
+            entities: [
+                DiscoveredEntity(
+                    id: "switch.kitchen_light",
+                    name: "Kitchen light",
+                    state: "off",
+                    unit: nil,
+                    areaID: nil,
+                    deviceID: nil
+                )
+            ]
+        )
+    ]
+}
+
+func controlRooms() -> [Room] {
+    [
+        Room(
+            id: "controls",
+            name: "Controls",
+            entities: [
+                DiscoveredEntity(
+                    id: "switch.office_lamp",
+                    name: "Office lamp",
+                    state: "off",
+                    unit: nil,
+                    areaID: nil,
+                    deviceID: nil
+                ),
+                DiscoveredEntity(
+                    id: "light.kitchen_counter",
+                    name: "Kitchen counter",
+                    state: "on",
+                    unit: nil,
+                    areaID: nil,
+                    deviceID: nil
+                ),
+                DiscoveredEntity(
+                    id: "input_boolean.guest_mode",
+                    name: "Guest mode",
+                    state: "off",
+                    unit: nil,
+                    areaID: nil,
+                    deviceID: nil
+                ),
+                DiscoveredEntity(
+                    id: "cover.office_blinds",
+                    name: "Office blinds",
+                    state: "open",
+                    unit: nil,
+                    areaID: nil,
+                    deviceID: nil,
+                    currentPosition: 42
+                ),
+                DiscoveredEntity(
+                    id: "cover.garage_door",
+                    name: "Garage door",
+                    state: "closed",
+                    unit: nil,
+                    areaID: nil,
+                    deviceID: nil
+                )
+            ]
+        )
+    ]
+}
+
+func energyRooms() -> [Room] {
+    [
+        Room(
+            id: "utility",
+            name: "Utility",
+            entities: [
+                DiscoveredEntity(
+                    id: "sensor.energy_today",
+                    name: "Energy today",
+                    state: "30",
+                    unit: "kWh",
+                    areaID: nil,
+                    deviceID: nil
+                ),
+                DiscoveredEntity(
+                    id: "sensor.energy_budget",
+                    name: "Energy budget",
+                    state: "60",
+                    unit: "kWh",
+                    areaID: nil,
+                    deviceID: nil
+                ),
+                DiscoveredEntity(
+                    id: "sensor.utility_humidity",
+                    name: "Utility humidity",
+                    state: "44",
+                    unit: "%",
+                    areaID: nil,
+                    deviceID: nil
+                )
+            ]
+        )
+    ]
 }
 #endif

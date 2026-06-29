@@ -196,8 +196,8 @@ final class PerchHACoreTests: XCTestCase {
         )
 
         XCTAssertEqual(tree.map(\.name), ["Office"])
-        XCTAssertEqual(tree.first?.entities.map(\.entity.id), ["sensor.office_temperature"])
-        XCTAssertEqual(tree.first?.entities.map(\.isSelected), [true])
+        XCTAssertEqual(tree.first?.entities.map(\.entity.id), ["sensor.office_temperature", "sensor.office_humidity"])
+        XCTAssertEqual(tree.first?.entities.map(\.isSelected), [true, false])
     }
 
     func testSelectionProjectorAppliesRoomAndEntityOrderToSelectedRooms() {

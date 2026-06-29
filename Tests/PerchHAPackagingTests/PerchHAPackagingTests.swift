@@ -286,7 +286,7 @@ final class PerchHAPackagingTests: XCTestCase {
 
         let project = try testXcodeProject(in: directory, schemeName: "PerchHA")
         let applicationsDirectory = directory.appendingPathComponent("Applications", isDirectory: true)
-        let discoveredDeveloperDirectory = try makeDiscoveredXcodeDeveloperDirectory(
+        _ = try makeDiscoveredXcodeDeveloperDirectory(
             in: applicationsDirectory,
             appName: "Xcode 26.0.app"
         )
@@ -321,14 +321,26 @@ final class PerchHAPackagingTests: XCTestCase {
             xcodeSelectURL: xcodeSelectURL,
             xcrunURL: xcrunURL,
             applicationSearchRoots: [applicationsDirectory],
+            environment: [:],
             commandRunner: runner
         ).check(configuration)
 
+        let discoveredAppURL = try XCTUnwrap(
+            FileManager.default.contentsOfDirectory(
+                at: applicationsDirectory,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ).first { $0.lastPathComponent == "Xcode 26.0.app" }
+        )
+        let discoveredDeveloperDirectoryPath = discoveredAppURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("Developer", isDirectory: true)
+            .path
         XCTAssertTrue(report.projectAvailable)
         XCTAssertTrue(report.sharedSchemeAvailable)
         XCTAssertFalse(report.projectListingAvailable)
         XCTAssertEqual(report.activeDeveloperDirectory, "/Library/Developer/CommandLineTools")
-        XCTAssertEqual(report.discoveredXcodeDeveloperDirectories, [discoveredDeveloperDirectory.path])
+        XCTAssertEqual(report.discoveredXcodeDeveloperDirectories, [discoveredDeveloperDirectoryPath])
         XCTAssertFalse(report.fullXcodeSelected)
         XCTAssertFalse(report.xctestAvailable)
         XCTAssertFalse(report.xcodebuildAvailable)
@@ -346,17 +358,17 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertEqual(diagnostic.project, .present)
         XCTAssertEqual(diagnostic.sharedScheme, .present)
         XCTAssertEqual(diagnostic.projectListing, .blocked)
-        XCTAssertEqual(diagnostic.discoveredXcodeDeveloperDirectories, [discoveredDeveloperDirectory.path])
+        XCTAssertEqual(diagnostic.discoveredXcodeDeveloperDirectories, [discoveredDeveloperDirectoryPath])
         XCTAssertEqual(diagnostic.fullXcode, .blocked)
         XCTAssertEqual(diagnostic.nativeVerification, .blocked)
         XCTAssertTrue(
             diagnostic.suggestedCommands.contains(
-                "sudo xcode-select -s '\(discoveredDeveloperDirectory.path)'"
+                "sudo xcode-select -s '\(discoveredDeveloperDirectoryPath)'"
             )
         )
         XCTAssertTrue(
             diagnostic.suggestedCommands.contains(
-                "DEVELOPER_DIR='\(discoveredDeveloperDirectory.path)' swift run perchha-xcode-doctor --json --strict --project \(project.path) --scheme PerchHA"
+                "DEVELOPER_DIR='\(discoveredDeveloperDirectoryPath)' swift run perchha-xcode-doctor --json --strict --project \(project.path) --scheme PerchHA"
             )
         )
     }
@@ -473,10 +485,14 @@ final class PerchHAPackagingTests: XCTestCase {
             projectURL: project,
             schemeName: "PerchHA"
         )
+        let emptyApplicationsDirectory = directory.appendingPathComponent("Applications", isDirectory: true)
+        try FileManager.default.createDirectory(at: emptyApplicationsDirectory, withIntermediateDirectories: true)
         let report = try PerchHAXcodePreflightChecker(
             fileManager: .default,
             xcodeSelectURL: xcodeSelectURL,
             xcrunURL: xcrunURL,
+            applicationSearchRoots: [emptyApplicationsDirectory],
+            environment: [:],
             commandRunner: runner
         ).check(configuration)
 
@@ -1918,7 +1934,7 @@ final class PerchHAPackagingTests: XCTestCase {
                 )
             )
         }
-        XCTAssertEqual(runner.invocations.count, 8)
+        XCTAssertEqual(runner.invocations.count, 10)
     }
 
     func testReleaseEvidenceVerifierAcceptsRelocatedRelativeManifestBundle() throws {
@@ -2145,6 +2161,7 @@ final class PerchHAPackagingTests: XCTestCase {
     func testReleaseEvidenceBundlerRefusesToOverwriteWithoutReplace() throws {
         let directory = temporaryDirectory()
         let bundledDirectory = temporaryDirectory()
+        try FileManager.default.createDirectory(at: bundledDirectory, withIntermediateDirectories: true)
         defer {
             try? FileManager.default.removeItem(at: directory)
             try? FileManager.default.removeItem(at: bundledDirectory)

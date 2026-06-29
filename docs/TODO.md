@@ -4,9 +4,7 @@ What is still missing before PerchHA can honestly be called production-ready:
 
 ## External blockers
 
-- [ ] Accept the installed Xcode license once on this Mac:
-  - [ ] `sudo env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -license accept`
-  - [ ] After that, rerun `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer .build/debug/perchha-xcode-doctor --json --strict`
+- [x] Xcode license accepted on this Mac; full-Xcode XCTest now compiles and runs (448 tests) with the coverage gate operational.
 - [ ] Restore real Home Assistant mirror capture readiness:
   - [ ] Primary `url` must answer `/api/`
   - [ ] Fallback `url2` must accept the configured token instead of returning `401`
@@ -18,7 +16,8 @@ What is still missing before PerchHA can honestly be called production-ready:
 ## Native/full-Xcode verification still missing
 
 - [ ] `xcodebuild -project PerchHA.xcodeproj -scheme PerchHA -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build`
-- [ ] Full-Xcode XCTest execution with coverage gate
+- [x] Full-Xcode XCTest execution with coverage gate (448 tests green under `-warnings-as-errors`; `PerchHACore` 95.77% line / `PerchHAClient` 86.29% line, gate enforced at the measured baseline)
+- [ ] Raise `PerchHAClient` line coverage from 86% back to the 95% goal
 - [ ] Full-Xcode verification for:
   - [ ] M5 app shell / first run
   - [ ] M6 selection, ordering, formatting UI

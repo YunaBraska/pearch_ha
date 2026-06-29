@@ -62,7 +62,7 @@ public struct PerchHAConnectionForm: Equatable, Sendable {
         return nil
     }
 
-    static func normalizedHomeAssistantURLString(_ text: String) -> String {
+    public static func normalizedHomeAssistantURLString(_ text: String) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
               var components = URLComponents(string: trimmed),
@@ -4173,88 +4173,212 @@ public struct PerchHAPanelView: View {
     }
 
     private var connectedEmptyState: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Connected")
-                .font(.headline)
-            Text("No values are selected yet.")
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: "square.dashed")
+                .font(.system(size: 34))
                 .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            VStack(spacing: 4) {
+                Text("No values yet")
+                    .font(.headline)
+                Text("Pick the rooms and sensors you want to keep an eye on.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Button {
+                model.toggleSettings()
+            } label: {
+                Label("Choose values…", systemImage: "slider.horizontal.3")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(model.snapshot.availableRooms.isEmpty)
+            Spacer()
         }
-        .padding(14)
+        .frame(maxWidth: .infinity)
+        .padding(24)
+        .accessibilityElement(children: .contain)
     }
 
     private var connectionForm: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            PerchHANativeTextField(
-                placeholder: "Home Assistant URL",
-                text: urlBinding,
-                contentType: {
-                    if #available(macOS 14.0, *) {
-                        return .URL
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Connect to Home Assistant")
+                        .font(.headline)
+                    Text("Enter your Home Assistant address, then sign in or paste an access token.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .accessibilityElement(children: .combine)
+
+                connectionStatusBanner
+
+                VStack(alignment: .leading, spacing: 4) {
+                    PerchHANativeTextField(
+                        placeholder: "Home Assistant URL",
+                        text: urlBinding,
+                        contentType: {
+                            if #available(macOS 14.0, *) {
+                                return .URL
+                            }
+                            return nil
+                        }(),
+                        normalizeOnCommit: PerchHAConnectionForm.normalizedHomeAssistantURLString
+                    )
+                    PerchHANativeTextField(
+                        placeholder: "Fallback URL",
+                        text: fallbackURLBinding,
+                        contentType: {
+                            if #available(macOS 14.0, *) {
+                                return .URL
+                            }
+                            return nil
+                        }(),
+                        normalizeOnCommit: PerchHAConnectionForm.normalizedHomeAssistantURLString
+                    )
+                    Text("Optional remote or backup address.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Button {
+                        model.startOAuthSignIn()
+                    } label: {
+                        Label(oauthSignInButtonTitle, systemImage: "person.crop.circle")
+                            .frame(maxWidth: .infinity)
                     }
-                    return nil
-                }(),
-                normalizeOnCommit: PerchHAConnectionForm.normalizedHomeAssistantURLString
-            )
-            PerchHANativeTextField(
-                placeholder: "Fallback URL",
-                text: fallbackURLBinding,
-                contentType: {
-                    if #available(macOS 14.0, *) {
-                        return .URL
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(isConnectionBusy)
+                    .help("Open Home Assistant in your browser to sign in. Recommended.")
+                    Text("Opens Home Assistant in your browser to approve access. No password is stored.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack(spacing: 8) {
+                    line
+                    Text("or use an access token")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
+                    line
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    PerchHANativeSecureField(
+                        placeholder: "Access token",
+                        text: tokenBinding,
+                        contentType: .password
+                    )
+                    Text("Create one in Home Assistant under your profile → Security → Long-lived access tokens.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityLabel("Where to find a token: Home Assistant profile, Security, Long-lived access tokens.")
+                    Button("Connect with token") {
+                        model.startConnect()
                     }
-                    return nil
-                }(),
-                normalizeOnCommit: PerchHAConnectionForm.normalizedHomeAssistantURLString
-            )
-            PerchHANativeSecureField(
-                placeholder: "Access token",
-                text: tokenBinding,
-                contentType: .password
-            )
-            Toggle(
-                "Self-signed cert for current HTTPS hosts",
-                isOn: selfSignedCertificateBinding
-            )
-            if let failureDescription = model.snapshot.failureDescription {
-                Text(failureDescription)
-                    .font(.callout)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityLabel("Connection error: \(failureDescription)")
-            }
-            if let oauthFailureDescription {
-                Text(oauthFailureDescription)
-                    .font(.callout)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityLabel("Sign-in error: \(oauthFailureDescription)")
-            }
-            if let connectionProgressMessage {
-                HStack(spacing: 6) {
-                    Image(systemName: "hourglass")
-                        .accessibilityHidden(true)
-                    Text(connectionProgressMessage)
+                    .buttonStyle(.bordered)
+                    .disabled(isConnectionBusy)
+                }
+
+                DisclosureGroup("Advanced") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle(
+                            "Allow self-signed certificates for these hosts",
+                            isOn: selfSignedCertificateBinding
+                        )
+                        Text("Only enable this if you connect over HTTPS with your own certificate.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.top, 4)
                 }
                 .font(.callout)
-                .foregroundStyle(.secondary)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(connectionProgressMessage)
             }
-            HStack {
-                Button("Connect") {
-                    model.startConnect()
-                }
-                .keyboardShortcut(.defaultAction)
-
-                Button(oauthSignInButtonTitle) {
-                    model.startOAuthSignIn()
-                }
-                .disabled(isConnectionBusy)
-            }
-            .disabled(isConnectionBusy)
+            .textFieldStyle(.roundedBorder)
+            .padding(14)
         }
-        .textFieldStyle(.roundedBorder)
-        .padding(14)
+    }
+
+    @ViewBuilder
+    private var connectionStatusBanner: some View {
+        if let failureDescription = model.snapshot.failureDescription {
+            connectionMessage(
+                failureDescription,
+                hint: connectionFailureHint(failureDescription),
+                accessibilityPrefix: "Connection error"
+            )
+        }
+        if let oauthFailureDescription {
+            connectionMessage(
+                oauthFailureDescription,
+                hint: connectionFailureHint(oauthFailureDescription),
+                accessibilityPrefix: "Sign-in error"
+            )
+        }
+        if let connectionProgressMessage {
+            HStack(spacing: 6) {
+                Image(systemName: "hourglass")
+                    .accessibilityHidden(true)
+                Text(connectionProgressMessage)
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(connectionProgressMessage)
+        }
+    }
+
+    private var line: some View {
+        Rectangle()
+            .fill(Color.secondary.opacity(0.25))
+            .frame(height: 1)
+            .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func connectionMessage(
+        _ message: String,
+        hint: String?,
+        accessibilityPrefix: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+            if let hint {
+                Text(hint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(accessibilityPrefix): \(message)\(hint.map { ". \($0)" } ?? "")")
+    }
+
+    private func connectionFailureHint(_ message: String) -> String? {
+        let lowered = message.lowercased()
+        if lowered.contains("auth") || lowered.contains("token") || lowered.contains("401") {
+            return "Check your access token, or use Sign in instead."
+        }
+        if lowered.contains("unreachable") || lowered.contains("could not") || lowered.contains("connect") || lowered.contains("host") {
+            return "Check the Home Assistant address and that this Mac can reach it."
+        }
+        if lowered.contains("tls") || lowered.contains("certificate") || lowered.contains("ssl") {
+            return "If you use a self-signed certificate, enable it under Advanced."
+        }
+        return nil
     }
 
     private var oauthFailureDescription: String? {

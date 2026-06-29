@@ -87,6 +87,9 @@ public struct PerchHAApplicationSnapshot: Equatable, Sendable {
     public let historyPresentationEntityID: EntityID?
     public let controlActionState: PerchHAControlActionState
     public let lastExternalURLEvent: PerchHAExternalURLEvent?
+    public let connectionState: ConnectionState
+    public let connectionForm: PerchHAConnectionForm
+    public let hasTokenInput: Bool
 }
 
 public enum PerchHAConfigurationPersistenceState: Equatable, Sendable {
@@ -1035,7 +1038,10 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             historyState: panelModel?.snapshot.historyState ?? .idle,
             historyPresentationEntityID: panelModel?.snapshot.historyPresentationEntityID,
             controlActionState: panelModel?.snapshot.controlActionState ?? .idle,
-            lastExternalURLEvent: lastExternalURLEvent
+            lastExternalURLEvent: lastExternalURLEvent,
+            connectionState: panelModel?.snapshot.connectionState ?? .disconnected,
+            connectionForm: panelModel?.snapshot.connectionForm ?? PerchHAConnectionForm(),
+            hasTokenInput: panelModel?.snapshot.hasTokenInput ?? false
         )
     }
 
@@ -1493,8 +1499,8 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             menuBarItemConfigurations: configuration.menuBarItemConfigurations,
             customActions: configuration.customActions,
             connectionProfile: PerchHAConnectionProfile(
-                urlString: form.urlString,
-                fallbackURLString: form.fallbackURLString,
+                urlString: PerchHAConnectionForm.normalizedHomeAssistantURLString(form.urlString),
+                fallbackURLString: PerchHAConnectionForm.normalizedHomeAssistantURLString(form.fallbackURLString),
                 allowsSelfSignedCertificates: form.allowsSelfSignedCertificates
             ),
             roomOrder: configuration.roomOrder,
