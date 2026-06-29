@@ -2078,9 +2078,7 @@ struct PerchHASmoke {
                 let input = HAConnectionInput(
                     endpoint: HAEndpoint(primaryURL: primaryURL, fallbackURL: form.fallbackURL()),
                     token: form.trimmedToken,
-                    serverTrustPolicy: HAServerTrustPolicy(
-                        allowedSelfSignedCertificateHosts: form.selfSignedCertificateHosts()
-                    )
+                    serverTrustPolicy: HAServerTrustPolicy(trustsAllHosts: true)
                 )
                 switch await client.discovery(input) {
                 case let .success(snapshot):
@@ -2096,9 +2094,7 @@ struct PerchHASmoke {
                 let input = HAConnectionInput(
                     endpoint: HAEndpoint(primaryURL: primaryURL, fallbackURL: form.fallbackURL()),
                     token: form.trimmedToken,
-                    serverTrustPolicy: HAServerTrustPolicy(
-                        allowedSelfSignedCertificateHosts: form.selfSignedCertificateHosts()
-                    )
+                    serverTrustPolicy: HAServerTrustPolicy(trustsAllHosts: true)
                 )
                 switch await client.services(input) {
                 case let .success(metadata):
@@ -2278,17 +2274,10 @@ struct PerchHASmoke {
         certificate.updateConnectionForm(
             urlString: "https://homeassistant.local:8123",
             fallbackURLString: "https://fallback.example",
-            token: "secret-token",
-            allowsSelfSignedCertificates: true
+            token: "secret-token"
         )
         await certificate.connect()
         try expect(certificate.snapshot.connectionForm.token.isEmpty, "panel model keeps certificate-form token private")
-        try expect(certificate.snapshot.connectionForm.allowsSelfSignedCertificates, "panel model keeps certificate opt-in visible")
-        let selfSignedHosts = await certificateRecorder.selfSignedCertificateHosts()
-        try expect(
-            selfSignedHosts == ["fallback.example", "homeassistant.local"],
-            "panel model forwards self-signed certificate hosts"
-        )
 
         let historyClock = TestPerchClock()
         let historyProbe = HistoryProviderProbe(
@@ -4423,8 +4412,9 @@ struct PerchHASmoke {
         }
 
         let snapshot = application.snapshot
-        try expect(snapshot.statusItemTitle == "PerchHA", "app launch creates PerchHA status item")
-        try expect(!snapshot.statusItemHasImage, "app launch starts without a status item image")
+        try expect(snapshot.statusItemTitle == "", "app launch shows the logo glyph with no title")
+        try expect(snapshot.statusItemHasImage, "app launch shows the fallback logo image")
+        try expect(snapshot.statusItemImageIsTemplate == true, "fallback logo image is a template image")
         try expect(snapshot.statusItemTargetIsApplication, "app launch wires status item target")
         try expect(snapshot.statusItemHasAction, "app launch wires status item action")
         try expect(snapshot.hasPanel, "app launch creates panel")
@@ -4859,7 +4849,8 @@ struct PerchHASmoke {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
         }
 
-        try expect(application.snapshot.statusItemTitle == "PerchHA", "app shell menu bar falls back before entity data loads")
+        try expect(application.snapshot.statusItemTitle == "", "app shell menu bar shows the logo glyph before entity data loads")
+        try expect(application.snapshot.statusItemImageIsTemplate == true, "app shell fallback logo is a template image")
         application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await application.connect()
         try expect(gaugeRenderer.renderCount == 0, "menu bar skips gauge rendering before image style is active")
@@ -5369,8 +5360,7 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
                     urlString: "https://homeassistant.local:8123",
                     fallbackURLString: "http://backup.local:8123",
                     token: "",
-                    usesStoredAuthSession: false,
-                    allowsSelfSignedCertificates: true
+                    usesStoredAuthSession: false
                 ),
                 canRetry: false
             )
@@ -5382,8 +5372,7 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
                     urlString: "https://homeassistant.local:8123",
                     fallbackURLString: "http://backup.local:8123",
                     token: "",
-                    usesStoredAuthSession: false,
-                    allowsSelfSignedCertificates: true
+                    usesStoredAuthSession: false
                 ),
                 lastUpdateDescription: "Connecting",
                 canRetry: false
@@ -5396,8 +5385,7 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
                     urlString: "https://homeassistant.local:8123",
                     fallbackURLString: "http://backup.local:8123",
                     token: "",
-                    usesStoredAuthSession: false,
-                    allowsSelfSignedCertificates: true
+                    usesStoredAuthSession: false
                 ),
                 canRetry: false
             )
@@ -5886,14 +5874,12 @@ actor Gate {
 actor ConnectionFormRecorder {
     private var recordedFallbackURLString: String?
     private var recordedTokens: [String] = []
-    private var recordedSelfSignedCertificateHosts: Set<String> = []
     private var recordedCallCount = 0
 
     func record(_ form: PerchHAConnectionForm) {
         recordedCallCount += 1
         recordedFallbackURLString = form.fallbackURL()?.absoluteString
         recordedTokens.append(form.token)
-        recordedSelfSignedCertificateHosts = form.selfSignedCertificateHosts()
     }
 
     func callCount() -> Int {
@@ -5906,10 +5892,6 @@ actor ConnectionFormRecorder {
 
     func tokens() -> [String] {
         recordedTokens
-    }
-
-    func selfSignedCertificateHosts() -> [String] {
-        recordedSelfSignedCertificateHosts.sorted()
     }
 }
 

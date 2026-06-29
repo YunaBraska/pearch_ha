@@ -10,13 +10,10 @@ import PerchHASupport
 ///
 /// The shared fields cover the Home Assistant URL, fallback URL, access token,
 /// the failure/progress banners, and the sign-in/connect buttons, mirroring the
-/// current first-run design. The self-signed certificate toggle is rendered, in
-/// an "Advanced" disclosure group, only when `includesSelfSignedToggle` is true so
-/// the first-run panel keeps its inline toggle while the Settings window hosts the
-/// toggle in its Advanced tab instead.
+/// current first-run design. The app always trusts the entered Home Assistant
+/// host, so there is no certificate-trust control.
 struct PerchHAConnectionFormFields: View {
     @ObservedObject var model: PerchHAPanelModel
-    let includesSelfSignedToggle: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -104,22 +101,6 @@ struct PerchHAConnectionFormFields: View {
                 .disabled(isConnectionBusy)
             }
 
-            if includesSelfSignedToggle {
-                DisclosureGroup("Advanced") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Toggle(
-                            "Allow self-signed certificates for these hosts",
-                            isOn: selfSignedCertificateBinding
-                        )
-                        Text("Only enable this if you connect over HTTPS with your own certificate.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(.top, 4)
-                }
-                .font(.callout)
-            }
         }
     }
 
@@ -190,7 +171,7 @@ struct PerchHAConnectionFormFields: View {
             return "Check the Home Assistant address and that this Mac can reach it."
         }
         if lowered.contains("tls") || lowered.contains("certificate") || lowered.contains("ssl") {
-            return "If you use a self-signed certificate, enable it under Advanced."
+            return "Check the Home Assistant address and that this Mac can reach it."
         }
         return nil
     }
@@ -252,23 +233,12 @@ struct PerchHAConnectionFormFields: View {
             }
         )
     }
-
-    private var selfSignedCertificateBinding: Binding<Bool> {
-        Binding(
-            get: {
-                model.snapshot.connectionForm.allowsSelfSignedCertificates
-            },
-            set: { value in
-                model.updateConnectionForm(allowsSelfSignedCertificates: value)
-            }
-        )
-    }
 }
 
 /// Dedicated, resizable Settings window content for PerchHA.
 ///
-/// Organized as a `TabView` with four tabs: Connection, Entities, Advanced, and
-/// About. Per-entity display and action configuration stays inline inside the
+/// Organized as a `TabView` with three tabs: Connection, Entities, and About.
+/// Per-entity display and action configuration stays inline inside the
 /// Entities tree, matching the documented UX. This view hosts the settings-only
 /// controls relocated out of the cramped menu-bar panel.
 public struct PerchHASettingsView: View {
@@ -281,7 +251,6 @@ public struct PerchHASettingsView: View {
     public enum Tab: Hashable, Sendable {
         case connection
         case entities
-        case advanced
         case about
     }
 
@@ -318,11 +287,6 @@ public struct PerchHASettingsView: View {
                     Label("Entities", systemImage: "square.grid.2x2")
                 }
                 .tag(Tab.entities)
-            advancedTab
-                .tabItem {
-                    Label("Advanced", systemImage: "gearshape.2")
-                }
-                .tag(Tab.advanced)
             aboutTab
                 .tabItem {
                     Label("About", systemImage: "info.circle")
@@ -360,7 +324,6 @@ public struct PerchHASettingsView: View {
         let content: AnyView = switch tab {
         case .connection: AnyView(connectionTab)
         case .entities: AnyView(entitiesTab)
-        case .advanced: AnyView(advancedTab)
         case .about: AnyView(aboutTab)
         }
         content
@@ -370,27 +333,14 @@ public struct PerchHASettingsView: View {
     }
 
     private var connectionTab: some View {
-        ScrollView {
-            PerchHAConnectionFormFields(model: model, includesSelfSignedToggle: false)
+        ScrollView(.vertical) {
+            PerchHAConnectionFormFields(model: model)
                 .textFieldStyle(.roundedBorder)
-                .padding(14)
+                .padding(.vertical, 14)
+                .padding(.leading, 14)
+                .padding(.trailing, 18)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private var advancedTab: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Toggle(
-                "Self-signed cert for current HTTPS hosts",
-                isOn: selfSignedCertificateBinding
-            )
-            Text("Allow self-signed TLS certificates for the configured HTTPS Home Assistant hosts. Leave this off unless your Home Assistant uses a certificate that macOS does not already trust.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
-        .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
@@ -430,6 +380,17 @@ public struct PerchHASettingsView: View {
     }
 
     private var settingsView: some View {
+        ScrollView(.vertical) {
+            settingsContent
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 14)
+                .padding(.leading, 14)
+                .padding(.trailing, 18)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var settingsContent: some View {
         VStack(alignment: .leading, spacing: 10) {
             TextField("Search", text: selectionSearchBinding)
                 .textFieldStyle(.roundedBorder)
@@ -468,20 +429,17 @@ public struct PerchHASettingsView: View {
                 Text("No matching values.")
                     .foregroundStyle(.secondary)
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(Array(settingsTree.enumerated()), id: \.element.id.rawValue) { index, room in
-                            selectionRoom(
-                                room,
-                                canMoveUp: canReorderSelection && index > settingsTree.startIndex,
-                                canMoveDown: canReorderSelection && index < settingsTree.index(before: settingsTree.endIndex)
-                            )
-                        }
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(settingsTree.enumerated()), id: \.element.id.rawValue) { index, room in
+                        selectionRoom(
+                            room,
+                            canMoveUp: canReorderSelection && index > settingsTree.startIndex,
+                            canMoveDown: canReorderSelection && index < settingsTree.index(before: settingsTree.endIndex)
+                        )
                     }
                 }
             }
         }
-        .padding(14)
     }
 
     private var orphanedCustomActionControls: some View {
@@ -1506,17 +1464,6 @@ public struct PerchHASettingsView: View {
 
     private func moveControlHelp(canMove: Bool, boundaryReason: String) -> String {
         model.snapshot.selectionReorderAccessibilityHint(canMove: canMove, boundaryReason: boundaryReason)
-    }
-
-    private var selfSignedCertificateBinding: Binding<Bool> {
-        Binding(
-            get: {
-                model.snapshot.connectionForm.allowsSelfSignedCertificates
-            },
-            set: { value in
-                model.updateConnectionForm(allowsSelfSignedCertificates: value)
-            }
-        )
     }
 
     private var selectionSearchBinding: Binding<String> {

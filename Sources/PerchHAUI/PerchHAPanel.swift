@@ -10,20 +10,17 @@ public struct PerchHAConnectionForm: Equatable, Sendable {
     public var fallbackURLString: String
     public var token: String
     public var usesStoredAuthSession: Bool
-    public var allowsSelfSignedCertificates: Bool
 
     public init(
         urlString: String = "",
         fallbackURLString: String = "",
         token: String = "",
-        usesStoredAuthSession: Bool = false,
-        allowsSelfSignedCertificates: Bool = false
+        usesStoredAuthSession: Bool = false
     ) {
         self.urlString = urlString
         self.fallbackURLString = fallbackURLString
         self.token = token
         self.usesStoredAuthSession = usesStoredAuthSession
-        self.allowsSelfSignedCertificates = allowsSelfSignedCertificates
     }
 
     public var trimmedToken: String {
@@ -40,13 +37,6 @@ public struct PerchHAConnectionForm: Equatable, Sendable {
             return nil
         }
         return Self.validURL(trimmed)
-    }
-
-    public func selfSignedCertificateHosts() -> Set<String> {
-        guard allowsSelfSignedCertificates else {
-            return []
-        }
-        return Set([primaryURL(), fallbackURL()].compactMap(Self.secureHost))
     }
 
     public var validationFailure: ConnectionFailure? {
@@ -115,16 +105,6 @@ public struct PerchHAConnectionForm: Equatable, Sendable {
             return ""
         }
         return "/" + trimmedSegments.joined(separator: "/")
-    }
-
-    private static func secureHost(_ url: URL?) -> String? {
-        guard url?.scheme?.lowercased() == "https",
-              let host = url?.host?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-              !host.isEmpty
-        else {
-            return nil
-        }
-        return host
     }
 
     private static let frontendRouteSegments: Set<String> = [
@@ -862,8 +842,7 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
                 urlString: connectionForm.urlString,
                 fallbackURLString: connectionForm.fallbackURLString,
                 token: "",
-                usesStoredAuthSession: connectionForm.usesStoredAuthSession,
-                allowsSelfSignedCertificates: connectionForm.allowsSelfSignedCertificates
+                usesStoredAuthSession: connectionForm.usesStoredAuthSession
             ),
             lastUpdateDescription: lastUpdateDescription,
             refreshCount: refreshCount,
@@ -1197,8 +1176,7 @@ public final class PerchHAPanelModel: ObservableObject {
         urlString: String? = nil,
         fallbackURLString: String? = nil,
         token: String? = nil,
-        usesStoredAuthSession: Bool? = nil,
-        allowsSelfSignedCertificates: Bool? = nil
+        usesStoredAuthSession: Bool? = nil
     ) {
         let nextUsesStoredAuthSession = usesStoredAuthSession
             ?? (token?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? false : editableForm.usesStoredAuthSession)
@@ -1206,8 +1184,7 @@ public final class PerchHAPanelModel: ObservableObject {
             urlString: urlString ?? editableForm.urlString,
             fallbackURLString: fallbackURLString ?? editableForm.fallbackURLString,
             token: token ?? editableForm.token,
-            usesStoredAuthSession: nextUsesStoredAuthSession,
-            allowsSelfSignedCertificates: allowsSelfSignedCertificates ?? editableForm.allowsSelfSignedCertificates
+            usesStoredAuthSession: nextUsesStoredAuthSession
         )
         snapshot = PerchHAPanelSnapshot(
             connectionState: snapshot.connectionState,
@@ -1270,8 +1247,7 @@ public final class PerchHAPanelModel: ObservableObject {
                 urlString: form.urlString,
                 fallbackURLString: form.fallbackURLString,
                 token: "",
-                usesStoredAuthSession: true,
-                allowsSelfSignedCertificates: form.allowsSelfSignedCertificates
+                usesStoredAuthSession: true
             )
             await connect()
         case let .failed(message):
@@ -3141,8 +3117,7 @@ public final class PerchHAPanelModel: ObservableObject {
             urlString: form.urlString,
             fallbackURLString: form.fallbackURLString,
             token: "",
-            usesStoredAuthSession: form.usesStoredAuthSession,
-            allowsSelfSignedCertificates: form.allowsSelfSignedCertificates
+            usesStoredAuthSession: form.usesStoredAuthSession
         )
     }
 
@@ -4225,7 +4200,7 @@ public struct PerchHAPanelView: View {
 
     private var connectionForm: some View {
         ScrollView {
-            PerchHAConnectionFormFields(model: model, includesSelfSignedToggle: true)
+            PerchHAConnectionFormFields(model: model)
                 .textFieldStyle(.roundedBorder)
                 .padding(14)
         }

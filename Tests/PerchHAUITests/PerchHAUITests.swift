@@ -261,27 +261,6 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertTrue(model.snapshot.redactedForDiagnostics().hasTokenInput)
     }
 
-    func testConnectionFormSelfSignedCertificateAllowanceIsOffByDefaultAndHostScoped() throws {
-        let defaultForm = PerchHAConnectionForm(
-            urlString: "https://HOMEASSISTANT.local:8123",
-            fallbackURLString: "https://fallback.example"
-        )
-        let enabledForm = PerchHAConnectionForm(
-            urlString: "https://HOMEASSISTANT.local:8123",
-            fallbackURLString: "https://fallback.example",
-            allowsSelfSignedCertificates: true
-        )
-        let insecureForm = PerchHAConnectionForm(
-            urlString: "http://homeassistant.local:8123",
-            fallbackURLString: "http://fallback.example",
-            allowsSelfSignedCertificates: true
-        )
-
-        XCTAssertEqual(defaultForm.selfSignedCertificateHosts(), Set<String>())
-        XCTAssertEqual(enabledForm.selfSignedCertificateHosts(), Set(["homeassistant.local", "fallback.example"]))
-        XCTAssertEqual(insecureForm.selfSignedCertificateHosts(), Set<String>())
-    }
-
     func testConnectionFormNormalizesFrontendURLsToUsableBaseURLs() {
         let form = PerchHAConnectionForm(
             urlString: " https://HOME.gomoo.io/lovelace/0?dashboard=1#kitchen ",
@@ -306,7 +285,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(form.primaryURL()?.absoluteString, "https://homeassistant.local/ha")
     }
 
-    func testPanelConnectionFormForwardsSelfSignedCertificateAllowanceWithoutLeakingToken() async {
+    func testPanelConnectionFormForwardsCredentialsWithoutLeakingToken() async {
         let recorder = ConnectionFormRecorder()
         let model = PerchHAPanelModel { form in
             await recorder.record(form)
@@ -316,18 +295,14 @@ final class PerchHAUITests: XCTestCase {
         model.updateConnectionForm(
             urlString: "https://homeassistant.local:8123",
             fallbackURLString: "https://fallback.example",
-            token: "secret-token",
-            allowsSelfSignedCertificates: true
+            token: "secret-token"
         )
         await model.connect()
 
         XCTAssertEqual(model.snapshot.connectionState, .connected)
         XCTAssertEqual(model.snapshot.connectionForm.token, "")
-        XCTAssertTrue(model.snapshot.connectionForm.allowsSelfSignedCertificates)
         let recordedTokens = await recorder.tokens()
         XCTAssertEqual(recordedTokens, ["secret-token"])
-        let recordedAllowances = await recorder.selfSignedCertificateAllowances()
-        XCTAssertEqual(recordedAllowances, [true])
     }
 
     func testStoredAuthSessionConnectsWithoutVisibleToken() async {
@@ -3887,10 +3862,9 @@ final class PerchHAUITests: XCTestCase {
         }
 
         let snapshot = application.snapshot
-        XCTAssertEqual(snapshot.statusItemTitle, "PerchHA")
-        XCTAssertFalse(snapshot.statusItemHasImage)
-        XCTAssertNil(snapshot.statusItemImageWidth)
-        XCTAssertNil(snapshot.statusItemImageHeight)
+        XCTAssertEqual(snapshot.statusItemTitle, "")
+        XCTAssertTrue(snapshot.statusItemHasImage)
+        XCTAssertEqual(snapshot.statusItemImageIsTemplate, true)
         XCTAssertTrue(snapshot.statusItemTargetIsApplication)
         XCTAssertTrue(snapshot.statusItemHasAction)
         XCTAssertTrue(snapshot.hasPanel)
@@ -3969,9 +3943,10 @@ final class PerchHAUITests: XCTestCase {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
         }
 
-        XCTAssertEqual(application.snapshot.statusItemTitle, "PerchHA")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "")
         XCTAssertEqual(application.snapshot.statusItemAccessibilityLabel, "PerchHA")
-        XCTAssertFalse(application.snapshot.statusItemHasImage)
+        XCTAssertTrue(application.snapshot.statusItemHasImage)
+        XCTAssertEqual(application.snapshot.statusItemImageIsTemplate, true)
 
         application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await application.connect()
@@ -4099,7 +4074,7 @@ final class PerchHAUITests: XCTestCase {
                     baseURL: try XCTUnwrap(URL(string: "http://homeassistant.local:8123")),
                     refreshToken: "refresh-token",
                     clientID: "https://perchha.dev/app",
-                    serverTrustPolicy: .default
+                    serverTrustPolicy: HAServerTrustPolicy(trustsAllHosts: true)
                 )
             ]
         )
@@ -4150,17 +4125,14 @@ final class PerchHAUITests: XCTestCase {
         application.updateConnectionForm(
             urlString: "https://HOMEASSISTANT.local:8123",
             fallbackURLString: "https://fallback.example",
-            usesStoredAuthSession: true,
-            allowsSelfSignedCertificates: true
+            usesStoredAuthSession: true
         )
         await application.connect()
 
-        let expectedPolicy = HAServerTrustPolicy(
-            allowedSelfSignedCertificateHosts: ["homeassistant.local", "fallback.example"]
-        )
+        let expectedPolicy = HAServerTrustPolicy(trustsAllHosts: true)
         XCTAssertEqual(application.snapshot.connectionState, .connected)
         XCTAssertEqual(application.snapshot.connectionForm.token, "")
-        XCTAssertTrue(application.snapshot.connectionForm.allowsSelfSignedCertificates)
+        XCTAssertTrue(expectedPolicy.trustsAllHosts)
         let _hoisted59 = await client.discoveryTrustPolicies()
         XCTAssertEqual(_hoisted59, [expectedPolicy, expectedPolicy])
         let _mlHoisted1010 = await client.refreshRequests()
@@ -4218,15 +4190,12 @@ final class PerchHAUITests: XCTestCase {
         }
         let primaryURL = try XCTUnwrap(URL(string: "https://primary.local:8123"))
         let fallbackURL = try XCTUnwrap(URL(string: "https://fallback.example"))
-        let expectedPolicy = HAServerTrustPolicy(
-            allowedSelfSignedCertificateHosts: ["primary.local", "fallback.example"]
-        )
+        let expectedPolicy = HAServerTrustPolicy(trustsAllHosts: true)
 
         application.updateConnectionForm(
             urlString: primaryURL.absoluteString,
             fallbackURLString: fallbackURL.absoluteString,
-            usesStoredAuthSession: true,
-            allowsSelfSignedCertificates: true
+            usesStoredAuthSession: true
         )
         await application.connect()
 
@@ -4659,8 +4628,7 @@ final class PerchHAUITests: XCTestCase {
         let result = await coordinator.signIn(
             form: PerchHAConnectionForm(
                 urlString: "https://homeassistant.local:8123",
-                fallbackURLString: "https://fallback.example",
-                allowsSelfSignedCertificates: true
+                fallbackURLString: "https://fallback.example"
             )
         )
 
@@ -4676,7 +4644,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(request.url.path, "/auth/token")
         XCTAssertEqual(
             request.serverTrustPolicy,
-            HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["homeassistant.local", "fallback.example"])
+            HAServerTrustPolicy(trustsAllHosts: true)
         )
         XCTAssertEqual(
             String(data: try XCTUnwrap(request.body), encoding: .utf8),
@@ -5401,8 +5369,7 @@ final class PerchHAUITests: XCTestCase {
         firstApplication.updateConnectionForm(
             urlString: "https://homeassistant.local:8123/lovelace/0",
             fallbackURLString: "https://fallback.example/ha/history",
-            token: "long-lived-token",
-            allowsSelfSignedCertificates: true
+            token: "long-lived-token"
         )
         await firstApplication.connect()
 
@@ -5428,7 +5395,6 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(secondApplication.snapshot.connectionForm.fallbackURLString, "https://fallback.example/ha")
         XCTAssertEqual(secondApplication.snapshot.connectionForm.token, "")
         XCTAssertTrue(secondApplication.snapshot.connectionForm.usesStoredAuthSession)
-        XCTAssertTrue(secondApplication.snapshot.connectionForm.allowsSelfSignedCertificates)
         XCTAssertTrue(secondApplication.snapshot.hasTokenInput)
     }
 
@@ -6089,7 +6055,6 @@ private actor ConnectionFormRecorder {
     private var recordedFallbackURLString: String?
     private var recordedTokens: [String] = []
     private var recordedUsesStoredAuthSessions: [Bool] = []
-    private var recordedSelfSignedCertificateAllowances: [Bool] = []
 
     func record(_ form: PerchHAConnectionForm) {
         recordedCallCount += 1
@@ -6097,7 +6062,6 @@ private actor ConnectionFormRecorder {
         recordedFallbackURLString = form.fallbackURL()?.absoluteString
         recordedTokens.append(form.token)
         recordedUsesStoredAuthSessions.append(form.usesStoredAuthSession)
-        recordedSelfSignedCertificateAllowances.append(form.allowsSelfSignedCertificates)
     }
 
     func callCount() -> Int {
@@ -6118,10 +6082,6 @@ private actor ConnectionFormRecorder {
 
     func usesStoredAuthSessions() -> [Bool] {
         recordedUsesStoredAuthSessions
-    }
-
-    func selfSignedCertificateAllowances() -> [Bool] {
-        recordedSelfSignedCertificateAllowances
     }
 }
 

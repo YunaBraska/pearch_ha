@@ -118,16 +118,13 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
 public struct PerchHAConnectionProfile: Equatable, Codable, Sendable {
     public let urlString: String
     public let fallbackURLString: String
-    public let allowsSelfSignedCertificates: Bool
 
     public init(
         urlString: String,
-        fallbackURLString: String = "",
-        allowsSelfSignedCertificates: Bool = false
+        fallbackURLString: String = ""
     ) {
         self.urlString = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
         self.fallbackURLString = fallbackURLString.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.allowsSelfSignedCertificates = allowsSelfSignedCertificates
     }
 }
 

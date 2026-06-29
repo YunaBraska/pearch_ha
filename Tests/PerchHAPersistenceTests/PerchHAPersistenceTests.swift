@@ -80,8 +80,7 @@ final class PerchHAPersistenceTests: XCTestCase {
             ],
             connectionProfile: PerchHAConnectionProfile(
                 urlString: "https://homeassistant.local:8123",
-                fallbackURLString: "https://fallback.example/ha",
-                allowsSelfSignedCertificates: true
+                fallbackURLString: "https://fallback.example/ha"
             ),
             roomOrder: ["office", "kitchen"],
             entityOrder: ["switch.office_lamp", "sensor.office_temperature"]

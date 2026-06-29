@@ -28,25 +28,53 @@ public struct HAConnectionInput: Equatable, Sendable {
 public struct HAServerTrustPolicy: Equatable, Sendable {
     public static let `default` = HAServerTrustPolicy()
 
+    /// Hosts whose self-signed TLS certificates are trusted when ``trustsAllHosts`` is false.
     public let allowedSelfSignedCertificateHosts: Set<String>
 
-    public init(allowedSelfSignedCertificateHosts: Set<String> = []) {
+    /// When true, every secure (`https`/`wss`) host is trusted regardless of certificate origin.
+    ///
+    /// This takes precedence over ``allowedSelfSignedCertificateHosts``: any secure host is
+    /// trusted, including hosts presenting self-signed certificates.
+    public let trustsAllHosts: Bool
+
+    /// Creates a server-trust policy.
+    ///
+    /// - Parameters:
+    ///   - allowedSelfSignedCertificateHosts: Hosts whose self-signed certificates are trusted
+    ///     when `trustsAllHosts` is false. Hosts are normalized (trimmed, lowercased); blanks are dropped.
+    ///   - trustsAllHosts: When true, all secure hosts are trusted unconditionally.
+    public init(allowedSelfSignedCertificateHosts: Set<String> = [], trustsAllHosts: Bool = false) {
         self.allowedSelfSignedCertificateHosts = Set(
             allowedSelfSignedCertificateHosts.compactMap(Self.normalizedHost)
         )
+        self.trustsAllHosts = trustsAllHosts
     }
 
+    /// Reports whether the certificate presented by `url` should be trusted.
+    ///
+    /// - Parameter url: The URL whose host is evaluated. Only `https`/`wss` schemes can be trusted.
+    /// - Returns: True for secure schemes when ``trustsAllHosts`` is set or the host is allow-listed.
     public func allowsSelfSignedCertificate(for url: URL) -> Bool {
         let scheme = url.scheme?.lowercased() ?? ""
         guard ["https", "wss"].contains(scheme) else {
             return false
         }
+        if trustsAllHosts {
+            return true
+        }
         return allowsSelfSignedCertificate(forHost: url.host)
     }
 
+    /// Reports whether the certificate presented by `host` should be trusted.
+    ///
+    /// - Parameter host: The host to evaluate.
+    /// - Returns: True when ``trustsAllHosts`` is set (for any non-empty host) or the host is allow-listed.
     public func allowsSelfSignedCertificate(forHost host: String?) -> Bool {
         guard let host = host.flatMap(Self.normalizedHost) else {
             return false
+        }
+        if trustsAllHosts {
+            return true
         }
         return allowedSelfSignedCertificateHosts.contains(host)
     }
@@ -153,7 +181,7 @@ private final class HAServerTrustPolicyURLSessionDelegate: NSObject, URLSessionD
         guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
               policy.allowsSelfSignedCertificate(forHost: challenge.protectionSpace.host),
               let trust = challenge.protectionSpace.serverTrust,
-              Self.isAllowedSelfSignedTrust(trust, host: challenge.protectionSpace.host)
+              policy.trustsAllHosts || Self.isAllowedSelfSignedTrust(trust, host: challenge.protectionSpace.host)
         else {
             return (.performDefaultHandling, nil)
         }

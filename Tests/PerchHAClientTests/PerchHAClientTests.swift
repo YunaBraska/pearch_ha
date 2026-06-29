@@ -50,6 +50,33 @@ final class PerchHAClientTests: XCTestCase {
         )
     }
 
+    func testServerTrustPolicyTrustsAllSecureHostsWhenTrustsAllHostsIsSet() throws {
+        let policy = HAServerTrustPolicy(trustsAllHosts: true)
+
+        XCTAssertTrue(
+            policy.allowsSelfSignedCertificate(
+                for: try XCTUnwrap(URL(string: "https://anything.example:8123/api/"))
+            )
+        )
+        XCTAssertTrue(
+            policy.allowsSelfSignedCertificate(
+                for: try XCTUnwrap(URL(string: "wss://unknown.local/api/websocket"))
+            )
+        )
+        XCTAssertTrue(policy.allowsSelfSignedCertificate(forHost: "unlisted.host"))
+        XCTAssertFalse(
+            policy.allowsSelfSignedCertificate(
+                for: try XCTUnwrap(URL(string: "http://anything.example:8123/api/"))
+            )
+        )
+        XCTAssertFalse(policy.allowsSelfSignedCertificate(forHost: nil))
+    }
+
+    func testServerTrustPolicyTrustsAllHostsIsOffByDefault() {
+        XCTAssertFalse(HAServerTrustPolicy.default.trustsAllHosts)
+        XCTAssertFalse(HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["a.local"]).trustsAllHosts)
+    }
+
     func testPlannedClientIdentifiesModule() {
         XCTAssertEqual(PlannedHAClient().describe().name, "PerchHAClient")
     }

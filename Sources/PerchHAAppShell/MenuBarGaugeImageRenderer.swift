@@ -176,3 +176,120 @@ public struct PerchHAStatusItemGaugeImageRenderer: PerchHAStatusItemGaugeImageRe
         NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2).fill()
     }
 }
+
+/// Renders the fallback menu-bar glyph shown when no entity is promoted.
+///
+/// Draws a stylized bird perched on a horizontal bar as a monochrome template
+/// image so macOS tints it for both light and dark menu bars. The glyph is
+/// legible at the menu-bar height (~18pt) and carries no color of its own.
+@MainActor
+public struct PerchHAStatusItemLogoImageRenderer {
+    /// Pixel/point size of the rendered glyph.
+    public let size: NSSize
+
+    /// Creates a logo renderer.
+    ///
+    /// - Parameter size: The glyph size. Defaults to a menu-bar-friendly 18x18.
+    public init(size: NSSize = NSSize(width: 18, height: 18)) {
+        self.size = size
+    }
+
+    /// Renders the logo glyph as a template image.
+    ///
+    /// - Returns: A template `NSImage` (`isTemplate == true`) the menu bar tints
+    ///   for the active appearance, or nil if a drawing context cannot be created.
+    public func image() -> NSImage? {
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(size.width.rounded(.up)),
+            pixelsHigh: Int(size.height.rounded(.up)),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else {
+            return nil
+        }
+
+        bitmap.size = size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+        draw(in: NSRect(origin: .zero, size: size))
+        NSGraphicsContext.current?.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+
+        let image = NSImage(size: size)
+        image.addRepresentation(bitmap)
+        image.isTemplate = true
+        return image
+    }
+
+    private func draw(in bounds: NSRect) {
+        NSColor.clear.setFill()
+        bounds.fill()
+
+        // Template images are masked by alpha; draw the glyph in opaque black.
+        let ink = NSColor.black
+        let width = bounds.width
+        let height = bounds.height
+
+        // Perch: a horizontal bar near the bottom.
+        let perch = NSRect(
+            x: bounds.minX + width * 0.18,
+            y: bounds.minY + height * 0.20,
+            width: width * 0.64,
+            height: max(1, height * 0.09)
+        )
+        ink.setFill()
+        NSBezierPath(roundedRect: perch, xRadius: perch.height / 2, yRadius: perch.height / 2).fill()
+
+        // Bird body: a teardrop sitting on the perch, leaning toward the tail.
+        let body = NSBezierPath()
+        let bellyY = perch.maxY
+        let backX = bounds.minX + width * 0.30
+        let frontX = bounds.minX + width * 0.66
+        let topY = bounds.minY + height * 0.78
+        body.move(to: NSPoint(x: frontX, y: bellyY))
+        body.curve(
+            to: NSPoint(x: bounds.minX + width * 0.58, y: topY),
+            controlPoint1: NSPoint(x: bounds.minX + width * 0.74, y: bellyY + height * 0.16),
+            controlPoint2: NSPoint(x: bounds.minX + width * 0.70, y: topY)
+        )
+        body.curve(
+            to: NSPoint(x: backX, y: bellyY),
+            controlPoint1: NSPoint(x: bounds.minX + width * 0.46, y: topY),
+            controlPoint2: NSPoint(x: bounds.minX + width * 0.30, y: bellyY + height * 0.30)
+        )
+        body.line(to: NSPoint(x: frontX, y: bellyY))
+        body.close()
+        ink.setFill()
+        body.fill()
+
+        // Tail: a short wedge trailing off the back of the body.
+        let tail = NSBezierPath()
+        tail.move(to: NSPoint(x: backX, y: bellyY + height * 0.04))
+        tail.line(to: NSPoint(x: bounds.minX + width * 0.16, y: bellyY + height * 0.22))
+        tail.line(to: NSPoint(x: backX + width * 0.06, y: bellyY + height * 0.18))
+        tail.close()
+        ink.setFill()
+        tail.fill()
+
+        // Eye punched out of the head for definition.
+        let eye = NSRect(
+            x: bounds.minX + width * 0.58,
+            y: bounds.minY + height * 0.60,
+            width: width * 0.08,
+            height: width * 0.08
+        )
+        NSColor.clear.set()
+        let previousMode = NSGraphicsContext.current?.compositingOperation
+        NSGraphicsContext.current?.compositingOperation = .clear
+        NSBezierPath(ovalIn: eye).fill()
+        if let previousMode {
+            NSGraphicsContext.current?.compositingOperation = previousMode
+        }
+    }
+}

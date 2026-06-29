@@ -264,9 +264,7 @@ public struct PerchHAAuthorizedHomeAssistantGateway: Sendable {
 
     private func resolveInput(form: PerchHAConnectionForm, primaryURL: URL) -> HAClientResult<PerchHAAuthorizedInput> {
         let endpoint = HAEndpoint(primaryURL: primaryURL, fallbackURL: form.fallbackURL())
-        let serverTrustPolicy = HAServerTrustPolicy(
-            allowedSelfSignedCertificateHosts: form.selfSignedCertificateHosts()
-        )
+        let serverTrustPolicy = HAServerTrustPolicy(trustsAllHosts: true)
         if !form.trimmedToken.isEmpty {
             return .success(
                 PerchHAAuthorizedInput(
@@ -676,9 +674,7 @@ public struct PerchHAOAuthSignInCoordinator: Sendable {
             baseURL: primaryURL,
             code: callback.code,
             clientID: configuration.clientID,
-            serverTrustPolicy: HAServerTrustPolicy(
-                allowedSelfSignedCertificateHosts: form.selfSignedCertificateHosts()
-            )
+            serverTrustPolicy: HAServerTrustPolicy(trustsAllHosts: true)
         )
         let token: HAOAuthToken
         switch exchange {
@@ -814,8 +810,10 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     private let oauthApplicationConfiguration: PerchHAOAuthApplicationConfiguration?
     private let menuBarPresenter: PerchHAMenuBarPresenter
     private let gaugeImageRenderer: any PerchHAStatusItemGaugeImageRendering
+    private let logoImageRenderer = PerchHAStatusItemLogoImageRenderer()
     private var statusItemPresentation = PerchHAMenuBarPresentation.fallback
     private var statusItemImageCache: (key: PerchHAStatusItemImageCacheKey, image: NSImage?)?
+    private var statusItemLogoImageCache: NSImage?
     private var configuration = PerchHAConfiguration.empty
     private var configurationPersistenceState = PerchHAConfigurationPersistenceState.unavailable
     private var lastExternalURLEvent: PerchHAExternalURLEvent?
@@ -1077,15 +1075,13 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         urlString: String? = nil,
         fallbackURLString: String? = nil,
         token: String? = nil,
-        usesStoredAuthSession: Bool? = nil,
-        allowsSelfSignedCertificates: Bool? = nil
+        usesStoredAuthSession: Bool? = nil
     ) {
         panelModel?.updateConnectionForm(
             urlString: urlString,
             fallbackURLString: fallbackURLString,
             token: token,
-            usesStoredAuthSession: usesStoredAuthSession,
-            allowsSelfSignedCertificates: allowsSelfSignedCertificates
+            usesStoredAuthSession: usesStoredAuthSession
         )
     }
 
@@ -1497,15 +1493,23 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             panelSnapshot: snapshot
         )
         let image: NSImage?
+        let title: String
         if let renderedItem = statusItemPresentation.renderedItem, renderedItem.gauge != nil {
             image = cachedStatusItemImage(for: renderedItem)
+            title = statusItemPresentation.statusItemTitle
+        } else if statusItemPresentation == .fallback {
+            // Nothing is promoted: show the template logo glyph instead of text.
+            statusItemImageCache = nil
+            image = cachedStatusItemLogoImage()
+            title = ""
         } else {
             statusItemImageCache = nil
             image = nil
+            title = statusItemPresentation.statusItemTitle
         }
         statusItem?.button?.image = image
         statusItem?.button?.imagePosition = image == nil ? .noImage : .imageLeading
-        statusItem?.button?.title = statusItemPresentation.statusItemTitle
+        statusItem?.button?.title = title
         statusItem?.button?.toolTip = statusItemPresentation.accessibilityLabel
         statusItem?.button?.setAccessibilityLabel(statusItemPresentation.accessibilityLabel)
     }
@@ -1517,6 +1521,15 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         }
         let image = gaugeImageRenderer.image(for: item)
         statusItemImageCache = (key, image)
+        return image
+    }
+
+    private func cachedStatusItemLogoImage() -> NSImage? {
+        if let statusItemLogoImageCache {
+            return statusItemLogoImageCache
+        }
+        let image = logoImageRenderer.image()
+        statusItemLogoImageCache = image
         return image
     }
 
@@ -1551,8 +1564,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             urlString: profile?.urlString ?? "",
             fallbackURLString: profile?.fallbackURLString ?? "",
             token: "",
-            usesStoredAuthSession: usesStoredAuthSession,
-            allowsSelfSignedCertificates: profile?.allowsSelfSignedCertificates ?? false
+            usesStoredAuthSession: usesStoredAuthSession
         )
     }
 
@@ -1574,8 +1586,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             customActions: configuration.customActions,
             connectionProfile: PerchHAConnectionProfile(
                 urlString: PerchHAConnectionForm.normalizedHomeAssistantURLString(form.urlString),
-                fallbackURLString: PerchHAConnectionForm.normalizedHomeAssistantURLString(form.fallbackURLString),
-                allowsSelfSignedCertificates: form.allowsSelfSignedCertificates
+                fallbackURLString: PerchHAConnectionForm.normalizedHomeAssistantURLString(form.fallbackURLString)
             ),
             roomOrder: configuration.roomOrder,
             entityOrder: configuration.entityOrder,
