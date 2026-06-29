@@ -1,4 +1,4 @@
-# Architecture - PerchHA
+# Architecture - PearchHA
 
 ## 1. Stack
 

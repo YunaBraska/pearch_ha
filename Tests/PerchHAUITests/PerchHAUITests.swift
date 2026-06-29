@@ -16,7 +16,7 @@ final class PerchHAUITests: XCTestCase {
         let snapshot = PerchHAPanelSnapshot(connectionState: .reconnecting(attempt: 2))
 
         XCTAssertEqual(snapshot.connectionSummary, "Reconnecting 2")
-        XCTAssertEqual(snapshot.accessibilitySummary, "PerchHA reconnecting 2, 0 visible values")
+        XCTAssertEqual(snapshot.accessibilitySummary, "PearchHA reconnecting 2, 0 visible values")
     }
 
     func test_t_accessibility_summary_reflects_empty_loading_success_and_error_states() {
@@ -48,7 +48,7 @@ final class PerchHAUITests: XCTestCase {
         )
         XCTAssertEqual(connecting.accessibilityPresentation().contentLabel, "Connecting to Home Assistant")
         XCTAssertEqual(empty.accessibilityPresentation().contentLabel, "Connected, no selected values")
-        XCTAssertEqual(success.accessibilityPresentation().summary, "PerchHA connected, 3 visible values")
+        XCTAssertEqual(success.accessibilityPresentation().summary, "PearchHA connected, 3 visible values")
         XCTAssertEqual(success.accessibilityPresentation().contentLabel, "3 visible values")
         XCTAssertEqual(failed.accessibilityPresentation().statusLabel, "Connection status: Failed: authentication failed")
         XCTAssertEqual(failed.accessibilityPresentation().contentLabel, "Connection failed: authentication failed")
@@ -80,7 +80,7 @@ final class PerchHAUITests: XCTestCase {
             preferences: PerchHAAccessibilityPreferences(reduceMotion: true, increaseContrast: true)
         )
 
-        XCTAssertEqual(presentation.label, "PerchHA failed: authentication failed, 0 visible values")
+        XCTAssertEqual(presentation.label, "PearchHA failed: authentication failed, 0 visible values")
         XCTAssertEqual(
             presentation.value,
             "Connection status: Failed: authentication failed, Connection failed: authentication failed"
@@ -496,8 +496,81 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.rooms.first?.entities.first?.name, "Office temperature")
         XCTAssertEqual(model.snapshot.rooms.first?.entities.first?.state, "21.4")
         XCTAssertEqual(model.snapshot.lastUpdateDescription, "Initial load complete")
+        XCTAssertNil(model.snapshot.problemDescription)
         XCTAssertEqual(model.snapshot.connectionForm.token, "")
         XCTAssertTrue(model.snapshot.hasTokenInput)
+    }
+
+    func test_t_sign_out_resets_state_and_invokes_handler() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[{"entity_id":"sensor.office_temperature","state":"21.4","attributes":{"friendly_name":"Office temperature","unit_of_measurement":"°C"}}]"#,
+            areaRegistryBody: #"[{"area_id":"office","name":"Office"}]"#,
+            deviceRegistryBody: #"[]"#,
+            entityRegistryBody: #"[{"entity_id":"sensor.office_temperature","name":"Office temperature","area_id":"office"}]"#
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer { server.stop() }
+
+        var signOutCount = 0
+        let model = PerchHAPanelModel(
+            connector: fakeHAConnector,
+            signOutHandler: { signOutCount += 1 }
+        )
+        model.updateConnectionForm(urlString: server.baseURL.absoluteString, token: "fake-token")
+        await model.connect()
+        XCTAssertEqual(model.snapshot.connectionState, .connected)
+        XCTAssertFalse(model.snapshot.rooms.isEmpty)
+
+        model.signOut()
+
+        XCTAssertEqual(signOutCount, 1)
+        XCTAssertEqual(model.snapshot.connectionState, .disconnected)
+        XCTAssertEqual(model.snapshot.phase, .firstRun)
+        XCTAssertTrue(model.snapshot.rooms.isEmpty)
+        XCTAssertFalse(model.snapshot.hasTokenInput)
+        XCTAssertFalse(model.snapshot.connectionForm.usesStoredAuthSession)
+        // The saved URL is kept so the user can reconnect easily.
+        XCTAssertEqual(model.snapshot.connectionForm.urlString, server.baseURL.absoluteString)
+
+        // Reconnecting after sign-out works.
+        model.updateConnectionForm(token: "fake-token")
+        await model.connect()
+        XCTAssertEqual(model.snapshot.connectionState, .connected)
+        XCTAssertFalse(model.snapshot.rooms.isEmpty)
+    }
+
+    func test_t_footer_problem_description_is_silent_when_healthy_and_reports_failures() {
+        let connected = PerchHAPanelSnapshot(
+            connectionState: .connected,
+            phase: .connectedData
+        )
+        XCTAssertNil(connected.problemDescription)
+
+        let connecting = PerchHAPanelSnapshot(
+            connectionState: .connecting,
+            phase: .connecting
+        )
+        XCTAssertNil(connecting.problemDescription)
+
+        let disconnected = PerchHAPanelSnapshot(
+            connectionState: .disconnected,
+            phase: .firstRun
+        )
+        XCTAssertEqual(disconnected.problemDescription, "Disconnected")
+
+        let reconnecting = PerchHAPanelSnapshot(
+            connectionState: .reconnecting(attempt: 2),
+            phase: .reconnecting(attempt: 2)
+        )
+        XCTAssertEqual(reconnecting.problemDescription, "Reconnecting (attempt 2)")
+
+        let failed = PerchHAPanelSnapshot(
+            connectionState: .failed(.authentication),
+            phase: .failed(.authentication)
+        )
+        XCTAssertEqual(failed.problemDescription, "authentication failed")
     }
 
     func test_t_panel_applies_selection_config_to_visible_rooms() async {
@@ -3944,7 +4017,7 @@ final class PerchHAUITests: XCTestCase {
         }
 
         XCTAssertEqual(application.snapshot.statusItemTitle, "")
-        XCTAssertEqual(application.snapshot.statusItemAccessibilityLabel, "PerchHA")
+        XCTAssertEqual(application.snapshot.statusItemAccessibilityLabel, "PearchHA")
         XCTAssertTrue(application.snapshot.statusItemHasImage)
         XCTAssertEqual(application.snapshot.statusItemImageIsTemplate, true)
 

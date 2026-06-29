@@ -1,4 +1,4 @@
-# PerchHA docs
+# PearchHA docs
 
 This directory is the project contract. Keep it small, linked, and current.
 

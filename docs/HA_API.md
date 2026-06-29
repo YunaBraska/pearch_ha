@@ -1,4 +1,4 @@
-# Home Assistant API contract - PerchHA
+# Home Assistant API contract - PearchHA
 
 This document defines the Home Assistant surface PerchHA depends on and the fixture set FakeHA must mirror.
 

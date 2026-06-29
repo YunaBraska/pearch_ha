@@ -979,6 +979,9 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             protectedActionValueStore: protectedActionValueStore,
             snapshotSink: { [weak self] snapshot in
                 self?.updateStatusItem(from: snapshot)
+            },
+            signOutHandler: { [weak self] in
+                self?.clearStoredAuthSession()
             }
         )
         panelModel = model
@@ -1087,6 +1090,16 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
 
     public func connect() async {
         await panelModel?.connect()
+    }
+
+    /// Signs the user out, clearing the stored Keychain session while keeping the
+    /// saved connection profile so the user can reconnect easily.
+    public func signOut() {
+        panelModel?.signOut()
+    }
+
+    private func clearStoredAuthSession() {
+        _ = try? authSessionStore?.clear()
     }
 
     public func startOAuthSignIn() async {
@@ -1429,7 +1442,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: true
         )
-        window.title = "PerchHA Settings"
+        window.title = "PearchHA Settings"
         window.isReleasedWhenClosed = false
         window.contentMinSize = AppShellLayout.settingsMinContentSize
         // Host the SwiftUI tree through a hosting controller (not a bare

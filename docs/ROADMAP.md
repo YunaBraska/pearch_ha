@@ -1,4 +1,4 @@
-# Roadmap - PerchHA
+# Roadmap - PearchHA
 
 Milestones are vertical slices. Each milestone ends with runnable code, tests, docs updated, and no secret leakage.
 

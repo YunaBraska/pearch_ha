@@ -179,9 +179,9 @@ public struct PerchHAStatusItemGaugeImageRenderer: PerchHAStatusItemGaugeImageRe
 
 /// Renders the fallback menu-bar glyph shown when no entity is promoted.
 ///
-/// Draws a stylized bird perched on a horizontal bar as a monochrome template
-/// image so macOS tints it for both light and dark menu bars. The glyph is
-/// legible at the menu-bar height (~18pt) and carries no color of its own.
+/// Draws a simple fish silhouette as a monochrome template image so macOS tints
+/// it for both light and dark menu bars. The glyph is legible at the menu-bar
+/// height (~18pt) and carries no color of its own.
 @MainActor
 public struct PerchHAStatusItemLogoImageRenderer {
     /// Pixel/point size of the rendered glyph.
@@ -235,58 +235,48 @@ public struct PerchHAStatusItemLogoImageRenderer {
         let ink = NSColor.black
         let width = bounds.width
         let height = bounds.height
+        let midY = bounds.minY + height * 0.5
 
-        // Perch: a horizontal bar near the bottom.
-        let perch = NSRect(
-            x: bounds.minX + width * 0.18,
-            y: bounds.minY + height * 0.20,
-            width: width * 0.64,
-            height: max(1, height * 0.09)
-        )
-        ink.setFill()
-        NSBezierPath(roundedRect: perch, xRadius: perch.height / 2, yRadius: perch.height / 2).fill()
-
-        // Bird body: a teardrop sitting on the perch, leaning toward the tail.
+        // Body: an oval/teardrop pointing toward the head (right side).
         let body = NSBezierPath()
-        let bellyY = perch.maxY
-        let backX = bounds.minX + width * 0.30
-        let frontX = bounds.minX + width * 0.66
-        let topY = bounds.minY + height * 0.78
-        body.move(to: NSPoint(x: frontX, y: bellyY))
+        let headX = bounds.minX + width * 0.82
+        let bodyBackX = bounds.minX + width * 0.28
+        let bodyTopY = bounds.minY + height * 0.74
+        let bodyBottomY = bounds.minY + height * 0.26
+        body.move(to: NSPoint(x: headX, y: midY))
         body.curve(
-            to: NSPoint(x: bounds.minX + width * 0.58, y: topY),
-            controlPoint1: NSPoint(x: bounds.minX + width * 0.74, y: bellyY + height * 0.16),
-            controlPoint2: NSPoint(x: bounds.minX + width * 0.70, y: topY)
+            to: NSPoint(x: bodyBackX, y: bodyTopY),
+            controlPoint1: NSPoint(x: headX, y: bodyTopY),
+            controlPoint2: NSPoint(x: bounds.minX + width * 0.40, y: bodyTopY)
         )
         body.curve(
-            to: NSPoint(x: backX, y: bellyY),
-            controlPoint1: NSPoint(x: bounds.minX + width * 0.46, y: topY),
-            controlPoint2: NSPoint(x: bounds.minX + width * 0.30, y: bellyY + height * 0.30)
+            to: NSPoint(x: headX, y: midY),
+            controlPoint1: NSPoint(x: bounds.minX + width * 0.40, y: bodyBottomY),
+            controlPoint2: NSPoint(x: headX, y: bodyBottomY)
         )
-        body.line(to: NSPoint(x: frontX, y: bellyY))
         body.close()
         ink.setFill()
         body.fill()
 
-        // Tail: a short wedge trailing off the back of the body.
+        // Tail: a triangular fin trailing off the back of the body.
         let tail = NSBezierPath()
-        tail.move(to: NSPoint(x: backX, y: bellyY + height * 0.04))
-        tail.line(to: NSPoint(x: bounds.minX + width * 0.16, y: bellyY + height * 0.22))
-        tail.line(to: NSPoint(x: backX + width * 0.06, y: bellyY + height * 0.18))
+        tail.move(to: NSPoint(x: bodyBackX + width * 0.02, y: midY))
+        tail.line(to: NSPoint(x: bounds.minX + width * 0.08, y: bounds.minY + height * 0.72))
+        tail.line(to: NSPoint(x: bounds.minX + width * 0.08, y: bounds.minY + height * 0.28))
         tail.close()
         ink.setFill()
         tail.fill()
 
-        // Eye punched out of the head for definition.
+        // Eye punched out of the head as negative space.
         let eye = NSRect(
-            x: bounds.minX + width * 0.58,
-            y: bounds.minY + height * 0.60,
-            width: width * 0.08,
-            height: width * 0.08
+            x: bounds.minX + width * 0.66,
+            y: midY - width * 0.045,
+            width: width * 0.09,
+            height: width * 0.09
         )
-        NSColor.clear.set()
         let previousMode = NSGraphicsContext.current?.compositingOperation
         NSGraphicsContext.current?.compositingOperation = .clear
+        NSColor.clear.setFill()
         NSBezierPath(ovalIn: eye).fill()
         if let previousMode {
             NSGraphicsContext.current?.compositingOperation = previousMode

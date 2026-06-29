@@ -1,4 +1,4 @@
-# PerchHA
+# PearchHA
 
 A native macOS menu bar app for Home Assistant. Keep an eye on your home from the menu bar — glanceable values and gauges, a quiet drop-down panel of rooms and sensors, history on hover, and one-tap controls.
 
@@ -46,7 +46,7 @@ swift run perchha-package-app \
 open .build/PerchHA.app
 ```
 
-The PerchHA icon appears in the menu bar. Click it, enter your Home Assistant address, then **Sign in** or paste an **access token** (create one in Home Assistant under your profile → Security → Long-lived access tokens). Open **Settings** to choose which rooms and values to show.
+The PearchHA icon appears in the menu bar. Click it, enter your Home Assistant address, then **Sign in** or paste an **access token** (create one in Home Assistant under your profile → Security → Long-lived access tokens). Open **Settings** to choose which rooms and values to show.
 
 ## Learn more
 

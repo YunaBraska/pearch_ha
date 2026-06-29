@@ -752,7 +752,7 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
     }
 
     public var accessibilitySummary: String {
-        "PerchHA \(connectionSummary.lowercased()), \(visibleEntityCount) visible values"
+        "PearchHA \(connectionSummary.lowercased()), \(visibleEntityCount) visible values"
     }
 
     public var failureDescription: String? {
@@ -768,6 +768,36 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
 
     public var canRefresh: Bool {
         canRetry
+    }
+
+    /// A short problem message for the panel footer, or `nil` when the connection
+    /// is healthy.
+    ///
+    /// Reports a failure (``failureDescription``), reconnection, or a disconnected
+    /// state. Returns `nil` while connecting or when connected and healthy so the
+    /// footer stays silent during normal operation. Benign update chatter is never
+    /// surfaced here.
+    ///
+    /// - Returns: A problem description suitable for the footer, or `nil`.
+    public var problemDescription: String? {
+        if let failureDescription {
+            return failureDescription
+        }
+        switch phase {
+        case let .reconnecting(attempt):
+            return "Reconnecting (attempt \(attempt))"
+        case .firstRun:
+            switch connectionState {
+            case .disconnected:
+                return "Disconnected"
+            case .connecting, .connected, .reconnecting, .failed:
+                return nil
+            }
+        case .connecting, .connectedEmpty, .connectedData:
+            return nil
+        case .failed, .failedStale:
+            return failureDescription
+        }
     }
 
     public func formattedValue(for entity: DiscoveredEntity, locale: Locale = .current) -> FormattedEntityValue {
@@ -1081,6 +1111,8 @@ public final class PerchHAPanelModel: ObservableObject {
     public typealias MenuBarDisplayConfigurationSink = @MainActor (MenuBarDisplayConfiguration) -> SelectionPersistenceResult
     public typealias CustomActionConfigurationSink = @MainActor (CustomActionConfiguration) -> SelectionPersistenceResult
     public typealias SnapshotSink = @MainActor (PerchHAPanelSnapshot) -> Void
+    /// Clears the persisted authentication session when the user signs out.
+    public typealias SignOutHandler = @MainActor () -> Void
 
     @Published public private(set) var snapshot: PerchHAPanelSnapshot {
         didSet {
@@ -1104,6 +1136,7 @@ public final class PerchHAPanelModel: ObservableObject {
     private let customActionSink: CustomActionConfigurationSink
     private let protectedActionValueStore: any ProtectedActionValueStore
     private let snapshotSink: SnapshotSink
+    private let signOutHandler: SignOutHandler
     private var historyCache = PerchHAHistoryCache()
     private var lastConnectedForm: PerchHAConnectionForm?
     private var editableForm: PerchHAConnectionForm
@@ -1131,9 +1164,11 @@ public final class PerchHAPanelModel: ObservableObject {
         menuBarDisplaySink: @escaping MenuBarDisplayConfigurationSink = { _ in .saved },
         customActionSink: @escaping CustomActionConfigurationSink = { _ in .saved },
         protectedActionValueStore: (any ProtectedActionValueStore)? = nil,
-        snapshotSink: @escaping SnapshotSink = { _ in }
+        snapshotSink: @escaping SnapshotSink = { _ in },
+        signOutHandler: @escaping SignOutHandler = {}
     ) {
         self.snapshotSink = snapshotSink
+        self.signOutHandler = signOutHandler
         if let failure = customActionConfiguration.validationFailure() {
             self.customActionConfiguration = CustomActionConfiguration()
             self.customActionPersistenceFailureDescription = failure.description
@@ -2893,6 +2928,57 @@ public final class PerchHAPanelModel: ObservableObject {
         }
     }
 
+    /// Signs the user out, returning the panel to a disconnected first-run state.
+    ///
+    /// Cancels any in-flight work, drops the in-memory access token and any stored
+    /// auth-session flag, clears the live rooms, and invokes the injected
+    /// ``SignOutHandler`` so the app shell can clear the Keychain session and
+    /// persisted access token. The saved connection URL/fallback profile is kept
+    /// so the user can reconnect without re-entering it.
+    public func signOut() {
+        actionTask?.cancel()
+        actionTask = nil
+        controlActionTask?.cancel()
+        controlActionTask = nil
+        historyTask?.cancel()
+        historyTask = nil
+        historyRequestGeneration += 1
+        pendingControlChange = nil
+        historyCache = PerchHAHistoryCache()
+        lastConnectedForm = nil
+        oauthSignInState = .idle
+
+        editableForm = PerchHAConnectionForm(
+            urlString: editableForm.urlString,
+            fallbackURLString: editableForm.fallbackURLString,
+            token: "",
+            usesStoredAuthSession: false
+        )
+        snapshot = PerchHAPanelSnapshot(
+            connectionState: .disconnected,
+            phase: .firstRun,
+            rooms: [],
+            availableRooms: snapshot.availableRooms,
+            selectionConfiguration: snapshot.selectionConfiguration,
+            menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
+            selectionQuery: snapshot.selectionQuery,
+            isSettingsPresented: snapshot.isSettingsPresented,
+            connectionForm: nonSecretForm(editableForm),
+            lastUpdateDescription: snapshot.lastUpdateDescription,
+            refreshCount: snapshot.refreshCount,
+            canRetry: false,
+            hasTokenInput: false,
+            selectionPersistenceFailureDescription: snapshot.selectionPersistenceFailureDescription,
+            displayPersistenceFailureDescription: snapshot.displayPersistenceFailureDescription,
+            serviceMetadataFailureDescription: nil,
+            historyState: .idle,
+            historyPresentationEntityID: nil,
+            controlActionState: .idle,
+            serviceMetadata: []
+        )
+        signOutHandler()
+    }
+
     public func connect() async {
         let form = editableForm
         if let failure = form.validationFailure {
@@ -4146,22 +4232,18 @@ public struct PerchHAPanelView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Circle()
-                    .fill(connectionStatusColor)
-                    .frame(width: 8, height: 8)
-                    .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 2 }
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("PerchHA")
-                        .font(.headline)
-                    Text(model.snapshot.connectionSummary)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
+        HStack(spacing: 6) {
+            Circle()
+                .fill(connectionStatusColor)
+                .frame(width: 8, height: 8)
+                .accessibilityHidden(true)
+            Text("PearchHA")
+                .font(.headline)
+            Text(model.snapshot.connectionSummary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 8)
             Button {
                 model.startRefresh()
             } label: {
@@ -4171,7 +4253,8 @@ public struct PerchHAPanelView: View {
             .help("Refresh")
             .accessibilityLabel("Refresh")
         }
-        .padding(14)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
     }
 
     private var connectionStatusColor: Color {
@@ -4540,8 +4623,12 @@ public struct PerchHAPanelView: View {
 
     private var footer: some View {
         HStack {
-            Text(model.snapshot.lastUpdateDescription)
-                .foregroundStyle(.secondary)
+            if let problem = model.snapshot.problemDescription {
+                Text(problem)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .accessibilityLabel("Status: \(problem)")
+            }
             Spacer()
             Button("Settings") {
                 openSettings()

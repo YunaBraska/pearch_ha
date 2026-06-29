@@ -1,4 +1,4 @@
-# UX - PerchHA
+# UX - PearchHA
 
 ## 1. North star
 

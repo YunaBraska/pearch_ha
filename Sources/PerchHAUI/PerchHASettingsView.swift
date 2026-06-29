@@ -16,6 +16,14 @@ struct PerchHAConnectionFormFields: View {
     @ObservedObject var model: PerchHAPanelModel
 
     var body: some View {
+        if showsConnectedState {
+            connectedState
+        } else {
+            editableFields
+        }
+    }
+
+    private var editableFields: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Connect to Home Assistant")
@@ -102,6 +110,69 @@ struct PerchHAConnectionFormFields: View {
             }
 
         }
+    }
+
+    /// True when the app is connected or holds an active stored auth session, so
+    /// the form should present the compact connected state instead of blank
+    /// login fields.
+    private var showsConnectedState: Bool {
+        if model.snapshot.showsConnectedContent {
+            return true
+        }
+        switch model.snapshot.connectionState {
+        case .connected, .reconnecting:
+            return true
+        case .connecting, .disconnected, .failed:
+            return false
+        }
+    }
+
+    /// The host shown in the connected state, derived from the real stored
+    /// connection URL (not a blanked editing binding).
+    private var connectedHost: String? {
+        let urlString = model.snapshot.connectionForm.urlString
+        if let host = URL(string: urlString)?.host, !host.isEmpty {
+            return host
+        }
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private var connectedState: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 3) {
+                Label {
+                    Text("Connected")
+                        .font(.headline)
+                } icon: {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(connectedAccessibilityLabel)
+                if let connectedHost {
+                    Text("Connected to \(connectedHost)")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityHidden(true)
+                }
+            }
+
+            Button("Sign out") {
+                model.signOut()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .help("Disconnect and clear the stored session. The address is kept so you can reconnect.")
+        }
+    }
+
+    private var connectedAccessibilityLabel: String {
+        if let connectedHost {
+            return "Connected to \(connectedHost)"
+        }
+        return "Connected"
     }
 
     @ViewBuilder
@@ -203,9 +274,7 @@ struct PerchHAConnectionFormFields: View {
 
     private var urlBinding: Binding<String> {
         Binding(
-            get: {
-                model.snapshot.showsConnectedContent ? "" : model.snapshot.connectionForm.urlString
-            },
+            get: { model.snapshot.connectionForm.urlString },
             set: { value in
                 model.updateConnectionForm(urlString: value)
             }
@@ -214,9 +283,7 @@ struct PerchHAConnectionFormFields: View {
 
     private var fallbackURLBinding: Binding<String> {
         Binding(
-            get: {
-                model.snapshot.showsConnectedContent ? "" : model.snapshot.connectionForm.fallbackURLString
-            },
+            get: { model.snapshot.connectionForm.fallbackURLString },
             set: { value in
                 model.updateConnectionForm(fallbackURLString: value)
             }
@@ -225,9 +292,7 @@ struct PerchHAConnectionFormFields: View {
 
     private var tokenBinding: Binding<String> {
         Binding(
-            get: {
-                model.snapshot.showsConnectedContent ? "" : model.tokenInputForView
-            },
+            get: { model.tokenInputForView },
             set: { value in
                 model.updateConnectionForm(token: value)
             }
@@ -346,7 +411,7 @@ public struct PerchHASettingsView: View {
 
     private var aboutTab: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("PerchHA")
+            Text("PearchHA")
                 .font(.title2.weight(.semibold))
             Text("Version \(Self.applicationVersion)")
                 .foregroundStyle(.secondary)

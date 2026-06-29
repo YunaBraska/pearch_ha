@@ -1,4 +1,4 @@
-# Testing strategy - PerchHA
+# Testing strategy - PearchHA
 
 ## 1. Principle
 

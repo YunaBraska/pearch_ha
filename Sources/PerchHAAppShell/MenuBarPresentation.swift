@@ -5,9 +5,9 @@ import PerchHAUI
 
 public struct PerchHAMenuBarPresentation: Equatable, Sendable {
     public static let fallback = PerchHAMenuBarPresentation(
-        title: "PerchHA",
-        statusItemTitle: "PerchHA",
-        accessibilityLabel: "PerchHA",
+        title: "PearchHA",
+        statusItemTitle: "PearchHA",
+        accessibilityLabel: "PearchHA",
         renderedItem: nil
     )
 

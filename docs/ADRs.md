@@ -1,4 +1,4 @@
-# Architecture Decision Records - PerchHA
+# Architecture Decision Records - PearchHA
 
 Format: context, decision, consequences, alternatives.
 
