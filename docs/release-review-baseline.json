@@ -3,7 +3,7 @@
     "name" : "review-contact-sheet.png",
     "pixelsHigh" : 1346,
     "pixelsWide" : 672,
-    "sampledHashHex" : "0fe2af77db70fa0a",
+    "sampledHashHex" : "7312a7a84bd1a77b",
     "visiblePixelCount" : 904512
   },
   "schemaVersion" : 1,
@@ -54,7 +54,7 @@
       "name" : "custom-action-editor-light.png",
       "pixelsHigh" : 1120,
       "pixelsWide" : 1040,
-      "sampledHashHex" : "d65aa5d676c47de1",
+      "sampledHashHex" : "7878bc33fa9e7063",
       "visiblePixelCount" : 1164800
     },
     {
@@ -89,7 +89,7 @@
       "name" : "settings-selection-light.png",
       "pixelsHigh" : 1120,
       "pixelsWide" : 1040,
-      "sampledHashHex" : "3919c676de001368",
+      "sampledHashHex" : "877fbdfa48e6e42d",
       "visiblePixelCount" : 1164800
     },
     {

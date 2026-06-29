@@ -2998,7 +2998,7 @@ struct PerchHASmoke {
     private static func verifySettingsCustomActionEditorTextFieldFocusPath() async throws {
         _ = NSApplication.shared
         let model = try await panelSnapshotModel(for: .customActionEditorLight)
-        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities)
+        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities, initiallyExpandedEntityIDs: ["sensor.office_humidity"])
         defer {
             panel.orderOut(nil)
             panel.contentView = nil
@@ -3058,7 +3058,7 @@ struct PerchHASmoke {
             customActionConfiguration: SmokePanelSnapshotVariant.customActionEditorLight.customActionConfiguration,
             protectedActionValueStore: protectedStore
         )
-        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities)
+        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities, initiallyExpandedEntityIDs: ["sensor.office_humidity"])
         defer {
             panel.orderOut(nil)
             panel.contentView = nil
@@ -3208,7 +3208,7 @@ struct PerchHASmoke {
             ]),
             protectedActionValueStore: protectedStore
         )
-        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities)
+        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities, initiallyExpandedEntityIDs: ["sensor.office_humidity"])
         defer {
             panel.orderOut(nil)
             panel.contentView = nil
@@ -4048,7 +4048,8 @@ struct PerchHASmoke {
                 PerchHASettingsView(
                     model: model,
                     accessibilityPreferencesOverride: variant.accessibilityPreferences,
-                    initialTab: .entities
+                    initialTab: .entities,
+                    initiallyExpandedEntityIDs: ["sensor.office_humidity"]
                 )
                 .tabContentForSnapshot(.entities)
                 .environment(\.colorScheme, variant.colorScheme)

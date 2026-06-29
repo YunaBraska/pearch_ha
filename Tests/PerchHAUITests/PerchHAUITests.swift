@@ -3693,7 +3693,7 @@ final class PerchHAUITests: XCTestCase {
             menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
             customActionConfiguration: CustomActionConfiguration(actions: [action])
         )
-        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities)
+        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities, initiallyExpandedEntityIDs: ["sensor.office_temperature"])
         defer {
             panel.orderOut(nil)
             panel.contentView = nil
@@ -3910,7 +3910,7 @@ final class PerchHAUITests: XCTestCase {
             menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
             customActionConfiguration: CustomActionConfiguration(actions: [action])
         )
-        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities)
+        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities, initiallyExpandedEntityIDs: ["sensor.office_temperature"])
         defer {
             panel.orderOut(nil)
             panel.contentView = nil
@@ -4023,7 +4023,7 @@ final class PerchHAUITests: XCTestCase {
             menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
             customActionConfiguration: CustomActionConfiguration(actions: [action])
         )
-        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities)
+        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities, initiallyExpandedEntityIDs: ["sensor.office_temperature"])
         defer {
             panel.orderOut(nil)
             panel.contentView = nil

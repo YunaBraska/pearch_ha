@@ -1465,9 +1465,19 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         return panel
     }
 
+    /// Builds the resizable Settings window hosting the SwiftUI settings tree.
+    ///
+    /// - Parameters:
+    ///   - model: The shared panel model driving the settings controls.
+    ///   - initialTab: The tab selected when the window first appears.
+    ///   - initiallyExpandedEntityIDs: Entity rows in the Entities tab whose
+    ///     per-entity configuration should be disclosed on first render. Empty
+    ///     by default; supplied by tests to reveal a specific entity's controls.
+    /// - Returns: A configured, non-visible `NSWindow`.
     public static func makeSettingsWindow(
         model: PerchHAPanelModel,
-        initialTab: PerchHASettingsView.Tab = .connection
+        initialTab: PerchHASettingsView.Tab = .connection,
+        initiallyExpandedEntityIDs: Set<EntityID> = []
     ) -> NSWindow {
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: AppShellLayout.settingsMinContentSize),
@@ -1482,7 +1492,11 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         // contentView) so the responder chain is wired and text fields accept
         // keyboard input and paste.
         window.contentViewController = NSHostingController(
-            rootView: PerchHASettingsView(model: model, initialTab: initialTab)
+            rootView: PerchHASettingsView(
+                model: model,
+                initialTab: initialTab,
+                initiallyExpandedEntityIDs: initiallyExpandedEntityIDs
+            )
         )
         window.setContentSize(AppShellLayout.settingsMinContentSize)
         return window

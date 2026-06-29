@@ -323,17 +323,33 @@ public struct PerchHASettingsView: View {
     private let accessibilityPreferencesOverride: PerchHAAccessibilityPreferences?
     @State private var draggedSelectionItem: SelectionDragItem?
     @State private var selectedTab: Tab
+    @State private var expandedEntityIDs: Set<EntityID>
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
+    /// Creates the Settings window content.
+    ///
+    /// - Parameters:
+    ///   - model: The shared panel model driving every binding and persistence
+    ///     side effect.
+    ///   - accessibilityPreferencesOverride: Optional fixed accessibility
+    ///     preferences. When `nil`, preferences are read from the environment.
+    ///   - initialTab: The tab shown when the window first appears.
+    ///   - initiallyExpandedEntityIDs: Entity rows in the Entities tab whose
+    ///     per-entity configuration should be disclosed (expanded) on first
+    ///     render. Defaults to empty, so every row starts collapsed. Used by
+    ///     snapshot and test render paths to reveal the configuration controls
+    ///     of the entity under inspection.
     public init(
         model: PerchHAPanelModel,
         accessibilityPreferencesOverride: PerchHAAccessibilityPreferences? = nil,
-        initialTab: Tab = .connection
+        initialTab: Tab = .connection,
+        initiallyExpandedEntityIDs: Set<EntityID> = []
     ) {
         self.model = model
         self.accessibilityPreferencesOverride = accessibilityPreferencesOverride
         _selectedTab = State(initialValue: initialTab)
+        _expandedEntityIDs = State(initialValue: initiallyExpandedEntityIDs)
     }
 
     public var body: some View {
@@ -553,13 +569,15 @@ public struct PerchHASettingsView: View {
     }
 
     private func selectionRoom(_ room: SelectableRoom, canMoveUp: Bool, canMoveDown: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 5) {
             selectionDragDrop(
-                HStack(alignment: .firstTextBaseline) {
-                    Text(room.name)
-                        .font(.subheadline.weight(.semibold))
+                HStack(spacing: 5) {
+                    Text(room.name.uppercased())
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .tracking(0.4)
                         .lineLimit(1)
-                    Spacer()
+                    Spacer(minLength: 0)
                     selectionMoveButtons(
                         up: {
                             model.moveRoom(room.id, direction: .up)
@@ -572,39 +590,107 @@ public struct PerchHASettingsView: View {
                         canMoveUp: canMoveUp,
                         canMoveDown: canMoveDown
                     )
-                },
+                }
+                .padding(.horizontal, 4),
                 item: .room(room.id)
             )
-            ForEach(Array(room.entities.enumerated()), id: \.element.entity.id.rawValue) { index, selectable in
-                selectionDragDrop(
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(alignment: .firstTextBaseline) {
-                            Toggle(
-                                selectable.entity.name,
-                                isOn: selectionBinding(for: selectable.entity.id)
-                            )
-                            .toggleStyle(.checkbox)
-                            .lineLimit(1)
-                            Spacer()
-                            selectionMoveButtons(
-                                up: {
-                                    model.moveEntity(selectable.entity.id, direction: .up)
-                                },
-                                down: {
-                                    model.moveEntity(selectable.entity.id, direction: .down)
-                                },
-                                upLabel: "Move \(selectable.entity.name) up",
-                                downLabel: "Move \(selectable.entity.name) down",
-                                canMoveUp: canReorderSelection && index > room.entities.startIndex,
-                                canMoveDown: canReorderSelection && index < room.entities.index(before: room.entities.endIndex)
-                            )
-                        }
-                        menuBarControls(for: selectable.entity)
-                        customActionControls(for: selectable.entity)
-                    },
-                    item: .entity(selectable.entity.id)
-                )
+            VStack(spacing: 0) {
+                ForEach(Array(room.entities.enumerated()), id: \.element.entity.id.rawValue) { index, selectable in
+                    selectionDragDrop(
+                        selectionEntityRow(
+                            selectable,
+                            canMoveUp: canReorderSelection && index > room.entities.startIndex,
+                            canMoveDown: canReorderSelection && index < room.entities.index(before: room.entities.endIndex)
+                        ),
+                        item: .entity(selectable.entity.id)
+                    )
+                    if index < room.entities.count - 1 {
+                        Divider()
+                            .padding(.leading, 34)
+                    }
+                }
             }
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.06))
+            )
+        }
+    }
+
+    private func selectionEntityRow(
+        _ selectable: SelectableEntity,
+        canMoveUp: Bool,
+        canMoveDown: Bool
+    ) -> some View {
+        let entity = selectable.entity
+        let isExpanded = expandedEntityIDs.contains(entity.id)
+        let isPromoted = model.snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Toggle("", isOn: selectionBinding(for: entity.id))
+                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+                    .accessibilityLabel("Show \(entity.name) in panel")
+                Image(systemName: perchHAEntityIconName(for: entity))
+                    .font(.system(size: 14))
+                    .frame(width: 22, alignment: .center)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                Text(entity.name)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                if isPromoted {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 6, height: 6)
+                        .accessibilityLabel("\(entity.name) shown in menu bar")
+                }
+                selectionMoveButtons(
+                    up: {
+                        model.moveEntity(entity.id, direction: .up)
+                    },
+                    down: {
+                        model.moveEntity(entity.id, direction: .down)
+                    },
+                    upLabel: "Move \(entity.name) up",
+                    downLabel: "Move \(entity.name) down",
+                    canMoveUp: canMoveUp,
+                    canMoveDown: canMoveDown
+                )
+                Button {
+                    toggleEntityExpansion(entity.id)
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help(isExpanded ? "Hide settings" : "Show settings")
+                .accessibilityLabel(isExpanded ? "Hide \(entity.name) settings" : "Show \(entity.name) settings")
+            }
+            .font(.body)
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 10) {
+                    menuBarControls(for: entity)
+                    customActionControls(for: entity)
+                }
+                .padding(.leading, 32)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .contentShape(Rectangle())
+    }
+
+    private func toggleEntityExpansion(_ id: EntityID) {
+        if expandedEntityIDs.contains(id) {
+            expandedEntityIDs.remove(id)
+        } else {
+            expandedEntityIDs.insert(id)
         }
     }
 

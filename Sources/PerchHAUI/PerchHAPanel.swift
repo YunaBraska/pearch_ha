@@ -4651,49 +4651,7 @@ public struct PerchHAPanelView: View {
     }
 
     private func entityIconName(for entity: DiscoveredEntity) -> String {
-        let domain = entity.id.domain
-        let name = entity.name.lowercased()
-        let unit = (entity.unit ?? "").lowercased()
-        switch domain {
-        case "light":
-            return "lightbulb"
-        case "switch", "input_boolean":
-            return "switch.2"
-        case "cover":
-            return "window.shade.open"
-        case "fan":
-            return "fanblades"
-        case "lock":
-            return "lock"
-        case "climate", "water_heater":
-            return "thermometer"
-        case "media_player":
-            return "play.rectangle"
-        case "binary_sensor":
-            return "dot.radiowaves.left.and.right"
-        case "person", "device_tracker":
-            return "person"
-        default:
-            if name.contains("temp") || unit.contains("°") || unit == "k" {
-                return "thermometer"
-            }
-            if name.contains("humid") || unit == "%" {
-                return "humidity"
-            }
-            if name.contains("batt") {
-                return "battery.50"
-            }
-            if name.contains("power") || name.contains("energy") || unit == "w" || unit == "kw" || unit == "wh" || unit == "kwh" {
-                return "bolt"
-            }
-            if name.contains("co2") || name.contains("air") || name.contains("quality") {
-                return "aqi.medium"
-            }
-            if name.contains("door") || name.contains("window") || name.contains("motion") {
-                return "sensor"
-            }
-            return "gauge.medium"
-        }
+        perchHAEntityIconName(for: entity)
     }
 
     private func entityControlBinding(for entity: DiscoveredEntity) -> Binding<Bool> {
@@ -4875,6 +4833,63 @@ public struct PerchHAPanelView: View {
         model.snapshot.formattedValue(for: entity)
     }
 
+}
+
+/// Resolves the SF Symbol name representing an entity's domain or measured
+/// quantity.
+///
+/// The choice is derived first from the Home Assistant domain, then falls back
+/// to heuristics over the entity name and unit (temperature, humidity, battery,
+/// power, air quality, contact/motion) before a neutral gauge default. Shared by
+/// the drop-down panel and the Settings entity overview so both present the same
+/// leading glyph for a given entity.
+///
+/// - Parameter entity: The discovered entity to represent.
+/// - Returns: A valid SF Symbol name; never empty.
+func perchHAEntityIconName(for entity: DiscoveredEntity) -> String {
+    let domain = entity.id.domain
+    let name = entity.name.lowercased()
+    let unit = (entity.unit ?? "").lowercased()
+    switch domain {
+    case "light":
+        return "lightbulb"
+    case "switch", "input_boolean":
+        return "switch.2"
+    case "cover":
+        return "window.shade.open"
+    case "fan":
+        return "fanblades"
+    case "lock":
+        return "lock"
+    case "climate", "water_heater":
+        return "thermometer"
+    case "media_player":
+        return "play.rectangle"
+    case "binary_sensor":
+        return "dot.radiowaves.left.and.right"
+    case "person", "device_tracker":
+        return "person"
+    default:
+        if name.contains("temp") || unit.contains("°") || unit == "k" {
+            return "thermometer"
+        }
+        if name.contains("humid") || unit == "%" {
+            return "humidity"
+        }
+        if name.contains("batt") {
+            return "battery.50"
+        }
+        if name.contains("power") || name.contains("energy") || unit == "w" || unit == "kw" || unit == "wh" || unit == "kwh" {
+            return "bolt"
+        }
+        if name.contains("co2") || name.contains("air") || name.contains("quality") {
+            return "aqi.medium"
+        }
+        if name.contains("door") || name.contains("window") || name.contains("motion") {
+            return "sensor"
+        }
+        return "gauge.medium"
+    }
 }
 
 extension PerchHAPanelSnapshot {
