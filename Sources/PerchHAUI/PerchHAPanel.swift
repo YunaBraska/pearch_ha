@@ -603,31 +603,9 @@ public struct PerchHAPanelRootAccessibilityPresentation: Equatable, Sendable {
     }
 }
 
-private struct PerchHAHistoryNumericSample: Sendable {
-    let timestamp: Date
-    let value: Double
-    let sourceIndex: Int
-}
-
 private extension HistorySeries {
-    var chronologicalNumericSamples: [PerchHAHistoryNumericSample] {
-        samples.enumerated()
-            .compactMap { index, sample -> PerchHAHistoryNumericSample? in
-                guard let value = sample.numericValue else {
-                    return nil
-                }
-                return PerchHAHistoryNumericSample(
-                    timestamp: sample.timestamp,
-                    value: value,
-                    sourceIndex: index
-                )
-            }
-            .sorted { lhs, rhs in
-                if lhs.timestamp == rhs.timestamp {
-                    return lhs.sourceIndex < rhs.sourceIndex
-                }
-                return lhs.timestamp < rhs.timestamp
-            }
+    var chronologicalNumericSamples: [PerchHAHistoryCursorSample] {
+        PerchHAHistoryCursor.numericSamples(of: self)
     }
 }
 
@@ -4081,9 +4059,11 @@ public struct PerchHAHistoryPopoverContent: View {
     private let entityID: EntityID
     private let entityName: String
     private let valueText: String
+    private let unit: String?
     private let state: PerchHAHistoryPanelState
     private let increaseContrastOverride: Bool?
     @Binding private var selectedRange: HistoryRange
+    @State private var cursorNormalizedX: Double?
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
@@ -4091,6 +4071,7 @@ public struct PerchHAHistoryPopoverContent: View {
         entityID: EntityID,
         entityName: String,
         valueText: String,
+        unit: String? = nil,
         state: PerchHAHistoryPanelState,
         increaseContrastOverride: Bool? = nil,
         selectedRange: Binding<HistoryRange>
@@ -4098,6 +4079,7 @@ public struct PerchHAHistoryPopoverContent: View {
         self.entityID = entityID
         self.entityName = entityName
         self.valueText = valueText
+        self.unit = unit
         self.state = state
         self.increaseContrastOverride = increaseContrastOverride
         _selectedRange = selectedRange
@@ -4149,11 +4131,16 @@ public struct PerchHAHistoryPopoverContent: View {
                 .accessibilityLabel("\(entityName) history has no numeric data")
         case let .statistics(series, statistics):
             VStack(alignment: .leading, spacing: 8) {
-                HistorySparkline(series: series)
-                    .stroke(.primary, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
-                    .frame(height: 46)
-                    .accessibilityHidden(true)
-                historyStats(statistics)
+                interactiveChart(series: series)
+                if let readout = cursorReadout(for: series) {
+                    Text(readout)
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(historyValueForegroundStyle)
+                        .accessibilityHidden(true)
+                } else {
+                    historyStats(statistics)
+                }
             }
         case let .unavailable(message):
             VStack(alignment: .leading, spacing: 4) {
@@ -4172,6 +4159,67 @@ public struct PerchHAHistoryPopoverContent: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(entityName) history unavailable: \(message). Hover again to retry.")
         }
+    }
+
+    private func interactiveChart(series: HistorySeries) -> some View {
+        let chartHeight: CGFloat = 46
+        return GeometryReader { proxy in
+            ZStack(alignment: .topLeading) {
+                HistorySparkline(series: series)
+                    .stroke(.primary, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                if let normalizedX = cursorNormalizedX {
+                    let x = proxy.size.width * CGFloat(min(max(normalizedX, 0), 1))
+                    Rectangle()
+                        .fill(Color.secondary.opacity(0.6))
+                        .frame(width: 1)
+                        .frame(maxHeight: .infinity)
+                        .offset(x: x)
+                }
+            }
+            .contentShape(Rectangle())
+            .onContinuousHover { phase in
+                switch phase {
+                case let .active(location):
+                    let width = proxy.size.width
+                    cursorNormalizedX = width > 0 ? Double(location.x / width) : nil
+                case .ended:
+                    cursorNormalizedX = nil
+                }
+            }
+        }
+        .frame(height: chartHeight)
+        .accessibilityHidden(true)
+    }
+
+    private func cursorReadout(for series: HistorySeries) -> String? {
+        guard let normalizedX = cursorNormalizedX,
+              let sample = PerchHAHistoryCursor.nearestSample(in: series, atNormalizedX: normalizedX)
+        else {
+            return nil
+        }
+        let value = formattedCursorValue(sample.value)
+        let time = formattedCursorTimestamp(sample.timestamp, range: series.range)
+        return "\(value) · \(time)"
+    }
+
+    private func formattedCursorValue(_ value: Double) -> String {
+        let number = menuBarNumberLabel(value)
+        let trimmedUnit = unit?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmedUnit.isEmpty ? number : "\(number) \(trimmedUnit)"
+    }
+
+    private func formattedCursorTimestamp(_ timestamp: Date, range: HistoryRange) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale.current
+        switch range {
+        case .hour, .day:
+            formatter.timeStyle = .short
+            formatter.dateStyle = .none
+        case .week, .month:
+            formatter.timeStyle = .none
+            formatter.dateStyle = .short
+        }
+        return formatter.string(from: timestamp)
     }
 
     private func historyStats(_ statistics: PerchHAHistoryStatistics) -> some View {
@@ -4239,6 +4287,7 @@ public struct PerchHAPanelView: View {
     private let accessibilityPreferencesOverride: PerchHAAccessibilityPreferences?
     private let onOpenSettings: (() -> Void)?
     @State private var pendingCustomActionID: CustomActionID?
+    @State private var panelSearch: String = ""
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
@@ -4266,7 +4315,7 @@ public struct PerchHAPanelView: View {
             preferences: accessibilityPreferences
         )
         VStack(alignment: .leading, spacing: 0) {
-            header
+            topBar
             Divider()
             content
             Divider()
@@ -4343,30 +4392,63 @@ public struct PerchHAPanelView: View {
         )
     }
 
-    private var header: some View {
-        HStack(spacing: 6) {
+    @ViewBuilder
+    private var topBar: some View {
+        switch model.snapshot.phase {
+        case .connectedData, .reconnecting, .failedStale:
+            searchBar
+        case .firstRun, .connecting, .connectedEmpty, .failed:
+            statusBar
+        }
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 8) {
             Circle()
                 .fill(connectionStatusColor)
                 .frame(width: 8, height: 8)
                 .accessibilityHidden(true)
-            Text("PearchHA")
-                .font(.headline)
-            Text(model.snapshot.connectionSummary)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Spacer(minLength: 8)
-            Button {
-                model.startRefresh()
-            } label: {
-                Image(systemName: "arrow.clockwise")
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                PerchHANativeTextField(
+                    placeholder: "Search",
+                    text: $panelSearch,
+                    contentType: nil,
+                    normalizeOnCommit: nil
+                )
+                .frame(height: 20)
             }
-            .disabled(!model.snapshot.canRefresh)
-            .help("Refresh")
-            .accessibilityLabel("Refresh")
+            refreshButton
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+
+    private var statusBar: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(connectionStatusColor)
+                .frame(width: 8, height: 8)
+                .accessibilityHidden(true)
+            Spacer(minLength: 0)
+            refreshButton
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+
+    private var refreshButton: some View {
+        Button {
+            model.startRefresh()
+        } label: {
+            Image(systemName: "arrow.clockwise")
+        }
+        .disabled(!model.snapshot.canRefresh)
+        .help("Refresh")
+        .accessibilityLabel("Refresh")
     }
 
     private var connectionStatusColor: Color {
@@ -4390,13 +4472,23 @@ public struct PerchHAPanelView: View {
         case .connectedEmpty:
             connectedEmptyState
         case .connectedData, .reconnecting, .failedStale:
+            let rooms = PerchHARoomSearch.filter(model.snapshot.rooms, query: panelSearch)
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(model.snapshot.rooms, id: \.id.rawValue) { room in
-                        roomSection(room)
+                if rooms.isEmpty {
+                    Text("No matching values")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(14)
+                        .accessibilityLabel("No matching values")
+                } else {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(rooms, id: \.id.rawValue) { room in
+                            roomSection(room)
+                        }
                     }
+                    .padding(14)
                 }
-                .padding(14)
             }
         }
     }
@@ -4728,6 +4820,7 @@ public struct PerchHAPanelView: View {
             entityID: entity.id,
             entityName: entity.name,
             valueText: entityValue(entity).text,
+            unit: entity.unit,
             state: model.snapshot.historyState,
             selectedRange: historyRangeBinding(for: entity)
         )

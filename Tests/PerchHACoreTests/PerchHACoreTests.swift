@@ -859,6 +859,94 @@ final class PerchHACoreTests: XCTestCase {
         XCTAssertEqual(EntityDisplayDefaults.defaultStyle(for: entity), .text)
     }
 
+    func testRoomSearchEmptyQueryReturnsEverything() {
+        let rooms = searchRooms()
+        XCTAssertEqual(PerchHARoomSearch.filter(rooms, query: "   "), rooms)
+        XCTAssertEqual(PerchHARoomSearch.filter(rooms, query: ""), rooms)
+    }
+
+    func testRoomSearchMatchesRoomNameKeepsAllEntities() {
+        let rooms = searchRooms()
+        let filtered = PerchHARoomSearch.filter(rooms, query: "off")
+        XCTAssertEqual(filtered.map(\.id), ["office"])
+        XCTAssertEqual(filtered.first?.entities.map(\.id), ["sensor.office_temp", "sensor.office_humidity"])
+    }
+
+    func testRoomSearchMatchesEntityNameKeepsOnlyMatchingEntities() {
+        let rooms = searchRooms()
+        let filtered = PerchHARoomSearch.filter(rooms, query: "humid")
+        XCTAssertEqual(filtered.map(\.id), ["office"])
+        XCTAssertEqual(filtered.first?.entities.map(\.id), ["sensor.office_humidity"])
+    }
+
+    func testRoomSearchDropsRoomsWithNoMatch() {
+        let rooms = searchRooms()
+        XCTAssertTrue(PerchHARoomSearch.filter(rooms, query: "zzz").isEmpty)
+    }
+
+    func testHistoryCursorNearestSampleEdgesAndMidpoints() {
+        let series = cursorSeries()
+        XCTAssertEqual(PerchHAHistoryCursor.nearestSample(in: series, atNormalizedX: 0)?.value, 10)
+        XCTAssertEqual(PerchHAHistoryCursor.nearestSample(in: series, atNormalizedX: 1)?.value, 30)
+        XCTAssertEqual(PerchHAHistoryCursor.nearestSample(in: series, atNormalizedX: 0.5)?.value, 20)
+    }
+
+    func testHistoryCursorClampsOutOfRangeX() {
+        let series = cursorSeries()
+        XCTAssertEqual(PerchHAHistoryCursor.nearestSample(in: series, atNormalizedX: -5)?.value, 10)
+        XCTAssertEqual(PerchHAHistoryCursor.nearestSample(in: series, atNormalizedX: 5)?.value, 30)
+    }
+
+    func testHistoryCursorReturnsNilWhenNoNumericSamples() {
+        let series = HistorySeries(
+            entityID: "sensor.office_temp",
+            range: .day,
+            samples: [HistorySample(timestamp: Date(timeIntervalSince1970: 0), state: "off", numericValue: nil)]
+        )
+        XCTAssertNil(PerchHAHistoryCursor.nearestSample(in: series, atNormalizedX: 0.5))
+    }
+
+    func testHistoryCursorSingleSampleIgnoresPosition() {
+        let series = HistorySeries(
+            entityID: "sensor.office_temp",
+            range: .day,
+            samples: [HistorySample(timestamp: Date(timeIntervalSince1970: 0), state: "10", numericValue: 10)]
+        )
+        XCTAssertEqual(PerchHAHistoryCursor.nearestSample(in: series, atNormalizedX: 0.9)?.value, 10)
+    }
+
+    private func cursorSeries() -> HistorySeries {
+        HistorySeries(
+            entityID: "sensor.office_temp",
+            range: .day,
+            samples: [
+                HistorySample(timestamp: Date(timeIntervalSince1970: 0), state: "10", numericValue: 10),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 100), state: "20", numericValue: 20),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 200), state: "30", numericValue: 30)
+            ]
+        )
+    }
+
+    private func searchRooms() -> [Room] {
+        [
+            Room(
+                id: "office",
+                name: "Office",
+                entities: [
+                    entity("sensor.office_temp", name: "Temperature", state: "21", unit: "°C"),
+                    entity("sensor.office_humidity", name: "Humidity", state: "44", unit: "%")
+                ]
+            ),
+            Room(
+                id: "kitchen",
+                name: "Kitchen",
+                entities: [
+                    entity("sensor.kitchen_power", name: "Power", state: "120", unit: "W")
+                ]
+            )
+        ]
+    }
+
     private func entity(_ id: EntityID, name: String? = nil, state: String, unit: String?) -> DiscoveredEntity {
         DiscoveredEntity(
             id: id,

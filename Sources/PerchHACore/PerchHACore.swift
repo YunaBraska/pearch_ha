@@ -82,6 +82,103 @@ public struct HistorySeries: Equatable, Codable, Sendable {
     }
 }
 
+/// A single numeric history reading paired with the moment it was recorded.
+///
+/// Used by interactive readouts (for example a chart crosshair) that need both
+/// the value and its timestamp for the sample nearest a cursor position.
+public struct PerchHAHistoryCursorSample: Equatable, Sendable {
+    public let timestamp: Date
+    public let value: Double
+
+    public init(timestamp: Date, value: Double) {
+        self.timestamp = timestamp
+        self.value = value
+    }
+}
+
+/// Pure selection of the history sample nearest a normalized horizontal cursor
+/// position, mirroring the time-based layout used to draw the sparkline.
+public enum PerchHAHistoryCursor {
+    /// The numeric samples of a series, sorted chronologically and stripped of
+    /// non-numeric readings.
+    ///
+    /// Ordering is stable: ties on timestamp keep their original sample order.
+    ///
+    /// - Parameter series: The history series to project.
+    /// - Returns: The chronological numeric samples, possibly empty.
+    public static func numericSamples(of series: HistorySeries) -> [PerchHAHistoryCursorSample] {
+        series.samples.enumerated()
+            .compactMap { index, sample -> (Int, PerchHAHistoryCursorSample)? in
+                guard let value = sample.numericValue else {
+                    return nil
+                }
+                return (index, PerchHAHistoryCursorSample(timestamp: sample.timestamp, value: value))
+            }
+            .sorted { lhs, rhs in
+                if lhs.1.timestamp == rhs.1.timestamp {
+                    return lhs.0 < rhs.0
+                }
+                return lhs.1.timestamp < rhs.1.timestamp
+            }
+            .map(\.1)
+    }
+
+    /// The numeric sample nearest a normalized horizontal position.
+    ///
+    /// The normalized position is clamped to `0...1`. Samples are laid out along
+    /// the x-axis by timestamp (matching the sparkline geometry); when every
+    /// sample shares one timestamp they fall back to an even index spacing. The
+    /// nearest sample by absolute distance is returned, preferring the earlier
+    /// sample on ties.
+    ///
+    /// - Parameters:
+    ///   - series: The history series to search.
+    ///   - normalizedX: The cursor position in `0...1` (`0` is the first sample,
+    ///     `1` is the last).
+    /// - Returns: The nearest numeric sample, or `nil` when the series carries no
+    ///   numeric samples.
+    public static func nearestSample(in series: HistorySeries, atNormalizedX normalizedX: Double) -> PerchHAHistoryCursorSample? {
+        let samples = numericSamples(of: series)
+        return nearestSample(in: samples, atNormalizedX: normalizedX)
+    }
+
+    /// The numeric sample nearest a normalized horizontal position.
+    ///
+    /// - Parameters:
+    ///   - samples: Chronological numeric samples (as produced by
+    ///     ``numericSamples(of:)``).
+    ///   - normalizedX: The cursor position in `0...1`.
+    /// - Returns: The nearest sample, or `nil` when `samples` is empty.
+    public static func nearestSample(in samples: [PerchHAHistoryCursorSample], atNormalizedX normalizedX: Double) -> PerchHAHistoryCursorSample? {
+        guard let first = samples.first else {
+            return nil
+        }
+        guard samples.count > 1 else {
+            return first
+        }
+        let clampedX = min(max(normalizedX, 0), 1)
+        let times = samples.map { $0.timestamp.timeIntervalSince1970 }
+        guard let firstTime = times.first, let lastTime = times.last else {
+            return first
+        }
+        let timeSpan = lastTime - firstTime
+        let lastIndex = Double(samples.count - 1)
+        var bestIndex = 0
+        var bestDistance = Double.greatestFiniteMagnitude
+        for (index, time) in times.enumerated() {
+            let sampleX = timeSpan > 0
+                ? (time - firstTime) / timeSpan
+                : Double(index) / lastIndex
+            let distance = abs(sampleX - clampedX)
+            if distance < bestDistance {
+                bestDistance = distance
+                bestIndex = index
+            }
+        }
+        return samples[bestIndex]
+    }
+}
+
 public struct AreaID: Hashable, Codable, Sendable, ExpressibleByStringLiteral {
     public let rawValue: String
 
@@ -684,6 +781,39 @@ public struct Room: Equatable, Codable, Sendable {
         self.id = id
         self.name = name
         self.entities = entities
+    }
+}
+
+/// Pure, case-insensitive filtering of rooms by a free-text query.
+///
+/// Mirrors the panel search behavior: a room is kept when its name matches the
+/// query or it has any matching entity. When the room name matches, all of its
+/// entities are kept; otherwise only matching entities remain. An empty or
+/// whitespace-only query returns the input unchanged.
+public enum PerchHARoomSearch {
+    /// Filters rooms (and their entities) by a query.
+    ///
+    /// - Parameters:
+    ///   - rooms: The rooms to filter.
+    ///   - query: The search text. Trimmed and matched case-insensitively.
+    /// - Returns: The filtered rooms, preserving input order. Rooms with no
+    ///   surviving entities are dropped.
+    public static func filter(_ rooms: [Room], query: String) -> [Room] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else {
+            return rooms
+        }
+        return rooms.compactMap { room -> Room? in
+            let roomMatches = room.name.lowercased().contains(needle)
+            if roomMatches {
+                return room
+            }
+            let matchingEntities = room.entities.filter { $0.name.lowercased().contains(needle) }
+            guard !matchingEntities.isEmpty else {
+                return nil
+            }
+            return Room(id: room.id, name: room.name, entities: matchingEntities)
+        }
     }
 }
 

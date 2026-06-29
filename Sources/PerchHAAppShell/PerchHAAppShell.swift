@@ -47,8 +47,16 @@ final class PerchHAStatusPanel: NSPanel {
             action = nil
         }
 
-        if let action, NSApp.sendAction(action, to: nil, from: self) {
-            return true
+        if let action {
+            // Route to this panel's own first responder (the focused field's
+            // field editor) so editing shortcuts work whether or not the panel
+            // is the application's key window; fall back to the responder chain.
+            if let firstResponder, NSApp.sendAction(action, to: firstResponder, from: self) {
+                return true
+            }
+            if NSApp.sendAction(action, to: nil, from: self) {
+                return true
+            }
         }
         return super.performKeyEquivalent(with: event)
     }
@@ -1625,9 +1633,40 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         if let statusItemLogoImageCache {
             return statusItemLogoImageCache
         }
-        let image = logoImageRenderer.image()
+        let image = appIconStatusItemImage() ?? logoImageRenderer.image()
         statusItemLogoImageCache = image
         return image
+    }
+
+    /// The application icon scaled to the menu-bar logo size, or nil when no
+    /// usable app icon is available.
+    ///
+    /// The result is a non-template (colored) image fitted into the renderer's
+    /// square size, preserving aspect ratio and centered.
+    private func appIconStatusItemImage() -> NSImage? {
+        let appIcon = NSApp.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
+        guard let appIcon, appIcon.size.width > 0, appIcon.size.height > 0 else {
+            return nil
+        }
+        let target = logoImageRenderer.size
+        let scale = min(target.width / appIcon.size.width, target.height / appIcon.size.height)
+        let drawSize = NSSize(width: appIcon.size.width * scale, height: appIcon.size.height * scale)
+        let origin = NSPoint(
+            x: (target.width - drawSize.width) / 2,
+            y: (target.height - drawSize.height) / 2
+        )
+        let scaled = NSImage(size: target)
+        scaled.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .high
+        appIcon.draw(
+            in: NSRect(origin: origin, size: drawSize),
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 1
+        )
+        scaled.unlockFocus()
+        scaled.isTemplate = false
+        return scaled
     }
 
     private func loadConfiguration() -> PerchHAConfiguration {
