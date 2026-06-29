@@ -6048,6 +6048,247 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(store.saveCallCount, 1)
     }
 
+    // MARK: - History prefetch coordinator
+
+    @MainActor
+    private func makeConnectedPrefetchModel(
+        recorder: PrefetchHistoryRecorder,
+        clock: TestPerchClock,
+        rooms: [Room],
+        prefetch: PerchHAHistoryPrefetchConfiguration,
+        cacheTTL: PerchDuration = .seconds(60)
+    ) async -> PerchHAPanelModel {
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: rooms) },
+            historyProvider: { form, entityID, range in
+                await recorder.provide(form: form, entityID: entityID, range: range)
+            },
+            clock: clock,
+            historyCacheConfiguration: PerchHAHistoryCacheConfiguration(capacity: 64, ttl: cacheTTL),
+            historyPrefetchConfiguration: prefetch
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        return model
+    }
+
+    /// Lets the freshly armed prefetch task reach its settle sleep, fires the
+    /// settle delay, and waits for the pass to finish the expected fetches.
+    private func runSettledPrefetchPass(
+        clock: TestPerchClock,
+        recorder: PrefetchHistoryRecorder,
+        settleDelay: PerchDuration,
+        expectedCalls: Int
+    ) async {
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: settleDelay)
+        await spinUntil { await recorder.callCount() >= expectedCalls }
+    }
+
+    func test_t_prefetch_warms_visible_plus_lookahead_only() async {
+        let clock = TestPerchClock()
+        let recorder = PrefetchHistoryRecorder()
+        let settleDelay = PerchDuration.milliseconds(250)
+        let model = await makeConnectedPrefetchModel(
+            recorder: recorder,
+            clock: clock,
+            rooms: prefetchRooms(count: 10),
+            prefetch: PerchHAHistoryPrefetchConfiguration(lookahead: 2, settleDelay: settleDelay)
+        )
+
+        model.setPanelActive(true)
+        model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
+        await runSettledPrefetchPass(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedCalls: 4)
+
+        let requested = Set(await recorder.requestedIDs())
+        XCTAssertEqual(
+            requested,
+            ["sensor.prefetch_0", "sensor.prefetch_1", "sensor.prefetch_2", "sensor.prefetch_3"]
+        )
+        let callCount = await recorder.callCount()
+        XCTAssertEqual(callCount, 4)
+    }
+
+    func test_t_prefetch_coalesces_rapid_visibility_changes() async {
+        let clock = TestPerchClock()
+        let recorder = PrefetchHistoryRecorder()
+        let settleDelay = PerchDuration.milliseconds(250)
+        let model = await makeConnectedPrefetchModel(
+            recorder: recorder,
+            clock: clock,
+            rooms: prefetchRooms(count: 10),
+            prefetch: PerchHAHistoryPrefetchConfiguration(lookahead: 0, settleDelay: settleDelay)
+        )
+
+        model.setPanelActive(true)
+        // Three "scroll" updates before any settle elapses; only the last survives.
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        model.updateVisibleEntities(["sensor.prefetch_3"])
+        model.updateVisibleEntities(["sensor.prefetch_7"])
+        await runSettledPrefetchPass(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedCalls: 1)
+
+        let requested = await recorder.requestedIDs()
+        XCTAssertEqual(requested, ["sensor.prefetch_7"])
+    }
+
+    func test_t_prefetch_skips_fresh_entries_and_fetches_expired() async {
+        let clock = TestPerchClock()
+        let recorder = PrefetchHistoryRecorder()
+        let settleDelay = PerchDuration.milliseconds(250)
+        let model = await makeConnectedPrefetchModel(
+            recorder: recorder,
+            clock: clock,
+            rooms: prefetchRooms(count: 4),
+            prefetch: PerchHAHistoryPrefetchConfiguration(
+                lookahead: 0,
+                settleDelay: settleDelay,
+                activeRefreshInterval: .seconds(120)
+            ),
+            cacheTTL: .seconds(60)
+        )
+
+        model.setPanelActive(true)
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await runSettledPrefetchPass(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedCalls: 1)
+        let firstPassCount = await recorder.callCount()
+        XCTAssertEqual(firstPassCount, 1)
+
+        // Re-report the same visible set well within the cache TTL and the active
+        // refresh interval: the still-fresh entry must not be refetched.
+        _ = await clock.advance(by: .seconds(10))
+        model.updateVisibleEntities([])
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: settleDelay)
+        await spinUntil { await clock.sleepingTaskCount() == 0 }
+        let stillFreshCount = await recorder.callCount()
+        XCTAssertEqual(stillFreshCount, 1)
+
+        // Now let the cache TTL expire: the absent/expired entry fetches again.
+        _ = await clock.advance(by: .seconds(60))
+        model.updateVisibleEntities([])
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await runSettledPrefetchPass(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedCalls: 2)
+        let afterExpiryCount = await recorder.callCount()
+        XCTAssertEqual(afterExpiryCount, 2)
+    }
+
+    func test_t_prefetch_active_refresh_is_shorter_than_lookahead_ttl() async {
+        let clock = TestPerchClock()
+        let recorder = PrefetchHistoryRecorder()
+        let settleDelay = PerchDuration.milliseconds(250)
+        let model = await makeConnectedPrefetchModel(
+            recorder: recorder,
+            clock: clock,
+            rooms: prefetchRooms(count: 4),
+            prefetch: PerchHAHistoryPrefetchConfiguration(
+                lookahead: 1,
+                settleDelay: settleDelay,
+                activeRefreshInterval: .seconds(30)
+            ),
+            cacheTTL: .seconds(120)
+        )
+
+        model.setPanelActive(true)
+        // Visible: _0 (active). Lookahead: _1.
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await runSettledPrefetchPass(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedCalls: 2)
+        let initialCount = await recorder.callCount()
+        XCTAssertEqual(initialCount, 2)
+
+        // Advance past the active refresh interval but well within the cache TTL.
+        _ = await clock.advance(by: .seconds(40))
+        model.updateVisibleEntities([])
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await runSettledPrefetchPass(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedCalls: 3)
+
+        // The active (visible) _0 refetched; the lookahead _1 did not (still TTL-fresh).
+        let requested = await recorder.requestedIDs()
+        XCTAssertEqual(requested.filter { $0 == "sensor.prefetch_0" }.count, 2)
+        XCTAssertEqual(requested.filter { $0 == "sensor.prefetch_1" }.count, 1)
+    }
+
+    func test_t_prefetch_does_nothing_while_inactive_and_cancels_in_flight() async {
+        let clock = TestPerchClock()
+        let recorder = PrefetchHistoryRecorder(waitForRelease: true)
+        let settleDelay = PerchDuration.milliseconds(250)
+        let model = await makeConnectedPrefetchModel(
+            recorder: recorder,
+            clock: clock,
+            rooms: prefetchRooms(count: 6),
+            prefetch: PerchHAHistoryPrefetchConfiguration(lookahead: 2, settleDelay: settleDelay)
+        )
+
+        // Inactive: reporting visibility must not fetch nor even arm a settle sleep.
+        model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        let inactiveSleepers = await clock.sleepingTaskCount()
+        XCTAssertEqual(inactiveSleepers, 0)
+        let inactiveCalls = await recorder.callCount()
+        XCTAssertEqual(inactiveCalls, 0)
+
+        // Activate and let one bounded batch enter the (blocking) provider.
+        model.setPanelActive(true)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: settleDelay)
+        await spinUntil { await recorder.callCount() >= 1 }
+
+        // Deactivate: in-flight prefetch is cancelled; releasing the blocked calls
+        // must not warm any cache or start new fetches.
+        model.setPanelActive(false)
+        await recorder.releaseAll()
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        XCTAssertNil(model.cachedHistorySeries(for: "sensor.prefetch_0"))
+    }
+
+    func test_t_prefetch_respects_concurrency_cap() async {
+        let clock = TestPerchClock()
+        let recorder = PrefetchHistoryRecorder(waitForRelease: true)
+        let settleDelay = PerchDuration.milliseconds(250)
+        let model = await makeConnectedPrefetchModel(
+            recorder: recorder,
+            clock: clock,
+            rooms: prefetchRooms(count: 10),
+            prefetch: PerchHAHistoryPrefetchConfiguration(
+                lookahead: 6,
+                settleDelay: settleDelay,
+                maxConcurrentFetches: 3
+            )
+        )
+
+        model.setPanelActive(true)
+        // Visible 0..1 plus lookahead 2..7 = 8 targets, cap 3.
+        model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: settleDelay)
+        await spinUntil { await recorder.callCount() == 3 }
+
+        // No more than the cap are ever blocked in the provider at once.
+        for _ in 0..<10 {
+            await Task.yield()
+            let waiting = await recorder.waiterCount()
+            XCTAssertLessThanOrEqual(waiting, 3)
+        }
+
+        // Drain: each release frees a worker, which claims the next job and blocks
+        // again — the cap is re-checked every step until all 8 targets are fetched.
+        for _ in 0..<200 {
+            if await recorder.callCount() >= 8 {
+                break
+            }
+            await recorder.releaseAll()
+            await Task.yield()
+            let waiting = await recorder.waiterCount()
+            XCTAssertLessThanOrEqual(waiting, 3)
+        }
+        let finalCount = await recorder.callCount()
+        XCTAssertEqual(finalCount, 8)
+    }
+
     private func spinUntil(_ condition: @escaping @MainActor () -> Bool) async {
         for _ in 0..<100 where !condition() {
             await Task.yield()
@@ -6617,6 +6858,64 @@ private actor HistoryProviderRecorder {
     }
 }
 
+/// Records every history request and answers with a series matching the
+/// requested entity and range, so concurrent prefetch fetches never depend on
+/// call ordering. Optionally blocks each call until released, letting tests
+/// observe in-flight concurrency.
+private actor PrefetchHistoryRecorder {
+    private let waitForRelease: Bool
+    private var requestedEntityIDs: [EntityID] = []
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(waitForRelease: Bool = false) {
+        self.waitForRelease = waitForRelease
+    }
+
+    func provide(
+        form: PerchHAConnectionForm,
+        entityID: EntityID,
+        range: HistoryRange
+    ) async -> PerchHAHistoryProviderResult {
+        requestedEntityIDs.append(entityID)
+        if waitForRelease {
+            await withCheckedContinuation { continuation in
+                waiters.append(continuation)
+            }
+        }
+        return .success(
+            HistorySeries(
+                entityID: entityID,
+                range: range,
+                samples: [
+                    HistorySample(
+                        timestamp: Date(timeIntervalSince1970: 1_789_999_200),
+                        state: "1.0",
+                        numericValue: 1.0
+                    )
+                ]
+            )
+        )
+    }
+
+    func callCount() -> Int {
+        requestedEntityIDs.count
+    }
+
+    func waiterCount() -> Int {
+        waiters.count
+    }
+
+    func requestedIDs() -> [EntityID] {
+        requestedEntityIDs
+    }
+
+    func releaseAll() {
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
+    }
+}
+
 private actor ActionRunnerRecorder {
     private var results: [PerchHAActionResult]
     private let waitForRelease: Bool
@@ -6916,6 +7215,20 @@ func selectionRooms() -> [Room] {
             ]
         )
     ]
+}
+
+func prefetchRooms(count: Int = 10) -> [Room] {
+    let entities = (0..<count).map { index in
+        DiscoveredEntity(
+            id: EntityID("sensor.prefetch_\(index)"),
+            name: "Prefetch \(index)",
+            state: "\(Double(index))",
+            unit: "°C",
+            areaID: nil,
+            deviceID: nil
+        )
+    }
+    return [Room(id: "prefetch", name: "Prefetch", entities: entities)]
 }
 
 func controlRooms() -> [Room] {

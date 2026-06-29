@@ -630,6 +630,49 @@ public struct PerchHAHistoryCacheConfiguration: Equatable, Sendable {
     }
 }
 
+/// Tuning for the inline-history prefetch coordinator.
+///
+/// The coordinator warms the in-memory history cache for the rows the panel is
+/// actually showing (plus a small lookahead) so the inline sparklines render
+/// from cache without the row ever triggering a fetch. It is fully gated on the
+/// panel being active and on settled visibility, and is bounded so it never
+/// inflates request volume.
+public struct PerchHAHistoryPrefetchConfiguration: Equatable, Sendable {
+    /// Extra entities beyond the visible set to warm, taken in display order from
+    /// the panel's ordered entity list.
+    public let lookahead: Int
+    /// How long visibility must stay unchanged before a prefetch pass runs, so
+    /// scrolling never fetches.
+    public let settleDelay: PerchDuration
+    /// Refresh interval applied to visible entities. A visible entity is
+    /// refetched once this interval has elapsed since its last fetch, even if its
+    /// cached series is still within the cache TTL. Lookahead entities ignore this
+    /// and only fetch when absent or expired by the cache TTL.
+    public let activeRefreshInterval: PerchDuration
+    /// Maximum number of history fetches allowed in flight at once during a pass.
+    public let maxConcurrentFetches: Int
+
+    /// Creates a prefetch configuration.
+    ///
+    /// - Parameters:
+    ///   - lookahead: Entities to warm beyond the visible set (default 6).
+    ///   - settleDelay: Quiet period before a pass runs (default 250 ms).
+    ///   - activeRefreshInterval: Visible-entity refresh interval (default 30 s,
+    ///     shorter than the typical 60 s cache TTL so visible rows refresh sooner).
+    ///   - maxConcurrentFetches: In-flight fetch cap (default 3).
+    public init(
+        lookahead: Int = 6,
+        settleDelay: PerchDuration = .milliseconds(250),
+        activeRefreshInterval: PerchDuration = .seconds(30),
+        maxConcurrentFetches: Int = 3
+    ) {
+        self.lookahead = max(0, lookahead)
+        self.settleDelay = settleDelay
+        self.activeRefreshInterval = activeRefreshInterval
+        self.maxConcurrentFetches = max(1, maxConcurrentFetches)
+    }
+}
+
 public struct PerchHAPanelSnapshot: Equatable, Sendable {
     public let connectionState: ConnectionState
     public let phase: PerchHAPanelPhase
@@ -1037,9 +1080,15 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
     }
 }
 
-private struct PerchHAHistoryCacheKey: Hashable {
+private struct PerchHAHistoryCacheKey: Hashable, Sendable {
     let entityID: EntityID
     let range: HistoryRange
+}
+
+private struct PrefetchJob: Sendable {
+    let entityID: EntityID
+    let range: HistoryRange
+    let key: PerchHAHistoryCacheKey
 }
 
 private struct PerchHAHistoryCacheEntry {
@@ -1146,6 +1195,7 @@ public final class PerchHAPanelModel: ObservableObject {
     private let historyDebounce: PerchDuration
     private let historyHoverGrace: PerchDuration
     private let historyCacheConfiguration: PerchHAHistoryCacheConfiguration
+    private let historyPrefetchConfiguration: PerchHAHistoryPrefetchConfiguration
     private let selectionSink: SelectionConfigurationSink
     private let menuBarDisplaySink: MenuBarDisplayConfigurationSink
     private let customActionSink: CustomActionConfigurationSink
@@ -1163,6 +1213,13 @@ public final class PerchHAPanelModel: ObservableObject {
     private var historyCloseTask: Task<Void, Never>?
     private var historyRequestGeneration = 0
     private var protectedValueDrafts: [String: String] = [:]
+    private var isPanelActive = false
+    private var visibleEntityIDs: [EntityID] = []
+    private var prefetchTask: Task<Void, Never>?
+    private var prefetchLastFetched: [PerchHAHistoryCacheKey: PerchInstant] = [:]
+    private var prefetchQueue: [PrefetchJob] = []
+    private var prefetchCursor = 0
+    private var prefetchWorkers: [Task<Void, Never>] = []
 
     public init(
         snapshot: PerchHAPanelSnapshot = PerchHAPanelSnapshot(),
@@ -1175,6 +1232,7 @@ public final class PerchHAPanelModel: ObservableObject {
         historyDebounce: PerchDuration = .milliseconds(150),
         historyHoverGrace: PerchDuration = .milliseconds(300),
         historyCacheConfiguration: PerchHAHistoryCacheConfiguration = PerchHAHistoryCacheConfiguration(),
+        historyPrefetchConfiguration: PerchHAHistoryPrefetchConfiguration = PerchHAHistoryPrefetchConfiguration(),
         selectionConfiguration: EntitySelectionConfiguration = EntitySelectionConfiguration(),
         menuBarDisplayConfiguration: MenuBarDisplayConfiguration = MenuBarDisplayConfiguration(),
         customActionConfiguration: CustomActionConfiguration = CustomActionConfiguration(),
@@ -1226,6 +1284,7 @@ public final class PerchHAPanelModel: ObservableObject {
         self.historyDebounce = historyDebounce
         self.historyHoverGrace = historyHoverGrace
         self.historyCacheConfiguration = historyCacheConfiguration
+        self.historyPrefetchConfiguration = historyPrefetchConfiguration
         self.selectionSink = selectionSink
         self.menuBarDisplaySink = menuBarDisplaySink
         self.customActionSink = customActionSink
@@ -1237,6 +1296,8 @@ public final class PerchHAPanelModel: ObservableObject {
         controlActionTask?.cancel()
         historyTask?.cancel()
         historyCloseTask?.cancel()
+        prefetchTask?.cancel()
+        prefetchWorkers.forEach { $0.cancel() }
     }
 
     public func updateConnectionForm(
@@ -1769,6 +1830,194 @@ public final class PerchHAPanelModel: ObservableObject {
         let range = snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).defaultHistoryRange
         let key = PerchHAHistoryCacheKey(entityID: id, range: range)
         return historyCache.peek(for: key, now: lastObservedInstant)
+    }
+
+    // MARK: - History prefetch coordinator
+
+    /// Marks the panel as shown or hidden, gating all history prefetch.
+    ///
+    /// The app shell calls this with `true` when the panel becomes visible and
+    /// `false` when it is hidden or closed. While inactive the coordinator does no
+    /// fetching whatsoever: any in-flight prefetch is cancelled and no background
+    /// sync runs. Re-activating with a known visible set re-arms a settle pass.
+    ///
+    /// - Parameter active: Whether the panel is currently shown.
+    public func setPanelActive(_ active: Bool) {
+        guard active != isPanelActive else {
+            return
+        }
+        isPanelActive = active
+        if active {
+            scheduleHistoryPrefetch()
+        } else {
+            cancelHistoryPrefetch()
+        }
+    }
+
+    /// Reports the entities currently visible in the panel, in display order.
+    ///
+    /// The view calls this as rows appear and disappear. The coordinator warms the
+    /// history cache for these entities plus the next ``PerchHAHistoryPrefetchConfiguration/lookahead``
+    /// entities in the panel's ordered list. Calls are coalesced: a prefetch pass
+    /// runs only once visibility has stayed unchanged for the configured settle
+    /// delay, so rapid updates while scrolling never fetch.
+    ///
+    /// - Parameter ids: The visible entity IDs in display order.
+    public func updateVisibleEntities(_ ids: [EntityID]) {
+        guard ids != visibleEntityIDs else {
+            return
+        }
+        visibleEntityIDs = ids
+        scheduleHistoryPrefetch()
+    }
+
+    /// Arms (or re-arms) a debounced prefetch pass on the injected clock.
+    ///
+    /// Cancelling and restarting the single pending task is what coalesces rapid
+    /// visibility changes: only the task armed by the final change survives the
+    /// settle delay. Does nothing while the panel is inactive.
+    private func scheduleHistoryPrefetch() {
+        prefetchTask?.cancel()
+        prefetchTask = nil
+        guard isPanelActive, lastConnectedForm != nil, !visibleEntityIDs.isEmpty else {
+            return
+        }
+        let settleDelay = historyPrefetchConfiguration.settleDelay
+        prefetchTask = Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            do {
+                _ = try await clock.sleep(for: settleDelay)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else {
+                return
+            }
+            await runHistoryPrefetchPass()
+            if !Task.isCancelled {
+                prefetchTask = nil
+            }
+        }
+    }
+
+    private func cancelHistoryPrefetch() {
+        prefetchTask?.cancel()
+        prefetchTask = nil
+        prefetchWorkers.forEach { $0.cancel() }
+        prefetchWorkers = []
+    }
+
+    /// Computes the prefetch target list: the visible entities plus the lookahead
+    /// window, in display order, de-duplicated.
+    private func prefetchTargets() -> [EntityID] {
+        let ordered = displayedEntityIDs()
+        let visible = Set(visibleEntityIDs)
+        guard let lastVisibleIndex = ordered.lastIndex(where: { visible.contains($0) }) else {
+            return visibleEntityIDs
+        }
+        let lookaheadEnd = min(ordered.count, lastVisibleIndex + 1 + historyPrefetchConfiguration.lookahead)
+        let lookahead = ordered[(lastVisibleIndex + 1)..<lookaheadEnd]
+        var seen = Set<EntityID>()
+        var targets: [EntityID] = []
+        for id in visibleEntityIDs + Array(lookahead) where seen.insert(id).inserted {
+            targets.append(id)
+        }
+        return targets
+    }
+
+    /// The panel's displayed entities flattened in display order.
+    private func displayedEntityIDs() -> [EntityID] {
+        snapshot.rooms.flatMap(\.entities).map(\.id)
+    }
+
+    /// Runs one bounded prefetch pass for the current targets, skipping anything
+    /// still fresh and capping concurrent fetches.
+    private func runHistoryPrefetchPass() async {
+        guard let form = lastConnectedForm else {
+            return
+        }
+        let visible = Set(visibleEntityIDs)
+        let now = await clock.now()
+        lastObservedInstant = now
+
+        let pending = prefetchTargets().compactMap { id -> PrefetchJob? in
+            let range = snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).defaultHistoryRange
+            let key = PerchHAHistoryCacheKey(entityID: id, range: range)
+            return shouldPrefetch(key: key, isActive: visible.contains(id), now: now)
+                ? PrefetchJob(entityID: id, range: range, key: key)
+                : nil
+        }
+        guard !pending.isEmpty else {
+            return
+        }
+
+        let limit = min(historyPrefetchConfiguration.maxConcurrentFetches, pending.count)
+        prefetchQueue = pending
+        prefetchCursor = 0
+        // Up to `limit` workers run concurrently. Each pulls the next job from the
+        // shared, MainActor-isolated cursor, so at most `limit` fetches are ever in
+        // flight; the rest start only as a worker frees up.
+        let workers: [Task<Void, Never>] = (0..<limit).map { _ in
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    return
+                }
+                await drainPrefetchQueue(form: form)
+            }
+        }
+        prefetchWorkers = workers
+        for worker in workers {
+            await worker.value
+        }
+        prefetchWorkers = []
+    }
+
+    /// A single prefetch worker: repeatedly claims the next queued job and fetches
+    /// it until the queue is drained, the task is cancelled, or the panel hides.
+    private func drainPrefetchQueue(form: PerchHAConnectionForm) async {
+        while !Task.isCancelled, isPanelActive {
+            guard prefetchCursor < prefetchQueue.count else {
+                return
+            }
+            let job = prefetchQueue[prefetchCursor]
+            prefetchCursor += 1
+            await prefetchOne(job, form: form)
+        }
+    }
+
+    /// Decides whether an entity needs a fetch this pass.
+    ///
+    /// Lookahead entities fetch only when their cached series is absent or expired
+    /// per the cache TTL. Visible (active) entities additionally refetch once the
+    /// active refresh interval has elapsed since their last fetch, even while their
+    /// cached series remains within the cache TTL.
+    private func shouldPrefetch(key: PerchHAHistoryCacheKey, isActive: Bool, now: PerchInstant) -> Bool {
+        let isCached = historyCache.peek(for: key, now: now) != nil
+        guard isCached else {
+            return true
+        }
+        guard isActive, let fetchedAt = prefetchLastFetched[key] else {
+            return false
+        }
+        return fetchedAt.advanced(by: historyPrefetchConfiguration.activeRefreshInterval) <= now
+    }
+
+    /// Fetches one entity's history into the cache without touching the popover
+    /// history state, recording the fetch instant for active-refresh accounting.
+    private func prefetchOne(_ job: PrefetchJob, form: PerchHAConnectionForm) async {
+        let result = await historyProvider(form, job.entityID, job.range)
+        guard !Task.isCancelled, isPanelActive else {
+            return
+        }
+        guard case let .success(series) = result, series.entityID == job.entityID, series.range == job.range else {
+            return
+        }
+        let now = await clock.now()
+        lastObservedInstant = now
+        prefetchLastFetched[job.key] = now
+        historyCache.insert(series, for: job.key, now: now, configuration: historyCacheConfiguration)
     }
 
     public func dismissHistoryPopover() {
@@ -3069,6 +3318,9 @@ public final class PerchHAPanelModel: ObservableObject {
         historyRequestGeneration += 1
         pendingControlChange = nil
         historyCache = PerchHAHistoryCache()
+        cancelHistoryPrefetch()
+        prefetchLastFetched = [:]
+        visibleEntityIDs = []
         lastConnectedForm = nil
         oauthSignInState = .idle
 
@@ -3249,6 +3501,8 @@ public final class PerchHAPanelModel: ObservableObject {
                 historyCloseTask = nil
                 historyRequestGeneration += 1
                 historyCache = PerchHAHistoryCache()
+                cancelHistoryPrefetch()
+                prefetchLastFetched = [:]
                 pendingControlChange = nil
             }
             lastConnectedForm = form
@@ -4357,6 +4611,7 @@ public struct PerchHAPanelView: View {
     private let onOpenSettings: (() -> Void)?
     @State private var pendingCustomActionID: CustomActionID?
     @State private var panelSearch: String = ""
+    @State private var visibleEntityIDs: Set<EntityID> = []
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
@@ -4694,6 +4949,12 @@ public struct PerchHAPanelView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
         .contentShape(Rectangle())
+        .onAppear {
+            markEntityVisible(entity.id, isVisible: true)
+        }
+        .onDisappear {
+            markEntityVisible(entity.id, isVisible: false)
+        }
         .onHover { isInside in
             if isInside {
                 model.startHistoryHover(entity.id)
@@ -4706,6 +4967,20 @@ public struct PerchHAPanelView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(entity.name), \(value.text)")
+    }
+
+    /// Tracks a row's on-screen visibility and reports the visible set to the
+    /// model in display order. Scrolling only mutates local state and hands the
+    /// model a settled set; the model's debounce decides whether to fetch, so
+    /// scrolling itself never triggers history requests.
+    private func markEntityVisible(_ id: EntityID, isVisible: Bool) {
+        if isVisible {
+            visibleEntityIDs.insert(id)
+        } else {
+            visibleEntityIDs.remove(id)
+        }
+        let ordered = model.snapshot.rooms.flatMap(\.entities).map(\.id).filter { visibleEntityIDs.contains($0) }
+        model.updateVisibleEntities(ordered)
     }
 
     private func entityIconName(for entity: DiscoveredEntity) -> String {
