@@ -1459,6 +1459,9 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         guard let panelModel else {
             return
         }
+        // Opening Settings dismisses the drop-down panel so the two windows do
+        // not overlap.
+        panel?.orderOut(nil)
         let window = settingsWindow ?? Self.makeSettingsWindow(model: panelModel)
         settingsWindow = window
         if !window.isVisible {

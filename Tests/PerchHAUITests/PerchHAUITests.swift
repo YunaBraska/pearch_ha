@@ -593,6 +593,24 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.availableRooms.flatMap(\.entities).count, 3)
     }
 
+    func test_t_panel_select_all_and_clear_all_entities() async {
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        let availableCount = model.snapshot.availableRooms.flatMap(\.entities).count
+
+        model.setAllEntities(isSelected: true)
+        XCTAssertEqual(model.snapshot.selectionConfiguration.selectedEntityIDs.count, availableCount)
+        XCTAssertEqual(model.snapshot.rooms.flatMap(\.entities).count, availableCount)
+
+        model.setAllEntities(isSelected: false)
+        XCTAssertEqual(model.snapshot.selectionConfiguration.selectedEntityIDs, [])
+        XCTAssertEqual(model.snapshot.rooms.flatMap(\.entities).count, 0)
+    }
+
     func test_t_history_hover_debounces_before_provider_call() async {
         let clock = TestPerchClock()
         let recorder = HistoryProviderRecorder(

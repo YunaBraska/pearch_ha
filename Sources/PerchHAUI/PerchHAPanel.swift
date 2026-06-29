@@ -1375,6 +1375,24 @@ public final class PerchHAPanelModel: ObservableObject {
         )
     }
 
+    /// Selects or deselects every discovered entity at once.
+    ///
+    /// - Parameter isSelected: When true, all available entities become visible
+    ///   in the panel; when false, the selection is cleared. The change is
+    ///   marked explicit and persisted.
+    public func setAllEntities(isSelected: Bool) {
+        let selected: Set<EntityID> = isSelected ? Set(orderedAvailableEntityIDs()) : []
+        updateSelectionConfiguration(
+            EntitySelectionConfiguration(
+                selectedEntityIDs: orderedSelectionIDs(selected),
+                roomOrder: snapshot.selectionConfiguration.roomOrder,
+                entityOrder: snapshot.selectionConfiguration.entityOrder,
+                isExplicit: true
+            ),
+            persist: true
+        )
+    }
+
     @discardableResult
     public func setMenuBarEntity(_ id: EntityID, isVisible: Bool) -> Bool {
         updateMenuBarDisplayConfiguration(

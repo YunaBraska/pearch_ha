@@ -457,8 +457,19 @@ public struct PerchHASettingsView: View {
 
     private var settingsContent: some View {
         VStack(alignment: .leading, spacing: 10) {
-            TextField("Search", text: selectionSearchBinding)
-                .textFieldStyle(.roundedBorder)
+            HStack(spacing: 8) {
+                TextField("Search", text: selectionSearchBinding)
+                    .textFieldStyle(.roundedBorder)
+                Button("Select all") {
+                    model.setAllEntities(isSelected: true)
+                }
+                .help("Show every discovered value in the panel")
+                Button("Clear") {
+                    model.setAllEntities(isSelected: false)
+                }
+                .help("Hide every value from the panel")
+            }
+            .disabled(model.snapshot.availableRooms.isEmpty)
             if let selectionPersistenceFailure = model.snapshot.selectionPersistenceFailureDescription {
                 Text(selectionPersistenceFailure)
                     .font(.callout)
