@@ -23,6 +23,7 @@ public struct PerchHAAppBundleManifest: Equatable, Sendable {
     public let buildVersion: String
     public let minimumSystemVersion: String
     public let callbackURLScheme: String
+    public let iconFileName: String?
 
     public init(
         appName: String = "PerchHA",
@@ -31,7 +32,8 @@ public struct PerchHAAppBundleManifest: Equatable, Sendable {
         version: String = "0.1.0",
         buildVersion: String = "1",
         minimumSystemVersion: String = "13.0",
-        callbackURLScheme: String = "perchha"
+        callbackURLScheme: String = "perchha",
+        iconFileName: String? = nil
     ) throws {
         self.appName = try Self.required(appName, name: "appName")
         self.bundleIdentifier = try Self.required(bundleIdentifier, name: "bundleIdentifier")
@@ -44,6 +46,7 @@ public struct PerchHAAppBundleManifest: Equatable, Sendable {
             throw PerchHAAppBundleManifestError.invalidCallbackURLScheme(normalizedScheme)
         }
         self.callbackURLScheme = normalizedScheme
+        self.iconFileName = try Self.optional(iconFileName, name: "iconFileName")
     }
 
     public func propertyListData() throws -> Data {
@@ -54,7 +57,8 @@ public struct PerchHAAppBundleManifest: Equatable, Sendable {
             version: version,
             buildVersion: buildVersion,
             minimumSystemVersion: minimumSystemVersion,
-            callbackURLScheme: callbackURLScheme
+            callbackURLScheme: callbackURLScheme,
+            iconFileName: iconFileName
         )
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .xml
@@ -67,6 +71,13 @@ public struct PerchHAAppBundleManifest: Equatable, Sendable {
             throw PerchHAAppBundleManifestError.blankField(name)
         }
         return trimmed
+    }
+
+    private static func optional(_ value: String?, name: String) throws -> String? {
+        guard let value else {
+            return nil
+        }
+        return try required(value, name: name)
     }
 
     private static func isValidURLScheme(_ value: String) -> Bool {
@@ -82,12 +93,15 @@ public struct PerchHAAppBundleManifest: Equatable, Sendable {
 
 public enum PerchHAAppBundleBuildError: Error, Equatable, CustomStringConvertible, Sendable {
     case executableMissing(String)
+    case iconMissing(String)
     case outputExists(String)
 
     public var description: String {
         switch self {
         case let .executableMissing(path):
             "executable does not exist: \(path)"
+        case let .iconMissing(path):
+            "icon file does not exist: \(path)"
         case let .outputExists(path):
             "output app already exists: \(path)"
         }
@@ -98,17 +112,20 @@ public struct PerchHAAppBundleBuildConfiguration: Equatable, Sendable {
     public let executableURL: URL
     public let outputURL: URL
     public let manifest: PerchHAAppBundleManifest
+    public let iconURL: URL?
     public let replaceExisting: Bool
 
     public init(
         executableURL: URL,
         outputURL: URL,
         manifest: PerchHAAppBundleManifest,
+        iconURL: URL? = nil,
         replaceExisting: Bool = false
     ) {
         self.executableURL = executableURL
         self.outputURL = outputURL
         self.manifest = manifest
+        self.iconURL = iconURL
         self.replaceExisting = replaceExisting
     }
 }
@@ -448,6 +465,11 @@ public struct PerchHAAppBundleBuilder {
         guard fileManager.fileExists(atPath: configuration.executableURL.path) else {
             throw PerchHAAppBundleBuildError.executableMissing(configuration.executableURL.path)
         }
+        if let iconURL = configuration.iconURL,
+           !fileManager.fileExists(atPath: iconURL.path)
+        {
+            throw PerchHAAppBundleBuildError.iconMissing(iconURL.path)
+        }
         if fileManager.fileExists(atPath: configuration.outputURL.path) {
             guard configuration.replaceExisting else {
                 throw PerchHAAppBundleBuildError.outputExists(configuration.outputURL.path)
@@ -464,6 +486,13 @@ public struct PerchHAAppBundleBuilder {
         let bundledExecutableURL = macOSURL.appendingPathComponent(configuration.manifest.executableName, isDirectory: false)
         try fileManager.copyItem(at: configuration.executableURL, to: bundledExecutableURL)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundledExecutableURL.path)
+
+        if let iconURL = configuration.iconURL {
+            try fileManager.copyItem(
+                at: iconURL,
+                to: resourcesURL.appendingPathComponent(iconURL.lastPathComponent, isDirectory: false)
+            )
+        }
 
         let infoPlistURL = contentsURL.appendingPathComponent("Info.plist", isDirectory: false)
         try configuration.manifest.propertyListData().write(to: infoPlistURL, options: .atomic)
@@ -2849,6 +2878,7 @@ private struct PerchHAInfoPlist: Encodable {
     let minimumSystemVersion: String
     let highResolutionCapable = true
     let agentApplication = true
+    let iconFileName: String?
     let urlTypes: [PerchHAInfoPlistURLType]
 
     init(
@@ -2858,7 +2888,8 @@ private struct PerchHAInfoPlist: Encodable {
         version: String,
         buildVersion: String,
         minimumSystemVersion: String,
-        callbackURLScheme: String
+        callbackURLScheme: String,
+        iconFileName: String?
     ) {
         self.appName = appName
         self.bundleIdentifier = bundleIdentifier
@@ -2866,6 +2897,7 @@ private struct PerchHAInfoPlist: Encodable {
         self.version = version
         self.buildVersion = buildVersion
         self.minimumSystemVersion = minimumSystemVersion
+        self.iconFileName = iconFileName
         self.urlTypes = [
             PerchHAInfoPlistURLType(
                 name: "\(bundleIdentifier).oauth",
@@ -2886,6 +2918,7 @@ private struct PerchHAInfoPlist: Encodable {
         case minimumSystemVersion = "LSMinimumSystemVersion"
         case highResolutionCapable = "NSHighResolutionCapable"
         case agentApplication = "LSUIElement"
+        case iconFileName = "CFBundleIconFile"
         case urlTypes = "CFBundleURLTypes"
     }
 }

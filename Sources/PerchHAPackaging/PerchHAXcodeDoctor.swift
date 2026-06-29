@@ -10,6 +10,7 @@ public enum PerchHAXcodePreflightIssue: Error, Equatable, CustomStringConvertibl
     case developerDirectoryLookupFailed(status: Int32)
     case developerDirectoryMissing
     case commandLineToolsSelected(String)
+    case xcodeLicenseNotAccepted
     case xctestUnavailable(status: Int32)
     case xcodebuildUnavailable(status: Int32)
     case projectListingFailed(status: Int32)
@@ -33,6 +34,8 @@ public enum PerchHAXcodePreflightIssue: Error, Equatable, CustomStringConvertibl
             "active developer directory was not reported by xcode-select"
         case let .commandLineToolsSelected(path):
             "active developer directory points at Command Line Tools, not full Xcode: \(path)"
+        case .xcodeLicenseNotAccepted:
+            "Xcode license has not been accepted for command-line use"
         case let .xctestUnavailable(status):
             "xctest is unavailable through xcrun (status \(status))"
         case let .xcodebuildUnavailable(status):
@@ -62,6 +65,8 @@ public enum PerchHAXcodePreflightIssue: Error, Equatable, CustomStringConvertibl
             "developerDirectoryMissing"
         case .commandLineToolsSelected:
             "commandLineToolsSelected"
+        case .xcodeLicenseNotAccepted:
+            "xcodeLicenseNotAccepted"
         case .xctestUnavailable:
             "xctestUnavailable"
         case .xcodebuildUnavailable:
@@ -96,6 +101,7 @@ public struct PerchHAXcodePreflightReport: Equatable, Sendable {
     public let sharedSchemeAvailable: Bool
     public let projectListingAvailable: Bool
     public let activeDeveloperDirectory: String?
+    public let discoveredXcodeDeveloperDirectories: [String]
     public let fullXcodeSelected: Bool
     public let xctestAvailable: Bool
     public let xcodebuildAvailable: Bool
@@ -106,6 +112,7 @@ public struct PerchHAXcodePreflightReport: Equatable, Sendable {
         sharedSchemeAvailable: Bool,
         projectListingAvailable: Bool,
         activeDeveloperDirectory: String?,
+        discoveredXcodeDeveloperDirectories: [String],
         fullXcodeSelected: Bool,
         xctestAvailable: Bool,
         xcodebuildAvailable: Bool,
@@ -115,6 +122,7 @@ public struct PerchHAXcodePreflightReport: Equatable, Sendable {
         self.sharedSchemeAvailable = sharedSchemeAvailable
         self.projectListingAvailable = projectListingAvailable
         self.activeDeveloperDirectory = activeDeveloperDirectory
+        self.discoveredXcodeDeveloperDirectories = discoveredXcodeDeveloperDirectories
         self.fullXcodeSelected = fullXcodeSelected
         self.xctestAvailable = xctestAvailable
         self.xcodebuildAvailable = xcodebuildAvailable
@@ -150,10 +158,21 @@ public struct PerchHAXcodePreflightReport: Equatable, Sendable {
                 "Restore the checked-in Xcode project and shared scheme, or point --project/--scheme at the correct shared scheme."
             )
         }
-        if issues.contains(where: Self.isDeveloperDirectoryIssue) {
+        if issues.contains(.xcodeLicenseNotAccepted) {
             result.append(
-                "Install a full Xcode app and select its developer directory before rerunning native verification."
+                "Accept the Xcode license once on this Mac before rerunning native verification."
             )
+        }
+        if issues.contains(where: Self.isDeveloperDirectoryIssue) {
+            if discoveredXcodeDeveloperDirectories.isEmpty {
+                result.append(
+                    "Install a full Xcode app and select its developer directory before rerunning native verification."
+                )
+            } else {
+                result.append(
+                    "Select a discovered full Xcode developer directory before rerunning native verification."
+                )
+            }
         }
         if issues.contains(where: Self.isDeveloperToolIssue) {
             result.append(
@@ -170,24 +189,36 @@ public struct PerchHAXcodePreflightReport: Equatable, Sendable {
 
     public func suggestedCommands(configuration: PerchHAXcodePreflightConfiguration) -> [String] {
         var commands: [String] = []
+        if issues.contains(where: Self.isDeveloperDirectoryIssue) {
+            commands.append("sudo xcode-select -s \(Self.shellQuoted(suggestedDeveloperDirectorySelectionPath))")
+        }
+        if issues.contains(.xcodeLicenseNotAccepted) {
+            commands.append(sudoPrefixed("xcodebuild -license accept"))
+        }
         if issues.contains(where: Self.isDeveloperDirectoryIssue)
             || issues.contains(where: Self.isDeveloperToolIssue)
+            || issues.contains(.xcodeLicenseNotAccepted)
         {
-            commands.append("sudo xcode-select -s /Applications/Xcode.app/Contents/Developer")
-            commands.append("xcrun --find xctest")
-            commands.append("xcrun --find xcodebuild")
+            commands.append(prefixed("xcrun --find xctest"))
+            commands.append(prefixed("xcrun --find xcodebuild"))
         }
         if isReadyForNativeVerification {
-            commands.append("swift test --disable-swift-testing --enable-xctest list")
+            commands.append(prefixed("swift test --disable-swift-testing --enable-xctest list"))
             commands.append(
-                "swift test --disable-swift-testing --enable-xctest -Xswiftc -warnings-as-errors --enable-code-coverage"
+                prefixed(
+                    "swift test --disable-swift-testing --enable-xctest -Xswiftc -warnings-as-errors --enable-code-coverage"
+                )
             )
             commands.append(
-                "xcodebuild -project \(Self.shellQuoted(configuration.projectURL.path)) -scheme \(Self.shellQuoted(configuration.schemeName)) -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build"
+                prefixed(
+                    "xcodebuild -project \(Self.shellQuoted(configuration.projectURL.path)) -scheme \(Self.shellQuoted(configuration.schemeName)) -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build"
+                )
             )
         } else {
             commands.append(
-                "swift run perchha-xcode-doctor --json --strict --project \(Self.shellQuoted(configuration.projectURL.path)) --scheme \(Self.shellQuoted(configuration.schemeName))"
+                prefixed(
+                    "swift run perchha-xcode-doctor --json --strict --project \(Self.shellQuoted(configuration.projectURL.path)) --scheme \(Self.shellQuoted(configuration.schemeName))"
+                )
             )
         }
         return commands
@@ -230,6 +261,41 @@ public struct PerchHAXcodePreflightReport: Equatable, Sendable {
         let escaped = value.replacingOccurrences(of: "'", with: "'\"'\"'")
         return "'\(escaped)'"
     }
+
+    private var suggestedDeveloperDirectorySelectionPath: String {
+        discoveredXcodeDeveloperDirectories.first ?? "/Applications/Xcode.app/Contents/Developer"
+    }
+
+    private var suggestedDeveloperDirectoryEnvironmentAssignment: String? {
+        let path: String?
+        if let activeDeveloperDirectory, Self.isFullXcodePath(activeDeveloperDirectory) {
+            path = activeDeveloperDirectory
+        } else {
+            path = discoveredXcodeDeveloperDirectories.first
+        }
+        guard let path else {
+            return nil
+        }
+        return "DEVELOPER_DIR=\(Self.shellQuoted(path))"
+    }
+
+    private func prefixed(_ command: String) -> String {
+        guard let assignment = suggestedDeveloperDirectoryEnvironmentAssignment else {
+            return command
+        }
+        return "\(assignment) \(command)"
+    }
+
+    private func sudoPrefixed(_ command: String) -> String {
+        guard let assignment = suggestedDeveloperDirectoryEnvironmentAssignment else {
+            return "sudo \(command)"
+        }
+        return "sudo env \(assignment) \(command)"
+    }
+
+    private static func isFullXcodePath(_ path: String) -> Bool {
+        path.contains(".app/Contents/Developer")
+    }
 }
 
 public enum PerchHAXcodePreflightPresence: String, Codable, Equatable, Sendable {
@@ -265,6 +331,7 @@ public struct PerchHAXcodePreflightDiagnostic: Codable, Equatable, Sendable {
     public let sharedScheme: PerchHAXcodePreflightPresence
     public let projectListing: PerchHAXcodePreflightState
     public let activeDeveloperDirectory: String?
+    public let discoveredXcodeDeveloperDirectories: [String]
     public let fullXcode: PerchHAXcodePreflightState
     public let xctest: PerchHAXcodePreflightState
     public let xcodebuild: PerchHAXcodePreflightState
@@ -278,6 +345,7 @@ public struct PerchHAXcodePreflightDiagnostic: Codable, Equatable, Sendable {
         sharedScheme: PerchHAXcodePreflightPresence,
         projectListing: PerchHAXcodePreflightState,
         activeDeveloperDirectory: String?,
+        discoveredXcodeDeveloperDirectories: [String],
         fullXcode: PerchHAXcodePreflightState,
         xctest: PerchHAXcodePreflightState,
         xcodebuild: PerchHAXcodePreflightState,
@@ -290,6 +358,7 @@ public struct PerchHAXcodePreflightDiagnostic: Codable, Equatable, Sendable {
         self.sharedScheme = sharedScheme
         self.projectListing = projectListing
         self.activeDeveloperDirectory = activeDeveloperDirectory
+        self.discoveredXcodeDeveloperDirectories = discoveredXcodeDeveloperDirectories
         self.fullXcode = fullXcode
         self.xctest = xctest
         self.xcodebuild = xcodebuild
@@ -307,6 +376,7 @@ public struct PerchHAXcodePreflightDiagnostic: Codable, Equatable, Sendable {
         sharedScheme = PerchHAXcodePreflightPresence(report.sharedSchemeAvailable)
         projectListing = PerchHAXcodePreflightState(report.projectListingAvailable)
         activeDeveloperDirectory = report.activeDeveloperDirectory
+        discoveredXcodeDeveloperDirectories = report.discoveredXcodeDeveloperDirectories
         fullXcode = PerchHAXcodePreflightState(report.fullXcodeSelected)
         xctest = PerchHAXcodePreflightState(report.xctestAvailable)
         xcodebuild = PerchHAXcodePreflightState(report.xcodebuildAvailable)
@@ -325,21 +395,29 @@ public struct PerchHAXcodePreflightDiagnostic: Codable, Equatable, Sendable {
 public struct PerchHAXcodePreflightChecker {
     public static let defaultXcodeSelectURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
     public static let defaultXcrunURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+    public static let defaultApplicationSearchRoots = [URL(fileURLWithPath: "/Applications", isDirectory: true)]
+    public static let developerDirectoryEnvironmentKey = "DEVELOPER_DIR"
 
     private let fileManager: FileManager
     private let xcodeSelectURL: URL
     private let xcrunURL: URL
+    private let applicationSearchRoots: [URL]
+    private let environment: [String: String]
     private let commandRunner: any PerchHACommandRunning
 
     public init(
         fileManager: FileManager = .default,
         xcodeSelectURL: URL = Self.defaultXcodeSelectURL,
         xcrunURL: URL = Self.defaultXcrunURL,
+        applicationSearchRoots: [URL] = Self.defaultApplicationSearchRoots,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
         commandRunner: any PerchHACommandRunning = PerchHAFoundationCommandRunner()
     ) {
         self.fileManager = fileManager
         self.xcodeSelectURL = xcodeSelectURL
         self.xcrunURL = xcrunURL
+        self.applicationSearchRoots = applicationSearchRoots
+        self.environment = environment
         self.commandRunner = commandRunner
     }
 
@@ -366,6 +444,7 @@ public struct PerchHAXcodePreflightChecker {
         }
 
         let activeDeveloperDirectory = try activeDeveloperDirectory(issues: &issues)
+        let discoveredXcodeDeveloperDirectories = discoveredXcodeDeveloperDirectories()
         let fullXcodeSelected = activeDeveloperDirectory.map(Self.isFullXcodeDeveloperDirectory) ?? false
         if let activeDeveloperDirectory, !fullXcodeSelected {
             issues.append(.commandLineToolsSelected(activeDeveloperDirectory))
@@ -392,6 +471,7 @@ public struct PerchHAXcodePreflightChecker {
             sharedSchemeAvailable: sharedSchemeAvailable,
             projectListingAvailable: projectListingAvailable,
             activeDeveloperDirectory: activeDeveloperDirectory,
+            discoveredXcodeDeveloperDirectories: discoveredXcodeDeveloperDirectories,
             fullXcodeSelected: fullXcodeSelected,
             xctestAvailable: xctestAvailable,
             xcodebuildAvailable: xcodebuildAvailable,
@@ -402,6 +482,10 @@ public struct PerchHAXcodePreflightChecker {
     private func activeDeveloperDirectory(
         issues: inout [PerchHAXcodePreflightIssue]
     ) throws -> String? {
+        if let overridePath = Self.nonBlank(environment[Self.developerDirectoryEnvironmentKey]) {
+            return overridePath
+        }
+
         guard fileManager.isExecutableFile(atPath: xcodeSelectURL.path) else {
             issues.append(.xcodeSelectToolMissing(xcodeSelectURL.path))
             return nil
@@ -441,6 +525,10 @@ public struct PerchHAXcodePreflightChecker {
             arguments: ["--find", tool]
         )
         guard result.status == 0, !result.output.isEmpty else {
+            if Self.isLicenseFailure(status: result.status, output: result.output) {
+                appendLicenseIssueIfNeeded(issues: &issues)
+                return false
+            }
             issues.append(unavailableIssue(result.status))
             return false
         }
@@ -468,6 +556,10 @@ public struct PerchHAXcodePreflightChecker {
             arguments: ["xcodebuild", "-list", "-project", configuration.projectURL.path]
         )
         guard result.status == 0 else {
+            if Self.isLicenseFailure(status: result.status, output: result.output) {
+                appendLicenseIssueIfNeeded(issues: &issues)
+                return false
+            }
             issues.append(.projectListingFailed(status: result.status))
             return false
         }
@@ -502,8 +594,58 @@ public struct PerchHAXcodePreflightChecker {
         return schemes
     }
 
+    private func discoveredXcodeDeveloperDirectories() -> [String] {
+        var results: [String] = []
+        for root in applicationSearchRoots {
+            guard let children = try? fileManager.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                continue
+            }
+            for child in children.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+                guard child.pathExtension == "app",
+                      child.deletingPathExtension().lastPathComponent.hasPrefix("Xcode")
+                else {
+                    continue
+                }
+                let developerDirectory = child
+                    .appendingPathComponent("Contents", isDirectory: true)
+                    .appendingPathComponent("Developer", isDirectory: true)
+                let xcodebuildPath = developerDirectory
+                    .appendingPathComponent("usr", isDirectory: true)
+                    .appendingPathComponent("bin", isDirectory: true)
+                    .appendingPathComponent("xcodebuild", isDirectory: false)
+                    .path
+                guard fileManager.isExecutableFile(atPath: xcodebuildPath) else {
+                    continue
+                }
+                results.append(developerDirectory.path)
+            }
+        }
+        return results
+    }
+
     private static func isFullXcodeDeveloperDirectory(_ path: String) -> Bool {
         path.contains(".app/Contents/Developer")
+    }
+
+    private func appendLicenseIssueIfNeeded(issues: inout [PerchHAXcodePreflightIssue]) {
+        if !issues.contains(.xcodeLicenseNotAccepted) {
+            issues.append(.xcodeLicenseNotAccepted)
+        }
+    }
+
+    private static func isLicenseFailure(status: Int32, output: String) -> Bool {
+        status == 69 && output.localizedCaseInsensitiveContains("license")
+    }
+
+    private static func nonBlank(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 }
 
@@ -554,6 +696,7 @@ public enum PerchHAXcodeDoctorCommand {
             "- shared scheme: \(diagnostic.sharedScheme.rawValue)",
             "- project listing: \(diagnostic.projectListing.rawValue)",
             "- active developer directory: \(diagnostic.activeDeveloperDirectory ?? "<unavailable>")",
+            "- discovered Xcode developer directories: \(diagnostic.discoveredXcodeDeveloperDirectories.isEmpty ? "<none>" : diagnostic.discoveredXcodeDeveloperDirectories.joined(separator: ", "))",
             "- full Xcode: \(diagnostic.fullXcode.rawValue)",
             "- xctest: \(diagnostic.xctest.rawValue)",
             "- xcodebuild: \(diagnostic.xcodebuild.rawValue)"

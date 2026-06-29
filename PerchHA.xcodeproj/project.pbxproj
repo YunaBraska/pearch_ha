@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		A00000000000000000000011 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000010 /* main.swift */; };
 		A00000000000000000000012 /* PerchHAAppShell in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000030 /* PerchHAAppShell */; };
+		A00000000000000000000015 /* PearchHA.icns in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000016 /* PearchHA.icns */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -16,6 +17,7 @@
 		A00000000000000000000010 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		A00000000000000000000013 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A00000000000000000000014 /* Package.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Package.swift; sourceTree = SOURCE_ROOT; };
+		A00000000000000000000016 /* PearchHA.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = PearchHA.icns; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -60,6 +62,7 @@
 			children = (
 				A00000000000000000000010 /* main.swift */,
 				A00000000000000000000013 /* Info.plist */,
+				A00000000000000000000016 /* PearchHA.icns */,
 			);
 			path = PerchHA;
 			sourceTree = "<group>";
@@ -128,6 +131,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A00000000000000000000015 /* PearchHA.icns in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

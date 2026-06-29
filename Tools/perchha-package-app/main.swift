@@ -5,6 +5,8 @@ import PerchHASupport
 
 @main
 struct PerchHAPackageAppCommand {
+    private static let defaultAppIconURL = URL(fileURLWithPath: "Xcode/PerchHA/PearchHA.icns", isDirectory: false)
+
     static func main() {
         do {
             try run()
@@ -64,18 +66,23 @@ struct PerchHAPackageAppCommand {
             try releasePreflight(options: options, signingIdentity: signingIdentity)
             return
         }
+        let iconURL = FileManager.default.fileExists(atPath: defaultAppIconURL.path)
+            ? defaultAppIconURL
+            : nil
         let manifest = try PerchHAAppBundleManifest(
             bundleIdentifier: options.value(for: "--bundle-id") ?? "dev.perchha.app",
             version: options.value(for: "--version") ?? "0.1.0",
             buildVersion: options.value(for: "--build-version") ?? "1",
             minimumSystemVersion: options.value(for: "--minimum-system-version") ?? "13.0",
-            callbackURLScheme: options.value(for: "--callback-scheme") ?? "perchha"
+            callbackURLScheme: options.value(for: "--callback-scheme") ?? "perchha",
+            iconFileName: iconURL?.deletingPathExtension().lastPathComponent
         )
         let result = try PerchHAAppBundleBuilder().build(
             PerchHAAppBundleBuildConfiguration(
                 executableURL: URL(fileURLWithPath: options.value(for: "--executable") ?? ".build/debug/PerchHA"),
                 outputURL: URL(fileURLWithPath: options.value(for: "--output") ?? ".build/PerchHA.app"),
                 manifest: manifest,
+                iconURL: iconURL,
                 replaceExisting: options.flags.contains("--replace")
             )
         )

@@ -23,8 +23,8 @@ Implemented locally:
 - Thin Xcode app wrapper metadata with menu-bar mode, OAuth callback scheme, shared scheme, and local Swift package library product wiring.
 - `hamirror` command with env parsing, token capture, fixture writing, privacy sanitization, and fixture verification.
 - Shared strict CLI option parsing across repo tools so malformed commands fail explicitly instead of treating the next flag as data.
-- `hamirror doctor` reports real-HA mirror readiness from redacted key presence/status plus next-step hints and suggested follow-up commands, supports scriptable JSON output, and fails strict preflight when capture is blocked.
-- `perchha-xcode-doctor` reports full-Xcode native verification readiness from project/scheme presence, `xcodebuild` project listing, active developer directory, `xctest`, and `xcodebuild` availability, supports scriptable JSON output, and fails strict preflight when native verification is blocked.
+- `hamirror doctor` reports real-HA mirror readiness from redacted key presence/status plus next-step hints and suggested follow-up commands, supports scriptable JSON output, adds endpoint-specific remediation hints with `--probe`, and fails strict preflight when capture is blocked.
+- `perchha-xcode-doctor` reports full-Xcode native verification readiness from project/scheme presence, `xcodebuild` project listing, active developer directory, discovered Xcode developer directories, local `DEVELOPER_DIR` overrides, Xcode license acceptance, `xctest`, and `xcodebuild` availability, supports scriptable JSON output, and fails strict preflight when native verification is blocked.
 - `hamirror capture --websocket` records optimized WebSocket command evidence without storing private WebSocket payloads.
 - `hamirror capture --write` immediately re-verifies the written fixture set, and private fixture outputs under `Fixtures/private/` also prove they are still ignored by Git.
 - `hamirror serve` replays mirrored REST and capability-aware WebSocket behavior locally, with minimal registry bodies synthesized from mirrored states when private WebSocket payloads were intentionally not captured.

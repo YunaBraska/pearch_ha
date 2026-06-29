@@ -19,6 +19,38 @@ final class PerchHAStatusPanel: NSPanel {
     override var canBecomeMain: Bool {
         true
     }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.type == .keyDown,
+              event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command),
+              let characters = event.charactersIgnoringModifiers?.lowercased()
+        else {
+            return super.performKeyEquivalent(with: event)
+        }
+
+        let action: Selector?
+        switch characters {
+        case "x":
+            action = #selector(NSText.cut(_:))
+        case "c":
+            action = #selector(NSText.copy(_:))
+        case "v":
+            action = #selector(NSText.paste(_:))
+        case "a":
+            action = #selector(NSText.selectAll(_:))
+        case "z":
+            action = event.modifierFlags.contains(.shift)
+                ? Selector(("redo:"))
+                : Selector(("undo:"))
+        default:
+            action = nil
+        }
+
+        if let action, NSApp.sendAction(action, to: nil, from: self) {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 }
 
 public struct PerchHAApplicationSnapshot: Equatable, Sendable {
@@ -84,6 +116,8 @@ public enum PerchHAExternalURLDisposition: Equatable, Sendable {
 public protocol PerchHAAuthSessionStorage: Sendable {
     @discardableResult func save(_ session: PerchHAAuthSession) throws -> PerchHAAuthSessionWriteResult
     func load() throws -> PerchHAAuthSession
+    func loadAccessToken() throws -> String
+    @discardableResult func saveAccessToken(_ accessToken: String) throws -> SecretWriteResult
     @discardableResult func replaceAccessToken(_ accessToken: String) throws -> SecretWriteResult
     @discardableResult func clear() throws -> PerchHAAuthSessionClearResult
 }
@@ -245,12 +279,13 @@ public struct PerchHAAuthorizedHomeAssistantGateway: Sendable {
             return .failure(.authentication)
         }
         do {
-            let session = try authSessionStore.load()
+            let accessToken = try authSessionStore.loadAccessToken()
+            let session = try? authSessionStore.load()
             return .success(
                 PerchHAAuthorizedInput(
                     input: HAConnectionInput(
                         endpoint: endpoint,
-                        token: session.accessToken,
+                        token: accessToken,
                         serverTrustPolicy: serverTrustPolicy
                     ),
                     session: session
@@ -763,6 +798,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     private var panel: NSPanel?
     private var panelModel: PerchHAPanelModel?
     private let configStore: ConfigStore?
+    private let authSessionStore: (any PerchHAAuthSessionStorage)?
     private let connector: PerchHAPanelModel.Connector
     private let historyProvider: PerchHAPanelModel.HistoryProvider
     private let serviceMetadataProvider: PerchHAPanelModel.ServiceMetadataProvider
@@ -783,13 +819,15 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     }
 
     public convenience init(configStore: ConfigStore?) {
-        let gateway = PerchHAAuthorizedHomeAssistantGateway()
+        let authSessionStore = PerchHAAuthSessionStore()
+        let gateway = PerchHAAuthorizedHomeAssistantGateway(authSessionStore: authSessionStore)
         let oauthSignInRunner: PerchHAPanelModel.OAuthSignInRunner
         let oauthApplicationConfiguration: PerchHAOAuthApplicationConfiguration?
         do {
             let configuration = try PerchHAOAuthApplicationConfiguration.fromEnvironment()
             let signInCoordinator = PerchHAOAuthSignInCoordinator(
-                configuration: configuration
+                configuration: configuration,
+                authSessionStore: authSessionStore
             )
             oauthSignInRunner = signInCoordinator.signIn(form:)
             oauthApplicationConfiguration = configuration
@@ -799,6 +837,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         }
         self.init(
             configStore: configStore,
+            authSessionStore: authSessionStore,
             connector: gateway.connect(form:),
             historyProvider: gateway.history(form:entityID:range:),
             serviceMetadataProvider: gateway.services(form:),
@@ -820,6 +859,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         )
         self.init(
             configStore: configStore,
+            authSessionStore: authSessionStore,
             connector: gateway.connect(form:),
             historyProvider: gateway.history(form:entityID:range:),
             serviceMetadataProvider: gateway.services(form:),
@@ -835,12 +875,14 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         connector: @escaping PerchHAPanelModel.Connector,
         serviceMetadataProvider: @escaping PerchHAPanelModel.ServiceMetadataProvider = { _ in .success([]) },
         protectedActionValueStore: any ProtectedActionValueStore = KeychainProtectedActionValueStore(),
+        authSessionStore: (any PerchHAAuthSessionStorage)? = nil,
         oauthApplicationConfiguration: PerchHAOAuthApplicationConfiguration? = nil,
         menuBarPresenter: PerchHAMenuBarPresenter = PerchHAMenuBarPresenter(),
         gaugeImageRenderer: any PerchHAStatusItemGaugeImageRendering = PerchHAStatusItemGaugeImageRenderer()
     ) {
         self.init(
             configStore: configStore,
+            authSessionStore: authSessionStore,
             connector: connector,
             historyProvider: PerchHAApplication.history(form:entityID:range:),
             serviceMetadataProvider: serviceMetadataProvider,
@@ -854,6 +896,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
 
     public init(
         configStore: ConfigStore?,
+        authSessionStore: (any PerchHAAuthSessionStorage)? = nil,
         connector: @escaping PerchHAPanelModel.Connector,
         historyProvider: @escaping PerchHAPanelModel.HistoryProvider,
         serviceMetadataProvider: @escaping PerchHAPanelModel.ServiceMetadataProvider = { _ in .success([]) },
@@ -865,6 +908,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         gaugeImageRenderer: any PerchHAStatusItemGaugeImageRendering = PerchHAStatusItemGaugeImageRenderer()
     ) {
         self.configStore = configStore
+        self.authSessionStore = authSessionStore
         self.connector = connector
         self.historyProvider = historyProvider
         self.serviceMetadataProvider = serviceMetadataProvider
@@ -888,6 +932,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     public func applicationDidFinishLaunching(_ notification: Notification) {
         releaseShell()
         configuration = loadConfiguration()
+        let rememberedForm = restoredConnectionForm()
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
@@ -895,7 +940,22 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         statusItem = item
 
         let model = PerchHAPanelModel(
-            connector: connector,
+            snapshot: PerchHAPanelSnapshot(
+                connectionForm: rememberedForm,
+                hasTokenInput: rememberedForm.usesStoredAuthSession
+            ),
+            connector: { [weak self] form in
+                guard let self else {
+                    return .failure(.protocolError("application deallocated"))
+                }
+                let result = await self.connector(form)
+                if case .success = result {
+                    await MainActor.run {
+                        self.rememberConnection(form)
+                    }
+                }
+                return result
+            },
             historyProvider: historyProvider,
             serviceMetadataProvider: serviceMetadataProvider,
             actionRunner: actionRunner,
@@ -1208,6 +1268,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             menuBarEntityIDs: configuration.menuBarEntityIDs,
             menuBarItemConfigurations: configuration.menuBarItemConfigurations,
             customActions: configuration.customActions,
+            connectionProfile: configuration.connectionProfile,
             roomOrder: selection.roomOrder,
             entityOrder: selection.entityOrder,
             isEntitySelectionExplicit: selection.isExplicit
@@ -1239,6 +1300,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             menuBarEntityIDs: displayConfiguration.promotedEntityIDs,
             menuBarItemConfigurations: displayConfiguration.itemConfigurations,
             customActions: configuration.customActions,
+            connectionProfile: configuration.connectionProfile,
             roomOrder: configuration.roomOrder,
             entityOrder: configuration.entityOrder,
             isEntitySelectionExplicit: configuration.isEntitySelectionExplicit
@@ -1275,6 +1337,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             menuBarEntityIDs: configuration.menuBarEntityIDs,
             menuBarItemConfigurations: configuration.menuBarItemConfigurations,
             customActions: customActionConfiguration.actions,
+            connectionProfile: configuration.connectionProfile,
             roomOrder: configuration.roomOrder,
             entityOrder: configuration.entityOrder,
             isEntitySelectionExplicit: configuration.isEntitySelectionExplicit
@@ -1393,6 +1456,56 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         } catch {
             configurationPersistenceState = .loadFailed(String(describing: error))
             return .empty
+        }
+    }
+
+    private func restoredConnectionForm() -> PerchHAConnectionForm {
+        let profile = configuration.connectionProfile
+        let usesStoredAuthSession: Bool
+        if let authSessionStore {
+            usesStoredAuthSession = (try? authSessionStore.loadAccessToken()) != nil
+        } else {
+            usesStoredAuthSession = false
+        }
+        return PerchHAConnectionForm(
+            urlString: profile?.urlString ?? "",
+            fallbackURLString: profile?.fallbackURLString ?? "",
+            token: "",
+            usesStoredAuthSession: usesStoredAuthSession,
+            allowsSelfSignedCertificates: profile?.allowsSelfSignedCertificates ?? false
+        )
+    }
+
+    private func rememberConnection(_ form: PerchHAConnectionForm) {
+        if let authSessionStore, !form.trimmedToken.isEmpty {
+            _ = try? authSessionStore.saveAccessToken(form.trimmedToken)
+        }
+        guard let configStore else {
+            return
+        }
+        if case .loadFailed = configurationPersistenceState {
+            return
+        }
+        let nextConfiguration = PerchHAConfiguration(
+            schemaVersion: configuration.schemaVersion,
+            selectedEntityIDs: configuration.selectedEntityIDs,
+            menuBarEntityIDs: configuration.menuBarEntityIDs,
+            menuBarItemConfigurations: configuration.menuBarItemConfigurations,
+            customActions: configuration.customActions,
+            connectionProfile: PerchHAConnectionProfile(
+                urlString: form.urlString,
+                fallbackURLString: form.fallbackURLString,
+                allowsSelfSignedCertificates: form.allowsSelfSignedCertificates
+            ),
+            roomOrder: configuration.roomOrder,
+            entityOrder: configuration.entityOrder,
+            isEntitySelectionExplicit: configuration.isEntitySelectionExplicit
+        )
+        do {
+            configuration = try configStore.save(nextConfiguration)
+            configurationPersistenceState = .ready
+        } catch {
+            configurationPersistenceState = .saveFailed(String(describing: error))
         }
     }
 

@@ -78,6 +78,11 @@ final class PerchHAPersistenceTests: XCTestCase {
                     requiresConfirmation: true
                 )
             ],
+            connectionProfile: PerchHAConnectionProfile(
+                urlString: "https://homeassistant.local:8123",
+                fallbackURLString: "https://fallback.example/ha",
+                allowsSelfSignedCertificates: true
+            ),
             roomOrder: ["office", "kitchen"],
             entityOrder: ["switch.office_lamp", "sensor.office_temperature"]
         )
@@ -490,6 +495,28 @@ final class PerchHAPersistenceTests: XCTestCase {
         }
         XCTAssertThrowsError(try PerchHAAuthSession(accessToken: "access-token", refreshToken: "refresh-token", clientID: " ")) { error in
             XCTAssertEqual(error as? SecretStoreError, .emptySecret(.oauthClientID))
+        }
+    }
+
+    func testAuthSessionStoreCanPersistStandaloneAccessTokenForLongLivedAuth() throws {
+        let keychain = KeychainSecretStore(service: "dev.perchha.tests.\(UUID().uuidString)")
+        let store = PerchHAAuthSessionStore(secretStore: keychain)
+        defer {
+            _ = try? store.clear()
+        }
+
+        _ = try store.save(
+            PerchHAAuthSession(
+                accessToken: "oauth-access",
+                refreshToken: "oauth-refresh",
+                clientID: "https://perchha.dev/app"
+            )
+        )
+
+        XCTAssertEqual(try store.saveAccessToken(" long-lived-token "), .updated)
+        XCTAssertEqual(try store.loadAccessToken(), "long-lived-token")
+        XCTAssertThrowsError(try store.load()) { error in
+            XCTAssertEqual(error as? SecretStoreError, .notFound(.refreshToken))
         }
     }
 

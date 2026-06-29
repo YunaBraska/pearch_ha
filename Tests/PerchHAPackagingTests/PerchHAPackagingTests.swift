@@ -6,7 +6,10 @@ import PerchHAPackaging
 
 final class PerchHAPackagingTests: XCTestCase {
     func testInfoPlistDeclaresCallbackURLSchemeAndMenuBarAgent() throws {
-        let manifest = try PerchHAAppBundleManifest(callbackURLScheme: "perchha-test")
+        let manifest = try PerchHAAppBundleManifest(
+            callbackURLScheme: "perchha-test",
+            iconFileName: "PearchHA"
+        )
 
         let plist = try propertyList(from: manifest.propertyListData())
 
@@ -14,6 +17,7 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertEqual(plist["CFBundleExecutable"] as? String, "PerchHA")
         XCTAssertEqual(plist["CFBundleIdentifier"] as? String, "dev.perchha.app")
         XCTAssertEqual(plist["CFBundlePackageType"] as? String, "APPL")
+        XCTAssertEqual(plist["CFBundleIconFile"] as? String, "PearchHA")
         XCTAssertEqual(plist["LSMinimumSystemVersion"] as? String, "13.0")
         XCTAssertEqual(plist["LSUIElement"] as? Bool, true)
         let urlTypes = try XCTUnwrap(plist["CFBundleURLTypes"] as? [[String: Any]])
@@ -30,7 +34,9 @@ final class PerchHAPackagingTests: XCTestCase {
         }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let executableURL = directory.appendingPathComponent("PerchHA-source", isDirectory: false)
+        let iconURL = directory.appendingPathComponent("PearchHA.icns", isDirectory: false)
         try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executableURL)
+        try Data("icon".utf8).write(to: iconURL)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executableURL.path)
         let outputURL = directory.appendingPathComponent("PerchHA.app", isDirectory: true)
 
@@ -38,17 +44,52 @@ final class PerchHAPackagingTests: XCTestCase {
             PerchHAAppBundleBuildConfiguration(
                 executableURL: executableURL,
                 outputURL: outputURL,
-                manifest: try PerchHAAppBundleManifest(callbackURLScheme: "perchha")
+                manifest: try PerchHAAppBundleManifest(
+                    callbackURLScheme: "perchha",
+                    iconFileName: "PearchHA"
+                ),
+                iconURL: iconURL
             )
         )
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: result.appURL.path))
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: result.executableURL.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: result.infoPlistURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.appendingPathComponent("Contents/Resources/PearchHA.icns").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.appendingPathComponent("Contents/PkgInfo").path))
         let plist = try propertyList(from: Data(contentsOf: result.infoPlistURL))
+        XCTAssertEqual(plist["CFBundleIconFile"] as? String, "PearchHA")
         let urlTypes = try XCTUnwrap(plist["CFBundleURLTypes"] as? [[String: Any]])
         XCTAssertEqual(urlTypes.first?["CFBundleURLSchemes"] as? [String], ["perchha"])
+    }
+
+    func testAppBundleBuilderRejectsMissingConfiguredIcon() throws {
+        let directory = temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executableURL = directory.appendingPathComponent("PerchHA-source", isDirectory: false)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executableURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executableURL.path)
+        let outputURL = directory.appendingPathComponent("PerchHA.app", isDirectory: true)
+        let missingIconURL = directory.appendingPathComponent("Missing.icns", isDirectory: false)
+
+        XCTAssertThrowsError(
+            try PerchHAAppBundleBuilder().build(
+                PerchHAAppBundleBuildConfiguration(
+                    executableURL: executableURL,
+                    outputURL: outputURL,
+                    manifest: try PerchHAAppBundleManifest(
+                        callbackURLScheme: "perchha",
+                        iconFileName: "Missing"
+                    ),
+                    iconURL: missingIconURL
+                )
+            )
+        ) { error in
+            XCTAssertEqual(error as? PerchHAAppBundleBuildError, .iconMissing(missingIconURL.path))
+        }
     }
 
     func testAppBundleBuilderRefusesToOverwriteWithoutReplace() throws {
@@ -244,6 +285,11 @@ final class PerchHAPackagingTests: XCTestCase {
         }
 
         let project = try testXcodeProject(in: directory, schemeName: "PerchHA")
+        let applicationsDirectory = directory.appendingPathComponent("Applications", isDirectory: true)
+        let discoveredDeveloperDirectory = try makeDiscoveredXcodeDeveloperDirectory(
+            in: applicationsDirectory,
+            appName: "Xcode 26.0.app"
+        )
         let xcodeSelectURL = try fakeExecutable(in: directory, name: "xcode-select")
         let xcrunURL = try fakeExecutable(in: directory, name: "xcrun")
         let runner = RecordingCommandRunner { executableURL, arguments in
@@ -274,6 +320,7 @@ final class PerchHAPackagingTests: XCTestCase {
             fileManager: .default,
             xcodeSelectURL: xcodeSelectURL,
             xcrunURL: xcrunURL,
+            applicationSearchRoots: [applicationsDirectory],
             commandRunner: runner
         ).check(configuration)
 
@@ -281,6 +328,7 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertTrue(report.sharedSchemeAvailable)
         XCTAssertFalse(report.projectListingAvailable)
         XCTAssertEqual(report.activeDeveloperDirectory, "/Library/Developer/CommandLineTools")
+        XCTAssertEqual(report.discoveredXcodeDeveloperDirectories, [discoveredDeveloperDirectory.path])
         XCTAssertFalse(report.fullXcodeSelected)
         XCTAssertFalse(report.xctestAvailable)
         XCTAssertFalse(report.xcodebuildAvailable)
@@ -298,17 +346,87 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertEqual(diagnostic.project, .present)
         XCTAssertEqual(diagnostic.sharedScheme, .present)
         XCTAssertEqual(diagnostic.projectListing, .blocked)
+        XCTAssertEqual(diagnostic.discoveredXcodeDeveloperDirectories, [discoveredDeveloperDirectory.path])
         XCTAssertEqual(diagnostic.fullXcode, .blocked)
         XCTAssertEqual(diagnostic.nativeVerification, .blocked)
         XCTAssertTrue(
             diagnostic.suggestedCommands.contains(
-                "sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
+                "sudo xcode-select -s '\(discoveredDeveloperDirectory.path)'"
             )
         )
         XCTAssertTrue(
             diagnostic.suggestedCommands.contains(
-                "swift run perchha-xcode-doctor --json --strict --project \(project.path) --scheme PerchHA"
+                "DEVELOPER_DIR='\(discoveredDeveloperDirectory.path)' swift run perchha-xcode-doctor --json --strict --project \(project.path) --scheme PerchHA"
             )
+        )
+    }
+
+    func testXcodePreflightHonorsDeveloperDirectoryEnvironmentOverride() throws {
+        let directory = temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let project = try testXcodeProject(in: directory, schemeName: "PerchHA")
+        let xcrunURL = try fakeExecutable(in: directory, name: "xcrun")
+        let runner = RecordingCommandRunner { executableURL, arguments in
+            XCTAssertEqual(executableURL, xcrunURL)
+            if arguments == ["--find", "xctest"] {
+                return PerchHACommandResult(
+                    status: 0,
+                    output: "/Applications/Xcode.app/Contents/Developer/usr/bin/xctest"
+                )
+            }
+            if arguments == ["--find", "xcodebuild"] {
+                return PerchHACommandResult(
+                    status: 0,
+                    output: "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+                )
+            }
+            if arguments == ["xcodebuild", "-list", "-project", project.path] {
+                return PerchHACommandResult(
+                    status: 0,
+                    output: """
+                    Information about project "PerchHA":
+                        Schemes:
+                            PerchHA
+                    """
+                )
+            }
+            XCTFail("unexpected command: \(executableURL.path) \(arguments)")
+            return PerchHACommandResult(status: 1, output: "unexpected command")
+        }
+
+        let configuration = PerchHAXcodePreflightConfiguration(
+            projectURL: project,
+            schemeName: "PerchHA"
+        )
+        let report = try PerchHAXcodePreflightChecker(
+            fileManager: .default,
+            xcodeSelectURL: directory.appendingPathComponent("missing-xcode-select", isDirectory: false),
+            xcrunURL: xcrunURL,
+            environment: [
+                PerchHAXcodePreflightChecker.developerDirectoryEnvironmentKey: "/Applications/Xcode.app/Contents/Developer"
+            ],
+            commandRunner: runner
+        ).check(configuration)
+
+        XCTAssertEqual(report.activeDeveloperDirectory, "/Applications/Xcode.app/Contents/Developer")
+        XCTAssertTrue(report.fullXcodeSelected)
+        XCTAssertTrue(report.projectListingAvailable)
+        XCTAssertTrue(report.xctestAvailable)
+        XCTAssertTrue(report.xcodebuildAvailable)
+        XCTAssertTrue(report.issues.isEmpty)
+        XCTAssertTrue(report.isReadyForNativeVerification)
+
+        let diagnostic = report.diagnostic(configuration: configuration)
+        XCTAssertTrue(
+            diagnostic.suggestedCommands.contains(
+                "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --disable-swift-testing --enable-xctest list"
+            )
+        )
+        XCTAssertFalse(
+            diagnostic.suggestedCommands.contains("sudo xcode-select -s /Applications/Xcode.app/Contents/Developer")
         )
     }
 
@@ -366,6 +484,7 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertTrue(report.sharedSchemeAvailable)
         XCTAssertTrue(report.projectListingAvailable)
         XCTAssertEqual(report.activeDeveloperDirectory, "/Applications/Xcode.app/Contents/Developer")
+        XCTAssertTrue(report.discoveredXcodeDeveloperDirectories.isEmpty)
         XCTAssertTrue(report.fullXcodeSelected)
         XCTAssertTrue(report.xctestAvailable)
         XCTAssertTrue(report.xcodebuildAvailable)
@@ -376,13 +495,119 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertEqual(diagnostic.projectListing, .ready)
         XCTAssertEqual(diagnostic.nativeVerification, .ready)
         XCTAssertTrue(
-            diagnostic.suggestedCommands.contains("swift test --disable-swift-testing --enable-xctest list")
+            diagnostic.suggestedCommands.contains(
+                "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --disable-swift-testing --enable-xctest list"
+            )
         )
         XCTAssertTrue(
             diagnostic.suggestedCommands.contains(
-                "xcodebuild -project \(project.path) -scheme PerchHA -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build"
+                "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project \(project.path) -scheme PerchHA -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build"
             )
         )
+    }
+
+    func testXcodePreflightReportsLicenseAcceptanceGuidance() throws {
+        let directory = temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let project = try testXcodeProject(in: directory, schemeName: "PerchHA")
+        let xcodeSelectURL = try fakeExecutable(in: directory, name: "xcode-select")
+        let xcrunURL = try fakeExecutable(in: directory, name: "xcrun")
+        let runner = RecordingCommandRunner { executableURL, arguments in
+            if executableURL == xcodeSelectURL {
+                return PerchHACommandResult(
+                    status: 0,
+                    output: "/Applications/Xcode.app/Contents/Developer"
+                )
+            }
+            if executableURL == xcrunURL {
+                if arguments == ["--find", "xctest"] {
+                    return PerchHACommandResult(
+                        status: 69,
+                        output: "You have not agreed to the Xcode license agreements. Please run 'sudo xcodebuild -license' to review and agree to the Xcode license agreements."
+                    )
+                }
+                if arguments == ["--find", "xcodebuild"] {
+                    return PerchHACommandResult(
+                        status: 69,
+                        output: "You have not agreed to the Xcode license agreements. Please run 'sudo xcodebuild -license' to review and agree to the Xcode license agreements."
+                    )
+                }
+            }
+            XCTFail("unexpected command: \(executableURL.path) \(arguments)")
+            return PerchHACommandResult(status: 1, output: "unexpected command")
+        }
+
+        let configuration = PerchHAXcodePreflightConfiguration(
+            projectURL: project,
+            schemeName: "PerchHA"
+        )
+        let report = try PerchHAXcodePreflightChecker(
+            fileManager: .default,
+            xcodeSelectURL: xcodeSelectURL,
+            xcrunURL: xcrunURL,
+            commandRunner: runner
+        ).check(configuration)
+
+        XCTAssertEqual(report.issues, [.xcodeLicenseNotAccepted])
+        XCTAssertFalse(report.xctestAvailable)
+        XCTAssertFalse(report.xcodebuildAvailable)
+        XCTAssertFalse(report.projectListingAvailable)
+
+        let diagnostic = report.diagnostic(configuration: configuration)
+        XCTAssertTrue(
+            diagnostic.nextSteps.contains(
+                "Accept the Xcode license once on this Mac before rerunning native verification."
+            )
+        )
+        XCTAssertTrue(
+            diagnostic.suggestedCommands.contains(
+                "sudo env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -license accept"
+            )
+        )
+        XCTAssertTrue(
+            diagnostic.suggestedCommands.contains(
+                "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run perchha-xcode-doctor --json --strict --project \(project.path) --scheme PerchHA"
+            )
+        )
+    }
+
+    func testXcodePreflightDiagnosticCarriesDiscoveredXcodeDeveloperDirectories() throws {
+        let directory = temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let applicationsDirectory = directory.appendingPathComponent("Applications", isDirectory: true)
+        let developerDirectory = try makeDiscoveredXcodeDeveloperDirectory(
+            in: applicationsDirectory,
+            appName: "Xcode-beta.app"
+        )
+        let report = PerchHAXcodePreflightReport(
+            projectAvailable: true,
+            sharedSchemeAvailable: true,
+            projectListingAvailable: false,
+            activeDeveloperDirectory: "/Library/Developer/CommandLineTools",
+            discoveredXcodeDeveloperDirectories: [developerDirectory.path],
+            fullXcodeSelected: false,
+            xctestAvailable: false,
+            xcodebuildAvailable: false,
+            issues: [
+                .commandLineToolsSelected("/Library/Developer/CommandLineTools"),
+                .xctestUnavailable(status: 72),
+                .xcodebuildUnavailable(status: 72)
+            ]
+        )
+        let diagnostic = report.diagnostic(
+            configuration: PerchHAXcodePreflightConfiguration(
+                projectURL: URL(fileURLWithPath: "/tmp/PerchHA.xcodeproj", isDirectory: true),
+                schemeName: "PerchHA"
+            )
+        )
+
+        XCTAssertEqual(diagnostic.discoveredXcodeDeveloperDirectories, [developerDirectory.path])
     }
 
     func testXcodeDoctorCommandSupportsScriptableJSONAndStrictMode() throws {
@@ -406,7 +631,7 @@ final class PerchHAPackagingTests: XCTestCase {
             XCTAssertEqual(diagnostic.projectListing, .ready)
             XCTAssertTrue(
                 diagnostic.suggestedCommands.contains(
-                    "swift test --disable-swift-testing --enable-xctest list"
+                    "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --disable-swift-testing --enable-xctest list"
                 )
             )
         } else {
@@ -2492,6 +2717,21 @@ final class PerchHAPackagingTests: XCTestCase {
         try "#!/bin/sh\nexit 0\n".write(to: toolURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: toolURL.path)
         return toolURL
+    }
+
+    private func makeDiscoveredXcodeDeveloperDirectory(in directory: URL, appName: String) throws -> URL {
+        let developerDirectory = directory
+            .appendingPathComponent(appName, isDirectory: true)
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("Developer", isDirectory: true)
+        let xcodebuildURL = developerDirectory
+            .appendingPathComponent("usr", isDirectory: true)
+            .appendingPathComponent("bin", isDirectory: true)
+            .appendingPathComponent("xcodebuild", isDirectory: false)
+        try FileManager.default.createDirectory(at: xcodebuildURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "#!/bin/sh\nexit 0\n".write(to: xcodebuildURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: xcodebuildURL.path)
+        return developerDirectory
     }
 
     private func launchServicesDump(appPath: String, scheme: String, claimRole: String) -> String {

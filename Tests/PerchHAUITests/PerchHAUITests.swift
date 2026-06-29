@@ -282,6 +282,30 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(insecureForm.selfSignedCertificateHosts(), Set<String>())
     }
 
+    func testConnectionFormNormalizesFrontendURLsToUsableBaseURLs() {
+        let form = PerchHAConnectionForm(
+            urlString: " https://HOME.gomoo.io/lovelace/0?dashboard=1#kitchen ",
+            fallbackURLString: "https://fallback.example/ha/history?entity=sensor.temp"
+        )
+
+        XCTAssertEqual(
+            PerchHAConnectionForm.normalizedHomeAssistantURLString(form.urlString),
+            "https://home.gomoo.io"
+        )
+        XCTAssertEqual(
+            PerchHAConnectionForm.normalizedHomeAssistantURLString(form.fallbackURLString),
+            "https://fallback.example/ha"
+        )
+        XCTAssertEqual(form.primaryURL()?.absoluteString, "https://home.gomoo.io")
+        XCTAssertEqual(form.fallbackURL()?.absoluteString, "https://fallback.example/ha")
+    }
+
+    func testConnectionFormKeepsProxyPrefixWhenNoFrontendRouteIsPresent() {
+        let form = PerchHAConnectionForm(urlString: "https://homeassistant.local/ha")
+
+        XCTAssertEqual(form.primaryURL()?.absoluteString, "https://homeassistant.local/ha")
+    }
+
     func testPanelConnectionFormForwardsSelfSignedCertificateAllowanceWithoutLeakingToken() async {
         let recorder = ConnectionFormRecorder()
         let model = PerchHAPanelModel { form in
@@ -3428,6 +3452,116 @@ final class PerchHAUITests: XCTestCase {
         }
     }
 
+    func testAppShellConnectionFormNormalizesFrontendURLsThroughNativeTextFields() throws {
+        let recorder = ConnectionFormRecorder()
+        let model = PerchHAPanelModel { form in
+            await recorder.record(form)
+            return .success(rooms: [])
+        }
+        let panel = PerchHAApplication.makePanel(model: model)
+        defer {
+            panel.orderOut(nil)
+            panel.contentViewController = nil
+        }
+
+        panel.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        let textFields = editableTextFields(in: panel.contentView)
+        let debugSummary = nativeControlDebugSummary(in: panel.contentView)
+        guard let urlField = textFields.first(where: { $0.placeholderString == "Home Assistant URL" }) else {
+            XCTFail(debugSummary)
+            return
+        }
+        guard let fallbackField = textFields.first(where: { $0.placeholderString == "Fallback URL" }) else {
+            XCTFail(debugSummary)
+            return
+        }
+
+        try setNativeTextFieldValue("https://home.gomoo.io/lovelace/0", for: urlField, in: panel)
+        try setNativeTextFieldValue("https://fallback.example/ha/history?entity=sensor.temp", for: fallbackField, in: panel)
+
+        XCTAssertEqual(model.snapshot.connectionForm.urlString, "https://home.gomoo.io")
+        XCTAssertEqual(model.snapshot.connectionForm.fallbackURLString, "https://fallback.example/ha")
+    }
+
+    func testAppShellConnectionFormUsesNativeSecurePasswordFieldForTokenEntry() {
+        let model = PerchHAPanelModel()
+        let panel = PerchHAApplication.makePanel(model: model)
+        defer {
+            panel.orderOut(nil)
+            panel.contentViewController = nil
+        }
+
+        panel.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        let secureFields = secureTextFields(in: panel.contentView)
+        let debugSummary = nativeControlDebugSummary(in: panel.contentView)
+        guard let tokenField = secureFields.first(where: { $0.placeholderString == "Access token" }) else {
+            XCTFail(debugSummary)
+            return
+        }
+
+        if #available(macOS 11.0, *) {
+            XCTAssertEqual(tokenField.contentType, .password)
+        }
+    }
+
+    func testAppShellConnectionFormSupportsCommandVPasteInStatusPanel() throws {
+        let model = PerchHAPanelModel()
+        let panel = PerchHAApplication.makePanel(model: model)
+        defer {
+            panel.orderOut(nil)
+            panel.contentViewController = nil
+        }
+
+        panel.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        let textFields = editableTextFields(in: panel.contentView)
+        let debugSummary = nativeControlDebugSummary(in: panel.contentView)
+        guard let urlField = textFields.first(where: { $0.placeholderString == "Home Assistant URL" }) else {
+            XCTFail(debugSummary)
+            return
+        }
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        XCTAssertTrue(pasteboard.setString("https://home.gomoo.io/lovelace/0", forType: .string))
+
+        XCTAssertTrue(panel.makeFirstResponder(urlField))
+        drainPanelRunLoop()
+        let firstResponder = panel.firstResponder as AnyObject?
+        let responder = urlField.currentEditor() ?? urlField
+        XCTAssertTrue(firstResponder === responder || firstResponder === urlField)
+
+        let event = try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [.command],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: panel.windowNumber,
+                context: nil,
+                characters: "v",
+                charactersIgnoringModifiers: "v",
+                isARepeat: false,
+                keyCode: 9
+            )
+        )
+
+        XCTAssertTrue(panel.performKeyEquivalent(with: event))
+        drainPanelRunLoop()
+        panel.endEditing(for: nil)
+        drainPanelRunLoop()
+
+        XCTAssertEqual(model.snapshot.connectionForm.urlString, "https://home.gomoo.io")
+    }
+
     func testAppShellSettingsCustomActionEditorMutatesNestedServiceDataThroughNativeTextFields() throws {
         let action = EntityCustomAction(
             id: "boost-air",
@@ -5150,6 +5284,64 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(secondApplication.snapshot.configurationPersistenceState, .ready)
     }
 
+    func testAppShellRemembersConnectionProfileAndStoredAccessTokenAcrossRelaunch() async throws {
+        let url = temporaryConfigURL()
+        let keychain = KeychainSecretStore(service: "dev.perchha.ui.tests.\(UUID().uuidString)")
+        let sessionStore = PerchHAAuthSessionStore(secretStore: keychain)
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+            _ = try? sessionStore.clear()
+        }
+
+        let firstApplication = PerchHAApplication(
+            configStore: JSONConfigStore(fileURL: url),
+            authSessionStore: sessionStore,
+            client: RefreshingHAClientRecorder(
+                discoveryResults: [.success(oauthDiscoverySnapshot())]
+            )
+        )
+        firstApplication.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        var firstApplicationIsRunning = true
+        defer {
+            if firstApplicationIsRunning {
+                firstApplication.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+            }
+        }
+
+        firstApplication.updateConnectionForm(
+            urlString: "https://homeassistant.local:8123/lovelace/0",
+            fallbackURLString: "https://fallback.example/ha/history",
+            token: "long-lived-token",
+            allowsSelfSignedCertificates: true
+        )
+        await firstApplication.connect()
+
+        XCTAssertEqual(try sessionStore.loadAccessToken(), "long-lived-token")
+        XCTAssertThrowsError(try sessionStore.load()) { error in
+            XCTAssertEqual(error as? SecretStoreError, .notFound(.refreshToken))
+        }
+
+        firstApplication.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        firstApplicationIsRunning = false
+
+        let secondApplication = PerchHAApplication(
+            configStore: JSONConfigStore(fileURL: url),
+            authSessionStore: sessionStore,
+            client: RefreshingHAClientRecorder()
+        )
+        secondApplication.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            secondApplication.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        XCTAssertEqual(secondApplication.snapshot.connectionForm.urlString, "https://homeassistant.local:8123")
+        XCTAssertEqual(secondApplication.snapshot.connectionForm.fallbackURLString, "https://fallback.example/ha")
+        XCTAssertEqual(secondApplication.snapshot.connectionForm.token, "")
+        XCTAssertTrue(secondApplication.snapshot.connectionForm.usesStoredAuthSession)
+        XCTAssertTrue(secondApplication.snapshot.connectionForm.allowsSelfSignedCertificates)
+        XCTAssertTrue(secondApplication.snapshot.hasTokenInput)
+    }
+
     func test_t_app_shell_reports_config_load_failure_and_blocks_save() {
         let store = FailingConfigStore(
             loadError: .malformedConfig(URL(fileURLWithPath: "/tmp/perchha-bad-config.json"), message: "bad json")
@@ -5482,6 +5674,21 @@ final class PerchHAUITests: XCTestCase {
         var result: [NSTextField] = []
         func collect(_ view: NSView) {
             if let textField = view as? NSTextField, !textField.isHiddenOrHasHiddenAncestor, textField.isEditable {
+                result.append(textField)
+            }
+            view.subviews.forEach(collect)
+        }
+        collect(root)
+        return result
+    }
+
+    private func secureTextFields(in root: NSView?) -> [NSSecureTextField] {
+        guard let root else {
+            return []
+        }
+        var result: [NSSecureTextField] = []
+        func collect(_ view: NSView) {
+            if let textField = view as? NSSecureTextField, !textField.isHiddenOrHasHiddenAncestor, textField.isEditable {
                 result.append(textField)
             }
             view.subviews.forEach(collect)

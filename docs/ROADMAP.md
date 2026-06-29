@@ -27,7 +27,7 @@ Implemented locally:
 - `swift test` compiles test targets in Command Line Tools environments.
 - `swift run perchha-smoke` runs.
 - CI runs on pull requests.
-- `perchha-xcode-doctor` reports checked-in project/scheme, `xcodebuild` project listing, and full-Xcode readiness from the active developer directory, `xctest`, and `xcodebuild`, with scriptable JSON output and strict preflight mode.
+- `perchha-xcode-doctor` reports checked-in project/scheme, `xcodebuild` project listing, discovered Xcode developer directories, local `DEVELOPER_DIR` overrides, Xcode license acceptance, and full-Xcode readiness from the active developer directory, `xctest`, and `xcodebuild`, with scriptable JSON output and strict preflight mode.
 - Full-Xcode CI selects Xcode, runs `perchha-xcode-doctor --json --strict`, lists XCTest cases with `swift test --disable-swift-testing --enable-xctest list`, and runs XCTest coverage gates.
 - `PerchHA.xcodeproj` declares a thin app target that uses the local Swift package library product, menu-bar `Info.plist`, OAuth callback scheme, and shared `PerchHA` scheme.
 - CI lints Xcode project, scheme, and `Info.plist` metadata.

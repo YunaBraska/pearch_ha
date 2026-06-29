@@ -3113,7 +3113,8 @@ final class PerchHAClientTests: XCTestCase {
             HAMirrorCaptureProbeReport(
                 primary: HAMirrorCaptureEndpointProbe(
                     state: .ready,
-                    message: "Home Assistant API responded successfully"
+                    message: "Home Assistant API responded successfully",
+                    guidance: nil
                 ),
                 fallback: nil
             )
@@ -3146,11 +3147,42 @@ final class PerchHAClientTests: XCTestCase {
 
         XCTAssertEqual(report.primary.state, .unavailable)
         XCTAssertEqual(report.primary.message, "Home Assistant request for /api/ failed: Could not connect to the server.")
+        XCTAssertEqual(
+            report.primary.guidance,
+            "Verify the Home Assistant URL, local network or VPN reachability, DNS, and that the instance is running."
+        )
         XCTAssertEqual(report.fallback?.state, .blocked)
         XCTAssertEqual(report.fallback?.message, "Home Assistant returned HTTP 401 for /api/")
+        XCTAssertEqual(
+            report.fallback?.guidance,
+            "Refresh the long-lived access token and verify it belongs to this Home Assistant instance."
+        )
         XCTAssertFalse(report.anyReady)
         XCTAssertFalse(report.primary.message.contains("primary.local"))
         XCTAssertFalse(report.fallback?.message.contains("fallback.example") == true)
+    }
+
+    func testMirrorProbeReportsMissingTokenGuidance() async throws {
+        let transport = RecordingMirrorTransport()
+        let service = HAMirrorCaptureService(transport: transport)
+        let environment = HAMirrorEnvironment(
+            primaryURL: try XCTUnwrap(URL(string: "http://127.0.0.1:8123")),
+            fallbackURL: nil,
+            token: nil,
+            user: nil,
+            password: nil
+        )
+
+        let report = await service.probe(environment: environment)
+
+        XCTAssertEqual(report.primary.state, .blocked)
+        XCTAssertEqual(report.primary.message, "missing token in environment file")
+        XCTAssertEqual(
+            report.primary.guidance,
+            "Set token=... in the env file or export PERCHHA_HA_TOKEN before probing Home Assistant."
+        )
+        let requests = await transport.requests
+        XCTAssertTrue(requests.isEmpty)
     }
 
     func testMirrorCaptureFallsBackToConfiguredFallbackURLOnPrimaryTransportFailure() async throws {

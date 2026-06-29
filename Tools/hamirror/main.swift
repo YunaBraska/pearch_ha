@@ -155,20 +155,26 @@ struct HAMirrorCommand {
             if let liveProbe {
                 print("- Live probe: \(liveProbe.anyReady ? "ready" : "blocked")")
                 print("- Primary /api/: \(liveProbe.primary.state.rawValue) - \(liveProbe.primary.message)")
+                if let guidance = liveProbe.primary.guidance {
+                    print("  hint: \(guidance)")
+                }
                 if let fallback = liveProbe.fallback {
                     print("- Fallback /api/: \(fallback.state.rawValue) - \(fallback.message)")
+                    if let guidance = fallback.guidance {
+                        print("  hint: \(guidance)")
+                    }
                 }
             }
             if !report.issues.isEmpty {
                 print("Issues:")
                 report.issues.forEach { print("- \($0.description)") }
             }
-            let nextSteps = report.nextSteps(envPath: envPath)
+            let nextSteps = doctorNextSteps(report: report, envPath: envPath, probe: liveProbe)
             if !nextSteps.isEmpty {
                 print("Next steps:")
                 nextSteps.forEach { print("- \($0)") }
             }
-            let suggestedCommands = report.suggestedCommands(envPath: envPath)
+            let suggestedCommands = doctorSuggestedCommands(report: report, envPath: envPath, probe: liveProbe)
             if !suggestedCommands.isEmpty {
                 print("Suggested commands:")
                 suggestedCommands.forEach { print("- \($0)") }
@@ -179,7 +185,7 @@ struct HAMirrorCommand {
             throw CommandError.mirrorEnvironmentBlocked(report.blockingMessages(envPath: envPath))
         }
         if options.has("--strict"), let liveProbe, !liveProbe.anyReady {
-            throw CommandError.mirrorEnvironmentBlocked(
+            throw CommandError.liveProbeBlocked(
                 probeBlockingMessages(probe: liveProbe)
             )
         }
@@ -282,7 +288,7 @@ struct HAMirrorCommand {
 
     Capture reads url, url2, and token from the env file. It tries url first and reuses url2 when the primary capture endpoint fails. User/password are not sent to REST.
     Capture with --write re-verifies the written fixture set immediately; private outputs under Fixtures/private/ also prove they stay ignored by Git.
-    Doctor prints redacted key presence/status plus next-step hints. Pass --probe for a live /api/ probe against primary and fallback URLs, --json for scriptable output, and --strict to fail when capture is blocked.
+    Doctor prints redacted key presence/status plus next-step hints. Pass --probe for a live /api/ probe against primary and fallback URLs with endpoint-specific remediation hints, --json for scriptable output, and --strict to fail when capture is blocked.
     OAuth check reads only PERCHHA_OAUTH_CLIENT_ID and PERCHHA_OAUTH_REDIRECT_URI, and reports redacted readiness guidance when they are missing.
     """
 
@@ -384,11 +390,63 @@ struct HAMirrorCommand {
     private static func probeBlockingMessages(
         probe: HAMirrorCaptureProbeReport
     ) -> [String] {
-        var messages = [probe.primary.message]
+        var messages = [probeSummary(label: "primary", endpoint: probe.primary)]
         if let fallback = probe.fallback {
-            messages.append(fallback.message)
+            messages.append(probeSummary(label: "fallback", endpoint: fallback))
         }
         return messages
+    }
+
+    private static func doctorNextSteps(
+        report: HAMirrorEnvironmentReadinessReport,
+        envPath: String,
+        probe: HAMirrorCaptureProbeReport?
+    ) -> [String] {
+        var steps = report.nextSteps(envPath: envPath)
+        guard let probe else {
+            return steps
+        }
+        if !probe.anyReady {
+            steps.append(contentsOf: probeEndpointNextSteps(label: "Primary", endpoint: probe.primary))
+            if let fallback = probe.fallback {
+                steps.append(contentsOf: probeEndpointNextSteps(label: "Fallback", endpoint: fallback))
+            }
+        }
+        return steps
+    }
+
+    private static func doctorSuggestedCommands(
+        report: HAMirrorEnvironmentReadinessReport,
+        envPath: String,
+        probe: HAMirrorCaptureProbeReport?
+    ) -> [String] {
+        guard probe?.anyReady != false else {
+            return report.canCheckOAuthClientWebsite
+                ? ["swift run hamirror oauth-check --env \(shellQuoted(envPath))"]
+                : []
+        }
+        return report.suggestedCommands(envPath: envPath)
+    }
+
+    private static func probeEndpointNextSteps(
+        label: String,
+        endpoint: HAMirrorCaptureEndpointProbe
+    ) -> [String] {
+        guard let guidance = endpoint.guidance else {
+            return []
+        }
+        return ["\(label) probe: \(guidance)"]
+    }
+
+    private static func probeSummary(
+        label: String,
+        endpoint: HAMirrorCaptureEndpointProbe
+    ) -> String {
+        let prefix = "\(label) \(endpoint.state.rawValue): \(endpoint.message)"
+        guard let guidance = endpoint.guidance else {
+            return prefix
+        }
+        return "\(prefix) Hint: \(guidance)"
     }
 
     private static func renderDoctorProbeJSON(
@@ -397,18 +455,24 @@ struct HAMirrorCommand {
         probe: HAMirrorCaptureProbeReport
     ) throws -> String {
         let baseDiagnostic = report.diagnostic(envPath: envPath)
+        let nextSteps = doctorNextSteps(report: report, envPath: envPath, probe: probe)
+        let suggestedCommands = doctorSuggestedCommands(report: report, envPath: envPath, probe: probe)
+        let primaryObject: [String: Any] = [
+            "state": probe.primary.state.rawValue,
+            "message": probe.primary.message,
+            "guidance": probe.primary.guidance as Any
+        ]
+        let fallbackObject: Any = probe.fallback.map { endpoint in
+            [
+                "state": endpoint.state.rawValue,
+                "message": endpoint.message,
+                "guidance": endpoint.guidance as Any
+            ] as [String: Any]
+        } ?? NSNull()
         let probeObject: [String: Any] = [
             "ready": probe.anyReady,
-            "primary": [
-                "state": probe.primary.state.rawValue,
-                "message": probe.primary.message
-            ],
-            "fallback": probe.fallback.map {
-                [
-                    "state": $0.state.rawValue,
-                    "message": $0.message
-                ]
-            } ?? NSNull()
+            "primary": primaryObject,
+            "fallback": fallbackObject
         ]
         let object: [String: Any] = [
             "envPath": baseDiagnostic.envPath,
@@ -427,12 +491,21 @@ struct HAMirrorCommand {
                     "description": $0.description
                 ]
             },
-            "nextSteps": baseDiagnostic.nextSteps,
-            "suggestedCommands": baseDiagnostic.suggestedCommands,
+            "nextSteps": nextSteps,
+            "suggestedCommands": suggestedCommands,
             "probe": probeObject
         ]
         let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
         return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
+    private static func shellQuoted(_ value: String) -> String {
+        let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "/._-"))
+        if !value.isEmpty && value.unicodeScalars.allSatisfy({ safe.contains($0) }) {
+            return value
+        }
+        let escaped = value.replacingOccurrences(of: "'", with: "'\"'\"'")
+        return "'\(escaped)'"
     }
 
     private static func parseOptions(
@@ -460,6 +533,7 @@ enum CommandError: Error, CustomStringConvertible {
     case missingValue(String)
     case conflictingOptions(String, String)
     case mirrorEnvironmentBlocked([String])
+    case liveProbeBlocked([String])
     case oauthEnvironmentBlocked([String])
     case fixtureOutputNotIgnored(String)
     case fixtureOutputOutsideRepository(String)
@@ -490,6 +564,8 @@ enum CommandError: Error, CustomStringConvertible {
             "conflicting options: \(first) and \(second)"
         case let .mirrorEnvironmentBlocked(issues):
             "mirror environment is not capture-ready: \(issues.joined(separator: "; "))"
+        case let .liveProbeBlocked(issues):
+            "mirror live probe is not ready: \(issues.joined(separator: "; "))"
         case let .oauthEnvironmentBlocked(issues):
             "OAuth client website check is not ready: \(issues.joined(separator: "; "))"
         case let .fixtureOutputNotIgnored(path):

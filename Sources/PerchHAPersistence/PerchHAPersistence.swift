@@ -30,6 +30,7 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
     public let menuBarEntityIDs: [EntityID]
     public let menuBarItemConfigurations: [MenuBarItemConfiguration]
     public let customActions: [EntityCustomAction]
+    public let connectionProfile: PerchHAConnectionProfile?
     public let roomOrder: [RoomID]
     public let entityOrder: [EntityID]
     public let isEntitySelectionExplicit: Bool
@@ -40,6 +41,7 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         menuBarEntityIDs: [EntityID] = [],
         menuBarItemConfigurations: [MenuBarItemConfiguration] = [],
         customActions: [EntityCustomAction] = [],
+        connectionProfile: PerchHAConnectionProfile? = nil,
         roomOrder: [RoomID] = [],
         entityOrder: [EntityID] = [],
         isEntitySelectionExplicit: Bool = false
@@ -49,6 +51,7 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         self.menuBarEntityIDs = menuBarEntityIDs
         self.menuBarItemConfigurations = menuBarItemConfigurations
         self.customActions = customActions
+        self.connectionProfile = connectionProfile
         self.roomOrder = roomOrder
         self.entityOrder = entityOrder
         self.isEntitySelectionExplicit = isEntitySelectionExplicit
@@ -84,6 +87,7 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         case menuBarEntityIDs
         case menuBarItemConfigurations
         case customActions
+        case connectionProfile
         case roomOrder
         case entityOrder
         case isEntitySelectionExplicit
@@ -104,9 +108,26 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
             )
         }
         customActions = decodedCustomActions
+        connectionProfile = try container.decodeIfPresent(PerchHAConnectionProfile.self, forKey: .connectionProfile)
         roomOrder = try container.decodeIfPresent([RoomID].self, forKey: .roomOrder) ?? []
         entityOrder = try container.decodeIfPresent([EntityID].self, forKey: .entityOrder) ?? []
         isEntitySelectionExplicit = try container.decodeIfPresent(Bool.self, forKey: .isEntitySelectionExplicit) ?? false
+    }
+}
+
+public struct PerchHAConnectionProfile: Equatable, Codable, Sendable {
+    public let urlString: String
+    public let fallbackURLString: String
+    public let allowsSelfSignedCertificates: Bool
+
+    public init(
+        urlString: String,
+        fallbackURLString: String = "",
+        allowsSelfSignedCertificates: Bool = false
+    ) {
+        self.urlString = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.fallbackURLString = fallbackURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.allowsSelfSignedCertificates = allowsSelfSignedCertificates
     }
 }
 
@@ -327,6 +348,24 @@ public struct PerchHAAuthSessionStore: Sendable {
             refreshToken: secretStore.read(.refreshToken),
             clientID: clientID
         )
+    }
+
+    public func loadAccessToken() throws -> String {
+        try secretStore.read(.accessToken)
+    }
+
+    @discardableResult
+    public func saveAccessToken(_ accessToken: String) throws -> SecretWriteResult {
+        let previousValues = try snapshots(for: [.accessToken, .refreshToken, .oauthClientID])
+        do {
+            let accessTokenResult = try secretStore.save(accessToken.trimmingCharacters(in: .whitespacesAndNewlines), for: .accessToken)
+            _ = try secretStore.delete(.refreshToken)
+            _ = try secretStore.delete(.oauthClientID)
+            return accessTokenResult
+        } catch {
+            try restore(previousValues)
+            throw error
+        }
     }
 
     @discardableResult

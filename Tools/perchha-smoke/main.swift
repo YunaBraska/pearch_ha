@@ -65,6 +65,7 @@ struct PerchHASmoke {
         try await verifyTestClock()
         try await verifyMirrorAndFakeHA()
         try await verifyHAMirrorDoctorCLIUsesExportedOverrides()
+        try await verifyHAMirrorDoctorProbeReportsLiveGuidance()
         try await verifyHAMirrorOAuthCheckReportsMissingConfigurationGuidance()
         try await verifyHAMirrorCaptureCLI()
         try await verifyHAMirrorServeCLI()
@@ -856,6 +857,117 @@ struct PerchHASmoke {
         try expect(diagnostic.token == .present, "hamirror doctor CLI reports present token without exposing it")
         try expect(diagnostic.oauthClientID == .present, "hamirror doctor CLI reports present OAuth client ID override")
         try expect(diagnostic.oauthRedirectURI == .present, "hamirror doctor CLI reports present OAuth redirect URI override")
+    }
+
+    private static func verifyHAMirrorDoctorProbeReportsLiveGuidance() async throws {
+        let fallbackServer = try FakeHARESTServer()
+        fallbackServer.start()
+        defer {
+            fallbackServer.stop()
+        }
+
+        let envURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("perchha-smoke-hamirror-doctor-probe-\(UUID().uuidString).env", isDirectory: false)
+        defer {
+            try? FileManager.default.removeItem(at: envURL)
+        }
+
+        try """
+        url=http://127.0.0.1:1
+        url2=\(fallbackServer.baseURL.absoluteString)
+        token=wrong-token
+        """.write(to: envURL, atomically: true, encoding: .utf8)
+
+        let executable = try toolExecutable(named: "hamirror")
+        let output = try runHAMirrorProcess(
+            executable: executable,
+            arguments: [
+                "doctor",
+                "--env", envURL.path,
+                "--probe"
+            ],
+            environment: [:]
+        )
+
+        try expect(output.terminationStatus == 0, "hamirror doctor --probe succeeds without strict mode")
+        try expect(
+            output.text.contains("- Primary /api/: unavailable - Home Assistant request for /api/ failed: Could not connect to the server."),
+            "hamirror doctor --probe reports primary transport failure"
+        )
+        try expect(
+            output.text.contains("hint: Verify the Home Assistant URL, local network or VPN reachability, DNS, and that the instance is running."),
+            "hamirror doctor --probe suggests transport remediation"
+        )
+        try expect(
+            output.text.contains("- Fallback /api/: blocked - Home Assistant returned HTTP 401 for /api/"),
+            "hamirror doctor --probe reports fallback authorization failure"
+        )
+        try expect(
+            output.text.contains("hint: Refresh the long-lived access token and verify it belongs to this Home Assistant instance."),
+            "hamirror doctor --probe suggests token remediation"
+        )
+        try expect(
+            !output.text.contains("swift run hamirror capture --env"),
+            "hamirror doctor --probe omits capture suggestion when no live endpoint is ready"
+        )
+        try expect(
+            !output.text.contains(fallbackServer.baseURL.absoluteString),
+            "hamirror doctor --probe keeps live endpoint URLs redacted"
+        )
+
+        let strictOutput = try runHAMirrorProcess(
+            executable: executable,
+            arguments: [
+                "doctor",
+                "--env", envURL.path,
+                "--probe",
+                "--strict"
+            ],
+            environment: [:]
+        )
+
+        try expect(strictOutput.terminationStatus != 0, "hamirror doctor --probe --strict fails when no endpoint is ready")
+        try expect(
+            strictOutput.text.contains("mirror live probe is not ready"),
+            "hamirror doctor --probe --strict reports live probe failure precisely"
+        )
+        try expect(
+            strictOutput.text.contains("primary unavailable: Home Assistant request for /api/ failed: Could not connect to the server. Hint: Verify the Home Assistant URL, local network or VPN reachability, DNS, and that the instance is running."),
+            "hamirror doctor --probe --strict labels the primary failure and carries guidance"
+        )
+        try expect(
+            strictOutput.text.contains("fallback blocked: Home Assistant returned HTTP 401 for /api/ Hint: Refresh the long-lived access token and verify it belongs to this Home Assistant instance."),
+            "hamirror doctor --probe --strict labels the fallback failure and carries guidance"
+        )
+
+        let jsonOutput = try runHAMirrorProcess(
+            executable: executable,
+            arguments: [
+                "doctor",
+                "--env", envURL.path,
+                "--probe",
+                "--json"
+            ],
+            environment: [:]
+        )
+
+        try expect(jsonOutput.terminationStatus == 0, "hamirror doctor --probe --json succeeds")
+        guard let object = try JSONSerialization.jsonObject(with: Data(jsonOutput.text.utf8)) as? [String: Any] else {
+            throw SmokeFailure("hamirror doctor --probe --json emitted a non-object payload")
+        }
+        guard let probe = object["probe"] as? [String: Any] else {
+            throw SmokeFailure("hamirror doctor --probe --json omitted the probe object")
+        }
+        guard let primary = probe["primary"] as? [String: Any] else {
+            throw SmokeFailure("hamirror doctor --probe --json omitted the primary probe object")
+        }
+        guard let fallback = probe["fallback"] as? [String: Any] else {
+            throw SmokeFailure("hamirror doctor --probe --json omitted the fallback probe object")
+        }
+        try expect(primary["guidance"] as? String == "Verify the Home Assistant URL, local network or VPN reachability, DNS, and that the instance is running.", "hamirror doctor --probe --json exports primary guidance")
+        try expect(fallback["guidance"] as? String == "Refresh the long-lived access token and verify it belongs to this Home Assistant instance.", "hamirror doctor --probe --json exports fallback guidance")
+        let suggestedCommands = probe["ready"] as? Bool == false ? (object["suggestedCommands"] as? [String] ?? []) : []
+        try expect(suggestedCommands.isEmpty, "hamirror doctor --probe --json omits capture suggestion when no live endpoint is ready")
     }
 
     private static func verifyHAMirrorOAuthCheckReportsMissingConfigurationGuidance() async throws {

@@ -62,15 +62,59 @@ public struct PerchHAConnectionForm: Equatable, Sendable {
         return nil
     }
 
-    private static func validURL(_ text: String) -> URL? {
+    static func normalizedHomeAssistantURLString(_ text: String) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: trimmed),
+        guard !trimmed.isEmpty,
+              var components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              let host = components.host?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !host.isEmpty
+        else {
+            return trimmed
+        }
+
+        components.scheme = scheme
+        components.host = host.lowercased()
+        components.user = nil
+        components.password = nil
+        components.query = nil
+        components.fragment = nil
+        components.path = normalizedHomeAssistantBasePath(components.path)
+
+        return components.url?.absoluteString ?? trimmed
+    }
+
+    private static func validURL(_ text: String) -> URL? {
+        let normalized = normalizedHomeAssistantURLString(text)
+        guard let url = URL(string: normalized),
               ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
               url.host?.isEmpty == false
         else {
             return nil
         }
         return url
+    }
+
+    private static func normalizedHomeAssistantBasePath(_ path: String) -> String {
+        let segments = path
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+        guard !segments.isEmpty else {
+            return ""
+        }
+
+        let trimmedSegments: [String]
+        if let frontendIndex = segments.firstIndex(where: { frontendRouteSegments.contains($0.lowercased()) }) {
+            trimmedSegments = Array(segments[..<frontendIndex])
+        } else {
+            trimmedSegments = segments
+        }
+
+        guard !trimmedSegments.isEmpty else {
+            return ""
+        }
+        return "/" + trimmedSegments.joined(separator: "/")
     }
 
     private static func secureHost(_ url: URL?) -> String? {
@@ -82,6 +126,17 @@ public struct PerchHAConnectionForm: Equatable, Sendable {
         }
         return host
     }
+
+    private static let frontendRouteSegments: Set<String> = [
+        "areas",
+        "config",
+        "dashboard",
+        "developer-tools",
+        "energy",
+        "history",
+        "lovelace",
+        "map"
+    ]
 }
 
 public enum PerchHAConnectionAttemptResult: Equatable, Sendable {
@@ -4129,17 +4184,32 @@ public struct PerchHAPanelView: View {
 
     private var connectionForm: some View {
         VStack(alignment: .leading, spacing: 10) {
-            TextField(
-                "Home Assistant URL",
-                text: urlBinding
+            PerchHANativeTextField(
+                placeholder: "Home Assistant URL",
+                text: urlBinding,
+                contentType: {
+                    if #available(macOS 14.0, *) {
+                        return .URL
+                    }
+                    return nil
+                }(),
+                normalizeOnCommit: PerchHAConnectionForm.normalizedHomeAssistantURLString
             )
-            TextField(
-                "Fallback URL",
-                text: fallbackURLBinding
+            PerchHANativeTextField(
+                placeholder: "Fallback URL",
+                text: fallbackURLBinding,
+                contentType: {
+                    if #available(macOS 14.0, *) {
+                        return .URL
+                    }
+                    return nil
+                }(),
+                normalizeOnCommit: PerchHAConnectionForm.normalizedHomeAssistantURLString
             )
-            SecureField(
-                "Access token",
-                text: tokenBinding
+            PerchHANativeSecureField(
+                placeholder: "Access token",
+                text: tokenBinding,
+                contentType: .password
             )
             Toggle(
                 "Self-signed cert for current HTTPS hosts",
@@ -5836,6 +5906,148 @@ private extension PerchHAPanelSnapshot {
             true
         case .firstRun, .connecting, .reconnecting, .failed, .failedStale:
             false
+        }
+    }
+}
+
+@MainActor
+private struct PerchHANativeTextField: NSViewRepresentable {
+    let placeholder: String
+    @Binding var text: String
+    let contentType: NSTextContentType?
+    let normalizeOnCommit: ((String) -> String)?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField()
+        configure(field)
+        field.delegate = context.coordinator
+        return field
+    }
+
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        context.coordinator.parent = self
+        configure(nsView)
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+    }
+
+    private func configure(_ field: NSTextField) {
+        field.placeholderString = placeholder
+        field.isEditable = true
+        field.isSelectable = true
+        field.isBezeled = true
+        field.bezelStyle = .roundedBezel
+        field.drawsBackground = true
+        field.usesSingleLineMode = true
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byTruncatingTail
+        field.focusRingType = .default
+        field.setAccessibilityLabel(placeholder)
+        if field.stringValue != text {
+            field.stringValue = text
+        }
+        if #available(macOS 11.0, *) {
+            field.contentType = contentType
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: PerchHANativeTextField
+
+        init(parent: PerchHANativeTextField) {
+            self.parent = parent
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else {
+                return
+            }
+            parent.text = field.stringValue
+        }
+
+        func controlTextDidEndEditing(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else {
+                return
+            }
+            commit(field)
+        }
+
+        private func commit(_ field: NSTextField) {
+            let normalized = parent.normalizeOnCommit?(field.stringValue) ?? field.stringValue
+            if field.stringValue != normalized {
+                field.stringValue = normalized
+            }
+            if parent.text != normalized {
+                parent.text = normalized
+            }
+        }
+    }
+}
+
+@MainActor
+private struct PerchHANativeSecureField: NSViewRepresentable {
+    let placeholder: String
+    @Binding var text: String
+    let contentType: NSTextContentType?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSSecureTextField {
+        let field = NSSecureTextField()
+        configure(field)
+        field.delegate = context.coordinator
+        return field
+    }
+
+    func updateNSView(_ nsView: NSSecureTextField, context: Context) {
+        context.coordinator.parent = self
+        configure(nsView)
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+    }
+
+    private func configure(_ field: NSSecureTextField) {
+        field.placeholderString = placeholder
+        field.isEditable = true
+        field.isSelectable = true
+        field.isBezeled = true
+        field.bezelStyle = .roundedBezel
+        field.drawsBackground = true
+        field.usesSingleLineMode = true
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byTruncatingTail
+        field.focusRingType = .default
+        field.setAccessibilityLabel(placeholder)
+        if field.stringValue != text {
+            field.stringValue = text
+        }
+        if #available(macOS 11.0, *) {
+            field.contentType = contentType
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: PerchHANativeSecureField
+
+        init(parent: PerchHANativeSecureField) {
+            self.parent = parent
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else {
+                return
+            }
+            parent.text = field.stringValue
         }
     }
 }

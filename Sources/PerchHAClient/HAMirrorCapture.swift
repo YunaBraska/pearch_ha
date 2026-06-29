@@ -119,10 +119,12 @@ public enum HAMirrorCaptureProbeState: String, Codable, Equatable, Sendable {
 public struct HAMirrorCaptureEndpointProbe: Codable, Equatable, Sendable {
     public let state: HAMirrorCaptureProbeState
     public let message: String
+    public let guidance: String?
 
-    public init(state: HAMirrorCaptureProbeState, message: String) {
+    public init(state: HAMirrorCaptureProbeState, message: String, guidance: String? = nil) {
         self.state = state
         self.message = message
+        self.guidance = guidance
     }
 
     public var isReady: Bool {
@@ -320,7 +322,8 @@ public struct HAMirrorCaptureService: Sendable {
         guard let token, !token.isEmpty else {
             return HAMirrorCaptureEndpointProbe(
                 state: .blocked,
-                message: HAMirrorCaptureError.missingToken.description
+                message: HAMirrorCaptureError.missingToken.description,
+                guidance: "Set token=... in the env file or export PERCHHA_HA_TOKEN before probing Home Assistant."
             )
         }
         do {
@@ -339,19 +342,48 @@ public struct HAMirrorCaptureService: Sendable {
     private func probe(from error: HAMirrorCaptureError) -> HAMirrorCaptureEndpointProbe {
         switch error {
         case .missingToken:
-            return HAMirrorCaptureEndpointProbe(state: .blocked, message: error.description)
+            return HAMirrorCaptureEndpointProbe(
+                state: .blocked,
+                message: error.description,
+                guidance: "Set token=... in the env file or export PERCHHA_HA_TOKEN before probing Home Assistant."
+            )
         case let .unexpectedStatus(_, statusCode):
             let state: HAMirrorCaptureProbeState = statusCode == 401 || statusCode == 403 ? .blocked : .unavailable
-            return HAMirrorCaptureEndpointProbe(state: state, message: error.description)
+            return HAMirrorCaptureEndpointProbe(
+                state: state,
+                message: error.description,
+                guidance: probeHTTPStatusGuidance(statusCode: statusCode)
+            )
         case .webSocketAuthentication:
-            return HAMirrorCaptureEndpointProbe(state: .blocked, message: error.description)
+            return HAMirrorCaptureEndpointProbe(
+                state: .blocked,
+                message: error.description,
+                guidance: "Refresh the long-lived access token and verify it belongs to this Home Assistant instance."
+            )
         case .nonHTTPResponse,
              .invalidPath,
              .transportFailure,
              .primaryAndFallbackFailed,
              .webSocketProtocol,
              .webSocketTimeout:
-            return HAMirrorCaptureEndpointProbe(state: .unavailable, message: error.description)
+            return HAMirrorCaptureEndpointProbe(
+                state: .unavailable,
+                message: error.description,
+                guidance: "Verify the Home Assistant URL, local network or VPN reachability, DNS, and that the instance is running."
+            )
+        }
+    }
+
+    private func probeHTTPStatusGuidance(statusCode: Int) -> String? {
+        switch statusCode {
+        case 401, 403:
+            return "Refresh the long-lived access token and verify it belongs to this Home Assistant instance."
+        case 404:
+            return "Verify the Home Assistant base URL and reverse-proxy path. The probe expects /api/ to exist on this host."
+        case 500...599:
+            return "Home Assistant is reachable but unhealthy. Check the server logs and wait for the instance to finish starting."
+        default:
+            return "Verify the Home Assistant URL and that this instance allows API access at /api/."
         }
     }
 
