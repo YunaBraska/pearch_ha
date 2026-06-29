@@ -4477,23 +4477,20 @@ public struct PerchHAPanelView: View {
                 .fill(connectionStatusColor)
                 .frame(width: 8, height: 8)
                 .accessibilityHidden(true)
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
+            PerchHACapsuleField(systemImage: "magnifyingglass") {
                 PerchHANativeTextField(
                     placeholder: "Search",
                     text: $panelSearch,
                     contentType: nil,
-                    normalizeOnCommit: nil
+                    normalizeOnCommit: nil,
+                    isBezeled: false
                 )
-                .frame(height: 20)
+                .frame(height: 18)
             }
             refreshButton
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.vertical, 7)
     }
 
     private var statusBar: some View {
@@ -4610,13 +4607,13 @@ public struct PerchHAPanelView: View {
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 4)
-            PerchHACard {
+            PerchHACard(cornerRadius: 12) {
                 VStack(spacing: 0) {
                     ForEach(Array(room.entities.enumerated()), id: \.element.id.rawValue) { index, entity in
                         entityRow(entity)
                         if index < room.entities.count - 1 {
                             Divider()
-                                .padding(.leading, 42)
+                                .padding(.leading, 46)
                         }
                     }
                 }
@@ -4627,26 +4624,36 @@ public struct PerchHAPanelView: View {
     private func entityRow(_ entity: DiscoveredEntity) -> some View {
         let value = entityValue(entity)
         let presentation = rowPresentation(for: entity)
+        let ringHero = ringGaugeHero(presentation: presentation, available: value.status == .available)
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 10) {
-                Image(systemName: entityIconName(for: entity))
-                    .font(.system(size: 14))
-                    .frame(width: 24, alignment: .center)
-                    .foregroundStyle(value.status == .available ? PerchHATheme.accent : Color.secondary)
-                    .accessibilityHidden(true)
+                if let gauge = ringHero {
+                    ringGaugeAnchor(gauge: gauge, value: value)
+                } else {
+                    Image(systemName: entityIconName(for: entity))
+                        .font(.system(size: 14))
+                        .frame(width: 24, alignment: .center)
+                        .foregroundStyle(value.status == .available ? PerchHATheme.accent : Color.secondary)
+                        .accessibilityHidden(true)
+                }
                 VStack(alignment: .leading, spacing: 1) {
-                    rowHero(entity: entity, value: value, presentation: presentation)
+                    if ringHero == nil {
+                        rowHero(entity: entity, value: value, presentation: presentation)
+                    }
                     Text(entity.name)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
-                rowAccessory(entity: entity, value: value, presentation: presentation)
+                if ringHero == nil {
+                    rowAccessory(entity: entity, value: value, presentation: presentation)
+                }
                 if let control = model.snapshot.control(for: entity) {
                     Toggle("", isOn: entityControlBinding(for: entity))
                         .labelsHidden()
                         .toggleStyle(.switch)
+                        .tint(PerchHATheme.accent)
                         .controlSize(.small)
                         .disabled(control.isRunning)
                         .help(entityControlHelp(for: entity, control: control))
@@ -4749,7 +4756,7 @@ public struct PerchHAPanelView: View {
     }
 
     private func coverButtons(for entity: DiscoveredEntity, control: PerchHACoverControl) -> some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 4) {
             coverButton(
                 icon: "arrow.up.to.line",
                 label: "Open \(entity.name)",
@@ -4785,11 +4792,9 @@ public struct PerchHAPanelView: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            Image(systemName: icon)
-                .frame(width: 18, height: 18)
+            PerchHACircularIconLabel(icon: icon, disabled: disabled)
         }
         .buttonStyle(.borderless)
-        .controlSize(.small)
         .disabled(disabled)
         .help(help)
         .accessibilityLabel(label)
@@ -4860,24 +4865,39 @@ public struct PerchHAPanelView: View {
     }
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: 6) {
             if let problem = model.snapshot.problemDescription {
                 Text(problem)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .accessibilityLabel("Status: \(problem)")
             }
-            Spacer()
-            Button("Settings") {
+            Spacer(minLength: 4)
+            Button {
                 openSettings()
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+                    .labelStyle(.titleAndIcon)
+                    .lineLimit(1)
             }
+            .buttonStyle(PerchHAIconButtonStyle())
             .disabled(model.snapshot.availableRooms.isEmpty)
-            Button("Quit") {
+            .help("Settings")
+            .accessibilityLabel("Settings")
+            Button {
                 NSApplication.shared.terminate(nil)
+            } label: {
+                Label("Quit", systemImage: "power")
+                    .labelStyle(.titleAndIcon)
+                    .lineLimit(1)
             }
+            .buttonStyle(PerchHAIconButtonStyle())
+            .help("Quit")
+            .accessibilityLabel("Quit")
         }
         .font(.footnote)
-        .padding(14)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
     }
 
     private func entityValue(_ entity: DiscoveredEntity) -> FormattedEntityValue {
@@ -4913,7 +4933,7 @@ public struct PerchHAPanelView: View {
             statePill(text: value.text, isActive: isActive, available: value.status == .available)
         } else {
             Text(value.text)
-                .font(.title3)
+                .font(.title2)
                 .fontWeight(.medium)
                 .monospacedDigit()
                 .lineLimit(1)
@@ -4935,14 +4955,15 @@ public struct PerchHAPanelView: View {
     }
 
     private func statePill(text: String, isActive: Bool, available: Bool) -> some View {
-        let color = available ? (isActive ? PerchHATheme.accent : Color.secondary) : Color.secondary
+        let isAccent = isActive && available
         return Text(text)
             .font(.caption.weight(.semibold))
-            .foregroundStyle(isActive && available ? color : .secondary)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 2)
+            .foregroundStyle(isAccent ? Color.white : Color.secondary)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 3)
             .background(
-                Capsule().fill(color.opacity(isActive && available ? 0.16 : 0.10))
+                Capsule(style: .continuous)
+                    .fill(isAccent ? PerchHATheme.accent : Color.primary.opacity(0.08))
             )
             .accessibilityHidden(true)
     }
@@ -4972,11 +4993,43 @@ public struct PerchHAPanelView: View {
                 .frame(width: 22, height: 22)
         case .bar:
             PerchHAEntityGaugeView(gauge: gauge)
-                .frame(width: 48, height: 8)
+                .frame(width: 60, height: 10)
         case .battery:
             PerchHAEntityGaugeView(gauge: gauge)
-                .frame(width: 30, height: 16)
+                .frame(width: 36, height: 18)
         }
+    }
+
+    /// The ring gauge to draw as the row's leading anchor, or `nil` when the row
+    /// is not an available ring-style gauge (bar/battery/value/pill rows keep the
+    /// leading icon and a trailing accessory).
+    private func ringGaugeHero(presentation: PerchHAEntityRowPresentation, available: Bool) -> PerchHAEntityGauge? {
+        guard available, case let .gauge(gauge) = presentation, gauge.style == .ring else {
+            return nil
+        }
+        return gauge
+    }
+
+    /// A ~42 pt ring gauge with the hero value centered inside it, used as the
+    /// clear visual anchor of a ring-gauge row. The value is the row hero; the
+    /// entity name sits in the caption line beside it.
+    private func ringGaugeAnchor(gauge: PerchHAEntityGauge, value: FormattedEntityValue) -> some View {
+        ZStack {
+            PerchHARingGauge(
+                fraction: gauge.fraction,
+                color: PerchHATheme.color(for: gauge.severity),
+                lineWidth: 4
+            )
+            Text(value.text)
+                .font(.system(.callout, design: .rounded).weight(.semibold))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+                .foregroundStyle(gauge.severity == .normal ? Color.primary : PerchHATheme.color(for: gauge.severity))
+                .padding(.horizontal, 4)
+        }
+        .frame(width: 42, height: 42)
+        .accessibilityHidden(true)
     }
 
 }
@@ -5055,6 +5108,10 @@ struct PerchHANativeTextField: NSViewRepresentable {
     @Binding var text: String
     let contentType: NSTextContentType?
     let normalizeOnCommit: ((String) -> String)?
+    /// When `false`, the field draws no bezel or background, so it can sit inside
+    /// a custom capsule container (the panel search field) without the stock
+    /// square text-field border. Defaults to `true` for the connection form.
+    var isBezeled: Bool = true
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -5079,13 +5136,14 @@ struct PerchHANativeTextField: NSViewRepresentable {
         field.placeholderString = placeholder
         field.isEditable = true
         field.isSelectable = true
-        field.isBezeled = true
+        field.isBezeled = isBezeled
         field.bezelStyle = .roundedBezel
-        field.drawsBackground = true
+        field.drawsBackground = isBezeled
+        field.isBordered = isBezeled
         field.usesSingleLineMode = true
         field.maximumNumberOfLines = 1
         field.lineBreakMode = .byTruncatingTail
-        field.focusRingType = .default
+        field.focusRingType = isBezeled ? .default : .none
         field.setAccessibilityLabel(placeholder)
         if field.stringValue != text {
             field.stringValue = text

@@ -87,6 +87,205 @@ public enum PerchHATheme {
     public static func cardShadow(_ scheme: ColorScheme) -> Color {
         scheme == .dark ? Color.clear : Color.black.opacity(0.06)
     }
+
+    /// The subtle fill of an inset capsule control (search field, footer bar).
+    ///
+    /// - Parameter scheme: The current appearance.
+    /// - Returns: A faint, appearance-aware fill that reads as recessed.
+    public static func insetControlFill(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.white.opacity(0.07)
+            : Color.black.opacity(0.05)
+    }
+
+    /// The hairline stroke of an inset capsule control.
+    ///
+    /// - Parameter scheme: The current appearance.
+    /// - Returns: A faint, appearance-aware border for inset controls.
+    public static func insetControlStroke(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.white.opacity(0.08)
+            : Color.black.opacity(0.07)
+    }
+}
+
+/// A bespoke, borderless icon (or icon+label) button tinted to the theme accent.
+///
+/// Replaces stock bordered push buttons in the panel footer, the cover controls,
+/// and the settings reorder/affordance controls. The control keeps its caller's
+/// action, `help`, and accessibility labels; this style only changes the look:
+/// a rounded hover/press chip, accent tint on hover and press, secondary tint at
+/// rest, and a dimmed look while disabled. It adds no animation timer.
+public struct PerchHAIconButtonStyle: ButtonStyle {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovering = false
+    private let prominentOnHover: Bool
+
+    /// Creates the style.
+    ///
+    /// - Parameter prominentOnHover: When `true`, the hover/press chip fills with
+    ///   the accent and the glyph turns white (used for the primary footer
+    ///   affordance); otherwise the glyph tints to the accent over a faint chip.
+    public init(prominentOnHover: Bool = false) {
+        self.prominentOnHover = prominentOnHover
+    }
+
+    public func makeBody(configuration: Configuration) -> some View {
+        let active = (isHovering || configuration.isPressed) && isEnabled
+        let foreground: Color = {
+            if !isEnabled {
+                return Color.secondary.opacity(0.5)
+            }
+            if active {
+                return prominentOnHover ? Color.white : PerchHATheme.accent
+            }
+            return Color.secondary
+        }()
+        let chip: Color = {
+            guard active else {
+                return .clear
+            }
+            return prominentOnHover
+                ? PerchHATheme.accent
+                : PerchHATheme.accent.opacity(0.16)
+        }()
+        return configuration.label
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(foreground)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous).fill(chip)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .opacity(configuration.isPressed && isEnabled ? 0.85 : 1)
+            .onHover { hovering in
+                isHovering = hovering
+            }
+    }
+}
+
+/// A bespoke, borderless circular icon button used for the panel's cover
+/// open/stop/close controls and similar single-glyph actions.
+///
+/// At rest the glyph is secondary over a faint circular well; on hover/press the
+/// well tints to the accent and the glyph turns accent. The caller keeps its
+/// action, `help`, and accessibility labels. No animation timer is used.
+public struct PerchHACircularIconButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovering = false
+    private let diameter: CGFloat
+
+    public init(diameter: CGFloat = 24) {
+        self.diameter = diameter
+    }
+
+    public func makeBody(configuration: Configuration) -> some View {
+        let active = (isHovering || configuration.isPressed) && isEnabled
+        let foreground: Color = {
+            if !isEnabled {
+                return Color.secondary.opacity(0.5)
+            }
+            return active ? PerchHATheme.accent : Color.secondary
+        }()
+        return configuration.label
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(foreground)
+            .frame(width: diameter, height: diameter)
+            .background(
+                Circle().fill(active ? PerchHATheme.accent.opacity(0.16) : Color.primary.opacity(0.05))
+            )
+            .contentShape(Circle())
+            .opacity(configuration.isPressed && isEnabled ? 0.85 : 1)
+            .onHover { hovering in
+                isHovering = hovering
+            }
+    }
+}
+
+/// A bespoke circular icon label with a hover/disabled-aware accent chip, drawn
+/// as the *label* of a native borderless `Button` so the control keeps its
+/// native AppKit backing (keyboard focus, responder behavior, accessibility)
+/// while still presenting the bespoke circular look. Used for the panel's cover
+/// open/stop/close controls.
+public struct PerchHACircularIconLabel: View {
+    @State private var isHovering = false
+    private let icon: String
+    private let disabled: Bool
+    private let diameter: CGFloat
+
+    public init(icon: String, disabled: Bool, diameter: CGFloat = 24) {
+        self.icon = icon
+        self.disabled = disabled
+        self.diameter = diameter
+    }
+
+    public var body: some View {
+        let active = isHovering && !disabled
+        let foreground: Color = disabled
+            ? Color.secondary.opacity(0.5)
+            : (active ? PerchHATheme.accent : Color.secondary)
+        return Image(systemName: icon)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(foreground)
+            .frame(width: diameter, height: diameter)
+            .background(
+                Circle().fill(active ? PerchHATheme.accent.opacity(0.16) : Color.primary.opacity(0.05))
+            )
+            .contentShape(Circle())
+            .onHover { hovering in
+                isHovering = hovering
+            }
+    }
+}
+
+/// A bespoke inset capsule wrapper that hosts an existing control (typically the
+/// native search field) behind a subtle fill, a hairline stroke, and an inset
+/// leading glyph — eliminating the stock square text-field bezel while keeping
+/// the wrapped control's behavior and accessibility intact.
+public struct PerchHACapsuleField<Content: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    private let systemImage: String
+    private let content: Content
+
+    /// Creates the capsule field.
+    ///
+    /// - Parameters:
+    ///   - systemImage: The inset leading SF Symbol (e.g. `magnifyingglass`).
+    ///   - content: The wrapped input control.
+    public init(systemImage: String, @ViewBuilder content: () -> Content) {
+        self.systemImage = systemImage
+        self.content = content()
+    }
+
+    public var body: some View {
+        let shape = Capsule(style: .continuous)
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            content
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(PerchHATheme.insetControlFill(colorScheme), in: shape)
+        .overlay(shape.strokeBorder(PerchHATheme.insetControlStroke(colorScheme), lineWidth: 1))
+        .clipShape(shape)
+    }
+}
+
+public extension View {
+    /// Applies the bespoke compact look shared by the settings pickers and
+    /// steppers: a borderless menu/stepper tinted to the accent at a small
+    /// control size. Behavior, keyboard handling, and accessibility are
+    /// unchanged.
+    func perchHACompactControl() -> some View {
+        self
+            .controlSize(.small)
+            .tint(PerchHATheme.accent)
+    }
 }
 
 /// A reusable, adaptive elevated card surface that groups room rows.

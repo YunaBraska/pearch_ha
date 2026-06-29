@@ -1311,6 +1311,20 @@ final class PerchHACoreTests: XCTestCase {
         )
     }
 
+    func testEntityRowPresentationUsesGaugeForConfiguredBoundsAlone() {
+        let presentation = PerchHAEntityRowPresentation.resolve(
+            entity: entity("sensor.tank", state: "500", unit: "L"),
+            configuration: MenuBarItemConfiguration(entityID: "sensor.tank")
+                .settingBounds(minValue: 0, maxValue: 1000)
+        )
+        guard case let .gauge(gauge) = presentation else {
+            return XCTFail("expected gauge resolved from configured min/max bounds alone")
+        }
+        XCTAssertEqual(gauge.fraction, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(gauge.severity, .normal)
+        XCTAssertEqual(gauge.style, .ring)
+    }
+
     func testEntityRowPresentationUsesPlainValueWhenNoFractionOrState() {
         XCTAssertEqual(
             PerchHAEntityRowPresentation.resolve(

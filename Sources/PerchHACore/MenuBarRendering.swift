@@ -695,6 +695,11 @@ public struct MenuBarItemRenderer: Sendable {
            unitsAreCompatible(entity.unit, totalEntity.unit) {
             return clampedPercent(value / total * 100.0)
         }
+        if let minValue = configuration.minValue,
+           let maxValue = configuration.maxValue,
+           maxValue > minValue {
+            return clampedPercent((value - minValue) / (maxValue - minValue) * 100.0)
+        }
         return nil
     }
 

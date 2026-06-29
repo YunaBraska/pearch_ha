@@ -410,26 +410,47 @@ public struct PerchHASettingsView: View {
 
     private var connectionTab: some View {
         ScrollView(.vertical) {
-            PerchHAConnectionFormFields(model: model)
-                .textFieldStyle(.roundedBorder)
-                .padding(.vertical, 14)
-                .padding(.leading, 14)
-                .padding(.trailing, 18)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            PerchHACard(cornerRadius: 12) {
+                PerchHAConnectionFormFields(model: model)
+                    .textFieldStyle(.roundedBorder)
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .tint(PerchHATheme.accent)
+            .padding(.vertical, 14)
+            .padding(.leading, 14)
+            .padding(.trailing, 18)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var aboutTab: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("PearchHA")
-                .font(.title2.weight(.semibold))
-            Text("Version \(Self.applicationVersion)")
-                .foregroundStyle(.secondary)
-            Text("A quiet macOS menu-bar companion for Home Assistant: scan room values at a glance, drive switches and covers, and run saved service calls without opening a browser.")
-                .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 14) {
+            PerchHACard(cornerRadius: 12) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "house.circle.fill")
+                            .font(.system(size: 30))
+                            .foregroundStyle(PerchHATheme.accent)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("PearchHA")
+                                .font(.title2.weight(.semibold))
+                            Text("Version \(Self.applicationVersion)")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Text("A quiet macOS menu-bar companion for Home Assistant: scan room values at a glance, drive switches and covers, and run saved service calls without opening a browser.")
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+            }
             Spacer(minLength: 0)
         }
+        .tint(PerchHATheme.accent)
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -469,16 +490,28 @@ public struct PerchHASettingsView: View {
     private var settingsContent: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                TextField("Search", text: selectionSearchBinding)
-                    .textFieldStyle(.roundedBorder)
-                Button("Select all") {
+                PerchHACapsuleField(systemImage: "magnifyingglass") {
+                    TextField("Search", text: selectionSearchBinding)
+                        .textFieldStyle(.plain)
+                }
+                Button {
                     model.setAllEntities(isSelected: true)
+                } label: {
+                    Label("Select all", systemImage: "checkmark.circle")
+                        .labelStyle(.titleAndIcon)
                 }
+                .buttonStyle(PerchHAIconButtonStyle())
                 .help("Show every discovered value in the panel")
-                Button("Clear") {
+                .accessibilityLabel("Select all")
+                Button {
                     model.setAllEntities(isSelected: false)
+                } label: {
+                    Label("Clear", systemImage: "circle")
+                        .labelStyle(.titleAndIcon)
                 }
+                .buttonStyle(PerchHAIconButtonStyle())
                 .help("Hide every value from the panel")
+                .accessibilityLabel("Clear")
             }
             .disabled(model.snapshot.availableRooms.isEmpty)
             if let selectionPersistenceFailure = model.snapshot.selectionPersistenceFailureDescription {
@@ -546,7 +579,7 @@ public struct PerchHASettingsView: View {
                         Image(systemName: "trash")
                             .frame(width: 18, height: 18)
                     }
-                    .buttonStyle(.borderless)
+                    .buttonStyle(PerchHACircularIconButtonStyle())
                     .controlSize(.small)
                     .help("Delete unused button")
                     .accessibilityLabel("Delete unused button \(action.title)")
@@ -589,28 +622,24 @@ public struct PerchHASettingsView: View {
                 .padding(.horizontal, 4),
                 item: .room(room.id)
             )
-            VStack(spacing: 0) {
-                ForEach(Array(room.entities.enumerated()), id: \.element.entity.id.rawValue) { index, selectable in
-                    selectionDragDrop(
-                        selectionEntityRow(
-                            selectable,
-                            canMoveUp: canReorderSelection && index > room.entities.startIndex,
-                            canMoveDown: canReorderSelection && index < room.entities.index(before: room.entities.endIndex)
-                        ),
-                        item: .entity(selectable.entity.id)
-                    )
-                    if index < room.entities.count - 1 {
-                        Divider()
-                            .padding(.leading, 34)
+            PerchHACard(cornerRadius: 12) {
+                VStack(spacing: 0) {
+                    ForEach(Array(room.entities.enumerated()), id: \.element.entity.id.rawValue) { index, selectable in
+                        selectionDragDrop(
+                            selectionEntityRow(
+                                selectable,
+                                canMoveUp: canReorderSelection && index > room.entities.startIndex,
+                                canMoveDown: canReorderSelection && index < room.entities.index(before: room.entities.endIndex)
+                            ),
+                            item: .entity(selectable.entity.id)
+                        )
+                        if index < room.entities.count - 1 {
+                            Divider()
+                                .padding(.leading, 34)
+                        }
                     }
                 }
             }
-            .background(Color(nsColor: .controlBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.06))
-            )
         }
     }
 
@@ -638,7 +667,7 @@ public struct PerchHASettingsView: View {
                 Spacer(minLength: 8)
                 if isPromoted {
                     Circle()
-                        .fill(Color.accentColor)
+                        .fill(PerchHATheme.accent)
                         .frame(width: 6, height: 6)
                         .accessibilityLabel("\(entity.name) shown in menu bar")
                 }
@@ -662,7 +691,7 @@ public struct PerchHASettingsView: View {
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                         .frame(width: 18, height: 18)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(PerchHACircularIconButtonStyle())
                 .controlSize(.small)
                 .help(isExpanded ? "Hide settings" : "Show settings")
                 .accessibilityLabel(isExpanded ? "Hide \(entity.name) settings" : "Show \(entity.name) settings")
@@ -686,9 +715,9 @@ public struct PerchHASettingsView: View {
         }
     }
 
-    /// The macOS System-Settings-style detail pane shown when an entity row is
-    /// expanded: clearly labelled Display, Menu bar, Alerts, and Buttons
-    /// sections separated by hairlines.
+    /// The bespoke detail pane shown when an entity row is expanded: clearly
+    /// labelled Display, Menu bar, Alerts, and Buttons sections with
+    /// accent-tinted headers and accent-tinted controls, separated by hairlines.
     private func entityDetailSections(for entity: DiscoveredEntity) -> some View {
         let configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entity.id)
         let isPromoted = model.snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
@@ -713,10 +742,11 @@ public struct PerchHASettingsView: View {
         }
         .font(.caption)
         .controlSize(.small)
+        .tint(PerchHATheme.accent)
     }
 
-    /// A single labelled settings section with a small leading SF Symbol header
-    /// and right-aligned controls, matching the macOS settings feel.
+    /// A single labelled settings section with a small accent-tinted leading SF
+    /// Symbol header and right-aligned controls in the bespoke PerchHA language.
     private func settingsSection<Content: View>(
         title: String,
         systemImage: String,
@@ -728,10 +758,11 @@ public struct PerchHASettingsView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .textCase(.uppercase)
+                    .tracking(0.5)
             } icon: {
                 Image(systemName: systemImage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(PerchHATheme.accent)
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(title)
@@ -923,11 +954,11 @@ public struct PerchHASettingsView: View {
                 Button {
                     addCustomAction(for: entity)
                 } label: {
-                    Image(systemName: "plus")
-                        .frame(width: 18, height: 18)
+                    Label("Add button", systemImage: "plus.circle.fill")
+                        .labelStyle(.titleAndIcon)
+                        .lineLimit(1)
                 }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
+                .buttonStyle(PerchHAIconButtonStyle(prominentOnHover: true))
                 .disabled(!hasMetadata)
                 .help(hasMetadata ? "Add button" : "Connect to Home Assistant to add a button")
                 .accessibilityLabel("Add button for \(entity.name)")
@@ -978,7 +1009,7 @@ public struct PerchHASettingsView: View {
                     Image(systemName: "trash")
                         .frame(width: 18, height: 18)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(PerchHACircularIconButtonStyle())
                 .controlSize(.small)
                 .help("Delete button")
                 .accessibilityLabel("Delete \(action.title)")
@@ -1122,7 +1153,7 @@ public struct PerchHASettingsView: View {
                 Image(systemName: "chevron.up")
                     .frame(width: 18, height: 18)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(PerchHACircularIconButtonStyle())
             .controlSize(.small)
             .disabled(!canMoveUp)
             .help(moveControlHelp(canMove: canMoveUp, boundaryReason: "Already first"))
@@ -1135,7 +1166,7 @@ public struct PerchHASettingsView: View {
                 Image(systemName: "chevron.down")
                     .frame(width: 18, height: 18)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(PerchHACircularIconButtonStyle())
             .controlSize(.small)
             .disabled(!canMoveDown)
             .help(moveControlHelp(canMove: canMoveDown, boundaryReason: "Already last"))
@@ -1325,7 +1356,7 @@ public struct PerchHASettingsView: View {
                 Image(systemName: "arrow.up.to.line")
                     .frame(width: 18, height: 18)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(PerchHACircularIconButtonStyle())
             .controlSize(.small)
             .disabled(!canMoveUp)
             .help(menuBarMoveHelp(canMove: canMoveUp, boundaryReason: "Already first in menu bar"))
@@ -1338,7 +1369,7 @@ public struct PerchHASettingsView: View {
                 Image(systemName: "arrow.down.to.line")
                     .frame(width: 18, height: 18)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(PerchHACircularIconButtonStyle())
             .controlSize(.small)
             .disabled(!canMoveDown)
             .help(menuBarMoveHelp(canMove: canMoveDown, boundaryReason: "Already last in menu bar"))
@@ -1403,7 +1434,7 @@ public struct PerchHASettingsView: View {
                 Image(systemName: "chevron.up")
                     .frame(width: 18, height: 18)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(PerchHACircularIconButtonStyle())
             .controlSize(.small)
             .disabled(!canMoveUp)
             .help(moveControlHelp(canMove: canMoveUp, boundaryReason: "Already first"))
@@ -1414,7 +1445,7 @@ public struct PerchHASettingsView: View {
                 Image(systemName: "chevron.down")
                     .frame(width: 18, height: 18)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(PerchHACircularIconButtonStyle())
             .controlSize(.small)
             .disabled(!canMoveDown)
             .help(moveControlHelp(canMove: canMoveDown, boundaryReason: "Already last"))
