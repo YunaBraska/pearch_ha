@@ -4061,6 +4061,159 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertFalse(application.snapshot.statusItemHasImage)
     }
 
+    func test_t_app_shell_promotes_multiple_menu_bar_items() async throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let store = JSONConfigStore(fileURL: url)
+        _ = try store.save(
+            PerchHAConfiguration(
+                selectedEntityIDs: ["sensor.office_humidity", "sensor.office_temperature"],
+                menuBarEntityIDs: ["sensor.office_humidity", "sensor.office_temperature"],
+                isEntitySelectionExplicit: true
+            )
+        )
+        let application = PerchHAApplication(
+            configStore: store,
+            connector: { _ in .success(rooms: selectionRooms()) }
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await application.connect()
+
+        let items = application.snapshot.menuBarItems
+        XCTAssertEqual(items.count, 2)
+        XCTAssertEqual(items[0].title, "44 %")
+        XCTAssertEqual(items[0].accessibilityLabel, "Office humidity, 44 %")
+        XCTAssertEqual(items[1].title, "21 °C")
+        XCTAssertEqual(items[1].accessibilityLabel, "Office temperature, 21 °C")
+        for item in items {
+            XCTAssertTrue(item.hasAction)
+            XCTAssertTrue(item.targetIsApplication)
+        }
+        // The legacy single-item fields mirror the first promoted item.
+        XCTAssertEqual(application.snapshot.statusItemTitle, "44 %")
+        XCTAssertEqual(application.snapshot.statusItemAccessibilityLabel, "Office humidity, 44 %")
+    }
+
+    func test_t_app_shell_menu_bar_item_count_tracks_promotion_changes() async throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let store = JSONConfigStore(fileURL: url)
+        _ = try store.save(
+            PerchHAConfiguration(
+                selectedEntityIDs: ["sensor.office_humidity", "sensor.office_temperature"],
+                menuBarEntityIDs: ["sensor.office_humidity"],
+                isEntitySelectionExplicit: true
+            )
+        )
+        let application = PerchHAApplication(
+            configStore: store,
+            connector: { _ in .success(rooms: selectionRooms()) }
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await application.connect()
+        XCTAssertEqual(application.snapshot.menuBarItems.count, 1)
+        XCTAssertEqual(application.snapshot.menuBarItems[0].title, "44 %")
+
+        XCTAssertTrue(application.setMenuBarEntity("sensor.office_temperature", isVisible: true))
+        XCTAssertEqual(application.snapshot.menuBarItems.count, 2)
+        XCTAssertEqual(application.snapshot.menuBarItems[1].title, "21 °C")
+
+        XCTAssertTrue(application.setMenuBarEntity("sensor.office_humidity", isVisible: false))
+        XCTAssertEqual(application.snapshot.menuBarItems.count, 1)
+        XCTAssertEqual(application.snapshot.menuBarItems[0].title, "21 °C")
+
+        // Demoting the last entity collapses back to the single fallback item.
+        XCTAssertTrue(application.setMenuBarEntity("sensor.office_temperature", isVisible: false))
+        let fallback = application.snapshot.menuBarItems
+        XCTAssertEqual(fallback.count, 1)
+        XCTAssertEqual(fallback[0].title, "")
+        XCTAssertTrue(fallback[0].hasImage)
+        XCTAssertEqual(fallback[0].imageIsTemplate, true)
+        XCTAssertTrue(fallback[0].hasAction)
+        XCTAssertTrue(fallback[0].targetIsApplication)
+    }
+
+    func test_t_app_shell_no_promotion_shows_single_fallback_item() {
+        let application = PerchHAApplication()
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        let items = application.snapshot.menuBarItems
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0].title, "")
+        XCTAssertTrue(items[0].hasImage)
+        XCTAssertEqual(items[0].imageIsTemplate, true)
+        XCTAssertTrue(items[0].hasAction)
+        XCTAssertTrue(items[0].targetIsApplication)
+    }
+
+    func test_t_app_shell_per_item_gauge_cache_isolates_redraws() async throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let store = JSONConfigStore(fileURL: url)
+        _ = try store.save(
+            PerchHAConfiguration(
+                selectedEntityIDs: ["sensor.office_humidity", "sensor.office_temperature"],
+                menuBarEntityIDs: ["sensor.office_humidity", "sensor.office_temperature"],
+                isEntitySelectionExplicit: true
+            )
+        )
+        let gaugeRenderer = CountingStatusItemGaugeImageRenderer()
+        let application = PerchHAApplication(
+            configStore: store,
+            connector: { _ in .success(rooms: selectionRooms()) },
+            gaugeImageRenderer: gaugeRenderer
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await application.connect()
+        XCTAssertEqual(gaugeRenderer.renderCount, 0)
+
+        // Render two gauge items: one render each.
+        XCTAssertTrue(application.setMenuBarDisplayStyle("sensor.office_humidity", style: .battery))
+        XCTAssertEqual(gaugeRenderer.renderCount, 1)
+        XCTAssertTrue(application.setMenuBarAbsoluteTotal("sensor.office_temperature", total: 50))
+        XCTAssertTrue(application.setMenuBarDisplayStyle("sensor.office_temperature", style: .ring))
+        XCTAssertEqual(gaugeRenderer.renderCount, 2)
+        XCTAssertTrue(application.snapshot.menuBarItems[0].hasImage)
+        XCTAssertTrue(application.snapshot.menuBarItems[1].hasImage)
+
+        // A live update to the first entity must not redraw the second item.
+        XCTAssertTrue(
+            application.applyLiveState(
+                EntityState(
+                    id: "sensor.office_temperature",
+                    name: "Office temperature",
+                    state: "21.4",
+                    unit: "°C"
+                )
+            )
+        )
+        XCTAssertEqual(gaugeRenderer.renderCount, 2)
+    }
+
     func test_t_app_shell_load_history_uses_injected_provider() async throws {
         let url = temporaryConfigURL()
         defer {

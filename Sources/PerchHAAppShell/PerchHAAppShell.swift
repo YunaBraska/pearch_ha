@@ -54,6 +54,38 @@ final class PerchHAStatusPanel: NSPanel {
     }
 }
 
+/// An observable description of a single live menu-bar status item.
+public struct PerchHAMenuBarStatusItemSnapshot: Equatable, Sendable {
+    public let title: String?
+    public let accessibilityLabel: String?
+    public let hasImage: Bool
+    public let imageWidth: Int?
+    public let imageHeight: Int?
+    public let imageIsTemplate: Bool?
+    public let hasAction: Bool
+    public let targetIsApplication: Bool
+
+    public init(
+        title: String?,
+        accessibilityLabel: String?,
+        hasImage: Bool,
+        imageWidth: Int?,
+        imageHeight: Int?,
+        imageIsTemplate: Bool?,
+        hasAction: Bool,
+        targetIsApplication: Bool
+    ) {
+        self.title = title
+        self.accessibilityLabel = accessibilityLabel
+        self.hasImage = hasImage
+        self.imageWidth = imageWidth
+        self.imageHeight = imageHeight
+        self.imageIsTemplate = imageIsTemplate
+        self.hasAction = hasAction
+        self.targetIsApplication = targetIsApplication
+    }
+}
+
 public struct PerchHAApplicationSnapshot: Equatable, Sendable {
     public let statusItemTitle: String?
     public let statusItemAccessibilityLabel: String?
@@ -63,6 +95,9 @@ public struct PerchHAApplicationSnapshot: Equatable, Sendable {
     public let statusItemImageIsTemplate: Bool?
     public let statusItemTargetIsApplication: Bool
     public let statusItemHasAction: Bool
+    /// One entry per live menu-bar status item, in promoted order. Always holds
+    /// at least one entry (the fallback fish-logo item when nothing is promoted).
+    public let menuBarItems: [PerchHAMenuBarStatusItemSnapshot]
     public let hasPanel: Bool
     public let hasPanelModel: Bool
     public let panelCanBecomeKey: Bool
@@ -794,7 +829,7 @@ public final class PerchHAASWebAuthenticationSessionPresenter: NSObject, PerchHA
 
 @MainActor
 public final class PerchHAApplication: NSObject, NSApplicationDelegate {
-    private var statusItem: NSStatusItem?
+    private var statusItems: [PerchHAStatusItemEntry] = []
     private var panel: NSPanel?
     private var settingsWindow: NSWindow?
     private var panelModel: PerchHAPanelModel?
@@ -811,8 +846,6 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     private let menuBarPresenter: PerchHAMenuBarPresenter
     private let gaugeImageRenderer: any PerchHAStatusItemGaugeImageRendering
     private let logoImageRenderer = PerchHAStatusItemLogoImageRenderer()
-    private var statusItemPresentation = PerchHAMenuBarPresentation.fallback
-    private var statusItemImageCache: (key: PerchHAStatusItemImageCacheKey, image: NSImage?)?
     private var statusItemLogoImageCache: NSImage?
     private var configuration = PerchHAConfiguration.empty
     private var configurationPersistenceState = PerchHAConfigurationPersistenceState.unavailable
@@ -938,11 +971,6 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         configuration = loadConfiguration()
         let rememberedForm = restoredConnectionForm()
 
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.target = self
-        item.button?.action = #selector(togglePanel(_:))
-        statusItem = item
-
         let model = PerchHAPanelModel(
             snapshot: PerchHAPanelSnapshot(
                 connectionForm: rememberedForm,
@@ -978,7 +1006,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             },
             protectedActionValueStore: protectedActionValueStore,
             snapshotSink: { [weak self] snapshot in
-                self?.updateStatusItem(from: snapshot)
+                self?.updateStatusItems(from: snapshot)
             },
             signOutHandler: { [weak self] in
                 self?.clearStoredAuthSession()
@@ -988,7 +1016,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         panel = Self.makePanel(model: model) { [weak self] in
             self?.openSettingsWindow()
         }
-        updateStatusItem(from: model.snapshot)
+        updateStatusItems(from: model.snapshot)
         autoConnectTask = startAutoConnect(form: rememberedForm, model: model)
     }
 
@@ -1032,17 +1060,19 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     }
 
     public var snapshot: PerchHAApplicationSnapshot {
-        let button = statusItem?.button
+        let menuBarItems = statusItems.map { statusItemSnapshot(for: $0.item) }
+        let first = menuBarItems.first
         let contentSize = panel.map { $0.contentRect(forFrameRect: $0.frame).size }
         return PerchHAApplicationSnapshot(
-            statusItemTitle: button?.title,
-            statusItemAccessibilityLabel: button?.accessibilityLabel(),
-            statusItemHasImage: button?.image != nil,
-            statusItemImageWidth: button?.image.map { Int($0.size.width.rounded()) },
-            statusItemImageHeight: button?.image.map { Int($0.size.height.rounded()) },
-            statusItemImageIsTemplate: button?.image?.isTemplate,
-            statusItemTargetIsApplication: (button?.target as AnyObject?) === self,
-            statusItemHasAction: button?.action != nil,
+            statusItemTitle: first?.title,
+            statusItemAccessibilityLabel: first?.accessibilityLabel,
+            statusItemHasImage: first?.hasImage ?? false,
+            statusItemImageWidth: first?.imageWidth,
+            statusItemImageHeight: first?.imageHeight,
+            statusItemImageIsTemplate: first?.imageIsTemplate,
+            statusItemTargetIsApplication: first?.targetIsApplication ?? false,
+            statusItemHasAction: first?.hasAction ?? false,
+            menuBarItems: menuBarItems,
             hasPanel: panel != nil,
             hasPanelModel: panelModel != nil,
             panelCanBecomeKey: panel?.canBecomeKey ?? false,
@@ -1505,49 +1535,90 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         settingsWindow = nil
         panelModel = nil
 
-        if let statusItem {
-            NSStatusBar.system.removeStatusItem(statusItem)
+        for entry in statusItems {
+            NSStatusBar.system.removeStatusItem(entry.item)
         }
-        statusItem = nil
-        statusItemPresentation = .fallback
-        statusItemImageCache = nil
+        statusItems = []
     }
 
-    private func updateStatusItem(from snapshot: PerchHAPanelSnapshot) {
-        statusItemPresentation = menuBarPresenter.presentation(
+    /// Reconciles the live menu-bar status items against the presenter output:
+    /// one item per promoted entity (in order), or a single fallback fish-logo
+    /// item when nothing is promoted. Creates, updates, and removes items in
+    /// place so each item keeps the same toggle target/action and a per-entity
+    /// image cache, preserving gauge-redraw throttling.
+    private func updateStatusItems(from snapshot: PerchHAPanelSnapshot) {
+        let presentations = menuBarPresenter.presentations(
             configuration: configuration,
             panelSnapshot: snapshot
         )
+
+        while statusItems.count > presentations.count {
+            let removed = statusItems.removeLast()
+            NSStatusBar.system.removeStatusItem(removed.item)
+        }
+        while statusItems.count < presentations.count {
+            statusItems.append(PerchHAStatusItemEntry(item: makeStatusItem()))
+        }
+
+        for (index, presentation) in presentations.enumerated() {
+            apply(presentation, to: &statusItems[index])
+        }
+    }
+
+    private func makeStatusItem() -> NSStatusItem {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.target = self
+        item.button?.action = #selector(togglePanel(_:))
+        return item
+    }
+
+    private func apply(_ presentation: PerchHAMenuBarPresentation, to entry: inout PerchHAStatusItemEntry) {
         let image: NSImage?
         let title: String
-        if let renderedItem = statusItemPresentation.renderedItem, renderedItem.gauge != nil {
-            image = cachedStatusItemImage(for: renderedItem)
-            title = statusItemPresentation.statusItemTitle
-        } else if statusItemPresentation == .fallback {
+        if let renderedItem = presentation.renderedItem, renderedItem.gauge != nil {
+            image = cachedStatusItemImage(for: renderedItem, in: &entry)
+            title = presentation.statusItemTitle
+        } else if presentation == .fallback {
             // Nothing is promoted: show the template logo glyph instead of text.
-            statusItemImageCache = nil
+            entry.imageCache = nil
             image = cachedStatusItemLogoImage()
             title = ""
         } else {
-            statusItemImageCache = nil
+            entry.imageCache = nil
             image = nil
-            title = statusItemPresentation.statusItemTitle
+            title = presentation.statusItemTitle
         }
-        statusItem?.button?.image = image
-        statusItem?.button?.imagePosition = image == nil ? .noImage : .imageLeading
-        statusItem?.button?.title = title
-        statusItem?.button?.toolTip = statusItemPresentation.accessibilityLabel
-        statusItem?.button?.setAccessibilityLabel(statusItemPresentation.accessibilityLabel)
+        entry.presentation = presentation
+        let button = entry.item.button
+        button?.image = image
+        button?.imagePosition = image == nil ? .noImage : .imageLeading
+        button?.title = title
+        button?.toolTip = presentation.accessibilityLabel
+        button?.setAccessibilityLabel(presentation.accessibilityLabel)
     }
 
-    private func cachedStatusItemImage(for item: RenderedMenuBarItem) -> NSImage? {
+    private func cachedStatusItemImage(for item: RenderedMenuBarItem, in entry: inout PerchHAStatusItemEntry) -> NSImage? {
         let key = PerchHAStatusItemImageCacheKey(item: item)
-        if let statusItemImageCache, statusItemImageCache.key == key {
-            return statusItemImageCache.image
+        if let imageCache = entry.imageCache, imageCache.key == key {
+            return imageCache.image
         }
         let image = gaugeImageRenderer.image(for: item)
-        statusItemImageCache = (key, image)
+        entry.imageCache = (key, image)
         return image
+    }
+
+    private func statusItemSnapshot(for item: NSStatusItem) -> PerchHAMenuBarStatusItemSnapshot {
+        let button = item.button
+        return PerchHAMenuBarStatusItemSnapshot(
+            title: button?.title,
+            accessibilityLabel: button?.accessibilityLabel(),
+            hasImage: button?.image != nil,
+            imageWidth: button?.image.map { Int($0.size.width.rounded()) },
+            imageHeight: button?.image.map { Int($0.size.height.rounded()) },
+            imageIsTemplate: button?.image?.isTemplate,
+            hasAction: button?.action != nil,
+            targetIsApplication: (button?.target as AnyObject?) === self
+        )
     }
 
     private func cachedStatusItemLogoImage() -> NSImage? {
@@ -1671,6 +1742,14 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     public static func action(form: PerchHAConnectionForm, action: ActionSpec) async -> PerchHAActionResult {
         await PerchHAAuthorizedHomeAssistantGateway().action(form: form, action: action)
     }
+}
+
+/// A live menu-bar status item paired with its last presentation and a
+/// per-entity gauge-image cache so redraws only happen when the item changes.
+private struct PerchHAStatusItemEntry {
+    let item: NSStatusItem
+    var presentation: PerchHAMenuBarPresentation = .fallback
+    var imageCache: (key: PerchHAStatusItemImageCacheKey, image: NSImage?)?
 }
 
 private struct PerchHAStatusItemImageCacheKey: Equatable {
