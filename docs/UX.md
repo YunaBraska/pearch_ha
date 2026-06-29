@@ -51,16 +51,14 @@ Click opens the panel. Right-click opens a compact context menu for hide, style,
 
 ## 5. Settings
 
-Tabs:
+Settings open in a dedicated resizable window (separate from the menu-bar panel), organized as tabs:
 
-- Connection.
-- Entities.
-- Display.
-- Actions.
-- Advanced.
-- About.
+- Connection: Home Assistant address, fallback address, access token, and sign-in. Shares the same field stack as first-run.
+- Entities: searchable room -> entity tree. Selecting an entity reveals its display and action configuration inline (menu-bar promotion, gauge style, label/unit/decimals, thresholds, history range, and custom actions).
+- Advanced: self-signed certificate allowance and other rarely-used options.
+- About: app identity and version.
 
-Entity selection uses a searchable room -> entity tree. Selecting an entity opens display and action configuration. Dragging changes PerchHA display order only; it does not rewrite Home Assistant areas.
+Entity selection uses a searchable room -> entity tree. Dragging changes PerchHA display order only; it does not rewrite Home Assistant areas. Per-entity display and action editing live in the Entities tab rather than separate Display/Actions tabs, so a single entity's configuration stays in one place.
 
 ## 6. Custom actions
 

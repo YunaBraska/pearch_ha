@@ -3461,10 +3461,10 @@ final class PerchHAUITests: XCTestCase {
             menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
             customActionConfiguration: CustomActionConfiguration(actions: [action])
         )
-        let panel = PerchHAApplication.makePanel(model: model)
+        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities)
         defer {
             panel.orderOut(nil)
-            panel.contentViewController = nil
+            panel.contentView = nil
         }
 
         panel.makeKeyAndOrderFront(nil)
@@ -3678,10 +3678,10 @@ final class PerchHAUITests: XCTestCase {
             menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
             customActionConfiguration: CustomActionConfiguration(actions: [action])
         )
-        let panel = PerchHAApplication.makePanel(model: model)
+        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities)
         defer {
             panel.orderOut(nil)
-            panel.contentViewController = nil
+            panel.contentView = nil
         }
 
         panel.makeKeyAndOrderFront(nil)
@@ -3791,10 +3791,10 @@ final class PerchHAUITests: XCTestCase {
             menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
             customActionConfiguration: CustomActionConfiguration(actions: [action])
         )
-        let panel = PerchHAApplication.makePanel(model: model)
+        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities)
         defer {
             panel.orderOut(nil)
-            panel.contentViewController = nil
+            panel.contentView = nil
         }
 
         panel.makeKeyAndOrderFront(nil)
@@ -5729,7 +5729,7 @@ final class PerchHAUITests: XCTestCase {
         return result
     }
 
-    private func setNativeTextFieldValue(_ value: String, for textField: NSTextField, in panel: NSPanel) throws {
+    private func setNativeTextFieldValue(_ value: String, for textField: NSTextField, in panel: NSWindow) throws {
         XCTAssertTrue(panel.makeFirstResponder(textField))
         drainPanelRunLoop()
         if let editor = textField.currentEditor() {

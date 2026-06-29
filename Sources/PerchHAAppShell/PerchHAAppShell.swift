@@ -9,6 +9,7 @@ import SwiftUI
 
 private enum AppShellLayout {
     static let panelContentSize = NSSize(width: 360, height: 420)
+    static let settingsMinContentSize = NSSize(width: 520, height: 560)
 }
 
 final class PerchHAStatusPanel: NSPanel {
@@ -799,6 +800,7 @@ public final class PerchHAASWebAuthenticationSessionPresenter: NSObject, PerchHA
 public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var panel: NSPanel?
+    private var settingsWindow: NSWindow?
     private var panelModel: PerchHAPanelModel?
     private let configStore: ConfigStore?
     private let authSessionStore: (any PerchHAAuthSessionStorage)?
@@ -981,7 +983,9 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             }
         )
         panelModel = model
-        panel = Self.makePanel(model: model)
+        panel = Self.makePanel(model: model) { [weak self] in
+            self?.openSettingsWindow()
+        }
         updateStatusItem(from: model.snapshot)
     }
 
@@ -1359,7 +1363,10 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         }
     }
 
-    public static func makePanel(model: PerchHAPanelModel) -> NSPanel {
+    public static func makePanel(
+        model: PerchHAPanelModel,
+        onOpenSettings: (() -> Void)? = nil
+    ) -> NSPanel {
         let panel = PerchHAStatusPanel(
             contentRect: NSRect(origin: .zero, size: AppShellLayout.panelContentSize),
             styleMask: [.nonactivatingPanel, .titled, .fullSizeContentView],
@@ -1370,9 +1377,44 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         panel.titlebarAppearsTransparent = true
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = true
-        panel.contentViewController = NSHostingController(rootView: PerchHAPanelView(model: model))
+        panel.contentViewController = NSHostingController(
+            rootView: PerchHAPanelView(model: model, onOpenSettings: onOpenSettings)
+        )
         panel.setContentSize(AppShellLayout.panelContentSize)
         return panel
+    }
+
+    public static func makeSettingsWindow(
+        model: PerchHAPanelModel,
+        initialTab: PerchHASettingsView.Tab = .connection
+    ) -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: AppShellLayout.settingsMinContentSize),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: true
+        )
+        window.title = "PerchHA Settings"
+        window.isReleasedWhenClosed = false
+        window.contentMinSize = AppShellLayout.settingsMinContentSize
+        let hostingView = NSHostingView(rootView: PerchHASettingsView(model: model, initialTab: initialTab))
+        hostingView.frame = NSRect(origin: .zero, size: AppShellLayout.settingsMinContentSize)
+        window.contentView = hostingView
+        window.setContentSize(AppShellLayout.settingsMinContentSize)
+        return window
+    }
+
+    private func openSettingsWindow() {
+        guard let panelModel else {
+            return
+        }
+        let window = settingsWindow ?? Self.makeSettingsWindow(model: panelModel)
+        settingsWindow = window
+        if !window.isVisible {
+            window.center()
+        }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func togglePanel(_ sender: NSStatusBarButton) {
@@ -1407,6 +1449,9 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         panel?.orderOut(nil)
         panel?.contentViewController = nil
         panel = nil
+        settingsWindow?.orderOut(nil)
+        settingsWindow?.contentView = nil
+        settingsWindow = nil
         panelModel = nil
 
         if let statusItem {

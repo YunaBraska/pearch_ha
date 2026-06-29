@@ -2991,10 +2991,10 @@ struct PerchHASmoke {
     private static func verifySettingsCustomActionEditorTextFieldFocusPath() async throws {
         _ = NSApplication.shared
         let model = try await panelSnapshotModel(for: .customActionEditorLight)
-        let panel = PerchHAApplication.makePanel(model: model)
+        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities)
         defer {
             panel.orderOut(nil)
-            panel.contentViewController = nil
+            panel.contentView = nil
         }
 
         panel.makeKeyAndOrderFront(nil)
@@ -3051,10 +3051,10 @@ struct PerchHASmoke {
             customActionConfiguration: SmokePanelSnapshotVariant.customActionEditorLight.customActionConfiguration,
             protectedActionValueStore: protectedStore
         )
-        let panel = PerchHAApplication.makePanel(model: model)
+        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities)
         defer {
             panel.orderOut(nil)
-            panel.contentViewController = nil
+            panel.contentView = nil
         }
 
         panel.makeKeyAndOrderFront(nil)
@@ -3201,10 +3201,10 @@ struct PerchHASmoke {
             ]),
             protectedActionValueStore: protectedStore
         )
-        let panel = PerchHAApplication.makePanel(model: model)
+        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities)
         defer {
             panel.orderOut(nil)
-            panel.contentViewController = nil
+            panel.contentView = nil
         }
 
         panel.makeKeyAndOrderFront(nil)
@@ -3308,7 +3308,7 @@ struct PerchHASmoke {
     }
 
     @MainActor
-    private static func setNativeTextFieldValue(_ value: String, for textField: NSTextField, in panel: NSPanel) throws {
+    private static func setNativeTextFieldValue(_ value: String, for textField: NSTextField, in panel: NSWindow) throws {
         try expect(panel.makeFirstResponder(textField), "panel accepts focus for native text field mutation")
         drainMainRunLoop()
         if let editor = textField.currentEditor() {
@@ -4020,6 +4020,7 @@ struct PerchHASmoke {
             }
         }
         let view: AnyView
+        let size: NSSize
         if variant == .historyLoadedLight || variant == .historyLoadedLightIncreasedContrast {
             view = AnyView(
                 PerchHAHistoryPopoverContent(
@@ -4034,6 +4035,18 @@ struct PerchHASmoke {
                 .background(Color(nsColor: NSColor.windowBackgroundColor))
                 .environment(\.colorScheme, variant.colorScheme)
             )
+            size = NSSize(width: 360, height: 420)
+        } else if variant == .customActionEditorLight || variant == .settingsSelectionLight {
+            view = AnyView(
+                PerchHASettingsView(
+                    model: model,
+                    accessibilityPreferencesOverride: variant.accessibilityPreferences,
+                    initialTab: .entities
+                )
+                .tabContentForSnapshot(.entities)
+                .environment(\.colorScheme, variant.colorScheme)
+            )
+            size = NSSize(width: 520, height: 560)
         } else {
             view = AnyView(
                 PerchHAPanelView(
@@ -4042,9 +4055,9 @@ struct PerchHASmoke {
                 )
                 .environment(\.colorScheme, variant.colorScheme)
             )
+            size = NSSize(width: 360, height: 420)
         }
         let hostingView = NSHostingView(rootView: view)
-        let size = NSSize(width: 360, height: 420)
 
         hostingView.appearance = NSAppearance(named: variant.appearanceName)
         hostingView.frame = NSRect(origin: .zero, size: size)

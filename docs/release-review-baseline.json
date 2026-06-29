@@ -3,7 +3,7 @@
     "name" : "review-contact-sheet.png",
     "pixelsHigh" : 1346,
     "pixelsWide" : 672,
-    "sampledHashHex" : "c8992d4186b60511",
+    "sampledHashHex" : "6edc4492202399b0",
     "visiblePixelCount" : 904512
   },
   "schemaVersion" : 1,
@@ -52,10 +52,10 @@
     },
     {
       "name" : "custom-action-editor-light.png",
-      "pixelsHigh" : 840,
-      "pixelsWide" : 720,
-      "sampledHashHex" : "9c9205966d0e60cc",
-      "visiblePixelCount" : 604800
+      "pixelsHigh" : 1120,
+      "pixelsWide" : 1040,
+      "sampledHashHex" : "d604cdcff675be41",
+      "visiblePixelCount" : 1164800
     },
     {
       "name" : "built-in-controls-light.png",
@@ -87,10 +87,10 @@
     },
     {
       "name" : "settings-selection-light.png",
-      "pixelsHigh" : 840,
-      "pixelsWide" : 720,
-      "sampledHashHex" : "24ee38276ef48a82",
-      "visiblePixelCount" : 604800
+      "pixelsHigh" : 1120,
+      "pixelsWide" : 1040,
+      "sampledHashHex" : "5fb401d428552a24",
+      "visiblePixelCount" : 1164800
     },
     {
       "name" : "reconnecting-light.png",

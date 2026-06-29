@@ -42,7 +42,7 @@ What is still missing before PerchHA can honestly be called production-ready:
   - [ ] Primary `.env.local` `url` did not answer `/api/`
   - [ ] Fallback `.env.local` `url2` answered `/api/` with `401`
   - [ ] No live connected real-HA screenshot set can be captured until one endpoint is readable without mutation
-- [ ] Custom action editor review: the current narrow panel makes the nested service-data editor feel cramped below the fold; review whether the editor should open taller, scroll more clearly, or expose fewer stacked controls at once.
+- [x] Custom action editor review: settings now open in a dedicated resizable window, so the nested service-data editor has full width and is no longer cramped below the fold.
 - [ ] Signed local app review: Finder/bundle icon is now present through ad-hoc signing, but a native launch screenshot of the signed app against a real HA session is still missing.
 
 ## Repo state at session end
