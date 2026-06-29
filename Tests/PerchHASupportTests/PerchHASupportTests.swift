@@ -107,9 +107,9 @@ final class PerchHASupportTests: XCTestCase {
     func testTestClockAdvancesDeterministically() async {
         let clock = TestPerchClock()
 
-        XCTAssertEqual(await clock.now(), PerchInstant(nanosecondsSinceStart: 0))
+        await assertEqualAsync(await clock.now(), PerchInstant(nanosecondsSinceStart: 0))
         _ = await clock.advance(by: .seconds(3))
-        XCTAssertEqual(await clock.now(), PerchInstant(nanosecondsSinceStart: 3_000_000_000))
+        await assertEqualAsync(await clock.now(), PerchInstant(nanosecondsSinceStart: 3_000_000_000))
     }
 
     func testTestClockWakesSleepersOnAdvance() async throws {
@@ -125,7 +125,7 @@ final class PerchHASupportTests: XCTestCase {
 
         _ = await clock.advance(by: .seconds(2))
 
-        XCTAssertEqual(try await sleeper.value, deadline)
+        try await assertEqualAsync(try await sleeper.value, deadline)
     }
 
     func testTestClockCancelsSleepers() async throws {
@@ -143,7 +143,7 @@ final class PerchHASupportTests: XCTestCase {
             _ = try await sleeper.value
             XCTFail("cancelled sleeper completed")
         } catch is CancellationError {
-            XCTAssertEqual(await clock.sleepingTaskCount(), 0)
+            await assertEqualAsync(await clock.sleepingTaskCount(), 0)
         }
     }
 
@@ -179,9 +179,9 @@ final class PerchHASupportTests: XCTestCase {
 
         let values = try await [first.value, second.value]
         XCTAssertEqual(values, [42, 42])
-        XCTAssertEqual(await counter.value, 1)
-        XCTAssertEqual(await coalescer.activeRequestCount(), 0)
-        XCTAssertEqual(await coalescer.coalescedWaiterCount(), 0)
+        await assertEqualAsync(await counter.value, 1)
+        await assertEqualAsync(await coalescer.activeRequestCount(), 0)
+        await assertEqualAsync(await coalescer.coalescedWaiterCount(), 0)
     }
 
     func testRequestCoalescerClearsFailedOperations() async throws {
@@ -221,9 +221,9 @@ final class PerchHASupportTests: XCTestCase {
             XCTFail("second coalesced call unexpectedly succeeded")
         } catch CoalescerTestError.planned {}
 
-        XCTAssertEqual(await counter.value, 1)
-        XCTAssertEqual(await coalescer.activeRequestCount(), 0)
-        XCTAssertEqual(await coalescer.coalescedWaiterCount(), 0)
+        await assertEqualAsync(await counter.value, 1)
+        await assertEqualAsync(await coalescer.activeRequestCount(), 0)
+        await assertEqualAsync(await coalescer.coalescedWaiterCount(), 0)
 
         let retry = try await coalescer.value(for: "same") {
             _ = await counter.increment()
@@ -231,7 +231,7 @@ final class PerchHASupportTests: XCTestCase {
         }
 
         XCTAssertEqual(retry, 99)
-        XCTAssertEqual(await counter.value, 2)
+        await assertEqualAsync(await counter.value, 2)
     }
 
     func test_t_rate_limit_hygiene() async throws {
@@ -275,9 +275,9 @@ final class PerchHASupportTests: XCTestCase {
             await coalescer.coalescedWaiterCount() == 1
         }
         _ = await gate.open()
-        XCTAssertEqual(try await [first.value, second.value], [1, 1])
-        XCTAssertEqual(await counter.value, 1)
-        XCTAssertEqual(await coalescer.coalescedWaiterCount(), 0)
+        try await assertEqualAsync(try await [first.value, second.value], [1, 1])
+        await assertEqualAsync(await counter.value, 1)
+        await assertEqualAsync(await coalescer.coalescedWaiterCount(), 0)
     }
 }
 

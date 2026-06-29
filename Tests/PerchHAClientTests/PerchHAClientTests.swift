@@ -236,7 +236,7 @@ final class PerchHAClientTests: XCTestCase {
                 )
             )
         )
-        XCTAssertEqual(await transport.requests, [])
+        await assertEqualAsync(await transport.requests, [])
     }
 
     func testOAuthClientWebsiteSkipsNetworkForExplicitDefaultHTTPSPort() async {
@@ -259,7 +259,7 @@ final class PerchHAClientTests: XCTestCase {
                 )
             )
         )
-        XCTAssertEqual(await transport.requests, [])
+        await assertEqualAsync(await transport.requests, [])
     }
 
     func testOAuthClientWebsiteSkipsNetworkForExplicitDefaultHTTPPort() async {
@@ -282,7 +282,7 @@ final class PerchHAClientTests: XCTestCase {
                 )
             )
         )
-        XCTAssertEqual(await transport.requests, [])
+        await assertEqualAsync(await transport.requests, [])
     }
 
     func testOAuthClientWebsiteRejectsInvalidInputsBeforeNetwork() async {
@@ -306,7 +306,7 @@ final class PerchHAClientTests: XCTestCase {
             invalidRedirect,
             .failure(.invalidPayload(path: "/auth/client_id", reason: "redirect_uri is invalid"))
         )
-        XCTAssertEqual(await transport.requests, [])
+        await assertEqualAsync(await transport.requests, [])
     }
 
     func testOAuthCodeExchangePostsFormAndRequiresRefreshToken() async throws {
@@ -828,7 +828,7 @@ final class PerchHAClientTests: XCTestCase {
         )
         let input = try connectionInput()
 
-        XCTAssertEqual(await HomeAssistantClient(transport: authTransport).checkRESTConnection(input), .failure(.authentication))
+        await assertEqualAsync(await HomeAssistantClient(transport: authTransport).checkRESTConnection(input), .failure(.authentication))
         XCTAssertEqual(
             await HomeAssistantClient(transport: unreachableTransport).checkRESTConnection(input),
             .failure(.unreachable(host: "homeassistant.local"))
@@ -855,7 +855,7 @@ final class PerchHAClientTests: XCTestCase {
         )
         let client = HomeAssistantClient()
 
-        XCTAssertEqual(await client.checkRESTConnection(input), .success(HARESTCheck(message: "API running.")))
+        await assertEqualAsync(await client.checkRESTConnection(input), .success(HARESTCheck(message: "API running.")))
         XCTAssertEqual(
             await client.states(input),
             .success([
@@ -888,8 +888,8 @@ final class PerchHAClientTests: XCTestCase {
             serverTrustPolicy: HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["127.0.0.1"])
         )
 
-        XCTAssertEqual(await client.checkRESTConnection(strictInput), .failure(.tlsRejected(host: "127.0.0.1")))
-        XCTAssertEqual(await client.checkRESTConnection(allowedInput), .success(HARESTCheck(message: "API running.")))
+        await assertEqualAsync(await client.checkRESTConnection(strictInput), .failure(.tlsRejected(host: "127.0.0.1")))
+        await assertEqualAsync(await client.checkRESTConnection(allowedInput), .success(HARESTCheck(message: "API running.")))
     }
 
     func testSelfSignedAllowanceRejectsCASignedSingleLeafCertificate() async throws {
@@ -911,7 +911,7 @@ final class PerchHAClientTests: XCTestCase {
             serverTrustPolicy: HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["127.0.0.1"])
         )
 
-        XCTAssertEqual(await HomeAssistantClient().checkRESTConnection(input), .failure(.tlsRejected(host: "127.0.0.1")))
+        await assertEqualAsync(await HomeAssistantClient().checkRESTConnection(input), .failure(.tlsRejected(host: "127.0.0.1")))
     }
 
     func testSelfSignedWebSocketRequiresExplicitHostAllowance() async throws {
@@ -932,8 +932,8 @@ final class PerchHAClientTests: XCTestCase {
             serverTrustPolicy: HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["127.0.0.1"])
         )
 
-        XCTAssertEqual(await client.checkWebSocketConnection(strictInput), .failure(.tlsRejected(host: "127.0.0.1")))
-        XCTAssertEqual(await client.checkWebSocketConnection(allowedInput), .success(HAWebSocketCheck(haVersion: "fake-ha")))
+        await assertEqualAsync(await client.checkWebSocketConnection(strictInput), .failure(.tlsRejected(host: "127.0.0.1")))
+        await assertEqualAsync(await client.checkWebSocketConnection(allowedInput), .success(HAWebSocketCheck(haVersion: "fake-ha")))
     }
 
     func testSelfSignedWebSocketAllowanceRejectsCASignedSingleLeafCertificate() async throws {
@@ -949,7 +949,7 @@ final class PerchHAClientTests: XCTestCase {
             serverTrustPolicy: HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["127.0.0.1"])
         )
 
-        XCTAssertEqual(await HomeAssistantClient().checkWebSocketConnection(input), .failure(.tlsRejected(host: "127.0.0.1")))
+        await assertEqualAsync(await HomeAssistantClient().checkWebSocketConnection(input), .failure(.tlsRejected(host: "127.0.0.1")))
     }
 
     func test_t_rest_history_provider_maps_and_sorts_samples() async throws {
@@ -1590,7 +1590,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(await client.checkWebSocketConnection(input), .success(HAWebSocketCheck(haVersion: "fake-ha")))
+        await assertEqualAsync(await client.checkWebSocketConnection(input), .success(HAWebSocketCheck(haVersion: "fake-ha")))
     }
 
     func testWebSocketDiscoveryPreservesBasePathPrefix() async throws {
@@ -1641,7 +1641,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "wrong-token"
         )
 
-        XCTAssertEqual(await client.checkWebSocketConnection(input), .failure(.authentication))
+        await assertEqualAsync(await client.checkWebSocketConnection(input), .failure(.authentication))
     }
 
     func testWebSocketStatesMapsFakeHAStates() async throws {
@@ -1687,7 +1687,7 @@ final class PerchHAClientTests: XCTestCase {
 
         XCTAssertEqual(result, .failure(.webSocketProtocol("expected result id 1, received 2")))
         try await waitForJournalCount(server: primary, count: 1)
-        XCTAssertTrue(await fallback.journal.snapshot().isEmpty)
+        await assertTrueAsync(await fallback.journal.snapshot().isEmpty)
     }
 
     func testWebSocketCommandFailureIsTyped() async throws {
@@ -2021,7 +2021,7 @@ final class PerchHAClientTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(await client.callService(input, call: call), .success(HAServiceCallResult(contextID: "fake-context")))
+        await assertEqualAsync(await client.callService(input, call: call), .success(HAServiceCallResult(contextID: "fake-context")))
         try await waitForJournalCount(server: server, count: 2)
 
         let serviceEntry = await server.journal.snapshot().last
@@ -2175,7 +2175,7 @@ final class PerchHAClientTests: XCTestCase {
             .success(HAServiceCallResult(contextID: "fake-context"))
         )
         try await waitForJournalCount(server: server, count: 2)
-        XCTAssertTrue(await server.journal.snapshot().contains { $0.path == "/api/websocket/call_service" })
+        await assertTrueAsync(await server.journal.snapshot().contains { $0.path == "/api/websocket/call_service" })
     }
 
     func test_t_websocket_auth_and_get_states() async throws {
@@ -2194,7 +2194,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(await client.checkWebSocketConnection(input), .success(HAWebSocketCheck(haVersion: "fake-ha")))
+        await assertEqualAsync(await client.checkWebSocketConnection(input), .success(HAWebSocketCheck(haVersion: "fake-ha")))
         XCTAssertEqual(
             await client.webSocketStates(input),
             .success([
@@ -2219,7 +2219,7 @@ final class PerchHAClientTests: XCTestCase {
             token: "fake-token"
         )
 
-        XCTAssertEqual(await client.checkRESTConnection(input), .success(HARESTCheck(message: "API running.")))
+        await assertEqualAsync(await client.checkRESTConnection(input), .success(HARESTCheck(message: "API running.")))
         XCTAssertEqual(
             await client.states(input),
             .success([

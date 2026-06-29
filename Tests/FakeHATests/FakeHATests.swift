@@ -128,9 +128,9 @@ final class FakeHATests: XCTestCase {
             task.cancel(with: .goingAway, reason: nil)
         }
 
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"type":"auth","access_token":"fake-token"}"#))
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"id":7,"type":"config/entity_registry/list_for_display"}"#))
 
         let result = try await receiveString(task)
@@ -193,9 +193,9 @@ final class FakeHATests: XCTestCase {
             task.cancel(with: .goingAway, reason: nil)
         }
 
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"type":"auth","access_token":"fake-token"}"#))
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"id":1,"type":"get_states"}"#))
 
         let result = try await receiveString(task)
@@ -217,9 +217,9 @@ final class FakeHATests: XCTestCase {
             task.cancel(with: .goingAway, reason: nil)
         }
 
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"type":"auth","access_token":"fake-token"}"#))
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"id":9,"type":"unknown_command"}"#))
 
         let result = try await receiveString(task)
@@ -247,9 +247,9 @@ final class FakeHATests: XCTestCase {
             task.cancel(with: .goingAway, reason: nil)
         }
 
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"type":"auth","access_token":"fake-token"}"#))
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
         try await task.send(
             .string(
                 #"{"id":3,"type":"recorder/statistics_during_period","statistic_ids":["sensor.office_temperature"],"period":"hour","start_time":"2026-06-20T12:00:00Z","end_time":"2026-06-27T12:00:00Z","types":["mean","state"]}"#
@@ -282,9 +282,9 @@ final class FakeHATests: XCTestCase {
             task.cancel(with: .goingAway, reason: nil)
         }
 
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"type":"auth","access_token":"fake-token"}"#))
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"id":4,"type":"get_services"}"#))
 
         let result = try await receiveString(task)
@@ -309,9 +309,9 @@ final class FakeHATests: XCTestCase {
             task.cancel(with: .goingAway, reason: nil)
         }
 
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"type":"auth","access_token":"fake-token"}"#))
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
         let journal = await server.journal.snapshot()
         XCTAssertEqual(journal.last?.path, "/ha/api/websocket")
     }
@@ -331,7 +331,7 @@ final class FakeHATests: XCTestCase {
 
         _ = try await receiveString(task)
         try await task.send(.string(#"{"type":"auth","access_token":"wrong"}"#))
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_invalid","message":"Invalid access token"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_invalid","message":"Invalid access token"}"#)
     }
 
     func testFakeHAServersStartOnDistinctPortsUnderBurstCreation() throws {
