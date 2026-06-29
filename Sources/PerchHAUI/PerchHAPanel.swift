@@ -4597,6 +4597,7 @@ public struct PerchHAPanelView: View {
                 } else {
                     Text(value.text)
                         .monospacedDigit()
+                        .fontWeight(.medium)
                         .lineLimit(1)
                         .foregroundStyle(value.status == .available ? .primary : .secondary)
                 }
