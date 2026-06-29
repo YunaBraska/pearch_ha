@@ -710,31 +710,17 @@ public struct PerchHASettingsView: View {
         for entity: DiscoveredEntity,
         configuration: MenuBarItemConfiguration
     ) -> some View {
-        let isNumeric = menuBarNumericState(entity.state) != nil
-        let isTemperature = isNumeric && TemperatureConversion.isTemperatureUnit(entity.unit)
-        if isTemperature {
-            HStack(spacing: 10) {
-                Text("Temp")
-                    .foregroundStyle(.secondary)
-                Picker("Temp", selection: temperatureUnitBinding(for: entity.id)) {
-                    ForEach(TemperatureUnitPreference.allCases, id: \.rawValue) { preference in
-                        Text(preference.displayName).tag(preference)
-                    }
-                }
-                .labelsHidden()
-                .frame(width: 110)
-                .accessibilityLabel("\(entity.name) temperature unit")
-                Spacer(minLength: 0)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
         HStack(spacing: 8) {
             Text("Unit")
                 .foregroundStyle(.secondary)
-            TextField("Unit override", text: unitOverrideBinding(for: entity.id))
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 110)
-                .accessibilityLabel("\(entity.name) unit override")
+            Picker("Unit", selection: displayUnitBinding(for: entity.id)) {
+                ForEach(ValueUnit.allCases, id: \.rawValue) { unit in
+                    Text(unit.displayName).tag(unit)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 140)
+            .accessibilityLabel("\(entity.name) unit")
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1658,24 +1644,13 @@ public struct PerchHASettingsView: View {
         )
     }
 
-    private func temperatureUnitBinding(for id: EntityID) -> Binding<TemperatureUnitPreference> {
+    private func displayUnitBinding(for id: EntityID) -> Binding<ValueUnit> {
         Binding(
             get: {
-                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).temperatureUnit
+                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).displayUnit
             },
-            set: { preference in
-                model.setTemperatureUnit(id, temperatureUnit: preference)
-            }
-        )
-    }
-
-    private func unitOverrideBinding(for id: EntityID) -> Binding<String> {
-        Binding(
-            get: {
-                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).unitOverride ?? ""
-            },
-            set: { override in
-                model.setUnitOverride(id, unitOverride: override)
+            set: { unit in
+                model.setDisplayUnit(id, displayUnit: unit)
             }
         )
     }

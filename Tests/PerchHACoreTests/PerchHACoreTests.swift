@@ -617,8 +617,7 @@ final class PerchHACoreTests: XCTestCase {
         let configuration = MenuBarItemConfiguration(entityID: "sensor.any")
 
         XCTAssertEqual(configuration.coverControlMode, .both)
-        XCTAssertEqual(configuration.temperatureUnit, .automatic)
-        XCTAssertNil(configuration.unitOverride)
+        XCTAssertEqual(configuration.displayUnit, .automatic)
         XCTAssertEqual(configuration.style, .text)
     }
 
@@ -631,16 +630,34 @@ final class PerchHACoreTests: XCTestCase {
 
         XCTAssertEqual(decoded.style, .ring)
         XCTAssertEqual(decoded.coverControlMode, .both)
-        XCTAssertEqual(decoded.temperatureUnit, .automatic)
-        XCTAssertNil(decoded.unitOverride)
+        XCTAssertEqual(decoded.displayUnit, .automatic)
+    }
+
+    func test_t_item_configuration_decodes_legacy_temperature_unit() throws {
+        let legacy = """
+        {"entityID":"sensor.temp","temperatureUnit":"fahrenheit"}
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(MenuBarItemConfiguration.self, from: legacy)
+
+        XCTAssertEqual(decoded.displayUnit, .fahrenheit)
+    }
+
+    func test_t_item_configuration_decodes_legacy_automatic_temperature_unit() throws {
+        let legacy = """
+        {"entityID":"sensor.temp","temperatureUnit":"automatic"}
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(MenuBarItemConfiguration.self, from: legacy)
+
+        XCTAssertEqual(decoded.displayUnit, .automatic)
     }
 
     func test_t_item_configuration_round_trips_new_fields() throws {
         let configuration = MenuBarItemConfiguration(
             entityID: "cover.blinds",
             coverControlMode: .slider,
-            temperatureUnit: .fahrenheit,
-            unitOverride: "ppm"
+            displayUnit: .bytes
         )
 
         let data = try JSONEncoder().encode(configuration)
@@ -648,16 +665,13 @@ final class PerchHACoreTests: XCTestCase {
 
         XCTAssertEqual(decoded, configuration)
         XCTAssertEqual(decoded.coverControlMode, .slider)
-        XCTAssertEqual(decoded.temperatureUnit, .fahrenheit)
-        XCTAssertEqual(decoded.unitOverride, "ppm")
+        XCTAssertEqual(decoded.displayUnit, .bytes)
     }
 
-    func test_t_item_configuration_normalizes_blank_unit_override() {
-        let blank = MenuBarItemConfiguration(entityID: "sensor.any", unitOverride: "   ")
-        XCTAssertNil(blank.unitOverride)
-
-        let trimmed = MenuBarItemConfiguration(entityID: "sensor.any", unitOverride: "  bar  ")
-        XCTAssertEqual(trimmed.unitOverride, "bar")
+    func test_t_item_configuration_setting_display_unit() {
+        let configuration = MenuBarItemConfiguration(entityID: "sensor.any")
+            .settingDisplayUnit(.compact)
+        XCTAssertEqual(configuration.displayUnit, .compact)
     }
 
     func test_t_cover_control_mode_projection() {
@@ -669,94 +683,158 @@ final class PerchHACoreTests: XCTestCase {
         XCTAssertTrue(CoverControlMode.slider.showsSlider)
     }
 
-    func test_t_temperature_conversion_celsius_to_fahrenheit() {
-        let formatter = EntityValueFormatter(
+    private func formatter(
+        _ unit: ValueUnit,
+        decimals: Int = 0,
+        showsUnit: Bool = true
+    ) -> EntityValueFormatter {
+        EntityValueFormatter(
             locale: Locale(identifier: "en_US"),
-            maximumFractionDigits: 0,
-            displayUnit: EntityDisplayUnit(temperatureUnit: .fahrenheit)
+            maximumFractionDigits: decimals,
+            displayUnit: unit,
+            showsUnit: showsUnit
         )
+    }
 
+    func test_t_value_unit_celsius_to_fahrenheit() {
         XCTAssertEqual(
-            formatter.format(entity("sensor.temp", state: "20", unit: "°C")),
+            formatter(.fahrenheit).format(entity("sensor.temp", state: "20", unit: "°C")),
             FormattedEntityValue(text: "68 °F", status: .available)
         )
     }
 
-    func test_t_temperature_conversion_fahrenheit_to_celsius() {
-        let formatter = EntityValueFormatter(
-            locale: Locale(identifier: "en_US"),
-            maximumFractionDigits: 0,
-            displayUnit: EntityDisplayUnit(temperatureUnit: .celsius)
-        )
-
+    func test_t_value_unit_fahrenheit_to_celsius() {
         XCTAssertEqual(
-            formatter.format(entity("sensor.temp", state: "68", unit: "F")),
+            formatter(.celsius).format(entity("sensor.temp", state: "68", unit: "F")),
             FormattedEntityValue(text: "20 °C", status: .available)
         )
     }
 
-    func test_t_temperature_conversion_kelvin_to_celsius() {
-        let formatter = EntityValueFormatter(
-            locale: Locale(identifier: "en_US"),
-            maximumFractionDigits: 1,
-            displayUnit: EntityDisplayUnit(temperatureUnit: .celsius)
-        )
-
+    func test_t_value_unit_kelvin_to_celsius() {
         XCTAssertEqual(
-            formatter.format(entity("sensor.temp", state: "300", unit: "K")),
+            formatter(.celsius, decimals: 1).format(entity("sensor.temp", state: "300", unit: "K")),
             FormattedEntityValue(text: "26.9 °C", status: .available)
         )
     }
 
-    func test_t_temperature_automatic_keeps_reported_unit() {
-        let formatter = EntityValueFormatter(
-            locale: Locale(identifier: "en_US"),
-            maximumFractionDigits: 1,
-            displayUnit: EntityDisplayUnit(temperatureUnit: .automatic)
-        )
-
+    func test_t_value_unit_celsius_to_kelvin() {
         XCTAssertEqual(
-            formatter.format(entity("sensor.temp", state: "21.4", unit: "°C")),
+            formatter(.kelvin, decimals: 2).format(entity("sensor.temp", state: "0", unit: "°C")),
+            FormattedEntityValue(text: "273.15 K", status: .available)
+        )
+    }
+
+    func test_t_value_unit_automatic_keeps_small_value_unchanged() {
+        XCTAssertEqual(
+            formatter(.automatic, decimals: 1).format(entity("sensor.temp", state: "21.4", unit: "°C")),
             FormattedEntityValue(text: "21.4 °C", status: .available)
         )
     }
 
-    func test_t_unit_override_replaces_unit_on_unitless_sensor() {
-        let formatter = EntityValueFormatter(
-            locale: Locale(identifier: "en_US"),
-            maximumFractionDigits: 0,
-            displayUnit: EntityDisplayUnit(unitOverride: "ppm")
-        )
-
+    func test_t_value_unit_automatic_keeps_small_grouped_value() {
         XCTAssertEqual(
-            formatter.format(entity("sensor.co2", state: "412", unit: nil)),
-            FormattedEntityValue(text: "412 ppm", status: .available)
+            formatter(.automatic).format(entity("sensor.q", state: "4054", unit: "queries")),
+            FormattedEntityValue(text: "4,054 queries", status: .available)
         )
     }
 
-    func test_t_temperature_conversion_takes_precedence_over_override() {
-        let formatter = EntityValueFormatter(
-            locale: Locale(identifier: "en_US"),
-            maximumFractionDigits: 0,
-            displayUnit: EntityDisplayUnit(temperatureUnit: .fahrenheit, unitOverride: "ppm")
-        )
-
+    func test_t_value_unit_automatic_compacts_large_value() {
         XCTAssertEqual(
-            formatter.format(entity("sensor.temp", state: "20", unit: "°C")),
-            FormattedEntityValue(text: "68 °F", status: .available)
+            formatter(.automatic).format(entity("sensor.q", state: "4054396", unit: "queries")),
+            FormattedEntityValue(text: "4.05M queries", status: .available)
         )
     }
 
-    func test_t_unit_override_wins_when_temperature_is_automatic() {
-        let formatter = EntityValueFormatter(
-            locale: Locale(identifier: "en_US"),
-            maximumFractionDigits: 1,
-            displayUnit: EntityDisplayUnit(temperatureUnit: .automatic, unitOverride: "deg")
-        )
-
+    func test_t_value_unit_compact_always_compacts() {
         XCTAssertEqual(
-            formatter.format(entity("sensor.temp", state: "20", unit: "°C")),
-            FormattedEntityValue(text: "20 deg", status: .available)
+            formatter(.compact).format(entity("sensor.q", state: "4054396", unit: "queries")),
+            FormattedEntityValue(text: "4.05M queries", status: .available)
+        )
+    }
+
+    func test_t_value_unit_compact_thousands_suffix() {
+        XCTAssertEqual(
+            formatter(.compact).format(entity("sensor.q", state: "12345", unit: nil)),
+            FormattedEntityValue(text: "12.3k", status: .available)
+        )
+    }
+
+    func test_t_value_unit_percent_appends_suffix() {
+        XCTAssertEqual(
+            formatter(.percent).format(entity("sensor.h", state: "44", unit: "%")),
+            FormattedEntityValue(text: "44%", status: .available)
+        )
+    }
+
+    func test_t_value_unit_bytes_renders_kilobytes() {
+        XCTAssertEqual(
+            formatter(.bytes).format(entity("sensor.b", state: "1536", unit: "B")),
+            FormattedEntityValue(text: "1.5 KB", status: .available)
+        )
+    }
+
+    func test_t_value_unit_bytes_renders_plain_bytes() {
+        XCTAssertEqual(
+            formatter(.bytes).format(entity("sensor.b", state: "512", unit: "B")),
+            FormattedEntityValue(text: "512 B", status: .available)
+        )
+    }
+
+    func test_t_value_unit_duration_renders_hours_minutes() {
+        XCTAssertEqual(
+            formatter(.duration).format(entity("sensor.d", state: "3725", unit: "s")),
+            FormattedEntityValue(text: "1h 2m", status: .available)
+        )
+    }
+
+    func test_t_value_unit_non_numeric_passthrough_automatic() {
+        XCTAssertEqual(
+            formatter(.automatic).format(entity("device_tracker.phone", state: "HOME", unit: nil)),
+            FormattedEntityValue(text: "HOME", status: .available)
+        )
+    }
+
+    func test_t_value_unit_non_numeric_passthrough_conversion() {
+        XCTAssertEqual(
+            formatter(.celsius).format(entity("switch.light", state: "off", unit: nil)),
+            FormattedEntityValue(text: "off", status: .available)
+        )
+    }
+
+    func test_t_value_unit_shows_unit_false_omits_suffix() {
+        XCTAssertEqual(
+            formatter(.percent, showsUnit: false).format(entity("sensor.h", state: "44", unit: "%")),
+            FormattedEntityValue(text: "44", status: .available)
+        )
+    }
+
+    func test_t_display_defaults_percent_unit_uses_percent() {
+        let entity = entity("sensor.office_humidity", name: "Humidity", state: "44", unit: "%")
+        XCTAssertEqual(EntityDisplayDefaults.displayUnit(for: entity), .percent)
+    }
+
+    func test_t_display_defaults_temperature_unit_matches_scale() {
+        XCTAssertEqual(
+            EntityDisplayDefaults.displayUnit(for: entity("sensor.t", state: "20", unit: "°F")),
+            .fahrenheit
+        )
+        XCTAssertEqual(
+            EntityDisplayDefaults.displayUnit(for: entity("sensor.t", state: "20", unit: "K")),
+            .kelvin
+        )
+    }
+
+    func test_t_display_defaults_byte_unit_uses_bytes() {
+        XCTAssertEqual(
+            EntityDisplayDefaults.displayUnit(for: entity("sensor.disk", state: "100", unit: "GiB")),
+            .bytes
+        )
+    }
+
+    func test_t_display_defaults_unknown_unit_uses_automatic() {
+        XCTAssertEqual(
+            EntityDisplayDefaults.displayUnit(for: entity("sensor.power", state: "120", unit: "W")),
+            .automatic
         )
     }
 
@@ -765,7 +843,7 @@ final class PerchHACoreTests: XCTestCase {
         let configuration = EntityDisplayDefaults.configuration(for: entity)
 
         XCTAssertEqual(configuration.style, .battery)
-        XCTAssertEqual(configuration.temperatureUnit, .automatic)
+        XCTAssertEqual(configuration.displayUnit, .percent)
         XCTAssertEqual(configuration.coverControlMode, .both)
     }
 

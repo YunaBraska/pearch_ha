@@ -1291,13 +1291,8 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     }
 
     @discardableResult
-    public func setTemperatureUnit(_ id: EntityID, temperatureUnit: TemperatureUnitPreference) -> Bool {
-        panelModel?.setTemperatureUnit(id, temperatureUnit: temperatureUnit) ?? false
-    }
-
-    @discardableResult
-    public func setUnitOverride(_ id: EntityID, unitOverride: String?) -> Bool {
-        panelModel?.setUnitOverride(id, unitOverride: unitOverride) ?? false
+    public func setDisplayUnit(_ id: EntityID, displayUnit: ValueUnit) -> Bool {
+        panelModel?.setDisplayUnit(id, displayUnit: displayUnit) ?? false
     }
 
     @discardableResult

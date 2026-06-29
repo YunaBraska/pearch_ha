@@ -804,7 +804,8 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
         let configuration = menuBarDisplayConfiguration.itemConfiguration(for: entity.id)
         return EntityValueFormatter(
             locale: locale,
-            displayUnit: configuration.displayUnit
+            displayUnit: configuration.displayUnit,
+            showsUnit: configuration.showsUnit
         ).format(entity, isStale: valuesAreStale)
     }
 
@@ -1475,16 +1476,9 @@ public final class PerchHAPanelModel: ObservableObject {
     }
 
     @discardableResult
-    public func setTemperatureUnit(_ id: EntityID, temperatureUnit: TemperatureUnitPreference) -> Bool {
+    public func setDisplayUnit(_ id: EntityID, displayUnit: ValueUnit) -> Bool {
         updateMenuBarItemConfiguration(
-            snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).updating(temperatureUnit: temperatureUnit)
-        )
-    }
-
-    @discardableResult
-    public func setUnitOverride(_ id: EntityID, unitOverride: String?) -> Bool {
-        updateMenuBarItemConfiguration(
-            snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).settingUnitOverride(unitOverride)
+            snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).settingDisplayUnit(displayUnit)
         )
     }
 
@@ -4986,18 +4980,6 @@ extension CoverControlMode {
     }
 }
 
-extension TemperatureUnitPreference {
-    var displayName: String {
-        switch self {
-        case .automatic:
-            "Auto"
-        case .celsius:
-            "Celsius"
-        case .fahrenheit:
-            "Fahrenheit"
-        }
-    }
-}
 
 extension HistoryRange {
     var displayName: String {

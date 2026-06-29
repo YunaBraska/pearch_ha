@@ -6023,14 +6023,14 @@ final class PerchHAUITests: XCTestCase {
         )
     }
 
-    func test_t_panel_formatted_value_applies_temperature_unit_preference() async {
+    func test_t_panel_formatted_value_applies_display_unit_temperature() async {
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) }
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
-        XCTAssertTrue(model.setTemperatureUnit("sensor.office_temperature", temperatureUnit: .fahrenheit))
+        XCTAssertTrue(model.setDisplayUnit("sensor.office_temperature", displayUnit: .fahrenheit))
 
         let temperature = model.snapshot.rooms.flatMap(\.entities).first { $0.id == "sensor.office_temperature" }
         XCTAssertEqual(
@@ -6039,20 +6039,19 @@ final class PerchHAUITests: XCTestCase {
         )
     }
 
-    func test_t_panel_formatted_value_applies_unit_override() async {
+    func test_t_panel_formatted_value_applies_display_unit_percent() async {
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) }
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
-        XCTAssertTrue(model.setUnitOverride("switch.kitchen_light", unitOverride: "ppm"))
-        XCTAssertTrue(model.setUnitOverride("sensor.office_humidity", unitOverride: "ppm"))
+        XCTAssertTrue(model.setDisplayUnit("sensor.office_humidity", displayUnit: .percent))
 
         let humidity = model.snapshot.rooms.flatMap(\.entities).first { $0.id == "sensor.office_humidity" }
         XCTAssertEqual(
             humidity.map { model.snapshot.formattedValue(for: $0, locale: Locale(identifier: "en_US")) },
-            FormattedEntityValue(text: "44 ppm", status: .available)
+            FormattedEntityValue(text: "44%", status: .available)
         )
     }
 
