@@ -969,12 +969,12 @@ final class PerchHAPackagingTests: XCTestCase {
         let dmgURL = directory.appendingPathComponent("PerchHA.dmg", isDirectory: false)
         try Data("dmg".utf8).write(to: dmgURL)
         let hdiutilURL = try fakeExecutable(in: directory, name: "hdiutil")
-        var mountpointURL: URL?
+        let mountpointURL = LockedValue<URL?>(nil)
         let runner = RecordingCommandRunner { _, arguments in
             if arguments.first == "attach" {
                 let mountpointIndex = try XCTUnwrap(arguments.firstIndex(of: "-mountpoint"))
                 let mountpoint = URL(fileURLWithPath: arguments[arguments.index(after: mountpointIndex)], isDirectory: true)
-                mountpointURL = mountpoint
+                mountpointURL.set(mountpoint)
                 XCTAssertEqual(arguments.last, dmgURL.path)
                 try FileManager.default.createDirectory(
                     at: mountpoint.appendingPathComponent("PerchHA.app", isDirectory: true),
@@ -986,7 +986,7 @@ final class PerchHAPackagingTests: XCTestCase {
                 )
                 return PerchHACommandResult(status: 0, output: "attached")
             }
-            XCTAssertEqual(arguments, ["detach", try XCTUnwrap(mountpointURL).path])
+            XCTAssertEqual(arguments, ["detach", try XCTUnwrap(mountpointURL.get()).path])
             return PerchHACommandResult(status: 0, output: "detached")
         }
 
@@ -998,7 +998,7 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertEqual(result.mountedAppURL.lastPathComponent, "PerchHA.app")
         XCTAssertEqual(result.applicationsShortcutURL?.lastPathComponent, "Applications")
         XCTAssertEqual(runner.invocations.map { $0.arguments.first }, ["attach", "detach"])
-        XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(mountpointURL).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(mountpointURL.get()).path))
     }
 
     func testDMGContentVerifierReportsMissingMountedAppAndStillDetaches() throws {
@@ -1010,19 +1010,19 @@ final class PerchHAPackagingTests: XCTestCase {
         let dmgURL = directory.appendingPathComponent("PerchHA.dmg", isDirectory: false)
         try Data("dmg".utf8).write(to: dmgURL)
         let hdiutilURL = try fakeExecutable(in: directory, name: "hdiutil")
-        var mountpointURL: URL?
+        let mountpointURL = LockedValue<URL?>(nil)
         let runner = RecordingCommandRunner { _, arguments in
             if arguments.first == "attach" {
                 let mountpointIndex = try XCTUnwrap(arguments.firstIndex(of: "-mountpoint"))
                 let mountpoint = URL(fileURLWithPath: arguments[arguments.index(after: mountpointIndex)], isDirectory: true)
-                mountpointURL = mountpoint
+                mountpointURL.set(mountpoint)
                 try FileManager.default.createSymbolicLink(
                     at: mountpoint.appendingPathComponent("Applications"),
                     withDestinationURL: URL(fileURLWithPath: "/Applications", isDirectory: true)
                 )
                 return PerchHACommandResult(status: 0, output: "attached")
             }
-            XCTAssertEqual(arguments, ["detach", try XCTUnwrap(mountpointURL).path])
+            XCTAssertEqual(arguments, ["detach", try XCTUnwrap(mountpointURL.get()).path])
             return PerchHACommandResult(status: 0, output: "detached")
         }
 
@@ -1031,7 +1031,7 @@ final class PerchHAPackagingTests: XCTestCase {
                 PerchHADMGContentVerificationConfiguration(dmgURL: dmgURL, appBundleName: "PerchHA.app")
             )
         ) { error in
-            guard let mountpointURL else {
+            guard let mountpointURL = mountpointURL.get() else {
                 XCTFail("missing mountpoint")
                 return
             }
@@ -2799,6 +2799,28 @@ private final class RecordingCommandRunner: PerchHACommandRunning, @unchecked Se
     func run(executableURL: URL, arguments: [String]) throws -> PerchHACommandResult {
         invocations.append(Invocation(executableURL: executableURL, arguments: arguments))
         return try handler(executableURL, arguments)
+    }
+}
+
+private final class LockedValue<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    func set(_ newValue: Value) {
+        lock.lock()
+        value = newValue
+        lock.unlock()
+    }
+
+    func get() -> Value {
+        lock.lock()
+        let currentValue = value
+        lock.unlock()
+        return currentValue
     }
 }
 
