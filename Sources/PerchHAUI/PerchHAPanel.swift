@@ -4140,17 +4140,13 @@ public struct PerchHAHistoryPopoverContent: View {
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("\(entityName) history has no numeric data")
         case let .statistics(series, statistics):
+            // Keep a constant height: always show the chart and stats, and float
+            // the cursor readout as an overlay on the chart. Swapping the area
+            // below the chart would resize the popover window on hover, which
+            // aborts inside NSPopover's animated resize.
             VStack(alignment: .leading, spacing: 8) {
                 interactiveChart(series: series)
-                if let readout = cursorReadout(for: series) {
-                    Text(readout)
-                        .font(.caption)
-                        .monospacedDigit()
-                        .foregroundStyle(historyValueForegroundStyle)
-                        .accessibilityHidden(true)
-                } else {
-                    historyStats(statistics)
-                }
+                historyStats(statistics)
             }
         case let .unavailable(message):
             VStack(alignment: .leading, spacing: 4) {
@@ -4184,6 +4180,18 @@ public struct PerchHAHistoryPopoverContent: View {
                         .frame(width: 1)
                         .frame(maxHeight: .infinity)
                         .offset(x: x)
+                    if let readout = cursorReadout(for: series) {
+                        Text(readout)
+                            .font(.caption2)
+                            .monospacedDigit()
+                            .foregroundStyle(historyValueForegroundStyle)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+                            .fixedSize()
+                            .offset(x: min(max(x - 30, 0), max(proxy.size.width - 60, 0)))
+                            .accessibilityHidden(true)
+                    }
                 }
             }
             .contentShape(Rectangle())
