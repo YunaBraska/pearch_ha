@@ -3,7 +3,7 @@
     "name" : "review-contact-sheet.png",
     "pixelsHigh" : 1346,
     "pixelsWide" : 672,
-    "sampledHashHex" : "6edc4492202399b0",
+    "sampledHashHex" : "cd22c17a199240ba",
     "visiblePixelCount" : 904512
   },
   "schemaVersion" : 1,
@@ -12,28 +12,28 @@
       "name" : "connected-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "ab331db6df1e4659",
+      "sampledHashHex" : "5ef4f9eb644690fa",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "connected-dark.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "503c2d88d1660662",
+      "sampledHashHex" : "28008a854bdc5176",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "connected-dark-increased-contrast.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "1b81641c02de4826",
+      "sampledHashHex" : "ed565d5256798db2",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "connected-light-reduced-motion.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "ab331db6df1e4659",
+      "sampledHashHex" : "5ef4f9eb644690fa",
       "visiblePixelCount" : 604800
     },
     {
@@ -61,28 +61,28 @@
       "name" : "built-in-controls-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "85f6599dc00bd9c4",
+      "sampledHashHex" : "d1e7ce7233de08cb",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "first-run-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "f04b18ff0ff08217",
+      "sampledHashHex" : "ba5e45a5af32b5e0",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "connecting-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "26317300ed3ddd27",
+      "sampledHashHex" : "88533e5f00ca9b43",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "signing-in-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "7effb7217d00f246",
+      "sampledHashHex" : "7c98563e2a713a21",
       "visiblePixelCount" : 604800
     },
     {
@@ -96,21 +96,21 @@
       "name" : "reconnecting-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "b1b373c798631de2",
+      "sampledHashHex" : "306724b30ad981a9",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "empty-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "9d6c99cf03d09ce9",
+      "sampledHashHex" : "f06dd1de0be3d3ea",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "error-dark.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "0d7238c14cfe2dd3",
+      "sampledHashHex" : "2bfa00b425522bd6",
       "visiblePixelCount" : 604800
     }
   ]

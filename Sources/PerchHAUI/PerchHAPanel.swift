@@ -4134,12 +4134,19 @@ public struct PerchHAPanelView: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("PerchHA")
-                    .font(.headline)
-                Text(model.snapshot.connectionSummary)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Circle()
+                    .fill(connectionStatusColor)
+                    .frame(width: 8, height: 8)
+                    .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 2 }
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("PerchHA")
+                        .font(.headline)
+                    Text(model.snapshot.connectionSummary)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer()
             Button {
@@ -4152,6 +4159,19 @@ public struct PerchHAPanelView: View {
             .accessibilityLabel("Refresh")
         }
         .padding(14)
+    }
+
+    private var connectionStatusColor: Color {
+        switch model.snapshot.connectionState {
+        case .connected:
+            return .green
+        case .connecting, .reconnecting:
+            return .orange
+        case .failed:
+            return .red
+        case .disconnected:
+            return Color.secondary
+        }
     }
 
     @ViewBuilder
