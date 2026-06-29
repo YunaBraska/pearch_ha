@@ -4206,69 +4206,149 @@ public struct PerchHAPanelView: View {
         }
     }
     private func roomSection(_ room: Room) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(room.name)
-                .font(.subheadline.weight(.semibold))
-            ForEach(room.entities, id: \.id.rawValue) { entity in
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(entity.name)
-                            .lineLimit(1)
-                        Spacer()
-                        Text(entityValue(entity).text)
-                            .monospacedDigit()
-                            .lineLimit(1)
-                            .foregroundStyle(entityValue(entity).status == .available ? .primary : .secondary)
-                        if let control = model.snapshot.control(for: entity) {
-                            Toggle("", isOn: entityControlBinding(for: entity))
-                                .labelsHidden()
-                                .toggleStyle(.switch)
-                                .controlSize(.small)
-                                .disabled(control.isRunning)
-                                .help(entityControlHelp(for: entity, control: control))
-                                .accessibilityLabel("\(control.isOn ? "Turn off" : "Turn on") \(entity.name)")
-                                .accessibilityHint(entityControlHelp(for: entity, control: control))
-                        }
-                        if let coverControl = model.snapshot.coverControl(for: entity) {
-                            coverButtons(for: entity, control: coverControl)
-                        }
-                        ForEach(model.customActions(for: entity), id: \.id.rawValue) { action in
-                            customActionButton(action)
-                        }
-                    }
-                    .font(.body)
-                    if let coverControl = model.snapshot.coverControl(for: entity),
-                       let position = coverControl.position {
-                        PerchHACoverPositionSlider(
-                            position: position,
-                            disabled: coverControl.isRunning,
-                            accessibilityName: "\(entity.name) position"
-                        ) { position in
-                            model.startCoverPositionChange(entity.id, position: position)
-                        }
-                        .frame(width: 132)
-                    }
-                    if let failureMessage = model.snapshot.controlActionState.failureMessage(for: entity.id) {
-                        Text(failureMessage)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityLabel("\(entity.name) control failed: \(failureMessage)")
-                    }
-                }
-                .onHover { isInside in
-                    if isInside {
-                        model.startHistoryHover(entity.id)
-                    } else {
-                        model.cancelHistoryHover()
-                    }
-                }
-                .popover(isPresented: historyPopoverBinding(for: entity.id)) {
-                    historyPopover(for: entity)
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityLabel("\(entity.name), \(entityValue(entity).text)")
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Text(room.name.uppercased())
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .tracking(0.4)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
             }
+            .padding(.horizontal, 4)
+            VStack(spacing: 0) {
+                ForEach(Array(room.entities.enumerated()), id: \.element.id.rawValue) { index, entity in
+                    entityRow(entity)
+                    if index < room.entities.count - 1 {
+                        Divider()
+                            .padding(.leading, 34)
+                    }
+                }
+            }
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.06))
+            )
+        }
+    }
+
+    private func entityRow(_ entity: DiscoveredEntity) -> some View {
+        let value = entityValue(entity)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                Image(systemName: entityIconName(for: entity))
+                    .font(.system(size: 14))
+                    .frame(width: 22, alignment: .center)
+                    .foregroundStyle(value.status == .available ? Color.accentColor : Color.secondary)
+                    .accessibilityHidden(true)
+                Text(entity.name)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(value.text)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .foregroundStyle(value.status == .available ? .primary : .secondary)
+                if let control = model.snapshot.control(for: entity) {
+                    Toggle("", isOn: entityControlBinding(for: entity))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .disabled(control.isRunning)
+                        .help(entityControlHelp(for: entity, control: control))
+                        .accessibilityLabel("\(control.isOn ? "Turn off" : "Turn on") \(entity.name)")
+                        .accessibilityHint(entityControlHelp(for: entity, control: control))
+                }
+                if let coverControl = model.snapshot.coverControl(for: entity) {
+                    coverButtons(for: entity, control: coverControl)
+                }
+                ForEach(model.customActions(for: entity), id: \.id.rawValue) { action in
+                    customActionButton(action)
+                }
+            }
+            .font(.body)
+            if let coverControl = model.snapshot.coverControl(for: entity),
+               let position = coverControl.position {
+                PerchHACoverPositionSlider(
+                    position: position,
+                    disabled: coverControl.isRunning,
+                    accessibilityName: "\(entity.name) position"
+                ) { position in
+                    model.startCoverPositionChange(entity.id, position: position)
+                }
+                .frame(width: 132)
+                .padding(.leading, 32)
+            }
+            if let failureMessage = model.snapshot.controlActionState.failureMessage(for: entity.id) {
+                Text(failureMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 32)
+                    .accessibilityLabel("\(entity.name) control failed: \(failureMessage)")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .contentShape(Rectangle())
+        .onHover { isInside in
+            if isInside {
+                model.startHistoryHover(entity.id)
+            } else {
+                model.cancelHistoryHover()
+            }
+        }
+        .popover(isPresented: historyPopoverBinding(for: entity.id)) {
+            historyPopover(for: entity)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(entity.name), \(value.text)")
+    }
+
+    private func entityIconName(for entity: DiscoveredEntity) -> String {
+        let domain = entity.id.domain
+        let name = entity.name.lowercased()
+        let unit = (entity.unit ?? "").lowercased()
+        switch domain {
+        case "light":
+            return "lightbulb"
+        case "switch", "input_boolean":
+            return "switch.2"
+        case "cover":
+            return "window.shade.open"
+        case "fan":
+            return "fanblades"
+        case "lock":
+            return "lock"
+        case "climate", "water_heater":
+            return "thermometer"
+        case "media_player":
+            return "play.rectangle"
+        case "binary_sensor":
+            return "dot.radiowaves.left.and.right"
+        case "person", "device_tracker":
+            return "person"
+        default:
+            if name.contains("temp") || unit.contains("°") || unit == "k" {
+                return "thermometer"
+            }
+            if name.contains("humid") || unit == "%" {
+                return "humidity"
+            }
+            if name.contains("batt") {
+                return "battery.50"
+            }
+            if name.contains("power") || name.contains("energy") || unit == "w" || unit == "kw" || unit == "wh" || unit == "kwh" {
+                return "bolt"
+            }
+            if name.contains("co2") || name.contains("air") || name.contains("quality") {
+                return "aqi.medium"
+            }
+            if name.contains("door") || name.contains("window") || name.contains("motion") {
+                return "sensor"
+            }
+            return "gauge.medium"
         }
     }
 

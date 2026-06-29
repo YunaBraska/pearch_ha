@@ -3,7 +3,7 @@
     "name" : "review-contact-sheet.png",
     "pixelsHigh" : 1346,
     "pixelsWide" : 672,
-    "sampledHashHex" : "3e8ca180761e52e5",
+    "sampledHashHex" : "2e882412380516d5",
     "visiblePixelCount" : 904512
   },
   "schemaVersion" : 1,
@@ -12,28 +12,28 @@
       "name" : "connected-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "5ef4f9eb644690fa",
+      "sampledHashHex" : "a75b6fd47a8c7fca",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "connected-dark.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "28008a854bdc5176",
+      "sampledHashHex" : "6db32b41328dff2d",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "connected-dark-increased-contrast.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "ed565d5256798db2",
+      "sampledHashHex" : "4710eafbab70af61",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "connected-light-reduced-motion.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "5ef4f9eb644690fa",
+      "sampledHashHex" : "a75b6fd47a8c7fca",
       "visiblePixelCount" : 604800
     },
     {
@@ -61,7 +61,7 @@
       "name" : "built-in-controls-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "d1e7ce7233de08cb",
+      "sampledHashHex" : "853764bc39ec7aa9",
       "visiblePixelCount" : 604800
     },
     {
@@ -96,7 +96,7 @@
       "name" : "reconnecting-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "306724b30ad981a9",
+      "sampledHashHex" : "708e6a4b1f88abcb",
       "visiblePixelCount" : 604800
     },
     {
