@@ -381,10 +381,17 @@ public struct PerchHAHistoryStatistics: Equatable, Sendable {
 }
 
 public enum PerchHAHistoryContentSummary: Equatable, Sendable {
+    /// The series fetched successfully but contained no samples at all.
+    case empty
+    /// The series contained samples, but none carried a numeric value.
     case noNumericData
     case statistics(PerchHAHistoryStatistics)
 
     public init(series: HistorySeries) {
+        guard !series.samples.isEmpty else {
+            self = .empty
+            return
+        }
         let samples = series.chronologicalNumericSamples
         let values = samples.map(\.value)
         guard let current = samples.last?.value,
@@ -408,6 +415,9 @@ public enum PerchHAHistoryContentSummary: Equatable, Sendable {
 public enum PerchHAHistoryBodyPresentation: Equatable, Sendable {
     case hidden
     case loadingSkeleton
+    /// A successful fetch that returned no history for the selected range.
+    case empty
+    /// A successful fetch whose samples carried no numeric values.
     case noNumericData
     case statistics(series: HistorySeries, statistics: PerchHAHistoryStatistics)
     case unavailable(String)
@@ -420,6 +430,8 @@ public enum PerchHAHistoryBodyPresentation: Equatable, Sendable {
             self = .loadingSkeleton
         case let .loaded(series) where series.entityID == entityID:
             switch PerchHAHistoryContentSummary(series: series) {
+            case .empty:
+                self = .empty
             case .noNumericData:
                 self = .noNumericData
             case let .statistics(statistics):
@@ -1131,6 +1143,7 @@ public final class PerchHAPanelModel: ObservableObject {
     private let oauthSignInRunner: OAuthSignInRunner
     private let clock: any PerchClock
     private let historyDebounce: PerchDuration
+    private let historyHoverGrace: PerchDuration
     private let historyCacheConfiguration: PerchHAHistoryCacheConfiguration
     private let selectionSink: SelectionConfigurationSink
     private let menuBarDisplaySink: MenuBarDisplayConfigurationSink
@@ -1145,6 +1158,7 @@ public final class PerchHAPanelModel: ObservableObject {
     private var controlActionTask: Task<Void, Never>?
     private var pendingControlChange: PendingControlChange?
     private var historyTask: Task<Void, Never>?
+    private var historyCloseTask: Task<Void, Never>?
     private var historyRequestGeneration = 0
     private var protectedValueDrafts: [String: String] = [:]
 
@@ -1157,6 +1171,7 @@ public final class PerchHAPanelModel: ObservableObject {
         oauthSignInRunner: @escaping OAuthSignInRunner = { _ in .failed("OAuth sign-in is not configured") },
         clock: any PerchClock = SystemPerchClock(),
         historyDebounce: PerchDuration = .milliseconds(150),
+        historyHoverGrace: PerchDuration = .milliseconds(300),
         historyCacheConfiguration: PerchHAHistoryCacheConfiguration = PerchHAHistoryCacheConfiguration(),
         selectionConfiguration: EntitySelectionConfiguration = EntitySelectionConfiguration(),
         menuBarDisplayConfiguration: MenuBarDisplayConfiguration = MenuBarDisplayConfiguration(),
@@ -1207,6 +1222,7 @@ public final class PerchHAPanelModel: ObservableObject {
         self.oauthSignInRunner = oauthSignInRunner
         self.clock = clock
         self.historyDebounce = historyDebounce
+        self.historyHoverGrace = historyHoverGrace
         self.historyCacheConfiguration = historyCacheConfiguration
         self.selectionSink = selectionSink
         self.menuBarDisplaySink = menuBarDisplaySink
@@ -1218,6 +1234,7 @@ public final class PerchHAPanelModel: ObservableObject {
         actionTask?.cancel()
         controlActionTask?.cancel()
         historyTask?.cancel()
+        historyCloseTask?.cancel()
     }
 
     public func updateConnectionForm(
@@ -1578,8 +1595,17 @@ public final class PerchHAPanelModel: ObservableObject {
         }
     }
 
+    /// Begins presenting the history popover for an entity after the debounce.
+    ///
+    /// Re-entering a row cancels any pending grace-period close so the popover
+    /// stays anchored beside the row while the cursor lingers.
+    ///
+    /// - Parameters:
+    ///   - id: The entity whose history should be shown.
+    ///   - range: An explicit range, or `nil` to use the entity's default.
     public func startHistoryHover(_ id: EntityID, range: HistoryRange? = nil) {
         let resolvedRange = range ?? snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).defaultHistoryRange
+        cancelPendingHistoryClose()
         historyTask?.cancel()
         applyHistoryPresentationEntityID(id)
         historyTask = Task { @MainActor [weak self] in
@@ -1598,7 +1624,61 @@ public final class PerchHAPanelModel: ObservableObject {
         }
     }
 
+    /// Keeps the history popover open while the cursor is inside it.
+    ///
+    /// Called when the cursor enters the popover content; cancels any pending
+    /// grace-period close scheduled when the cursor left the underlying row.
+    public func keepHistoryHoverAlive() {
+        cancelPendingHistoryClose()
+    }
+
+    /// Schedules the history popover to close after the hover grace period.
+    ///
+    /// Called when the cursor leaves the row or the popover. The close does not
+    /// happen immediately: a grace timer (``historyHoverGrace``) runs on the
+    /// injected clock so the cursor can travel from the row into the popover
+    /// without dismissing it. ``startHistoryHover(_:range:)`` or
+    /// ``keepHistoryHoverAlive()`` called before the timer fires cancels the
+    /// pending close.
     public func cancelHistoryHover() {
+        let isLoading: Bool
+        if case .loading = snapshot.historyState {
+            isLoading = true
+        } else {
+            isLoading = false
+        }
+        guard snapshot.historyPresentationEntityID != nil || historyTask != nil || isLoading else {
+            return
+        }
+        historyCloseTask?.cancel()
+        historyCloseTask = Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            do {
+                _ = try await clock.sleep(for: historyHoverGrace)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else {
+                return
+            }
+            historyCloseTask = nil
+            closeHistoryHoverImmediately()
+        }
+    }
+
+    private func cancelPendingHistoryClose() {
+        historyCloseTask?.cancel()
+        historyCloseTask = nil
+    }
+
+    /// Clears the history presentation right away, bypassing the grace period.
+    ///
+    /// Used by teardown paths (sign-out, reconnect, panel dismissal) where the
+    /// popover must disappear without waiting.
+    private func closeHistoryHoverImmediately() {
+        cancelPendingHistoryClose()
         historyTask?.cancel()
         historyTask = nil
         historyRequestGeneration += 1
@@ -1662,7 +1742,7 @@ public final class PerchHAPanelModel: ObservableObject {
     }
 
     public func dismissHistoryPopover() {
-        cancelHistoryHover()
+        closeHistoryHoverImmediately()
     }
 
     public func customActions(for entity: DiscoveredEntity) -> [EntityCustomAction] {
@@ -2954,6 +3034,8 @@ public final class PerchHAPanelModel: ObservableObject {
         controlActionTask = nil
         historyTask?.cancel()
         historyTask = nil
+        historyCloseTask?.cancel()
+        historyCloseTask = nil
         historyRequestGeneration += 1
         pendingControlChange = nil
         historyCache = PerchHAHistoryCache()
@@ -3133,6 +3215,8 @@ public final class PerchHAPanelModel: ObservableObject {
             if connectionChanged {
                 historyTask?.cancel()
                 historyTask = nil
+                historyCloseTask?.cancel()
+                historyCloseTask = nil
                 historyRequestGeneration += 1
                 historyCache = PerchHAHistoryCache()
                 pendingControlChange = nil
@@ -4052,6 +4136,12 @@ public struct PerchHAHistoryPopoverContent: View {
         case .loadingSkeleton:
             HistoryLoadingSkeleton()
                 .accessibilityLabel("\(entityName) history loading")
+        case .empty:
+            Text("No history for this range")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel("\(entityName) has no history for this range")
         case .noNumericData:
             Text("No history data")
                 .font(.callout)
@@ -4066,11 +4156,21 @@ public struct PerchHAHistoryPopoverContent: View {
                 historyStats(statistics)
             }
         case let .unavailable(message):
-            Text(message)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityLabel("\(entityName) history unavailable: \(message)")
+            VStack(alignment: .leading, spacing: 4) {
+                Label("History unavailable", systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Move away and hover again to retry.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(entityName) history unavailable: \(message). Hover again to retry.")
         }
     }
 
@@ -4434,7 +4534,7 @@ public struct PerchHAPanelView: View {
                 model.cancelHistoryHover()
             }
         }
-        .popover(isPresented: historyPopoverBinding(for: entity.id)) {
+        .popover(isPresented: historyPopoverBinding(for: entity.id), arrowEdge: .trailing) {
             historyPopover(for: entity)
         }
         .accessibilityElement(children: .contain)
@@ -4631,6 +4731,13 @@ public struct PerchHAPanelView: View {
             state: model.snapshot.historyState,
             selectedRange: historyRangeBinding(for: entity)
         )
+        .onHover { isInside in
+            if isInside {
+                model.keepHistoryHoverAlive()
+            } else {
+                model.cancelHistoryHover()
+            }
+        }
     }
 
     private var footer: some View {

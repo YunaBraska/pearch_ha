@@ -2305,7 +2305,8 @@ struct PerchHASmoke {
                 await historyProbe.provide(form: form, entityID: entityID, range: range)
             },
             clock: historyClock,
-            historyDebounce: .seconds(1)
+            historyDebounce: .seconds(1),
+            historyHoverGrace: .milliseconds(300)
         )
         historyPanel.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await historyPanel.connect()
@@ -2344,6 +2345,23 @@ struct PerchHASmoke {
             "panel history opens popover presentation"
         )
         historyPanel.cancelHistoryHover()
+        for _ in 0..<100 {
+            if await historyClock.sleepingTaskCount() == 1 {
+                break
+            }
+            await Task.yield()
+        }
+        try expect(
+            historyPanel.snapshot.historyPresentationEntityID == "sensor.office_temperature",
+            "panel history hover-out keeps popover open during grace period"
+        )
+        _ = await historyClock.advance(by: .milliseconds(300))
+        for _ in 0..<100 {
+            if historyPanel.snapshot.historyPresentationEntityID == nil {
+                break
+            }
+            await Task.yield()
+        }
         try expect(historyPanel.snapshot.historyPresentationEntityID == nil, "panel history hover-out closes popover")
         let providerCallsAfterDebounce = await historyProbe.callCount()
         try expect(providerCallsAfterDebounce == 1, "panel history provider called after debounce")

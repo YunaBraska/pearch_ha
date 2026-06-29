@@ -657,6 +657,7 @@ final class PerchHAUITests: XCTestCase {
     }
 
     func test_t_history_cancel_hover_resets_loading_state() async {
+        let clock = TestPerchClock()
         let recorder = HistoryProviderRecorder(
             results: [
                 .success(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4))
@@ -667,7 +668,9 @@ final class PerchHAUITests: XCTestCase {
             connector: { _ in .success(rooms: selectionRooms()) },
             historyProvider: { form, entityID, range in
                 await recorder.provide(form: form, entityID: entityID, range: range)
-            }
+            },
+            clock: clock,
+            historyHoverGrace: .milliseconds(300)
         )
 
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
@@ -683,6 +686,10 @@ final class PerchHAUITests: XCTestCase {
         }
 
         model.cancelHistoryHover()
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .milliseconds(300))
+        await spinUntil { model.snapshot.historyState == .idle }
+
         await recorder.releaseNext()
         await task.value
 
@@ -826,6 +833,7 @@ final class PerchHAUITests: XCTestCase {
     }
 
     func test_t_history_hover_out_closes_loaded_and_unavailable_popovers() async {
+        let loadedClock = TestPerchClock()
         let loadedRecorder = HistoryProviderRecorder(
             results: [
                 .success(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4))
@@ -836,7 +844,9 @@ final class PerchHAUITests: XCTestCase {
             historyProvider: { form, entityID, range in
                 await loadedRecorder.provide(form: form, entityID: entityID, range: range)
             },
-            historyDebounce: .milliseconds(0)
+            clock: loadedClock,
+            historyDebounce: .milliseconds(0),
+            historyHoverGrace: .milliseconds(300)
         )
         loadedModel.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await loadedModel.connect()
@@ -851,13 +861,19 @@ final class PerchHAUITests: XCTestCase {
 
         XCTAssertEqual(loadedModel.snapshot.historyPresentationEntityID, "sensor.office_temperature")
         loadedModel.cancelHistoryHover()
+        await spinUntil { await loadedClock.sleepingTaskCount() == 1 }
+        _ = await loadedClock.advance(by: .milliseconds(300))
+        await spinUntil { loadedModel.snapshot.historyPresentationEntityID == nil }
         XCTAssertNil(loadedModel.snapshot.historyPresentationEntityID)
         XCTAssertEqual(loadedModel.snapshot.historyState, .loaded(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4)))
 
+        let unavailableClock = TestPerchClock()
         let unavailableModel = PerchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
             historyProvider: { _, _, _ in .unavailable("history unavailable") },
-            historyDebounce: .milliseconds(0)
+            clock: unavailableClock,
+            historyDebounce: .milliseconds(0),
+            historyHoverGrace: .milliseconds(300)
         )
         unavailableModel.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await unavailableModel.connect()
@@ -872,6 +888,9 @@ final class PerchHAUITests: XCTestCase {
 
         XCTAssertEqual(unavailableModel.snapshot.historyPresentationEntityID, "sensor.office_temperature")
         unavailableModel.cancelHistoryHover()
+        await spinUntil { await unavailableClock.sleepingTaskCount() == 1 }
+        _ = await unavailableClock.advance(by: .milliseconds(300))
+        await spinUntil { unavailableModel.snapshot.historyPresentationEntityID == nil }
         XCTAssertNil(unavailableModel.snapshot.historyPresentationEntityID)
         XCTAssertEqual(
             unavailableModel.snapshot.historyState,
@@ -879,12 +898,159 @@ final class PerchHAUITests: XCTestCase {
         )
     }
 
-    func testHistoryContentSummaryEmptySeriesIsNoNumericData() {
+    func test_t_history_hover_out_keeps_presentation_until_grace_elapses() async {
+        let clock = TestPerchClock()
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, entityID, range in
+                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
+            },
+            clock: clock,
+            historyDebounce: .milliseconds(0),
+            historyHoverGrace: .milliseconds(300)
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.startHistoryHover("sensor.office_temperature", range: .hour)
+        await spinUntil {
+            if case .loaded = model.snapshot.historyState {
+                return true
+            }
+            return false
+        }
+
+        model.cancelHistoryHover()
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+
+        _ = await clock.advance(by: .milliseconds(299))
+        await Task.yield()
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+
+        _ = await clock.advance(by: .milliseconds(1))
+        await spinUntil { model.snapshot.historyPresentationEntityID == nil }
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+    }
+
+    func test_t_history_keep_alive_cancels_pending_grace_close() async {
+        let clock = TestPerchClock()
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, entityID, range in
+                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
+            },
+            clock: clock,
+            historyDebounce: .milliseconds(0),
+            historyHoverGrace: .milliseconds(300)
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.startHistoryHover("sensor.office_temperature", range: .hour)
+        await spinUntil {
+            if case .loaded = model.snapshot.historyState {
+                return true
+            }
+            return false
+        }
+
+        model.cancelHistoryHover()
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        model.keepHistoryHoverAlive()
+        await spinUntil { await clock.sleepingTaskCount() == 0 }
+
+        _ = await clock.advance(by: .seconds(5))
+        await Task.yield()
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+    }
+
+    func test_t_history_re_entering_row_cancels_pending_grace_close() async {
+        let clock = TestPerchClock()
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, entityID, range in
+                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
+            },
+            clock: clock,
+            historyDebounce: .milliseconds(0),
+            historyHoverGrace: .milliseconds(300)
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.startHistoryHover("sensor.office_temperature", range: .hour)
+        await spinUntil {
+            if case .loaded = model.snapshot.historyState {
+                return true
+            }
+            return false
+        }
+
+        model.cancelHistoryHover()
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        model.startHistoryHover("sensor.office_temperature", range: .hour)
+        await spinUntil {
+            if case .loaded = model.snapshot.historyState {
+                return true
+            }
+            return false
+        }
+
+        _ = await clock.advance(by: .seconds(5))
+        await Task.yield()
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+    }
+
+    func test_t_history_empty_loaded_series_produces_empty_state() async {
+        let emptySeries = HistorySeries(entityID: "sensor.office_temperature", range: .hour, samples: [])
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, _, _ in .success(emptySeries) },
+            historyDebounce: .milliseconds(0)
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        await model.loadHistory("sensor.office_temperature", range: .hour)
+
+        XCTAssertEqual(model.snapshot.historyState, .loaded(emptySeries))
+        XCTAssertEqual(
+            PerchHAHistoryBodyPresentation(state: model.snapshot.historyState, entityID: "sensor.office_temperature"),
+            .empty
+        )
+    }
+
+    func test_t_history_provider_failure_produces_unavailable_state() async {
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, _, _ in .unavailable("lost connection to Home Assistant") },
+            historyDebounce: .milliseconds(0)
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        await model.loadHistory("sensor.office_temperature", range: .hour)
+
+        XCTAssertEqual(
+            model.snapshot.historyState,
+            .unavailable(
+                entityID: "sensor.office_temperature",
+                range: .hour,
+                message: "lost connection to Home Assistant"
+            )
+        )
+        XCTAssertEqual(
+            PerchHAHistoryBodyPresentation(state: model.snapshot.historyState, entityID: "sensor.office_temperature"),
+            .unavailable("lost connection to Home Assistant")
+        )
+    }
+
+    func testHistoryContentSummaryEmptySeriesIsEmpty() {
         XCTAssertEqual(
             PerchHAHistoryContentSummary(
                 series: HistorySeries(entityID: "sensor.office_temperature", range: .hour, samples: [])
             ),
-            .noNumericData
+            .empty
         )
     }
 
@@ -1012,7 +1178,7 @@ final class PerchHAUITests: XCTestCase {
                 state: .loaded(HistorySeries(entityID: "sensor.office_temperature", range: .hour, samples: [])),
                 entityID: "sensor.office_temperature"
             ),
-            .noNumericData
+            .empty
         )
         XCTAssertEqual(
             PerchHAHistoryBodyPresentation(
@@ -6856,5 +7022,19 @@ func energyRooms() -> [Room] {
             ]
         )
     ]
+}
+
+private func historySeriesFixture(entityID: EntityID, range: HistoryRange, value: Double) -> HistorySeries {
+    HistorySeries(
+        entityID: entityID,
+        range: range,
+        samples: [
+            HistorySample(
+                timestamp: Date(timeIntervalSince1970: 1_789_999_200),
+                state: "\(value)",
+                numericValue: value
+            )
+        ]
+    )
 }
 #endif
