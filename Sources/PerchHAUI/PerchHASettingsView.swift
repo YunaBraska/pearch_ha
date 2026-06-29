@@ -307,11 +307,6 @@ struct PerchHAConnectionFormFields: View {
 /// Entities tree, matching the documented UX. This view hosts the settings-only
 /// controls relocated out of the cramped menu-bar panel.
 public struct PerchHASettingsView: View {
-    private enum CustomActionEditorLayout {
-        static let serviceDataTypePickerWidth: CGFloat = 92
-        static let serviceDataValueMinWidth: CGFloat = 144
-    }
-
     /// Selectable tabs of the Settings window.
     public enum Tab: Hashable, Sendable {
         case connection
@@ -536,7 +531,7 @@ public struct PerchHASettingsView: View {
 
     private var orphanedCustomActionControls: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text("Unmatched actions")
+            Text("Unused buttons")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             ForEach(model.orphanedCustomActions, id: \.id.rawValue) { action in
@@ -553,8 +548,8 @@ public struct PerchHASettingsView: View {
                     }
                     .buttonStyle(.borderless)
                     .controlSize(.small)
-                    .help("Delete unmatched action")
-                    .accessibilityLabel("Delete unmatched action \(action.title)")
+                    .help("Delete unused button")
+                    .accessibilityLabel("Delete unused button \(action.title)")
                 }
             }
         }
@@ -674,11 +669,8 @@ public struct PerchHASettingsView: View {
             }
             .font(.body)
             if isExpanded {
-                VStack(alignment: .leading, spacing: 10) {
-                    menuBarControls(for: entity)
-                    customActionControls(for: entity)
-                }
-                .padding(.leading, 32)
+                entityDetailSections(for: entity)
+                    .padding(.leading, 32)
             }
         }
         .padding(.horizontal, 12)
@@ -694,28 +686,80 @@ public struct PerchHASettingsView: View {
         }
     }
 
-    private func menuBarControls(for entity: DiscoveredEntity) -> some View {
+    /// The macOS System-Settings-style detail pane shown when an entity row is
+    /// expanded: clearly labelled Display, Menu bar, Alerts, and Buttons
+    /// sections separated by hairlines.
+    private func entityDetailSections(for entity: DiscoveredEntity) -> some View {
         let configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entity.id)
         let isPromoted = model.snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
-        let isNumeric = menuBarNumericState(entity.state) != nil
-        let isCover = entity.id.domain == "cover"
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Toggle("Menu bar", isOn: menuBarVisibilityBinding(for: entity.id))
-                    .toggleStyle(.checkbox)
-                    .fixedSize()
-                    .accessibilityLabel("Show \(entity.name) in menu bar")
-                if isPromoted {
-                    menuBarMoveButtons(for: entity)
-                    Spacer(minLength: 0)
+        return VStack(alignment: .leading, spacing: 0) {
+            settingsSection(title: "Display", systemImage: "textformat.size") {
+                displaySectionControls(for: entity, configuration: configuration, isPromoted: isPromoted)
+            }
+            settingsSectionDivider
+            settingsSection(title: "Menu bar", systemImage: "menubar.rectangle") {
+                menuBarSectionControls(for: entity, isPromoted: isPromoted)
+            }
+            if isPromoted {
+                settingsSectionDivider
+                settingsSection(title: "Alerts", systemImage: "bell.badge") {
+                    menuBarThresholdControls(for: entity, configuration: configuration)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            settingsSectionDivider
+            settingsSection(title: "Buttons", systemImage: "hand.tap") {
+                customActionControls(for: entity)
+            }
+        }
+        .font(.caption)
+        .controlSize(.small)
+    }
 
+    /// A single labelled settings section with a small leading SF Symbol header
+    /// and right-aligned controls, matching the macOS settings feel.
+    private func settingsSection<Content: View>(
+        title: String,
+        systemImage: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+            } icon: {
+                Image(systemName: systemImage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(title)
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 8)
+    }
+
+    private var settingsSectionDivider: some View {
+        Divider()
+            .accessibilityHidden(true)
+    }
+
+    /// Display section: how the value is rendered (style, unit, min/max,
+    /// label/unit toggles, decimals). Excludes promotion/reorder and alerts.
+    @ViewBuilder
+    private func displaySectionControls(
+        for entity: DiscoveredEntity,
+        configuration: MenuBarItemConfiguration,
+        isPromoted: Bool
+    ) -> some View {
+        let isNumeric = menuBarNumericState(entity.state) != nil
+        let isCover = entity.id.domain == "cover"
+        VStack(alignment: .leading, spacing: 6) {
             if isNumeric {
-                HStack(spacing: 10) {
-                    Text("Style")
-                        .foregroundStyle(.secondary)
+                settingsControlRow("Style") {
                     Picker("Style", selection: menuBarStyleBinding(for: entity.id)) {
                         ForEach(MenuBarDisplayStyle.allCases, id: \.rawValue) { style in
                             Text(style.displayName).tag(style)
@@ -724,15 +768,11 @@ public struct PerchHASettingsView: View {
                     .labelsHidden()
                     .frame(width: 110)
                     .accessibilityLabel("\(entity.name) display style")
-                    Spacer(minLength: 0)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             if isCover {
-                HStack(spacing: 10) {
-                    Text("Controls")
-                        .foregroundStyle(.secondary)
+                settingsControlRow("Controls") {
                     Picker("Controls", selection: coverControlModeBinding(for: entity.id)) {
                         ForEach(CoverControlMode.allCases, id: \.rawValue) { mode in
                             Text(mode.displayName).tag(mode)
@@ -741,20 +781,18 @@ public struct PerchHASettingsView: View {
                     .labelsHidden()
                     .frame(width: 110)
                     .accessibilityLabel("\(entity.name) cover controls")
-                    Spacer(minLength: 0)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             unitDisplayControls(for: entity, configuration: configuration)
 
             if isPromoted {
                 HStack(spacing: 12) {
-                    Toggle("Label", isOn: menuBarLabelBinding(for: entity.id))
+                    Toggle("Show label", isOn: menuBarLabelBinding(for: entity.id))
                         .toggleStyle(.checkbox)
                         .fixedSize()
                         .accessibilityLabel("Show \(entity.name) label in menu bar")
-                    Toggle("Unit", isOn: menuBarUnitBinding(for: entity.id))
+                    Toggle("Show unit", isOn: menuBarUnitBinding(for: entity.id))
                         .toggleStyle(.checkbox)
                         .fixedSize()
                         .accessibilityLabel("Show \(entity.name) unit in menu bar")
@@ -784,11 +822,40 @@ public struct PerchHASettingsView: View {
                 if configuration.style != .text && menuBarCanUseGaugeTotal(for: entity) {
                     menuBarTotalControls(for: entity, configuration: configuration)
                 }
-                menuBarThresholdControls(for: entity, configuration: configuration)
             }
         }
-        .font(.caption)
-        .controlSize(.small)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Menu bar section: whether the entity is shown in the menu bar and its
+    /// position there.
+    private func menuBarSectionControls(for entity: DiscoveredEntity, isPromoted: Bool) -> some View {
+        HStack(spacing: 8) {
+            Toggle("Show in menu bar", isOn: menuBarVisibilityBinding(for: entity.id))
+                .toggleStyle(.checkbox)
+                .fixedSize()
+                .accessibilityLabel("Show \(entity.name) in menu bar")
+            if isPromoted {
+                menuBarMoveButtons(for: entity)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// A label-column row with right-aligned trailing controls, used for the
+    /// aligned settings layout.
+    private func settingsControlRow<Trailing: View>(
+        _ label: String,
+        @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        HStack(spacing: 10) {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            trailing()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -837,13 +904,22 @@ public struct PerchHASettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Guided, jargon-free Buttons editor for an entity.
+    ///
+    /// Each button exposes only a Name field, a "What it does" picker (friendly
+    /// service labels grouped by domain), an optional Target picker, an "Ask
+    /// before running" toggle, reorder controls, and delete. When no service
+    /// metadata is available the picker and Add button are disabled with a short
+    /// hint, so the editor never falls back to raw Home Assistant fields.
     private func customActionControls(for entity: DiscoveredEntity) -> some View {
         let actions = model.customActions(for: entity)
-        return VStack(alignment: .leading, spacing: 5) {
+        let hasMetadata = !model.snapshot.serviceMetadata.isEmpty
+        return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
-                Text("Actions")
+                Text("One-tap buttons attached to this value.")
                     .foregroundStyle(.secondary)
-                Spacer()
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
                 Button {
                     addCustomAction(for: entity)
                 } label: {
@@ -852,83 +928,185 @@ public struct PerchHASettingsView: View {
                 }
                 .buttonStyle(.borderless)
                 .controlSize(.small)
-                .help("Add action")
-                .accessibilityLabel("Add action for \(entity.name)")
+                .disabled(!hasMetadata)
+                .help(hasMetadata ? "Add button" : "Connect to Home Assistant to add a button")
+                .accessibilityLabel("Add button for \(entity.name)")
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if !hasMetadata && actions.isEmpty {
+                Text("Connect to Home Assistant to add a button.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             ForEach(Array(actions.enumerated()), id: \.element.id.rawValue) { index, action in
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        TextField("Title", text: customActionTitleBinding(for: action.id))
-                            .textFieldStyle(.roundedBorder)
-                            .accessibilityLabel("\(entity.name) action title")
-                        Toggle("Confirm", isOn: customActionConfirmationBinding(for: action.id))
-                            .toggleStyle(.checkbox)
-                            .accessibilityLabel("\(action.title) confirmation")
-                        customActionMoveButtons(
-                            for: action,
-                            entityName: entity.name,
-                            canMoveUp: canReorderSelection && index > actions.startIndex,
-                            canMoveDown: canReorderSelection && index < actions.index(before: actions.endIndex)
-                        )
-                        Button {
-                            model.removeCustomAction(action.id)
-                        } label: {
-                            Image(systemName: "trash")
-                                .frame(width: 18, height: 18)
-                        }
-                        .buttonStyle(.borderless)
-                        .controlSize(.small)
-                        .help("Delete action")
-                        .accessibilityLabel("Delete \(action.title)")
-                    }
-                    customActionServiceSelector(action)
-                    TextField("Target entity", text: customActionTargetBinding(for: action.id))
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel("\(action.title) target entity")
-                    customActionServiceDataControls(action)
-                }
+                customActionEditor(
+                    action,
+                    entity: entity,
+                    hasMetadata: hasMetadata,
+                    canMoveUp: canReorderSelection && index > actions.startIndex,
+                    canMoveDown: canReorderSelection && index < actions.index(before: actions.endIndex)
+                )
             }
         }
         .font(.caption)
         .controlSize(.small)
     }
 
-    @ViewBuilder
-    private func customActionServiceSelector(_ action: EntityCustomAction) -> some View {
-        if model.snapshot.serviceMetadata.isEmpty {
+    private func customActionEditor(
+        _ action: EntityCustomAction,
+        entity: DiscoveredEntity,
+        hasMetadata: Bool,
+        canMoveUp: Bool,
+        canMoveDown: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                TextField("Domain", text: customActionDomainBinding(for: action.id))
+                TextField("Name", text: customActionTitleBinding(for: action.id))
                     .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("\(action.title) domain")
-                TextField("Service", text: customActionServiceBinding(for: action.id))
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("\(action.title) service")
+                    .accessibilityLabel("\(entity.name) button name")
+                customActionMoveButtons(
+                    for: action,
+                    entityName: entity.name,
+                    canMoveUp: canMoveUp,
+                    canMoveDown: canMoveDown
+                )
+                Button {
+                    model.removeCustomAction(action.id)
+                } label: {
+                    Image(systemName: "trash")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help("Delete button")
+                .accessibilityLabel("Delete \(action.title)")
             }
+
+            settingsControlRow("What it does") {
+                customActionServicePicker(action, hasMetadata: hasMetadata)
+            }
+
+            settingsControlRow("Target") {
+                customActionTargetPicker(action)
+            }
+
+            Toggle("Ask before running", isOn: customActionConfirmationBinding(for: action.id))
+                .toggleStyle(.checkbox)
+                .fixedSize()
+                .accessibilityLabel("\(action.title) ask before running")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The "What it does" picker: friendly service labels grouped by domain, or
+    /// a single disabled placeholder when no metadata is available.
+    @ViewBuilder
+    private func customActionServicePicker(_ action: EntityCustomAction, hasMetadata: Bool) -> some View {
+        if hasMetadata {
+            Picker("What it does", selection: customActionServiceSelectionBinding(for: action.id)) {
+                let current = ServiceSelection(domain: action.action.domain, service: action.action.service)
+                if !metadataContains(current) {
+                    Text(PerchHAServiceLabel.friendlyLabel(domain: current.domain, service: current.service))
+                        .tag(current)
+                }
+                ForEach(metadataDomains, id: \.self) { domain in
+                    Section(PerchHAServiceLabel.domainTitle(domain)) {
+                        ForEach(metadataServices(for: domain), id: \.service) { metadata in
+                            Text(PerchHAServiceLabel.friendlyLabel(domain: domain, service: metadata.service))
+                                .tag(ServiceSelection(domain: domain, service: metadata.service))
+                        }
+                    }
+                }
+            }
+            .labelsHidden()
+            .frame(width: 200)
+            .accessibilityLabel("\(action.title) what it does")
         } else {
-            HStack(spacing: 6) {
-                Picker("Domain", selection: customActionMetadataDomainBinding(for: action.id)) {
-                    if !metadataDomains.contains(action.action.domain) {
-                        Text(action.action.domain).tag(action.action.domain)
-                    }
-                    ForEach(metadataDomains, id: \.self) { domain in
-                        Text(domain).tag(domain)
-                    }
-                }
-                .frame(width: 132)
-                .accessibilityLabel("\(action.title) domain")
-                Picker("Service", selection: customActionMetadataServiceBinding(for: action.id)) {
-                    let services = metadataServices(for: action.action.domain)
-                    if !services.contains(where: { $0.service == action.action.service }) {
-                        Text(action.action.service).tag(action.action.service)
-                    }
-                    ForEach(services, id: \.service) { metadata in
-                        Text(metadata.service).tag(metadata.service)
-                    }
-                }
-                .frame(width: 132)
-                .accessibilityLabel("\(action.title) service")
+            Picker("What it does", selection: .constant(0)) {
+                Text("Connect to Home Assistant to choose…").tag(0)
+            }
+            .labelsHidden()
+            .frame(width: 200)
+            .disabled(true)
+            .accessibilityLabel("\(action.title) what it does")
+        }
+    }
+
+    /// The optional Target picker: discovered entities by friendly name, plus a
+    /// "None" choice.
+    private func customActionTargetPicker(_ action: EntityCustomAction) -> some View {
+        let entities = discoveredEntitiesForTarget
+        return Picker("Target", selection: customActionTargetSelectionBinding(for: action.id)) {
+            Text("None").tag(EntityID?.none)
+            if let current = action.action.targetEntityID,
+               !entities.contains(where: { $0.id == current }) {
+                Text(current.rawValue).tag(EntityID?.some(current))
+            }
+            ForEach(entities, id: \.id.rawValue) { entity in
+                Text(entity.name).tag(EntityID?.some(entity.id))
             }
         }
+        .labelsHidden()
+        .frame(width: 200)
+        .accessibilityLabel("\(action.title) target")
+    }
+
+    private var discoveredEntitiesForTarget: [DiscoveredEntity] {
+        model.snapshot.availableRooms.flatMap(\.entities)
+    }
+
+    private func metadataContains(_ selection: ServiceSelection) -> Bool {
+        model.snapshot.serviceMetadata.contains {
+            $0.domain == selection.domain && $0.service == selection.service
+        }
+    }
+
+    /// A combined domain+service choice for the "What it does" picker, so a
+    /// single selection sets both the action's `domain` and `service`.
+    private struct ServiceSelection: Hashable {
+        let domain: String
+        let service: String
+    }
+
+    private func customActionServiceSelectionBinding(for id: CustomActionID) -> Binding<ServiceSelection> {
+        Binding(
+            get: {
+                let action = model.customAction(id: id)
+                return ServiceSelection(
+                    domain: action?.action.domain ?? "",
+                    service: action?.action.service ?? ""
+                )
+            },
+            set: { selection in
+                model.setCustomActionService(id, domain: selection.domain, service: selection.service)
+            }
+        )
+    }
+
+    private func customActionTargetSelectionBinding(for id: CustomActionID) -> Binding<EntityID?> {
+        Binding(
+            get: {
+                model.customAction(id: id)?.action.targetEntityID
+            },
+            set: { targetEntityID in
+                updateCustomAction(id) { action in
+                    EntityCustomAction(
+                        id: action.id,
+                        entityID: action.entityID,
+                        title: action.title,
+                        action: ActionSpec(
+                            domain: action.action.domain,
+                            service: action.action.service,
+                            targetEntityID: targetEntityID,
+                            serviceData: action.action.serviceData
+                        ),
+                        requiresConfirmation: action.requiresConfirmation
+                    )
+                }
+            }
+        )
     }
 
     private func customActionMoveButtons(
@@ -967,259 +1145,23 @@ public struct PerchHASettingsView: View {
     }
 
     private func addCustomAction(for entity: DiscoveredEntity) {
+        guard let firstDomain = metadataDomains.first,
+              let firstService = metadataServices(for: firstDomain).first else {
+            return
+        }
         let action = EntityCustomAction(
             id: nextCustomActionID(for: entity.id),
             entityID: entity.id,
-            title: "Update",
-            action: ActionSpec(domain: "homeassistant", service: "update_entity", targetEntityID: entity.id)
+            title: PerchHAServiceLabel.serviceTitle(firstService.service),
+            action: ActionSpec(
+                domain: firstDomain,
+                service: firstService.service,
+                targetEntityID: nil
+            )
         )
         model.setCustomAction(action)
     }
 
-    private func customActionServiceDataControls(_ action: EntityCustomAction) -> some View {
-        let keys = action.action.serviceData.keys.sorted()
-        return VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Text("Service data")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    addCustomActionServiceDataValue(action.id)
-                } label: {
-                    Image(systemName: "plus")
-                        .frame(width: 18, height: 18)
-                }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                .help("Add service data")
-                .accessibilityLabel("Add service data for \(action.title)")
-            }
-            ForEach(keys, id: \.self) { key in
-                customActionServiceDataObjectEntry(action, parentPath: [], key: key, nesting: 0)
-            }
-        }
-    }
-
-    private func customActionServiceDataObjectEntry(
-        _ action: EntityCustomAction,
-        parentPath: [PerchHACustomActionServiceDataPathComponent],
-        key: String,
-        nesting: Int
-    ) -> AnyView {
-        let path = parentPath + [.key(key)]
-        let value = customActionServiceDataValue(for: action.id, path: path) ?? .null
-        return AnyView(
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    TextField("Key", text: customActionServiceDataKeyBinding(for: action.id, parentPath: parentPath, key: key))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(minWidth: 92, idealWidth: 118)
-                        .accessibilityLabel("\(action.title) service data key")
-                    customActionServiceDataTypePicker(action, path: path, value: value)
-                    customActionServiceDataInlineValueField(action, path: path, value: value)
-                    Button {
-                        model.removeCustomActionServiceDataValue(action.id, path: path)
-                    } label: {
-                        Image(systemName: "trash")
-                            .frame(width: 18, height: 18)
-                    }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                    .help("Delete service data")
-                    .accessibilityLabel("Delete \(key) from \(action.title)")
-                }
-                .padding(.leading, CGFloat(nesting) * 12)
-                customActionNestedServiceDataControls(action, path: path, value: value, nesting: nesting)
-            }
-        )
-    }
-
-    private func customActionServiceDataArrayEntry(
-        _ action: EntityCustomAction,
-        parentPath: [PerchHACustomActionServiceDataPathComponent],
-        index: Int,
-        count: Int,
-        nesting: Int
-    ) -> AnyView {
-        let path = parentPath + [.index(index)]
-        let value = customActionServiceDataValue(for: action.id, path: path) ?? .null
-        return AnyView(
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text("#\(index + 1)")
-                        .foregroundStyle(.secondary)
-                        .frame(width: 42, alignment: .leading)
-                    customActionServiceDataTypePicker(action, path: path, value: value)
-                    customActionServiceDataInlineValueField(action, path: path, value: value)
-                    Button {
-                        model.moveCustomActionServiceDataArrayValue(action.id, path: path, direction: .up)
-                    } label: {
-                        Image(systemName: "chevron.up")
-                            .frame(width: 18, height: 18)
-                    }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                    .disabled(index == 0)
-                    .help("Move item up")
-                    .accessibilityLabel("Move item \(index + 1) up in \(action.title)")
-                    Button {
-                        model.moveCustomActionServiceDataArrayValue(action.id, path: path, direction: .down)
-                    } label: {
-                        Image(systemName: "chevron.down")
-                            .frame(width: 18, height: 18)
-                    }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                    .disabled(index >= count - 1)
-                    .help("Move item down")
-                    .accessibilityLabel("Move item \(index + 1) down in \(action.title)")
-                    Button {
-                        model.removeCustomActionServiceDataValue(action.id, path: path)
-                    } label: {
-                        Image(systemName: "trash")
-                            .frame(width: 18, height: 18)
-                    }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                    .help("Delete list item")
-                    .accessibilityLabel("Delete item \(index + 1) from \(action.title)")
-                }
-                .padding(.leading, CGFloat(nesting) * 12)
-                customActionNestedServiceDataControls(action, path: path, value: value, nesting: nesting)
-            }
-        )
-    }
-
-    private func customActionServiceDataTypePicker(
-        _ action: EntityCustomAction,
-        path: [PerchHACustomActionServiceDataPathComponent],
-        value: ActionValue
-    ) -> some View {
-        Picker("Type", selection: customActionServiceDataTypeBinding(for: action.id, path: path)) {
-            Text("Text").tag(PerchHACustomActionServiceDataValueKind.string)
-            Text("Number").tag(PerchHACustomActionServiceDataValueKind.number)
-            Text("Bool").tag(PerchHACustomActionServiceDataValueKind.bool)
-            Text("Object").tag(PerchHACustomActionServiceDataValueKind.object)
-            Text("List").tag(PerchHACustomActionServiceDataValueKind.array)
-        }
-        .labelsHidden()
-        .frame(width: CustomActionEditorLayout.serviceDataTypePickerWidth)
-        .disabled(model.isSensitiveServiceDataPath(path))
-        .accessibilityLabel("\(action.title) service data type")
-    }
-
-    @ViewBuilder
-    private func customActionServiceDataInlineValueField(
-        _ action: EntityCustomAction,
-        path: [PerchHACustomActionServiceDataPathComponent],
-        value: ActionValue
-    ) -> some View {
-        if value.isInlineEditable {
-            if model.isSensitiveServiceDataPath(path) {
-                SecureField(
-                    customActionProtectedValuePlaceholder(for: action.id, path: path),
-                    text: customActionProtectedValueBinding(for: action.id, path: path)
-                )
-                .textFieldStyle(.roundedBorder)
-                .frame(minWidth: CustomActionEditorLayout.serviceDataValueMinWidth)
-                .layoutPriority(1)
-                .accessibilityLabel("\(action.title) protected service data value")
-            } else {
-                TextField("Value", text: customActionServiceDataValueBinding(for: action.id, path: path))
-                    .textFieldStyle(.roundedBorder)
-                    .frame(minWidth: CustomActionEditorLayout.serviceDataValueMinWidth)
-                    .layoutPriority(1)
-                    .accessibilityLabel("\(action.title) service data value")
-            }
-        } else {
-            Text(value.editorText)
-                .foregroundStyle(.secondary)
-                .frame(minWidth: CustomActionEditorLayout.serviceDataValueMinWidth, maxWidth: .infinity, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityLabel("\(action.title) service data nested value")
-        }
-    }
-
-    private func customActionNestedServiceDataControls(
-        _ action: EntityCustomAction,
-        path: [PerchHACustomActionServiceDataPathComponent],
-        value: ActionValue,
-        nesting: Int
-    ) -> AnyView {
-        switch value {
-        case let .object(values):
-            let keys = values.keys.sorted()
-            return AnyView(
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(keys, id: \.self) { childKey in
-                        customActionServiceDataObjectEntry(action, parentPath: path, key: childKey, nesting: nesting + 1)
-                    }
-                    Button {
-                        addCustomActionObjectServiceDataValue(action.id, parentPath: path)
-                    } label: {
-                        Label("Add field", systemImage: "plus")
-                    }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                    .padding(.leading, CGFloat(nesting + 1) * 12)
-                    .accessibilityLabel("Add nested service data field for \(action.title)")
-                }
-            )
-        case let .array(values):
-            return AnyView(
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(values.indices), id: \.self) { index in
-                        customActionServiceDataArrayEntry(
-                            action,
-                            parentPath: path,
-                            index: index,
-                            count: values.count,
-                            nesting: nesting + 1
-                        )
-                    }
-                    Button {
-                        model.appendCustomActionServiceDataArrayValue(action.id, path: path, value: .string(""))
-                    } label: {
-                        Label("Add item", systemImage: "plus")
-                    }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                    .padding(.leading, CGFloat(nesting + 1) * 12)
-                    .accessibilityLabel("Add list item for \(action.title)")
-                }
-            )
-        case .string, .protectedString, .number, .bool, .null:
-            return AnyView(EmptyView())
-        }
-    }
-
-    private func addCustomActionServiceDataValue(_ id: CustomActionID) {
-        addCustomActionObjectServiceDataValue(id, parentPath: [])
-    }
-
-    private func addCustomActionObjectServiceDataValue(
-        _ id: CustomActionID,
-        parentPath: [PerchHACustomActionServiceDataPathComponent]
-    ) {
-        guard let action = model.customAction(id: id) else {
-            return
-        }
-        let values: [String: ActionValue]
-        if parentPath.isEmpty {
-            values = action.action.serviceData
-        } else if case let .object(nestedValues) = customActionServiceDataValue(for: id, path: parentPath) {
-            values = nestedValues
-        } else {
-            return
-        }
-        var index = 1
-        var key = "value\(index)"
-        while values[key] != nil {
-            index += 1
-            key = "value\(index)"
-        }
-        model.setCustomActionServiceDataValue(id, path: parentPath + [.key(key)], value: .string(""))
-    }
 
     private var metadataDomains: [String] {
         Array(Set(model.snapshot.serviceMetadata.map(\.domain))).sorted()
@@ -1231,146 +1173,7 @@ public struct PerchHASettingsView: View {
             .sorted { lhs, rhs in lhs.service < rhs.service }
     }
 
-    private func customActionMetadataDomainBinding(for id: CustomActionID) -> Binding<String> {
-        Binding(
-            get: {
-                model.customAction(id: id)?.action.domain ?? ""
-            },
-            set: { domain in
-                guard let action = model.customAction(id: id) else {
-                    return
-                }
-                let service = metadataServices(for: domain).first?.service ?? action.action.service
-                model.setCustomActionService(id, domain: domain, service: service)
-            }
-        )
-    }
 
-    private func customActionMetadataServiceBinding(for id: CustomActionID) -> Binding<String> {
-        Binding(
-            get: {
-                model.customAction(id: id)?.action.service ?? ""
-            },
-            set: { service in
-                guard let action = model.customAction(id: id) else {
-                    return
-                }
-                model.setCustomActionService(id, domain: action.action.domain, service: service)
-            }
-        )
-    }
-
-    private func customActionServiceDataKeyBinding(
-        for id: CustomActionID,
-        parentPath: [PerchHACustomActionServiceDataPathComponent],
-        key: String
-    ) -> Binding<String> {
-        Binding(
-            get: {
-                key
-            },
-            set: { newKey in
-                model.renameCustomActionServiceDataKey(id, parentPath: parentPath, from: key, to: newKey)
-            }
-        )
-    }
-
-    private func customActionServiceDataTypeBinding(
-        for id: CustomActionID,
-        path: [PerchHACustomActionServiceDataPathComponent]
-    ) -> Binding<PerchHACustomActionServiceDataValueKind> {
-        Binding(
-            get: {
-                customActionServiceDataValue(for: id, path: path)?.editorType ?? .string
-            },
-            set: { type in
-                model.setCustomActionServiceDataType(id, path: path, kind: type)
-            }
-        )
-    }
-
-    private func customActionServiceDataValueBinding(
-        for id: CustomActionID,
-        path: [PerchHACustomActionServiceDataPathComponent]
-    ) -> Binding<String> {
-        Binding(
-            get: {
-                customActionServiceDataValue(for: id, path: path)?.editorText ?? ""
-            },
-            set: { text in
-                let type = customActionServiceDataValue(for: id, path: path)?.editorType ?? .string
-                model.setCustomActionServiceDataText(id, path: path, text: text, kind: type)
-            }
-        )
-    }
-
-    private func customActionProtectedValueBinding(
-        for id: CustomActionID,
-        path: [PerchHACustomActionServiceDataPathComponent]
-    ) -> Binding<String> {
-        Binding(
-            get: {
-                model.protectedValueDraft(for: id, path: path)
-            },
-            set: { text in
-                model.setCustomActionServiceDataText(id, path: path, text: text, kind: .string)
-            }
-        )
-    }
-
-    private func customActionProtectedValuePlaceholder(
-        for id: CustomActionID,
-        path: [PerchHACustomActionServiceDataPathComponent]
-    ) -> String {
-        if case .protectedString = customActionServiceDataValue(for: id, path: path) {
-            return "Stored in Keychain"
-        }
-        return "Value"
-    }
-
-    private func customActionServiceDataValue(
-        for id: CustomActionID,
-        path: [PerchHACustomActionServiceDataPathComponent]
-    ) -> ActionValue? {
-        guard let first = path.first,
-              case let .key(rawKey) = first
-        else {
-            return nil
-        }
-        let trimmedKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard var value = model.customAction(id: id)?.action.serviceData[trimmedKey] else {
-            return nil
-        }
-        for component in path.dropFirst() {
-            switch (component, value) {
-            case let (.key(key), .object(values)):
-                let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard let nextValue = values[trimmedKey] else {
-                    return nil
-                }
-                value = nextValue
-            case let (.index(index), .array(values)):
-                guard values.indices.contains(index) else {
-                    return nil
-                }
-                value = values[index]
-            case (.key, .string),
-                 (.key, .protectedString),
-                 (.key, .number),
-                 (.key, .bool),
-                 (.key, .array),
-                 (.key, .null),
-                 (.index, .string),
-                 (.index, .protectedString),
-                 (.index, .number),
-                 (.index, .bool),
-                 (.index, .object),
-                 (.index, .null):
-                return nil
-            }
-        }
-        return value
-    }
 
     private func nextCustomActionID(for entityID: EntityID) -> CustomActionID {
         let base = "action-\(entityID.rawValue.replacingOccurrences(of: ".", with: "-"))"
@@ -1395,79 +1198,6 @@ public struct PerchHASettingsView: View {
                         entityID: action.entityID,
                         title: title,
                         action: action.action,
-                        requiresConfirmation: action.requiresConfirmation
-                    )
-                }
-            }
-        )
-    }
-
-    private func customActionDomainBinding(for id: CustomActionID) -> Binding<String> {
-        Binding(
-            get: {
-                model.customAction(id: id)?.action.domain ?? ""
-            },
-            set: { domain in
-                updateCustomAction(id) { action in
-                    EntityCustomAction(
-                        id: action.id,
-                        entityID: action.entityID,
-                        title: action.title,
-                        action: ActionSpec(
-                            domain: domain,
-                            service: action.action.service,
-                            targetEntityID: action.action.targetEntityID,
-                            serviceData: action.action.serviceData
-                        ),
-                        requiresConfirmation: action.requiresConfirmation
-                    )
-                }
-            }
-        )
-    }
-
-    private func customActionServiceBinding(for id: CustomActionID) -> Binding<String> {
-        Binding(
-            get: {
-                model.customAction(id: id)?.action.service ?? ""
-            },
-            set: { service in
-                updateCustomAction(id) { action in
-                    EntityCustomAction(
-                        id: action.id,
-                        entityID: action.entityID,
-                        title: action.title,
-                        action: ActionSpec(
-                            domain: action.action.domain,
-                            service: service,
-                            targetEntityID: action.action.targetEntityID,
-                            serviceData: action.action.serviceData
-                        ),
-                        requiresConfirmation: action.requiresConfirmation
-                    )
-                }
-            }
-        )
-    }
-
-    private func customActionTargetBinding(for id: CustomActionID) -> Binding<String> {
-        Binding(
-            get: {
-                model.customAction(id: id)?.action.targetEntityID?.rawValue ?? ""
-            },
-            set: { targetEntityID in
-                updateCustomAction(id) { action in
-                    let trimmedTarget = targetEntityID.trimmingCharacters(in: .whitespacesAndNewlines)
-                    return EntityCustomAction(
-                        id: action.id,
-                        entityID: action.entityID,
-                        title: action.title,
-                        action: ActionSpec(
-                            domain: action.action.domain,
-                            service: action.action.service,
-                            targetEntityID: trimmedTarget.isEmpty ? nil : EntityID(trimmedTarget),
-                            serviceData: action.action.serviceData
-                        ),
                         requiresConfirmation: action.requiresConfirmation
                     )
                 }
@@ -1541,18 +1271,18 @@ public struct PerchHASettingsView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                Toggle("Warn", isOn: menuBarWarningEnabledBinding(for: entity.id))
+                Toggle("Warning", isOn: menuBarWarningEnabledBinding(for: entity.id))
                     .toggleStyle(.checkbox)
                     .accessibilityLabel("\(entity.name) warning threshold")
                 if configuration.thresholds.warning != nil {
-                    Picker("Warn", selection: menuBarWarningDirectionBinding(for: entity.id)) {
+                    Picker("Warning", selection: menuBarWarningDirectionBinding(for: entity.id)) {
                         Text(ValueThresholdDirection.aboveOrEqual.displayName).tag(ValueThresholdDirection.aboveOrEqual)
                         Text(ValueThresholdDirection.belowOrEqual.displayName).tag(ValueThresholdDirection.belowOrEqual)
                     }
                     .frame(width: 68)
                     .accessibilityLabel("\(entity.name) warning threshold direction")
                     Stepper(
-                        "Warn \(menuBarNumberLabel(configuration.thresholds.warning?.value))",
+                        "Warning \(menuBarNumberLabel(configuration.thresholds.warning?.value))",
                         value: menuBarWarningValueBinding(for: entity.id),
                         in: -100_000...100_000,
                         step: 1
@@ -1561,18 +1291,18 @@ public struct PerchHASettingsView: View {
                 }
             }
             HStack(spacing: 8) {
-                Toggle("Crit", isOn: menuBarCriticalEnabledBinding(for: entity.id))
+                Toggle("Critical", isOn: menuBarCriticalEnabledBinding(for: entity.id))
                     .toggleStyle(.checkbox)
                     .accessibilityLabel("\(entity.name) critical threshold")
                 if configuration.thresholds.critical != nil {
-                    Picker("Crit", selection: menuBarCriticalDirectionBinding(for: entity.id)) {
+                    Picker("Critical", selection: menuBarCriticalDirectionBinding(for: entity.id)) {
                         Text(ValueThresholdDirection.aboveOrEqual.displayName).tag(ValueThresholdDirection.aboveOrEqual)
                         Text(ValueThresholdDirection.belowOrEqual.displayName).tag(ValueThresholdDirection.belowOrEqual)
                     }
                     .frame(width: 68)
                     .accessibilityLabel("\(entity.name) critical threshold direction")
                     Stepper(
-                        "Crit \(menuBarNumberLabel(configuration.thresholds.critical?.value))",
+                        "Critical \(menuBarNumberLabel(configuration.thresholds.critical?.value))",
                         value: menuBarCriticalValueBinding(for: entity.id),
                         in: -100_000...100_000,
                         step: 1

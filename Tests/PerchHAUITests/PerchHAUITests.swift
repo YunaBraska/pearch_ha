@@ -3659,7 +3659,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(Int(frameSize.height.rounded()), 420)
     }
 
-    func testAppShellSettingsCustomActionEditorExposesOrderedNativeTextFieldFocusPath() {
+    func testAppShellSettingsButtonEditorExposesGuidedNameFieldAndServiceTargetPickers() {
         let action = EntityCustomAction(
             id: "boost-air",
             entityID: "sensor.office_temperature",
@@ -3667,12 +3667,7 @@ final class PerchHAUITests: XCTestCase {
             action: ActionSpec(
                 domain: "script",
                 service: "turn_on",
-                targetEntityID: "script.air_cleaner_boost",
-                serviceData: [
-                    "variables": .object([
-                        "steps": .array(["fan", "purifier"])
-                    ])
-                ]
+                targetEntityID: "sensor.office_humidity"
             ),
             requiresConfirmation: true
         )
@@ -3685,7 +3680,11 @@ final class PerchHAUITests: XCTestCase {
             selectionQuery: "temperature",
             isSettingsPresented: true,
             lastUpdateDescription: "Snapshot ready",
-            canRetry: true
+            canRetry: true,
+            serviceMetadata: [
+                HAServiceMetadata(domain: "script", service: "turn_on", name: "Turn on", description: nil),
+                HAServiceMetadata(domain: "switch", service: "turn_on", name: "Turn on", description: nil)
+            ]
         )
         let model = PerchHAPanelModel(
             snapshot: snapshot,
@@ -3706,44 +3705,27 @@ final class PerchHAUITests: XCTestCase {
         let textFields = editableTextFields(in: panel.contentView)
         let popUpButtons = nativePopUpButtons(in: panel.contentView)
         let debugSummary = nativeControlDebugSummary(in: panel.contentView)
-        let titleField = textFields.first { $0.placeholderString == "Title" }
-        let targetField = textFields.first { $0.placeholderString == "Target entity" }
-        let keyField = textFields.first { $0.placeholderString == "Key" }
-        let valueField = textFields.first { $0.placeholderString == "Value" }
+        let nameField = textFields.first { $0.placeholderString == "Name" }
 
-        XCTAssertNotNil(titleField, debugSummary)
-        XCTAssertNotNil(targetField, debugSummary)
-        XCTAssertNotNil(keyField, debugSummary)
-        XCTAssertNotNil(valueField, debugSummary)
+        XCTAssertNotNil(nameField, debugSummary)
+        // The removed raw fields must not appear in the guided editor.
+        XCTAssertNil(textFields.first { $0.placeholderString == "Title" }, debugSummary)
+        XCTAssertNil(textFields.first { $0.placeholderString == "Domain" }, debugSummary)
+        XCTAssertNil(textFields.first { $0.placeholderString == "Service" }, debugSummary)
+        XCTAssertNil(textFields.first { $0.placeholderString == "Target entity" }, debugSummary)
+        XCTAssertNil(textFields.first { $0.placeholderString == "Key" }, debugSummary)
+        XCTAssertNil(textFields.first { $0.placeholderString == "Value" }, debugSummary)
+
         let selectedPopupTitles = Set(popUpButtons.compactMap(\.titleOfSelectedItem))
-        let domainField = textFields.first { $0.placeholderString == "Domain" }
-        let serviceField = textFields.first { $0.placeholderString == "Service" }
-        XCTAssertEqual(domainField?.stringValue, "script", debugSummary)
-        XCTAssertEqual(serviceField?.stringValue, "turn_on", debugSummary)
-        XCTAssertTrue(selectedPopupTitles.contains("Object"), debugSummary)
-        XCTAssertTrue(selectedPopupTitles.contains("List"), debugSummary)
+        XCTAssertTrue(selectedPopupTitles.contains("Script: Turn on"), debugSummary)
+        XCTAssertTrue(selectedPopupTitles.contains("Office humidity"), debugSummary)
 
-        guard let titleField else {
+        guard let nameField else {
             return
         }
-        XCTAssertTrue(panel.makeFirstResponder(titleField))
+        XCTAssertTrue(panel.makeFirstResponder(nameField))
         let firstResponder = panel.firstResponder as AnyObject?
-        XCTAssertTrue(firstResponder === titleField.currentEditor() || firstResponder === titleField)
-
-        let keyViewLabels = nativeKeyViewLoopLabels(startingAt: titleField)
-        let keyViewSummary = keyViewLabels.joined(separator: " -> ")
-        let targetIndex = keyViewLabels.firstIndex { $0.contains("placeholder:Target entity") }
-        let keyIndex = keyViewLabels.firstIndex { $0.contains("placeholder:Key") }
-        let valueIndex = keyViewLabels.firstIndex { $0.contains("placeholder:Value") }
-
-        XCTAssertNotNil(targetIndex, keyViewSummary)
-        XCTAssertNotNil(keyIndex, keyViewSummary)
-        XCTAssertNotNil(valueIndex, keyViewSummary)
-        if let targetIndex, let keyIndex, let valueIndex {
-            XCTAssertGreaterThan(targetIndex, 0, keyViewSummary)
-            XCTAssertGreaterThan(keyIndex, targetIndex, keyViewSummary)
-            XCTAssertGreaterThan(valueIndex, keyIndex, keyViewSummary)
-        }
+        XCTAssertTrue(firstResponder === nameField.currentEditor() || firstResponder === nameField)
     }
 
     func testAppShellConnectionFormNormalizesFrontendURLsThroughNativeTextFields() throws {
@@ -3856,7 +3838,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.connectionForm.urlString, "https://home.gomoo.io")
     }
 
-    func testAppShellSettingsCustomActionEditorMutatesNestedServiceDataThroughNativeTextFields() throws {
+    func testAppShellSettingsButtonEditorMutatesNameAndTargetThroughGuidedControls() throws {
         let action = EntityCustomAction(
             id: "boost-air",
             entityID: "sensor.office_temperature",
@@ -3864,7 +3846,7 @@ final class PerchHAUITests: XCTestCase {
             action: ActionSpec(
                 domain: "script",
                 service: "turn_on",
-                targetEntityID: "script.air_cleaner_boost",
+                targetEntityID: nil,
                 serviceData: [
                     "variables": .object([
                         "steps": .array(["fan", "purifier"])
@@ -3884,24 +3866,7 @@ final class PerchHAUITests: XCTestCase {
             lastUpdateDescription: "Snapshot ready",
             canRetry: true,
             serviceMetadata: [
-                HAServiceMetadata(
-                    domain: "script",
-                    service: "turn_on",
-                    name: "Turn on",
-                    description: nil,
-                    fields: [
-                        HAServiceFieldMetadata(
-                            key: "variables",
-                            name: "Variables",
-                            description: nil,
-                            required: false,
-                            example: .object([
-                                "steps": .array(["fan", "purifier"])
-                            ]),
-                            selector: .object(["object": .object([:])])
-                        )
-                    ]
-                )
+                HAServiceMetadata(domain: "script", service: "turn_on", name: "Turn on", description: nil)
             ]
         )
         let model = PerchHAPanelModel(
@@ -3921,39 +3886,35 @@ final class PerchHAUITests: XCTestCase {
         panel.contentView?.layoutSubtreeIfNeeded()
 
         let textFields = editableTextFields(in: panel.contentView)
+        let popUpButtons = nativePopUpButtons(in: panel.contentView)
         let debugSummary = nativeControlDebugSummary(in: panel.contentView)
-        guard let titleField = textFields.first(where: { $0.placeholderString == "Title" && $0.stringValue == "Boost air" }) else {
+        guard let nameField = textFields.first(where: { $0.placeholderString == "Name" && $0.stringValue == "Boost air" }) else {
             XCTFail(debugSummary)
             return
         }
-        guard let targetField = textFields.first(where: { $0.placeholderString == "Target entity" && $0.stringValue == "script.air_cleaner_boost" }) else {
-            XCTFail(debugSummary)
-            return
-        }
-        let valueFields = textFields.filter { $0.placeholderString == "Value" }
-        guard let nestedValueField = valueFields.last else {
+        guard let targetPopUp = popUpButtons.first(where: { $0.titleOfSelectedItem == "None" }) else {
             XCTFail(debugSummary)
             return
         }
 
-        try setNativeTextFieldValue("Boost harder", for: titleField, in: panel)
-        try setNativeTextFieldValue("script.air_cleaner_quiet", for: targetField, in: panel)
-        try setNativeTextFieldValue("boost", for: nestedValueField, in: panel)
+        try setNativeTextFieldValue("Boost harder", for: nameField, in: panel)
+        try setNativePopUpSelection("Office humidity", for: targetPopUp)
 
         let updatedAction = try XCTUnwrap(model.customActionConfiguration.action(id: "boost-air"))
         XCTAssertEqual(updatedAction.title, "Boost harder")
-        XCTAssertEqual(updatedAction.action.targetEntityID, "script.air_cleaner_quiet")
+        XCTAssertEqual(updatedAction.action.targetEntityID, "sensor.office_humidity")
+        // The stored service-data payload is preserved untouched by the guided editor.
         XCTAssertEqual(
             updatedAction.action.serviceData,
             [
                 "variables": .object([
-                    "steps": .array(["fan", "boost"])
+                    "steps": .array(["fan", "purifier"])
                 ])
             ]
         )
     }
 
-    func testAppShellSettingsCustomActionEditorMutatesServiceAndNestedTypeThroughNativePopups() throws {
+    func testAppShellSettingsButtonEditorMutatesServiceThroughWhatItDoesPicker() throws {
         let action = EntityCustomAction(
             id: "boost-air",
             entityID: "sensor.office_temperature",
@@ -3961,7 +3922,7 @@ final class PerchHAUITests: XCTestCase {
             action: ActionSpec(
                 domain: "script",
                 service: "turn_on",
-                targetEntityID: "script.air_cleaner_boost",
+                targetEntityID: nil,
                 serviceData: [
                     "variables": .object([
                         "steps": .array(["fan", "purifier"])
@@ -3981,40 +3942,9 @@ final class PerchHAUITests: XCTestCase {
             lastUpdateDescription: "Snapshot ready",
             canRetry: true,
             serviceMetadata: [
-                HAServiceMetadata(
-                    domain: "script",
-                    service: "turn_on",
-                    name: "Turn on",
-                    description: nil,
-                    fields: [
-                        HAServiceFieldMetadata(
-                            key: "variables",
-                            name: "Variables",
-                            description: nil,
-                            required: false,
-                            example: .object([
-                                "steps": .array(["fan", "purifier"])
-                            ]),
-                            selector: .object(["object": .object([:])])
-                        )
-                    ]
-                ),
-                HAServiceMetadata(
-                    domain: "script",
-                    service: "turn_off",
-                    name: "Turn off",
-                    description: nil,
-                    fields: [
-                        HAServiceFieldMetadata(
-                            key: "transition",
-                            name: "Transition",
-                            description: nil,
-                            required: false,
-                            example: 3,
-                            selector: .object(["number": .object(["min": 0])])
-                        )
-                    ]
-                )
+                HAServiceMetadata(domain: "script", service: "turn_on", name: "Turn on", description: nil),
+                HAServiceMetadata(domain: "script", service: "turn_off", name: "Turn off", description: nil),
+                HAServiceMetadata(domain: "switch", service: "turn_on", name: "Turn on", description: nil)
             ]
         )
         let model = PerchHAPanelModel(
@@ -4035,27 +3965,23 @@ final class PerchHAUITests: XCTestCase {
 
         let popUpButtons = nativePopUpButtons(in: panel.contentView)
         let debugSummary = nativeControlDebugSummary(in: panel.contentView)
-        guard let servicePopUp = popUpButtons.first(where: { $0.titleOfSelectedItem == "turn_on" }) else {
-            XCTFail(debugSummary)
-            return
-        }
-        guard let typePopUp = popUpButtons.first(where: { $0.titleOfSelectedItem == "List" }) else {
+        guard let servicePopUp = popUpButtons.first(where: { $0.titleOfSelectedItem == "Script: Turn on" }) else {
             XCTFail(debugSummary)
             return
         }
 
-        try setNativePopUpSelection("turn_off", for: servicePopUp)
-        try setNativePopUpSelection("Text", for: typePopUp)
+        try setNativePopUpSelection("Switch: Turn on", for: servicePopUp)
 
         let updatedAction = try XCTUnwrap(model.customActionConfiguration.action(id: "boost-air"))
-        XCTAssertEqual(updatedAction.action.service, "turn_off")
+        XCTAssertEqual(updatedAction.action.domain, "switch")
+        XCTAssertEqual(updatedAction.action.service, "turn_on")
+        // The stored payload is preserved as-is by the guided picker.
         XCTAssertEqual(
             updatedAction.action.serviceData,
             [
                 "variables": .object([
-                    "steps": ""
-                ]),
-                "transition": 3
+                    "steps": .array(["fan", "purifier"])
+                ])
             ]
         )
     }

@@ -3011,37 +3011,21 @@ struct PerchHASmoke {
         let textFields = nativeTextFields(in: panel.contentView)
         let popUpButtons = nativePopUpButtons(in: panel.contentView)
         let focusDebug = nativeControlDebugSummary(in: panel.contentView)
-        let titleField = textFields.first { $0.placeholderString == "Title" }
-        let targetField = textFields.first { $0.placeholderString == "Target entity" }
-        let keyField = textFields.first { $0.placeholderString == "Key" }
-        let valueField = textFields.first { $0.placeholderString == "Value" }
+        let nameField = textFields.first { $0.placeholderString == "Name" }
 
-        try expect(titleField != nil, "settings custom-action editor exposes a native title field (\(focusDebug))")
-        try expect(targetField != nil, "settings custom-action editor exposes a native target field (\(focusDebug))")
-        try expect(keyField != nil, "settings custom-action editor exposes a native service-data key field (\(focusDebug))")
-        try expect(valueField != nil, "settings custom-action editor exposes a native service-data value field (\(focusDebug))")
+        try expect(nameField != nil, "settings button editor exposes a native name field (\(focusDebug))")
+        try expect(textFields.first { $0.placeholderString == "Title" } == nil, "settings button editor removes the raw title field (\(focusDebug))")
+        try expect(textFields.first { $0.placeholderString == "Domain" } == nil, "settings button editor removes the raw domain field (\(focusDebug))")
+        try expect(textFields.first { $0.placeholderString == "Service" } == nil, "settings button editor removes the raw service field (\(focusDebug))")
+        try expect(textFields.first { $0.placeholderString == "Target entity" } == nil, "settings button editor removes the raw target field (\(focusDebug))")
+        try expect(textFields.first { $0.placeholderString == "Key" } == nil, "settings button editor removes the service-data key field (\(focusDebug))")
+        try expect(textFields.first { $0.placeholderString == "Value" } == nil, "settings button editor removes the service-data value field (\(focusDebug))")
         let selectedPopupTitles = Set(popUpButtons.compactMap(\.titleOfSelectedItem))
-        try expect(selectedPopupTitles.contains("script"), "settings custom-action editor exposes native domain picker selection (\(focusDebug))")
-        try expect(selectedPopupTitles.contains("turn_on"), "settings custom-action editor exposes native service picker selection (\(focusDebug))")
-        try expect(selectedPopupTitles.contains("Object"), "settings custom-action editor exposes native object type picker selection (\(focusDebug))")
-        try expect(selectedPopupTitles.contains("List"), "settings custom-action editor exposes native list type picker selection (\(focusDebug))")
-        if let titleField {
-            try expect(panel.makeFirstResponder(titleField), "settings custom-action editor accepts native title focus")
+        try expect(selectedPopupTitles.contains("Script: Turn on"), "settings button editor exposes the guided what-it-does selection (\(focusDebug))")
+        if let nameField {
+            try expect(panel.makeFirstResponder(nameField), "settings button editor accepts native name focus")
             let firstResponder = panel.firstResponder as AnyObject?
-            try expect(firstResponder === titleField.currentEditor() || firstResponder === titleField, "settings custom-action editor installs the title field as first responder")
-            let keyViewLabels = nativeKeyViewLoopLabels(startingAt: titleField)
-            let keyViewSummary = keyViewLabels.joined(separator: " -> ")
-            let targetIndex = keyViewLabels.firstIndex(where: { $0.contains("placeholder:Target entity") })
-            let keyIndex = keyViewLabels.firstIndex(where: { $0.contains("placeholder:Key") })
-            let valueIndex = keyViewLabels.firstIndex(where: { $0.contains("placeholder:Value") })
-            try expect(targetIndex != nil, "settings custom-action editor key view path reaches the target entity field (\(keyViewSummary))")
-            try expect(keyIndex != nil, "settings custom-action editor key view path reaches a service-data key field (\(keyViewSummary))")
-            try expect(valueIndex != nil, "settings custom-action editor key view path reaches a service-data value field (\(keyViewSummary))")
-            if let targetIndex, let keyIndex, let valueIndex {
-                try expect(targetIndex > 0, "settings custom-action editor target field follows the title field (\(keyViewSummary))")
-                try expect(keyIndex > targetIndex, "settings custom-action editor service-data key field follows the target field (\(keyViewSummary))")
-                try expect(valueIndex > keyIndex, "settings custom-action editor service-data value field follows the service-data key field (\(keyViewSummary))")
-            }
+            try expect(firstResponder === nameField.currentEditor() || firstResponder === nameField, "settings button editor installs the name field as first responder")
         }
     }
 
@@ -3069,43 +3053,40 @@ struct PerchHASmoke {
         panel.contentView?.layoutSubtreeIfNeeded()
 
         let textFields = nativeTextFields(in: panel.contentView)
+        let popUpButtons = nativePopUpButtons(in: panel.contentView)
         let focusDebug = nativeControlDebugSummary(in: panel.contentView)
-        guard let titleField = textFields.first(where: { $0.placeholderString == "Title" && $0.stringValue == "Boost air" }) else {
-            throw SmokeFailure("settings custom-action editor title field is missing for mutation (\(focusDebug))")
+        guard let nameField = textFields.first(where: { $0.placeholderString == "Name" && $0.stringValue == "Boost air" }) else {
+            throw SmokeFailure("settings button editor name field is missing for mutation (\(focusDebug))")
         }
-        guard let targetField = textFields.first(where: { $0.placeholderString == "Target entity" && $0.stringValue == "script.air_cleaner_boost" }) else {
-            throw SmokeFailure("settings custom-action editor target field is missing for mutation (\(focusDebug))")
+        guard let targetPopUp = popUpButtons.first(where: { $0.titleOfSelectedItem == "script.air_cleaner_boost" }) else {
+            throw SmokeFailure("settings button editor target picker is missing for mutation (\(focusDebug))")
         }
-        guard let nestedValueField = textFields.first(where: { $0.placeholderString == "Value" && $0.stringValue == "purifier" }) else {
-            throw SmokeFailure("settings custom-action editor nested value field is missing for mutation (\(focusDebug))")
-        }
-        try setNativeTextFieldValue("Boost harder", for: titleField, in: panel)
-        try setNativeTextFieldValue("script.air_cleaner_quiet", for: targetField, in: panel)
-        try setNativeTextFieldValue("boost", for: nestedValueField, in: panel)
+        try setNativeTextFieldValue("Boost harder", for: nameField, in: panel)
+        try setNativePopUpButtonSelection("Office lamp", for: targetPopUp)
 
         guard let action = model.customActionConfiguration.action(id: "snapshot-boost-air") else {
-            throw SmokeFailure("settings custom-action editor lost the seeded custom action")
+            throw SmokeFailure("settings button editor lost the seeded custom action")
         }
-        try expect(action.title == "Boost harder", "settings custom-action editor commits title edits through native text fields")
-        try expect(action.action.targetEntityID == "script.air_cleaner_quiet", "settings custom-action editor commits target edits through native text fields")
+        try expect(action.title == "Boost harder", "settings button editor commits name edits through the native name field")
+        try expect(action.action.targetEntityID == "switch.office_lamp", "settings button editor commits target edits through the guided target picker")
         guard case let .protectedString(reference) = action.action.serviceData["pin"] else {
-            throw SmokeFailure("settings custom-action editor did not preserve protected value reference")
+            throw SmokeFailure("settings button editor did not preserve protected value reference")
         }
         let storedProtectedValue = try protectedStore.load(reference)
-        try expect(storedProtectedValue == "1234", "settings custom-action editor preserves protected values outside JSON config")
+        try expect(storedProtectedValue == "1234", "settings button editor preserves protected values outside JSON config")
         try expect(
             action.action.serviceData == [
                 "variables": .object([
-                    "steps": .array(["fan", "boost"])
+                    "steps": .array(["fan", "purifier"])
                 ]),
                 "pin": .protectedString(reference)
             ],
-            "settings custom-action editor commits nested service-data edits through native text fields"
+            "settings button editor preserves the stored service-data payload untouched"
         )
         let encoded = try JSONEncoder().encode(model.customActionConfiguration)
         let text = String(decoding: encoded, as: UTF8.self)
-        try expect(!text.contains("1234"), "settings custom-action editor keeps protected values out of JSON config")
-        try expect(!focusDebug.contains("1234"), "settings custom-action editor does not leak protected values through visible native control text")
+        try expect(!text.contains("1234"), "settings button editor keeps protected values out of JSON config")
+        try expect(!focusDebug.contains("1234"), "settings button editor does not leak protected values through visible native control text")
     }
 
     @MainActor
@@ -3220,50 +3201,36 @@ struct PerchHASmoke {
 
         let popUpButtons = nativePopUpButtons(in: panel.contentView)
         let focusDebug = nativeControlDebugSummary(in: panel.contentView)
-        guard popUpButtons.contains(where: { $0.titleOfSelectedItem == "turn_on" }) else {
-            throw SmokeFailure("settings custom-action editor service popup is missing for mutation (\(focusDebug))")
-        }
-        guard popUpButtons.contains(where: { $0.titleOfSelectedItem == "List" }) else {
-            throw SmokeFailure("settings custom-action editor nested type popup is missing for mutation (\(focusDebug))")
+        guard let servicePopUp = popUpButtons.first(where: { $0.titleOfSelectedItem == "Script: Turn on" }) else {
+            throw SmokeFailure("settings button editor what-it-does picker is missing for mutation (\(focusDebug))")
         }
 
-        try expect(
-            model.setCustomActionService("snapshot-boost-air", domain: "script", service: "turn_off"),
-            "settings custom-action editor applies service metadata mutation in CLT smoke"
-        )
-        try expect(
-            model.setCustomActionServiceDataType(
-                "snapshot-boost-air",
-                path: [.key("variables"), .key("steps")],
-                kind: .string
-            ),
-            "settings custom-action editor applies type mutation in CLT smoke"
-        )
+        try setNativePopUpButtonSelection("Script: Turn off", for: servicePopUp)
 
         guard let action = model.customActionConfiguration.action(id: "snapshot-boost-air") else {
-            throw SmokeFailure("settings custom-action editor lost the seeded custom action after popup mutation")
+            throw SmokeFailure("settings button editor lost the seeded custom action after popup mutation")
         }
         try expect(
-            action.action.service == "turn_off",
-            "settings custom-action editor commits service metadata mutation through the panel model: \(action.action.service)"
+            action.action.domain == "script" && action.action.service == "turn_off",
+            "settings button editor commits the what-it-does selection through the panel model: \(action.action.domain)/\(action.action.service)"
         )
         guard case let .protectedString(reference) = action.action.serviceData["pin"] else {
-            throw SmokeFailure("settings custom-action editor preserves protected value references through popup mutation")
+            throw SmokeFailure("settings button editor preserves protected value references through popup mutation")
         }
         guard case let .object(variables) = action.action.serviceData["variables"] else {
-            throw SmokeFailure("settings custom-action editor preserves variables object through popup mutation")
+            throw SmokeFailure("settings button editor preserves variables object through popup mutation")
         }
         try expect(
-            variables["steps"] == "",
-            "settings custom-action editor commits nested type mutation through the panel model: \(String(describing: variables["steps"]))"
+            variables["steps"] == .array(["fan", "purifier"]),
+            "settings button editor preserves the stored payload through the what-it-does selection: \(String(describing: variables["steps"]))"
         )
         try expect(
             action.action.serviceData["transition"] == 3,
-            "settings custom-action editor applies new metadata defaults after the service change: \(String(describing: action.action.serviceData["transition"]))"
+            "settings button editor applies new metadata defaults after the service change: \(String(describing: action.action.serviceData["transition"]))"
         )
         try expect(
             action.action.serviceData["pin"] == .protectedString(reference),
-            "settings custom-action editor keeps protected references through popup mutation: \(String(describing: action.action.serviceData["pin"]))"
+            "settings button editor keeps protected references through popup mutation: \(String(describing: action.action.serviceData["pin"]))"
         )
     }
 

@@ -477,6 +477,79 @@ public struct ActionSpec: Equatable, Sendable, Codable {
     }
 }
 
+/// Friendly, jargon-free labels for Home Assistant service identifiers.
+///
+/// Home Assistant addresses a service call by a machine `domain` and `service`
+/// pair (for example `script` / `turn_on`). The guided button editor presents
+/// these to people instead as readable phrases, so this helper turns the raw
+/// identifiers into Title-cased, space-separated text.
+public enum PerchHAServiceLabel {
+    /// Returns a human-readable, Title-cased name for a service domain.
+    ///
+    /// Underscores become spaces and each word is capitalized, so `media_player`
+    /// becomes `Media Player`. Empty or whitespace-only input yields an empty
+    /// string.
+    ///
+    /// - Parameter domain: The raw Home Assistant service domain.
+    /// - Returns: A Title-cased label, or an empty string when `domain` is blank.
+    public static func domainTitle(_ domain: String) -> String {
+        humanize(domain, capitalizeEachWord: true)
+    }
+
+    /// Returns a human-readable name for a service within a domain.
+    ///
+    /// Underscores become spaces and only the first word is capitalized, so
+    /// `turn_on` becomes `Turn on`. Empty or whitespace-only input yields an
+    /// empty string.
+    ///
+    /// - Parameter service: The raw Home Assistant service name.
+    /// - Returns: A sentence-cased label, or an empty string when `service` is
+    ///   blank.
+    public static func serviceTitle(_ service: String) -> String {
+        humanize(service, capitalizeEachWord: false)
+    }
+
+    /// Returns a combined `Domain: Service` label such as `Script: Turn on`.
+    ///
+    /// When either component is blank the separator and missing side are
+    /// omitted, so a blank service yields just the domain title.
+    ///
+    /// - Parameters:
+    ///   - domain: The raw Home Assistant service domain.
+    ///   - service: The raw Home Assistant service name.
+    /// - Returns: A friendly label for the service call.
+    public static func friendlyLabel(domain: String, service: String) -> String {
+        let domainPart = domainTitle(domain)
+        let servicePart = serviceTitle(service)
+        switch (domainPart.isEmpty, servicePart.isEmpty) {
+        case (false, false):
+            return "\(domainPart): \(servicePart)"
+        case (false, true):
+            return domainPart
+        case (true, false):
+            return servicePart
+        case (true, true):
+            return ""
+        }
+    }
+
+    private static func humanize(_ raw: String, capitalizeEachWord: Bool) -> String {
+        let words = raw
+            .split { character in character == "_" || character == "." || character == " " }
+            .map(String.init)
+        guard !words.isEmpty else {
+            return ""
+        }
+        let rendered = words.enumerated().map { index, word -> String in
+            if capitalizeEachWord || index == 0 {
+                return word.prefix(1).uppercased() + word.dropFirst()
+            }
+            return word
+        }
+        return rendered.joined(separator: " ")
+    }
+}
+
 public struct HAServiceMetadata: Equatable, Sendable {
     public let domain: String
     public let service: String
