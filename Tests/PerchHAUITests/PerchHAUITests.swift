@@ -5432,6 +5432,49 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertTrue(secondApplication.snapshot.hasTokenInput)
     }
 
+    func testAppShellAutoConnectsOnLaunchWhenStoredSessionAndProfileExist() async throws {
+        let url = temporaryConfigURL()
+        let keychain = KeychainSecretStore(service: "dev.perchha.ui.tests.\(UUID().uuidString)")
+        let sessionStore = PerchHAAuthSessionStore(secretStore: keychain)
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+            _ = try? sessionStore.clear()
+        }
+
+        let seedApplication = PerchHAApplication(
+            configStore: JSONConfigStore(fileURL: url),
+            authSessionStore: sessionStore,
+            client: RefreshingHAClientRecorder(
+                discoveryResults: [.success(oauthDiscoverySnapshot())]
+            )
+        )
+        seedApplication.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        seedApplication.updateConnectionForm(
+            urlString: "https://homeassistant.local:8123",
+            token: "long-lived-token"
+        )
+        await seedApplication.connect()
+        seedApplication.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+
+        let relaunched = PerchHAApplication(
+            configStore: JSONConfigStore(fileURL: url),
+            authSessionStore: sessionStore,
+            client: RefreshingHAClientRecorder(
+                discoveryResults: [.success(oauthDiscoverySnapshot())]
+            )
+        )
+        relaunched.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            relaunched.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        let state = await relaunched.awaitAutoConnect()
+        XCTAssertEqual(state, .connected)
+        XCTAssertEqual(relaunched.snapshot.connectionState, .connected)
+        XCTAssertEqual(relaunched.snapshot.connectionForm.token, "")
+        XCTAssertTrue(relaunched.snapshot.hasTokenInput)
+    }
+
     func test_t_app_shell_reports_config_load_failure_and_blocks_save() {
         let store = FailingConfigStore(
             loadError: .malformedConfig(URL(fileURLWithPath: "/tmp/perchha-bad-config.json"), message: "bad json")

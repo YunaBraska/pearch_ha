@@ -802,6 +802,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     private var panel: NSPanel?
     private var settingsWindow: NSWindow?
     private var panelModel: PerchHAPanelModel?
+    private var autoConnectTask: Task<Void, Never>?
     private let configStore: ConfigStore?
     private let authSessionStore: (any PerchHAAuthSessionStorage)?
     private let connector: PerchHAPanelModel.Connector
@@ -987,6 +988,29 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             self?.openSettingsWindow()
         }
         updateStatusItem(from: model.snapshot)
+        autoConnectTask = startAutoConnect(form: rememberedForm, model: model)
+    }
+
+    /// Reconnects automatically on launch when a connection profile and a stored
+    /// access token are already present, so a relaunch restores the live session
+    /// instead of returning to the connection form. Returns the running task, or
+    /// `nil` when no stored session is available to reconnect with.
+    @discardableResult
+    private func startAutoConnect(form: PerchHAConnectionForm, model: PerchHAPanelModel) -> Task<Void, Never>? {
+        guard form.usesStoredAuthSession, form.primaryURL() != nil else {
+            return nil
+        }
+        return Task { @MainActor in
+            await model.connect()
+        }
+    }
+
+    /// Awaits any in-flight launch auto-connect and reports the resulting
+    /// connection state. Returns the current connection state immediately when no
+    /// auto-connect is in flight. Makes the launch auto-connect path observable.
+    public func awaitAutoConnect() async -> ConnectionState {
+        await autoConnectTask?.value
+        return panelModel?.snapshot.connectionState ?? .disconnected
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
@@ -1445,6 +1469,8 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     }
 
     private func releaseShell() {
+        autoConnectTask?.cancel()
+        autoConnectTask = nil
         panelModel?.cancelInFlightAction()
         panel?.orderOut(nil)
         panel?.contentViewController = nil
