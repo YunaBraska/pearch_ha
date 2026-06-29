@@ -1273,6 +1273,21 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     }
 
     @discardableResult
+    public func setCoverControlMode(_ id: EntityID, mode: CoverControlMode) -> Bool {
+        panelModel?.setCoverControlMode(id, mode: mode) ?? false
+    }
+
+    @discardableResult
+    public func setTemperatureUnit(_ id: EntityID, temperatureUnit: TemperatureUnitPreference) -> Bool {
+        panelModel?.setTemperatureUnit(id, temperatureUnit: temperatureUnit) ?? false
+    }
+
+    @discardableResult
+    public func setUnitOverride(_ id: EntityID, unitOverride: String?) -> Bool {
+        panelModel?.setUnitOverride(id, unitOverride: unitOverride) ?? false
+    }
+
+    @discardableResult
     public func setMenuBarWarningThreshold(_ id: EntityID, threshold: ValueThreshold?) -> Bool {
         panelModel?.setMenuBarWarningThreshold(id, threshold: threshold) ?? false
     }

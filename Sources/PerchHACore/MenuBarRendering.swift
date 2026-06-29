@@ -7,6 +7,46 @@ public enum MenuBarDisplayStyle: String, CaseIterable, Codable, Equatable, Senda
     case ring
 }
 
+/// Controls which interactive elements a cover entity exposes in the panel.
+public enum CoverControlMode: String, CaseIterable, Codable, Equatable, Sendable {
+    /// Open, Stop, and Close buttons only.
+    case buttons
+    /// A position slider only, shown when a position is reported.
+    case slider
+    /// Both the buttons and the position slider (the default).
+    case both
+
+    /// Whether the Open/Stop/Close buttons should be rendered.
+    public var showsButtons: Bool {
+        switch self {
+        case .buttons, .both:
+            true
+        case .slider:
+            false
+        }
+    }
+
+    /// Whether the position slider should be rendered when a position exists.
+    public var showsSlider: Bool {
+        switch self {
+        case .slider, .both:
+            true
+        case .buttons:
+            false
+        }
+    }
+}
+
+/// Selects the temperature scale used when displaying a numeric temperature value.
+public enum TemperatureUnitPreference: String, CaseIterable, Codable, Equatable, Sendable {
+    /// Show the value in the unit reported by Home Assistant, unchanged.
+    case automatic
+    /// Convert and display the value in degrees Celsius.
+    case celsius
+    /// Convert and display the value in degrees Fahrenheit.
+    case fahrenheit
+}
+
 public enum HistoryRange: String, CaseIterable, Codable, Equatable, Hashable, Sendable {
     case hour
     case day
@@ -64,6 +104,12 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
     public let totalEntityID: EntityID?
     public let thresholds: ValueThresholds
     public let defaultHistoryRange: HistoryRange
+    /// Which controls a cover entity exposes in the panel.
+    public let coverControlMode: CoverControlMode
+    /// The temperature scale used when the value is a numeric temperature.
+    public let temperatureUnit: TemperatureUnitPreference
+    /// An optional label that replaces the displayed unit for any entity.
+    public let unitOverride: String?
 
     public init(
         entityID: EntityID,
@@ -74,7 +120,10 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         absoluteTotal: Double? = nil,
         totalEntityID: EntityID? = nil,
         thresholds: ValueThresholds = ValueThresholds(),
-        defaultHistoryRange: HistoryRange = .hour
+        defaultHistoryRange: HistoryRange = .hour,
+        coverControlMode: CoverControlMode = .both,
+        temperatureUnit: TemperatureUnitPreference = .automatic,
+        unitOverride: String? = nil
     ) {
         self.entityID = entityID
         self.style = style
@@ -85,6 +134,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         self.totalEntityID = totalEntityID
         self.thresholds = thresholds
         self.defaultHistoryRange = defaultHistoryRange
+        self.coverControlMode = coverControlMode
+        self.temperatureUnit = temperatureUnit
+        self.unitOverride = Self.normalizedOverride(unitOverride)
     }
 
     public func updating(
@@ -95,7 +147,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         absoluteTotal: Double? = nil,
         totalEntityID: EntityID? = nil,
         thresholds: ValueThresholds? = nil,
-        defaultHistoryRange: HistoryRange? = nil
+        defaultHistoryRange: HistoryRange? = nil,
+        coverControlMode: CoverControlMode? = nil,
+        temperatureUnit: TemperatureUnitPreference? = nil
     ) -> MenuBarItemConfiguration {
         MenuBarItemConfiguration(
             entityID: entityID,
@@ -106,7 +160,31 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             absoluteTotal: absoluteTotal ?? self.absoluteTotal,
             totalEntityID: totalEntityID ?? self.totalEntityID,
             thresholds: thresholds ?? self.thresholds,
-            defaultHistoryRange: defaultHistoryRange ?? self.defaultHistoryRange
+            defaultHistoryRange: defaultHistoryRange ?? self.defaultHistoryRange,
+            coverControlMode: coverControlMode ?? self.coverControlMode,
+            temperatureUnit: temperatureUnit ?? self.temperatureUnit,
+            unitOverride: unitOverride
+        )
+    }
+
+    /// Returns a copy with the free-form unit override replaced.
+    ///
+    /// - Parameter override: The override label, or `nil`/blank to clear it.
+    /// - Returns: An updated configuration value.
+    public func settingUnitOverride(_ override: String?) -> MenuBarItemConfiguration {
+        MenuBarItemConfiguration(
+            entityID: entityID,
+            style: style,
+            showsLabel: showsLabel,
+            showsUnit: showsUnit,
+            maximumFractionDigits: maximumFractionDigits,
+            absoluteTotal: absoluteTotal,
+            totalEntityID: totalEntityID,
+            thresholds: thresholds,
+            defaultHistoryRange: defaultHistoryRange,
+            coverControlMode: coverControlMode,
+            temperatureUnit: temperatureUnit,
+            unitOverride: override
         )
     }
 
@@ -120,7 +198,10 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             absoluteTotal: total,
             totalEntityID: nil,
             thresholds: thresholds,
-            defaultHistoryRange: defaultHistoryRange
+            defaultHistoryRange: defaultHistoryRange,
+            coverControlMode: coverControlMode,
+            temperatureUnit: temperatureUnit,
+            unitOverride: unitOverride
         )
     }
 
@@ -134,7 +215,10 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             absoluteTotal: nil,
             totalEntityID: id,
             thresholds: thresholds,
-            defaultHistoryRange: defaultHistoryRange
+            defaultHistoryRange: defaultHistoryRange,
+            coverControlMode: coverControlMode,
+            temperatureUnit: temperatureUnit,
+            unitOverride: unitOverride
         )
     }
 
@@ -166,8 +250,28 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             absoluteTotal: absoluteTotal,
             totalEntityID: totalEntityID,
             thresholds: thresholds,
-            defaultHistoryRange: defaultHistoryRange
+            defaultHistoryRange: defaultHistoryRange,
+            coverControlMode: coverControlMode,
+            temperatureUnit: temperatureUnit,
+            unitOverride: unitOverride
         )
+    }
+
+    /// The display-unit preferences derived from this configuration.
+    ///
+    /// - Returns: A value carrying the temperature scale and unit override
+    ///   applied when formatting this entity's value.
+    public var displayUnit: EntityDisplayUnit {
+        EntityDisplayUnit(temperatureUnit: temperatureUnit, unitOverride: unitOverride)
+    }
+
+    private static func normalizedOverride(_ override: String?) -> String? {
+        guard let trimmed = override?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty
+        else {
+            return nil
+        }
+        return trimmed
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -180,6 +284,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         case totalEntityID
         case thresholds
         case defaultHistoryRange
+        case coverControlMode
+        case temperatureUnit
+        case unitOverride
     }
 
     public init(from decoder: Decoder) throws {
@@ -196,6 +303,14 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         totalEntityID = try container.decodeIfPresent(EntityID.self, forKey: .totalEntityID)
         thresholds = try container.decodeIfPresent(ValueThresholds.self, forKey: .thresholds) ?? ValueThresholds()
         defaultHistoryRange = try container.decodeIfPresent(HistoryRange.self, forKey: .defaultHistoryRange) ?? .hour
+        coverControlMode = try container.decodeIfPresent(CoverControlMode.self, forKey: .coverControlMode) ?? .both
+        temperatureUnit = try container.decodeIfPresent(
+            TemperatureUnitPreference.self,
+            forKey: .temperatureUnit
+        ) ?? .automatic
+        unitOverride = Self.normalizedOverride(
+            try container.decodeIfPresent(String.self, forKey: .unitOverride)
+        )
     }
 }
 
@@ -402,7 +517,8 @@ public struct MenuBarItemRenderer: Sendable {
         )
         let value = EntityValueFormatter(
             locale: locale,
-            maximumFractionDigits: configuration.maximumFractionDigits
+            maximumFractionDigits: configuration.maximumFractionDigits,
+            displayUnit: configuration.showsUnit ? configuration.displayUnit : .standard
         ).format(displayEntity, isStale: isStale)
         let gauge = gauge(for: entity, configuration: configuration, availableEntities: availableEntities)
         let severity = severity(for: entity, gauge: gauge, configuration: configuration)

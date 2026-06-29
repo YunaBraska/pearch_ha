@@ -5901,6 +5901,70 @@ final class PerchHAUITests: XCTestCase {
         )
     }
 
+    func test_t_cover_control_mode_defaults_to_both_and_persists_changes() async {
+        let sink = MenuBarDisplaySinkRecorder()
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: controlRooms()) },
+            menuBarDisplaySink: { displayConfiguration in
+                sink.record(displayConfiguration)
+            }
+        )
+
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        let cover = model.snapshot.rooms.flatMap(\.entities).first { $0.id == "cover.office_blinds" }
+        guard let cover else {
+            return XCTFail("expected cover entity")
+        }
+        XCTAssertEqual(model.coverControlMode(for: cover), .both)
+        XCTAssertEqual(model.snapshot.coverControlMode(for: cover), .both)
+
+        XCTAssertTrue(model.setCoverControlMode("cover.office_blinds", mode: .slider))
+        XCTAssertEqual(model.coverControlMode(for: cover), .slider)
+        XCTAssertEqual(
+            model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: "cover.office_blinds").coverControlMode,
+            .slider
+        )
+        XCTAssertEqual(
+            sink.lastDisplayConfiguration?.itemConfiguration(for: "cover.office_blinds").coverControlMode,
+            .slider
+        )
+    }
+
+    func test_t_panel_formatted_value_applies_temperature_unit_preference() async {
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        XCTAssertTrue(model.setTemperatureUnit("sensor.office_temperature", temperatureUnit: .fahrenheit))
+
+        let temperature = model.snapshot.rooms.flatMap(\.entities).first { $0.id == "sensor.office_temperature" }
+        XCTAssertEqual(
+            temperature.map { model.snapshot.formattedValue(for: $0, locale: Locale(identifier: "en_US")) },
+            FormattedEntityValue(text: "70.52 °F", status: .available)
+        )
+    }
+
+    func test_t_panel_formatted_value_applies_unit_override() async {
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        XCTAssertTrue(model.setUnitOverride("switch.kitchen_light", unitOverride: "ppm"))
+        XCTAssertTrue(model.setUnitOverride("sensor.office_humidity", unitOverride: "ppm"))
+
+        let humidity = model.snapshot.rooms.flatMap(\.entities).first { $0.id == "sensor.office_humidity" }
+        XCTAssertEqual(
+            humidity.map { model.snapshot.formattedValue(for: $0, locale: Locale(identifier: "en_US")) },
+            FormattedEntityValue(text: "44 ppm", status: .available)
+        )
+    }
+
     private func temporaryConfigURL() -> URL {
         URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("perchha-ui-test-\(UUID().uuidString)", isDirectory: true)

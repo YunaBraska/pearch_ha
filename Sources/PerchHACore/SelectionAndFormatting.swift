@@ -376,13 +376,121 @@ public struct FormattedEntityValue: Equatable, Sendable {
     }
 }
 
+/// Per-entity display-unit preferences applied when formatting a value.
+public struct EntityDisplayUnit: Equatable, Sendable {
+    /// The temperature scale used when the value is a numeric temperature.
+    public let temperatureUnit: TemperatureUnitPreference
+    /// An optional label that replaces the displayed unit for any entity.
+    public let unitOverride: String?
+
+    /// The preference that leaves the value and unit exactly as reported.
+    public static let standard = EntityDisplayUnit(temperatureUnit: .automatic, unitOverride: nil)
+
+    public init(temperatureUnit: TemperatureUnitPreference = .automatic, unitOverride: String? = nil) {
+        self.temperatureUnit = temperatureUnit
+        let trimmed = unitOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.unitOverride = (trimmed?.isEmpty == false) ? trimmed : nil
+    }
+}
+
+/// Pure helpers for recognizing and converting temperature units.
+public enum TemperatureConversion {
+    /// Whether a Home Assistant unit string denotes a temperature scale.
+    ///
+    /// - Parameter unit: The raw unit string (for example `°C`, `F`, or `K`).
+    /// - Returns: `true` for Celsius, Fahrenheit, or Kelvin variants.
+    public static func isTemperatureUnit(_ unit: String?) -> Bool {
+        scale(of: unit) != nil
+    }
+
+    /// The recognized scale for a unit string, or `nil` when not a temperature.
+    public static func scale(of unit: String?) -> TemperatureScale? {
+        guard let trimmed = unit?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return nil
+        }
+        let normalized = trimmed
+            .replacingOccurrences(of: "°", with: "")
+            .replacingOccurrences(of: " ", with: "")
+            .uppercased()
+        switch normalized {
+        case "C", "CELSIUS":
+            return .celsius
+        case "F", "FAHRENHEIT":
+            return .fahrenheit
+        case "K", "KELVIN":
+            return .kelvin
+        default:
+            return nil
+        }
+    }
+
+    /// Converts a numeric temperature between scales.
+    ///
+    /// - Parameters:
+    ///   - value: The numeric value in `from`.
+    ///   - from: The source scale.
+    ///   - to: The destination scale.
+    /// - Returns: The value expressed in the `to` scale.
+    public static func convert(_ value: Double, from: TemperatureScale, to: TemperatureScale) -> Double {
+        let celsius = from.toCelsius(value)
+        return to.fromCelsius(celsius)
+    }
+}
+
+/// A recognized temperature scale.
+public enum TemperatureScale: Equatable, Sendable {
+    case celsius
+    case fahrenheit
+    case kelvin
+
+    /// The canonical unit label for this scale.
+    public var unitLabel: String {
+        switch self {
+        case .celsius:
+            "°C"
+        case .fahrenheit:
+            "°F"
+        case .kelvin:
+            "K"
+        }
+    }
+
+    func toCelsius(_ value: Double) -> Double {
+        switch self {
+        case .celsius:
+            value
+        case .fahrenheit:
+            (value - 32) * 5 / 9
+        case .kelvin:
+            value - 273.15
+        }
+    }
+
+    func fromCelsius(_ celsius: Double) -> Double {
+        switch self {
+        case .celsius:
+            celsius
+        case .fahrenheit:
+            celsius * 9 / 5 + 32
+        case .kelvin:
+            celsius + 273.15
+        }
+    }
+}
+
 public struct EntityValueFormatter: Sendable {
     public let localeIdentifier: String
     public let maximumFractionDigits: Int
+    public let displayUnit: EntityDisplayUnit
 
-    public init(locale: Locale = .current, maximumFractionDigits: Int = 2) {
+    public init(
+        locale: Locale = .current,
+        maximumFractionDigits: Int = 2,
+        displayUnit: EntityDisplayUnit = .standard
+    ) {
         self.localeIdentifier = locale.identifier
         self.maximumFractionDigits = maximumFractionDigits
+        self.displayUnit = displayUnit
     }
 
     public func format(_ entity: DiscoveredEntity, isStale: Bool = false) -> FormattedEntityValue {
@@ -403,23 +511,104 @@ public struct EntityValueFormatter: Sendable {
 
     private func valueText(state: String, unit: String?) -> String {
         let trimmedState = state.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Explicit temperature conversion takes precedence over a raw override.
+        if let target = targetScale,
+           let source = TemperatureConversion.scale(of: unit),
+           let decimal = Decimal(string: trimmedState, locale: Locale(identifier: "en_US_POSIX")) {
+            let value = NSDecimalNumber(decimal: decimal).doubleValue
+            let converted = TemperatureConversion.convert(value, from: source, to: target)
+            let number = formattedDouble(converted) ?? trimmedState
+            return "\(number) \(target.unitLabel)"
+        }
+
         let value = formattedNumber(trimmedState) ?? trimmedState
-        guard let unit, !unit.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        let resolvedUnit = resolvedUnitLabel(unit)
+        guard let resolvedUnit, !resolvedUnit.isEmpty else {
             return value
         }
-        return "\(value) \(unit)"
+        return "\(value) \(resolvedUnit)"
+    }
+
+    private var targetScale: TemperatureScale? {
+        switch displayUnit.temperatureUnit {
+        case .automatic:
+            nil
+        case .celsius:
+            .celsius
+        case .fahrenheit:
+            .fahrenheit
+        }
+    }
+
+    private func resolvedUnitLabel(_ unit: String?) -> String? {
+        if let override = displayUnit.unitOverride {
+            return override
+        }
+        let trimmed = unit?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 
     private func formattedNumber(_ state: String) -> String? {
         guard let decimal = Decimal(string: state, locale: Locale(identifier: "en_US_POSIX")) else {
             return nil
         }
+        return numberFormatter().string(from: NSDecimalNumber(decimal: decimal))
+    }
+
+    private func formattedDouble(_ value: Double) -> String? {
+        numberFormatter().string(from: NSNumber(value: value))
+    }
+
+    private func numberFormatter() -> NumberFormatter {
         let formatter = NumberFormatter()
         formatter.locale = Locale(identifier: localeIdentifier)
         formatter.numberStyle = .decimal
         formatter.minimumFractionDigits = 0
         formatter.maximumFractionDigits = maximumFractionDigits
         formatter.roundingMode = .halfUp
-        return formatter.string(from: NSDecimalNumber(decimal: decimal))
+        return formatter
+    }
+}
+
+/// Pure, domain-aware defaults for a newly seen entity's display configuration.
+///
+/// These keep known entities sensible out of the box (battery sensors default
+/// to the battery gauge, temperatures keep the reported unit, covers expose
+/// both control styles) while leaving every option editable for unknowns.
+public enum EntityDisplayDefaults {
+    /// The default per-entity menu-bar/display configuration for an entity.
+    ///
+    /// - Parameter entity: The entity to derive defaults for.
+    /// - Returns: A configuration carrying domain-appropriate defaults.
+    public static func configuration(for entity: DiscoveredEntity) -> MenuBarItemConfiguration {
+        MenuBarItemConfiguration(
+            entityID: entity.id,
+            style: defaultStyle(for: entity),
+            coverControlMode: .both,
+            temperatureUnit: .automatic
+        )
+    }
+
+    /// The default menu-bar gauge style for an entity.
+    ///
+    /// - Parameter entity: The entity to inspect.
+    /// - Returns: `.battery` for battery-named or percentage battery sensors,
+    ///   otherwise `.text`.
+    public static func defaultStyle(for entity: DiscoveredEntity) -> MenuBarDisplayStyle {
+        isBatteryLike(entity) ? .battery : .text
+    }
+
+    private static func isBatteryLike(_ entity: DiscoveredEntity) -> Bool {
+        let name = entity.name.lowercased()
+        let id = entity.id.rawValue.lowercased()
+        let unit = entity.unit?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let mentionsBattery = name.contains("battery")
+            || name.contains("batt ")
+            || id.contains("battery")
+        return mentionsBattery && unit == "%"
     }
 }

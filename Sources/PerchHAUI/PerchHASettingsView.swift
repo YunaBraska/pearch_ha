@@ -535,6 +535,8 @@ public struct PerchHASettingsView: View {
     private func menuBarControls(for entity: DiscoveredEntity) -> some View {
         let configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entity.id)
         let isPromoted = model.snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
+        let isNumeric = menuBarNumericState(entity.state) != nil
+        let isCover = entity.id.domain == "cover"
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Toggle("Menu bar", isOn: menuBarVisibilityBinding(for: entity.id))
@@ -548,7 +550,7 @@ public struct PerchHASettingsView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            if isPromoted {
+            if isNumeric {
                 HStack(spacing: 10) {
                     Text("Style")
                         .foregroundStyle(.secondary)
@@ -559,11 +561,32 @@ public struct PerchHASettingsView: View {
                     }
                     .labelsHidden()
                     .frame(width: 110)
-                    .accessibilityLabel("\(entity.name) menu bar style")
+                    .accessibilityLabel("\(entity.name) display style")
                     Spacer(minLength: 0)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
+            if isCover {
+                HStack(spacing: 10) {
+                    Text("Controls")
+                        .foregroundStyle(.secondary)
+                    Picker("Controls", selection: coverControlModeBinding(for: entity.id)) {
+                        ForEach(CoverControlMode.allCases, id: \.rawValue) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 110)
+                    .accessibilityLabel("\(entity.name) cover controls")
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            unitDisplayControls(for: entity, configuration: configuration)
+
+            if isPromoted {
                 HStack(spacing: 12) {
                     Toggle("Label", isOn: menuBarLabelBinding(for: entity.id))
                         .toggleStyle(.checkbox)
@@ -604,6 +627,41 @@ public struct PerchHASettingsView: View {
         }
         .font(.caption)
         .controlSize(.small)
+    }
+
+    @ViewBuilder
+    private func unitDisplayControls(
+        for entity: DiscoveredEntity,
+        configuration: MenuBarItemConfiguration
+    ) -> some View {
+        let isNumeric = menuBarNumericState(entity.state) != nil
+        let isTemperature = isNumeric && TemperatureConversion.isTemperatureUnit(entity.unit)
+        if isTemperature {
+            HStack(spacing: 10) {
+                Text("Temp")
+                    .foregroundStyle(.secondary)
+                Picker("Temp", selection: temperatureUnitBinding(for: entity.id)) {
+                    ForEach(TemperatureUnitPreference.allCases, id: \.rawValue) { preference in
+                        Text(preference.displayName).tag(preference)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 110)
+                .accessibilityLabel("\(entity.name) temperature unit")
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        HStack(spacing: 8) {
+            Text("Unit")
+                .foregroundStyle(.secondary)
+            TextField("Unit override", text: unitOverrideBinding(for: entity.id))
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 110)
+                .accessibilityLabel("\(entity.name) unit override")
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func customActionControls(for entity: DiscoveredEntity) -> some View {
@@ -1509,6 +1567,39 @@ public struct PerchHASettingsView: View {
             },
             set: { style in
                 model.setMenuBarDisplayStyle(id, style: style)
+            }
+        )
+    }
+
+    private func coverControlModeBinding(for id: EntityID) -> Binding<CoverControlMode> {
+        Binding(
+            get: {
+                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).coverControlMode
+            },
+            set: { mode in
+                model.setCoverControlMode(id, mode: mode)
+            }
+        )
+    }
+
+    private func temperatureUnitBinding(for id: EntityID) -> Binding<TemperatureUnitPreference> {
+        Binding(
+            get: {
+                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).temperatureUnit
+            },
+            set: { preference in
+                model.setTemperatureUnit(id, temperatureUnit: preference)
+            }
+        )
+    }
+
+    private func unitOverrideBinding(for id: EntityID) -> Binding<String> {
+        Binding(
+            get: {
+                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).unitOverride ?? ""
+            },
+            set: { override in
+                model.setUnitOverride(id, unitOverride: override)
             }
         )
     }

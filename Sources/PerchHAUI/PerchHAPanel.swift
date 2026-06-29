@@ -710,6 +710,14 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
         PerchHACoverControl(entity: entity, actionState: controlActionState)
     }
 
+    /// The cover control mode chosen for an entity.
+    ///
+    /// - Parameter entity: The entity to inspect.
+    /// - Returns: The configured ``CoverControlMode`` (defaults to ``CoverControlMode/both``).
+    public func coverControlMode(for entity: DiscoveredEntity) -> CoverControlMode {
+        menuBarDisplayConfiguration.itemConfiguration(for: entity.id).coverControlMode
+    }
+
     public var selectionTree: [SelectableRoom] {
         EntitySelectionProjector().selectionTree(
             rooms: availableRooms,
@@ -763,7 +771,11 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
     }
 
     public func formattedValue(for entity: DiscoveredEntity, locale: Locale = .current) -> FormattedEntityValue {
-        EntityValueFormatter(locale: locale).format(entity, isStale: valuesAreStale)
+        let configuration = menuBarDisplayConfiguration.itemConfiguration(for: entity.id)
+        return EntityValueFormatter(
+            locale: locale,
+            displayUnit: configuration.displayUnit
+        ).format(entity, isStale: valuesAreStale)
     }
 
     public func accessibilityPresentation(
@@ -1394,6 +1406,32 @@ public final class PerchHAPanelModel: ObservableObject {
             snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).updating(
                 defaultHistoryRange: defaultHistoryRange
             )
+        )
+    }
+
+    /// The cover control mode configured for an entity.
+    public func coverControlMode(for entity: DiscoveredEntity) -> CoverControlMode {
+        snapshot.coverControlMode(for: entity)
+    }
+
+    @discardableResult
+    public func setCoverControlMode(_ id: EntityID, mode: CoverControlMode) -> Bool {
+        updateMenuBarItemConfiguration(
+            snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).updating(coverControlMode: mode)
+        )
+    }
+
+    @discardableResult
+    public func setTemperatureUnit(_ id: EntityID, temperatureUnit: TemperatureUnitPreference) -> Bool {
+        updateMenuBarItemConfiguration(
+            snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).updating(temperatureUnit: temperatureUnit)
+        )
+    }
+
+    @discardableResult
+    public func setUnitOverride(_ id: EntityID, unitOverride: String?) -> Bool {
+        updateMenuBarItemConfiguration(
+            snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).settingUnitOverride(unitOverride)
         )
     }
 
@@ -4260,7 +4298,8 @@ public struct PerchHAPanelView: View {
                         .accessibilityLabel("\(control.isOn ? "Turn off" : "Turn on") \(entity.name)")
                         .accessibilityHint(entityControlHelp(for: entity, control: control))
                 }
-                if let coverControl = model.snapshot.coverControl(for: entity) {
+                if let coverControl = model.snapshot.coverControl(for: entity),
+                   model.coverControlMode(for: entity).showsButtons {
                     coverButtons(for: entity, control: coverControl)
                 }
                 ForEach(model.customActions(for: entity), id: \.id.rawValue) { action in
@@ -4269,6 +4308,7 @@ public struct PerchHAPanelView: View {
             }
             .font(.body)
             if let coverControl = model.snapshot.coverControl(for: entity),
+               model.coverControlMode(for: entity).showsSlider,
                let position = coverControl.position {
                 PerchHACoverPositionSlider(
                     position: position,
@@ -4824,6 +4864,32 @@ extension ValueThresholdDirection {
             "High"
         case .belowOrEqual:
             "Low"
+        }
+    }
+}
+
+extension CoverControlMode {
+    var displayName: String {
+        switch self {
+        case .buttons:
+            "Buttons"
+        case .slider:
+            "Slider"
+        case .both:
+            "Both"
+        }
+    }
+}
+
+extension TemperatureUnitPreference {
+    var displayName: String {
+        switch self {
+        case .automatic:
+            "Auto"
+        case .celsius:
+            "Celsius"
+        case .fahrenheit:
+            "Fahrenheit"
         }
     }
 }
