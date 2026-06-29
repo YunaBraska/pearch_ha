@@ -1421,9 +1421,12 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         window.title = "PerchHA Settings"
         window.isReleasedWhenClosed = false
         window.contentMinSize = AppShellLayout.settingsMinContentSize
-        let hostingView = NSHostingView(rootView: PerchHASettingsView(model: model, initialTab: initialTab))
-        hostingView.frame = NSRect(origin: .zero, size: AppShellLayout.settingsMinContentSize)
-        window.contentView = hostingView
+        // Host the SwiftUI tree through a hosting controller (not a bare
+        // contentView) so the responder chain is wired and text fields accept
+        // keyboard input and paste.
+        window.contentViewController = NSHostingController(
+            rootView: PerchHASettingsView(model: model, initialTab: initialTab)
+        )
         window.setContentSize(AppShellLayout.settingsMinContentSize)
         return window
     }
@@ -1476,7 +1479,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         panel?.contentViewController = nil
         panel = nil
         settingsWindow?.orderOut(nil)
-        settingsWindow?.contentView = nil
+        settingsWindow?.contentViewController = nil
         settingsWindow = nil
         panelModel = nil
 
