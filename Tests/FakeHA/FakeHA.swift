@@ -623,7 +623,7 @@ public enum FakeHAWebSocketMode: Equatable, Sendable {
     case entityRemovalThenPartialSubscribeEntitiesChangeThenAddition
     case disconnectOnceAfterSubscribeEntitiesResult
 
-    func unavailableCommandCode(for type: String) -> FakeHAUnavailableCommandCode? {
+    public func unavailableCommandCode(for type: String) -> FakeHAUnavailableCommandCode? {
         switch self {
         case let .unsupportedCommands(commands):
             commands.contains(type) ? .unsupportedCommand : nil
