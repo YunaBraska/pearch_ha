@@ -84,9 +84,13 @@ public struct PerchHAMenuBarPresenter: Sendable {
         panelSnapshot: PerchHAPanelSnapshot,
         locale: Locale = .current
     ) -> [PerchHAMenuBarPresentation] {
+        // Read the promoted set from the live panel snapshot rather than the
+        // launch-time configuration so runtime promotions immediately add or
+        // remove menu-bar items.
+        let displayConfiguration = panelSnapshot.menuBarDisplayConfiguration
         let entities = projector.promotedEntities(
             rooms: panelSnapshot.availableRooms,
-            menuBarEntityIDs: configuration.menuBarEntityIDs
+            menuBarEntityIDs: displayConfiguration.promotedEntityIDs
         )
         guard !entities.isEmpty else {
             return [.fallback]
@@ -95,7 +99,7 @@ public struct PerchHAMenuBarPresenter: Sendable {
         return entities.map { entity in
             let rendered = renderer.render(
                 entity: entity,
-                configuration: configuration.menuBarDisplayConfiguration.itemConfiguration(for: entity.id),
+                configuration: displayConfiguration.itemConfiguration(for: entity.id),
                 availableEntities: availableEntities,
                 locale: locale,
                 isStale: panelSnapshot.valuesAreStale

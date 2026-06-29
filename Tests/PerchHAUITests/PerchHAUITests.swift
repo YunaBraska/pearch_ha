@@ -4227,6 +4227,31 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertFalse(application.snapshot.statusItemHasImage)
     }
 
+    func test_t_menu_bar_presenter_reads_promotions_from_live_snapshot() {
+        let presenter = PerchHAMenuBarPresenter()
+        let rooms = selectionRooms()
+        let snapshot = PerchHAPanelSnapshot(
+            connectionState: .connected,
+            phase: .connectedData,
+            rooms: rooms,
+            availableRooms: rooms,
+            menuBarDisplayConfiguration: MenuBarDisplayConfiguration(
+                promotedEntityIDs: ["sensor.office_humidity", "sensor.office_temperature"]
+            )
+        )
+        // The launch-time configuration promotes nothing; the presenter must use
+        // the live snapshot so runtime promotions appear in the menu bar.
+        let presentations = presenter.presentations(
+            configuration: PerchHAConfiguration(),
+            panelSnapshot: snapshot
+        )
+        XCTAssertEqual(presentations.count, 2)
+        XCTAssertEqual(
+            presentations.compactMap(\.entityID),
+            ["sensor.office_humidity", "sensor.office_temperature"]
+        )
+    }
+
     func test_t_app_shell_promotes_multiple_menu_bar_items() async throws {
         let url = temporaryConfigURL()
         defer {
