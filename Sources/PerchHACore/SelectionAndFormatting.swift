@@ -369,10 +369,121 @@ public enum EntityValueStatus: Equatable, Sendable {
 public struct FormattedEntityValue: Equatable, Sendable {
     public let text: String
     public let status: EntityValueStatus
+    /// The SF Symbol name to render instead of (or beside) the text when the
+    /// selected unit is icon-based, or `nil` for plain text units.
+    public let iconSymbolName: String?
 
-    public init(text: String, status: EntityValueStatus) {
+    public init(text: String, status: EntityValueStatus, iconSymbolName: String? = nil) {
         self.text = text
         self.status = status
+        self.iconSymbolName = iconSymbolName
+    }
+}
+
+/// A dynamic-symbol unit family whose rendered SF Symbol is chosen by a
+/// normalized fraction in `0...1`.
+///
+/// Each family owns a pure mapping from a fraction to an SF Symbol name plus a
+/// short accessible description (for example `"battery 50%"`). The mapping is
+/// deterministic at the documented boundaries (`0`, `0.2`, `0.5`, `0.8`, `1.0`).
+public enum DynamicIconStyle: String, CaseIterable, Codable, Equatable, Sendable {
+    case battery
+    case signal
+    case sound
+    case brightness
+    case thermometer
+
+    /// The SF Symbol and accessible label chosen for a normalized fraction.
+    ///
+    /// - Parameter fraction: The value mapped into `0...1`. Values outside the
+    ///   range are clamped before selection.
+    /// - Returns: The chosen SF Symbol name and a human-readable description that
+    ///   embeds the rounded percent (for example `"battery 50%"`).
+    public func icon(for fraction: Double) -> DynamicIcon {
+        let clamped = min(1.0, max(0.0, fraction))
+        let percent = Int((clamped * 100).rounded())
+        let symbol: String
+        switch self {
+        case .battery:
+            symbol = switch clamped {
+            case ..<0.125: "battery.0percent"
+            case ..<0.375: "battery.25percent"
+            case ..<0.625: "battery.50percent"
+            case ..<0.875: "battery.75percent"
+            default: "battery.100percent"
+            }
+            return DynamicIcon(symbolName: symbol, accessibleText: "battery \(percent)%")
+        case .signal:
+            symbol = switch clamped {
+            case ..<0.125: "wifi.slash"
+            case ..<0.375: "wifi.exclamationmark"
+            case ..<0.75: "wifi"
+            default: "wifi"
+            }
+            return DynamicIcon(symbolName: symbol, accessibleText: "signal \(percent)%")
+        case .sound:
+            symbol = switch clamped {
+            case ..<0.125: "speaker.slash.fill"
+            case ..<0.375: "speaker.wave.1.fill"
+            case ..<0.75: "speaker.wave.2.fill"
+            default: "speaker.wave.3.fill"
+            }
+            return DynamicIcon(symbolName: symbol, accessibleText: "volume \(percent)%")
+        case .brightness:
+            symbol = switch clamped {
+            case ..<0.25: "sun.min"
+            case ..<0.75: "sun.max"
+            default: "sun.max.fill"
+            }
+            return DynamicIcon(symbolName: symbol, accessibleText: "brightness \(percent)%")
+        case .thermometer:
+            symbol = switch clamped {
+            case ..<0.25: "thermometer.low"
+            case ..<0.75: "thermometer.medium"
+            default: "thermometer.high"
+            }
+            return DynamicIcon(symbolName: symbol, accessibleText: "temperature \(percent)%")
+        }
+    }
+}
+
+/// A chosen dynamic icon: the SF Symbol name plus an accessible description.
+public struct DynamicIcon: Equatable, Sendable {
+    /// The SF Symbol name to render as a template image.
+    public let symbolName: String
+    /// A short accessible description, for example `"battery 50%"`.
+    public let accessibleText: String
+
+    public init(symbolName: String, accessibleText: String) {
+        self.symbolName = symbolName
+        self.accessibleText = accessibleText
+    }
+}
+
+/// Maps a raw numeric value into a normalized fraction in `0...1`.
+///
+/// Used by percentage- and icon-based units. When `minimum`/`maximum` are
+/// provided and `maximum > minimum`, the value is rescaled as
+/// `(value - minimum) / (maximum - minimum)` and clamped. When the bounds are
+/// absent (or invalid), the value is assumed to already be on a `0...100`
+/// percentage scale and is clamped to `0...1` after dividing by 100.
+public enum NormalizedFraction {
+    /// Resolves a normalized fraction for a raw value.
+    ///
+    /// - Parameters:
+    ///   - value: The raw numeric value.
+    ///   - minimum: The optional lower bound mapped to `0`.
+    ///   - maximum: The optional upper bound mapped to `1`.
+    /// - Returns: A fraction clamped to `0...1`.
+    public static func resolve(value: Double, minimum: Double?, maximum: Double?) -> Double {
+        if let minimum, let maximum, maximum > minimum {
+            return clamp((value - minimum) / (maximum - minimum))
+        }
+        return clamp(value / 100.0)
+    }
+
+    private static func clamp(_ value: Double) -> Double {
+        min(1.0, max(0.0, value))
     }
 }
 
@@ -468,12 +579,9 @@ public enum TemperatureScale: Equatable, Sendable {
 /// numeric value fall back to the raw state verbatim when the value cannot be
 /// parsed as a number (for example `HOME` or `off`).
 public enum ValueUnit: String, CaseIterable, Codable, Equatable, Sendable {
-    /// Keep the entity's Home Assistant unit, compacting only large magnitudes
-    /// (>= 10000) with SI suffixes; smaller values format with the configured
-    /// decimals exactly as before.
-    case automatic
     /// A plain number with the configured decimals and thousands grouping,
-    /// keeping the Home Assistant unit but never converting the value.
+    /// keeping the Home Assistant unit. Large magnitudes (>= 10000) are SI
+    /// compacted so `4054396` renders as `4.05M`.
     case number
     /// Always SI-compacted (k/M/B/T), keeping the Home Assistant unit.
     case compact
@@ -485,16 +593,34 @@ public enum ValueUnit: String, CaseIterable, Codable, Equatable, Sendable {
     case fahrenheit
     /// Interpret the value via the entity's temperature unit and show Kelvin.
     case kelvin
-    /// Interpret the raw value as bytes and render as B/KB/MB/GB/TB (1024-based).
+    /// Interpret the raw value as bytes and render as B/KB/MB/GB/TB/PB (1024-based).
     case bytes
+    /// Interpret the raw value as bytes per second and auto-scale (B/s..PB/s).
+    case dataRate
+    /// Interpret the raw value as lux and compact large magnitudes (suffix `lx`).
+    case illuminance
+    /// Interpret the raw value as watts and auto-scale W/kW/MW/GW.
+    case power
+    /// Interpret the raw value as watt-hours and auto-scale Wh/kWh/MWh/GWh.
+    case energy
+    /// Interpret the raw value as grams and auto-scale g/kg/t.
+    case mass
     /// Interpret the raw value as seconds and render as a compact duration.
     case duration
+    /// Render a battery glyph chosen by the value's normalized fraction.
+    case batteryIcon
+    /// Render a Wi-Fi/connection glyph chosen by the value's normalized fraction.
+    case signalIcon
+    /// Render a speaker glyph chosen by the value's normalized fraction.
+    case soundIcon
+    /// Render a sun glyph chosen by the value's normalized fraction.
+    case brightnessIcon
+    /// Render a thermometer glyph chosen by the value's normalized fraction.
+    case thermometerIcon
 
     /// A human-friendly label for this unit, shown in the settings picker.
     public var displayName: String {
         switch self {
-        case .automatic:
-            "Automatic"
         case .number:
             "Number"
         case .compact:
@@ -509,12 +635,50 @@ public enum ValueUnit: String, CaseIterable, Codable, Equatable, Sendable {
             "Kelvin"
         case .bytes:
             "Bytes"
+        case .dataRate:
+            "Data rate"
+        case .illuminance:
+            "Illuminance (lx)"
+        case .power:
+            "Power (W)"
+        case .energy:
+            "Energy (Wh)"
+        case .mass:
+            "Mass (g)"
         case .duration:
             "Duration"
+        case .batteryIcon:
+            "Battery icon"
+        case .signalIcon:
+            "Signal icon"
+        case .soundIcon:
+            "Sound icon"
+        case .brightnessIcon:
+            "Brightness icon"
+        case .thermometerIcon:
+            "Thermometer icon"
         }
     }
 
-    /// The threshold at or above which `.automatic` compacts a magnitude.
+    /// The dynamic-icon family this unit renders, when it is icon-based.
+    public var iconStyle: DynamicIconStyle? {
+        switch self {
+        case .batteryIcon: .battery
+        case .signalIcon: .signal
+        case .soundIcon: .sound
+        case .brightnessIcon: .brightness
+        case .thermometerIcon: .thermometer
+        default: nil
+        }
+    }
+
+    /// Whether this unit maps the value into `0...1` (percentage or icon based),
+    /// so the per-entity min/max bounds become relevant.
+    public var usesNormalizedFraction: Bool {
+        self == .percent || iconStyle != nil
+    }
+
+    /// The threshold at or above which `.number`/`.illuminance` compact a magnitude.
     private static let compactionThreshold = 10_000.0
 
     /// Renders a raw value as display text for this unit.
@@ -537,19 +701,13 @@ public enum ValueUnit: String, CaseIterable, Codable, Equatable, Sendable {
     ) -> String {
         let unit = (haUnit?.isEmpty == false) ? haUnit : nil
         switch self {
-        case .automatic:
+        case .number:
             guard let value = rawNumericValue else {
                 return rawState
             }
             let number = abs(value) >= Self.compactionThreshold
                 ? Self.compacted(value)
                 : (formatter.string(from: NSNumber(value: value)) ?? rawState)
-            return Self.appendUnit(number, unit: unit, showsUnit: showsUnit)
-        case .number:
-            guard let value = rawNumericValue else {
-                return rawState
-            }
-            let number = formatter.string(from: NSNumber(value: value)) ?? rawState
             return Self.appendUnit(number, unit: unit, showsUnit: showsUnit)
         case .compact:
             guard let value = rawNumericValue else {
@@ -575,12 +733,68 @@ public enum ValueUnit: String, CaseIterable, Codable, Equatable, Sendable {
                 return rawState
             }
             return Self.bytes(value, showsUnit: showsUnit)
+        case .dataRate:
+            guard let value = rawNumericValue else {
+                return rawState
+            }
+            return Self.dataRate(value, showsUnit: showsUnit)
+        case .illuminance:
+            guard let value = rawNumericValue else {
+                return rawState
+            }
+            let number = abs(value) >= Self.compactionThreshold
+                ? Self.compacted(value)
+                : Self.trimmedNumber(value)
+            return showsUnit ? "\(number) lx" : number
+        case .power:
+            guard let value = rawNumericValue else {
+                return rawState
+            }
+            return Self.scaled(value, units: ["W", "kW", "MW", "GW"], factor: 1000, showsUnit: showsUnit)
+        case .energy:
+            guard let value = rawNumericValue else {
+                return rawState
+            }
+            return Self.scaled(value, units: ["Wh", "kWh", "MWh", "GWh"], factor: 1000, showsUnit: showsUnit)
+        case .mass:
+            guard let value = rawNumericValue else {
+                return rawState
+            }
+            return Self.scaled(value, units: ["g", "kg", "t"], factor: 1000, showsUnit: showsUnit)
         case .duration:
             guard let value = rawNumericValue else {
                 return rawState
             }
             return Self.duration(value)
+        case .batteryIcon, .signalIcon, .soundIcon, .brightnessIcon, .thermometerIcon:
+            // Icon units render through `icon(...)`; this text is the fallback
+            // (the raw state) used when no numeric value is parseable.
+            guard rawNumericValue != nil else {
+                return rawState
+            }
+            return ""
         }
+    }
+
+    /// The chosen dynamic icon for an icon-based unit, or `nil` for text units
+    /// or non-numeric states.
+    ///
+    /// - Parameters:
+    ///   - rawNumericValue: The parsed numeric value, when the state is numeric.
+    ///   - minValue: The optional lower bound mapped to the empty icon level.
+    ///   - maxValue: The optional upper bound mapped to the full icon level.
+    /// - Returns: The selected icon, or `nil` when this unit is not icon-based or
+    ///   the value cannot be parsed.
+    public func icon(
+        rawNumericValue: Double?,
+        minValue: Double?,
+        maxValue: Double?
+    ) -> DynamicIcon? {
+        guard let style = iconStyle, let value = rawNumericValue else {
+            return nil
+        }
+        let fraction = NormalizedFraction.resolve(value: value, minimum: minValue, maximum: maxValue)
+        return style.icon(for: fraction)
     }
 
     /// The temperature scale this unit targets, if any.
@@ -628,13 +842,44 @@ public enum ValueUnit: String, CaseIterable, Codable, Equatable, Sendable {
         return trimmedNumber((value * pow(10, Double(decimals))).rounded() / pow(10, Double(decimals)))
     }
 
-    /// Renders raw bytes as B/KB/MB/GB/TB (1024-based) to two decimals.
+    /// Renders raw bytes as B/KB/MB/GB/TB/PB (1024-based) to two decimals.
     static func bytes(_ value: Double, showsUnit: Bool) -> String {
-        let units = ["B", "KB", "MB", "GB", "TB"]
+        binaryScaled(value, units: ["B", "KB", "MB", "GB", "TB", "PB"], showsUnit: showsUnit)
+    }
+
+    /// Renders raw bytes-per-second as B/s..PB/s (1024-based) to two decimals.
+    static func dataRate(_ value: Double, showsUnit: Bool) -> String {
+        binaryScaled(value, units: ["B/s", "KB/s", "MB/s", "GB/s", "TB/s", "PB/s"], showsUnit: showsUnit)
+    }
+
+    /// Auto-scales a magnitude across 1024-based units, keeping the first unit
+    /// exact and rounding scaled magnitudes to two decimals.
+    private static func binaryScaled(_ value: Double, units: [String], showsUnit: Bool) -> String {
         var magnitude = abs(value)
         var index = 0
         while magnitude >= 1024, index < units.count - 1 {
             magnitude /= 1024
+            index += 1
+        }
+        let signed = value < 0 ? -magnitude : magnitude
+        let number = index == 0 ? trimmedNumber(signed) : trimmedNumber((signed * 100).rounded() / 100)
+        return showsUnit ? "\(number) \(units[index])" : number
+    }
+
+    /// Auto-scales a magnitude across decimal-factor units (for example watts to
+    /// W/kW/MW), rounding scaled magnitudes to two decimals.
+    ///
+    /// - Parameters:
+    ///   - value: The raw value in the smallest unit.
+    ///   - units: The ordered unit labels, smallest first.
+    ///   - factor: The step between adjacent units (for example `1000`).
+    ///   - showsUnit: Whether to append the chosen unit label.
+    /// - Returns: The scaled value with an optional unit suffix.
+    static func scaled(_ value: Double, units: [String], factor: Double, showsUnit: Bool) -> String {
+        var magnitude = abs(value)
+        var index = 0
+        while magnitude >= factor, index < units.count - 1 {
+            magnitude /= factor
             index += 1
         }
         let signed = value < 0 ? -magnitude : magnitude
@@ -676,19 +921,28 @@ public enum ValueUnit: String, CaseIterable, Codable, Equatable, Sendable {
 public struct EntityValueFormatter: Sendable {
     public let localeIdentifier: String
     public let maximumFractionDigits: Int
-    public let displayUnit: ValueUnit
+    /// The explicitly selected unit, or `nil` to use the detected default.
+    public let displayUnit: ValueUnit?
     public let showsUnit: Bool
+    /// The optional lower bound for percentage/icon normalization.
+    public let minValue: Double?
+    /// The optional upper bound for percentage/icon normalization.
+    public let maxValue: Double?
 
     public init(
         locale: Locale = .current,
         maximumFractionDigits: Int = 2,
-        displayUnit: ValueUnit = .automatic,
-        showsUnit: Bool = true
+        displayUnit: ValueUnit? = nil,
+        showsUnit: Bool = true,
+        minValue: Double? = nil,
+        maxValue: Double? = nil
     ) {
         self.localeIdentifier = locale.identifier
         self.maximumFractionDigits = max(0, maximumFractionDigits)
         self.displayUnit = displayUnit
         self.showsUnit = showsUnit
+        self.minValue = minValue
+        self.maxValue = maxValue
     }
 
     public func format(_ entity: DiscoveredEntity, isStale: Bool = false) -> FormattedEntityValue {
@@ -700,19 +954,22 @@ public struct EntityValueFormatter: Sendable {
             return FormattedEntityValue(text: "Unknown", status: .unknown)
         }
 
-        let value = valueText(state: entity.state, unit: entity.unit)
-        if isStale {
-            return FormattedEntityValue(text: "Stale: \(value)", status: .stale)
-        }
-        return FormattedEntityValue(text: value, status: .available)
-    }
-
-    private func valueText(state: String, unit: String?) -> String {
-        let trimmedState = state.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedState = entity.state.trimmingCharacters(in: .whitespacesAndNewlines)
         let numeric = Decimal(string: trimmedState, locale: Locale(identifier: "en_US_POSIX"))
             .map { NSDecimalNumber(decimal: $0).doubleValue }
-        let resolvedUnit = unit?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return displayUnit.display(
+        let unit = EntityDisplayDefaults.effectiveUnit(displayUnit, haUnit: entity.unit, state: entity.state)
+        let icon = unit.icon(rawNumericValue: numeric, minValue: minValue, maxValue: maxValue)
+        let value = valueText(unit: unit, numeric: numeric, trimmedState: trimmedState, haUnit: entity.unit)
+        let text = icon?.accessibleText ?? value
+        if isStale {
+            return FormattedEntityValue(text: "Stale: \(text)", status: .stale, iconSymbolName: icon?.symbolName)
+        }
+        return FormattedEntityValue(text: text, status: .available, iconSymbolName: icon?.symbolName)
+    }
+
+    private func valueText(unit: ValueUnit, numeric: Double?, trimmedState: String, haUnit: String?) -> String {
+        let resolvedUnit = haUnit?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return unit.display(
             rawNumericValue: numeric,
             rawState: trimmedState,
             haUnit: resolvedUnit,
@@ -748,19 +1005,27 @@ public enum EntityDisplayDefaults {
             entityID: entity.id,
             style: defaultStyle(for: entity),
             coverControlMode: .both,
-            displayUnit: displayUnit(for: entity)
+            displayUnit: nil
         )
     }
 
-    /// The smart default display unit derived from an entity's HA unit.
+    /// The concrete display unit detected from an entity's HA unit and state.
     ///
-    /// - Parameter entity: The entity to inspect.
-    /// - Returns: `.percent` for `%`, the matching temperature scale for
-    ///   temperature units, `.bytes` for byte units, and `.automatic` otherwise.
-    public static func displayUnit(for entity: DiscoveredEntity) -> ValueUnit {
-        let trimmed = entity.unit?.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// - Parameters:
+    ///   - haUnit: The reported Home Assistant unit, if any.
+    ///   - state: The current state string (unused today, reserved for future
+    ///     value-shape detection).
+    /// - Returns: `.percent` for `%`, the matching temperature scale, `.bytes`
+    ///   for byte units, and `.number` otherwise.
+    ///
+    /// The scaling scalar units (`.illuminance`, `.power`, `.energy`, `.mass`)
+    /// reinterpret the raw magnitude against a fixed base unit, so they are never
+    /// auto-detected (the reported unit may already be a scaled variant such as
+    /// `kWh`). They remain available as explicit per-entity selections.
+    public static func detectedUnit(haUnit: String?, state: String = "") -> ValueUnit {
+        let trimmed = haUnit?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let trimmed, !trimmed.isEmpty else {
-            return .automatic
+            return .number
         }
         if trimmed == "%" {
             return .percent
@@ -775,14 +1040,26 @@ public enum EntityDisplayDefaults {
         case nil:
             break
         }
-        if isByteUnit(trimmed) {
+        let normalized = trimmed.replacingOccurrences(of: " ", with: "").uppercased()
+        if isByteUnit(normalized) {
             return .bytes
         }
-        return .automatic
+        return .number
     }
 
-    private static func isByteUnit(_ unit: String) -> Bool {
-        let normalized = unit.replacingOccurrences(of: " ", with: "").uppercased()
+    /// Resolves the unit to render with: the explicit selection, or the detected
+    /// default when none is set.
+    ///
+    /// - Parameters:
+    ///   - selected: The explicitly chosen unit, or `nil`.
+    ///   - haUnit: The reported Home Assistant unit, if any.
+    ///   - state: The current state string.
+    /// - Returns: A concrete `ValueUnit`.
+    public static func effectiveUnit(_ selected: ValueUnit?, haUnit: String?, state: String = "") -> ValueUnit {
+        selected ?? detectedUnit(haUnit: haUnit, state: state)
+    }
+
+    private static func isByteUnit(_ normalized: String) -> Bool {
         let byteUnits: Set<String> = [
             "B", "KB", "MB", "GB", "TB", "PB",
             "KIB", "MIB", "GIB", "TIB", "PIB",

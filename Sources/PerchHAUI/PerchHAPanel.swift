@@ -795,7 +795,9 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
         return EntityValueFormatter(
             locale: locale,
             displayUnit: configuration.displayUnit,
-            showsUnit: configuration.showsUnit
+            showsUnit: configuration.showsUnit,
+            minValue: configuration.minValue,
+            maxValue: configuration.maxValue
         ).format(entity, isStale: valuesAreStale)
     }
 
@@ -1471,9 +1473,17 @@ public final class PerchHAPanelModel: ObservableObject {
     }
 
     @discardableResult
-    public func setDisplayUnit(_ id: EntityID, displayUnit: ValueUnit) -> Bool {
+    public func setDisplayUnit(_ id: EntityID, displayUnit: ValueUnit?) -> Bool {
         updateMenuBarItemConfiguration(
             snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).settingDisplayUnit(displayUnit)
+        )
+    }
+
+    @discardableResult
+    public func setDisplayBounds(_ id: EntityID, minValue: Double?, maxValue: Double?) -> Bool {
+        updateMenuBarItemConfiguration(
+            snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id)
+                .settingBounds(minValue: minValue, maxValue: maxValue)
         )
     }
 
@@ -4571,10 +4581,17 @@ public struct PerchHAPanelView: View {
                 Text(entity.name)
                     .lineLimit(1)
                 Spacer(minLength: 8)
-                Text(value.text)
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .foregroundStyle(value.status == .available ? .primary : .secondary)
+                if let iconSymbolName = value.iconSymbolName {
+                    Image(systemName: iconSymbolName)
+                        .font(.system(size: 14))
+                        .foregroundStyle(value.status == .available ? .primary : .secondary)
+                        .accessibilityLabel(value.text)
+                } else {
+                    Text(value.text)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .foregroundStyle(value.status == .available ? .primary : .secondary)
+                }
                 if let control = model.snapshot.control(for: entity) {
                     Toggle("", isOn: entityControlBinding(for: entity))
                         .labelsHidden()

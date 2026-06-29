@@ -96,8 +96,13 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
     public let defaultHistoryRange: HistoryRange
     /// Which controls a cover entity exposes in the panel.
     public let coverControlMode: CoverControlMode
-    /// The selectable unit that converts and formats this entity's value.
-    public let displayUnit: ValueUnit
+    /// The selected unit that converts and formats this entity's value, or `nil`
+    /// to use the unit detected from the entity's Home Assistant unit.
+    public let displayUnit: ValueUnit?
+    /// The optional lower bound mapped to `0` for percentage/icon units.
+    public let minValue: Double?
+    /// The optional upper bound mapped to `1` for percentage/icon units.
+    public let maxValue: Double?
 
     public init(
         entityID: EntityID,
@@ -110,7 +115,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         thresholds: ValueThresholds = ValueThresholds(),
         defaultHistoryRange: HistoryRange = .hour,
         coverControlMode: CoverControlMode = .both,
-        displayUnit: ValueUnit = .automatic
+        displayUnit: ValueUnit? = nil,
+        minValue: Double? = nil,
+        maxValue: Double? = nil
     ) {
         self.entityID = entityID
         self.style = style
@@ -123,6 +130,8 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         self.defaultHistoryRange = defaultHistoryRange
         self.coverControlMode = coverControlMode
         self.displayUnit = displayUnit
+        self.minValue = minValue
+        self.maxValue = maxValue
     }
 
     public func updating(
@@ -135,7 +144,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         thresholds: ValueThresholds? = nil,
         defaultHistoryRange: HistoryRange? = nil,
         coverControlMode: CoverControlMode? = nil,
-        displayUnit: ValueUnit? = nil
+        displayUnit: ValueUnit? = nil,
+        minValue: Double? = nil,
+        maxValue: Double? = nil
     ) -> MenuBarItemConfiguration {
         MenuBarItemConfiguration(
             entityID: entityID,
@@ -148,16 +159,56 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             thresholds: thresholds ?? self.thresholds,
             defaultHistoryRange: defaultHistoryRange ?? self.defaultHistoryRange,
             coverControlMode: coverControlMode ?? self.coverControlMode,
-            displayUnit: displayUnit ?? self.displayUnit
+            displayUnit: displayUnit ?? self.displayUnit,
+            minValue: minValue ?? self.minValue,
+            maxValue: maxValue ?? self.maxValue
         )
     }
 
     /// Returns a copy with the selected display unit replaced.
     ///
-    /// - Parameter unit: The unit to apply when formatting this entity's value.
+    /// - Parameter unit: The unit to apply, or `nil` to use the detected default.
     /// - Returns: An updated configuration value.
-    public func settingDisplayUnit(_ unit: ValueUnit) -> MenuBarItemConfiguration {
-        updating(displayUnit: unit)
+    public func settingDisplayUnit(_ unit: ValueUnit?) -> MenuBarItemConfiguration {
+        MenuBarItemConfiguration(
+            entityID: entityID,
+            style: style,
+            showsLabel: showsLabel,
+            showsUnit: showsUnit,
+            maximumFractionDigits: maximumFractionDigits,
+            absoluteTotal: absoluteTotal,
+            totalEntityID: totalEntityID,
+            thresholds: thresholds,
+            defaultHistoryRange: defaultHistoryRange,
+            coverControlMode: coverControlMode,
+            displayUnit: unit,
+            minValue: minValue,
+            maxValue: maxValue
+        )
+    }
+
+    /// Returns a copy with the percentage/icon normalization bounds replaced.
+    ///
+    /// - Parameters:
+    ///   - minValue: The lower bound mapped to `0`, or `nil` to clear it.
+    ///   - maxValue: The upper bound mapped to `1`, or `nil` to clear it.
+    /// - Returns: An updated configuration value.
+    public func settingBounds(minValue: Double?, maxValue: Double?) -> MenuBarItemConfiguration {
+        MenuBarItemConfiguration(
+            entityID: entityID,
+            style: style,
+            showsLabel: showsLabel,
+            showsUnit: showsUnit,
+            maximumFractionDigits: maximumFractionDigits,
+            absoluteTotal: absoluteTotal,
+            totalEntityID: totalEntityID,
+            thresholds: thresholds,
+            defaultHistoryRange: defaultHistoryRange,
+            coverControlMode: coverControlMode,
+            displayUnit: displayUnit,
+            minValue: minValue,
+            maxValue: maxValue
+        )
     }
 
     public func settingAbsoluteTotal(_ total: Double?) -> MenuBarItemConfiguration {
@@ -172,7 +223,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             thresholds: thresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
-            displayUnit: displayUnit
+            displayUnit: displayUnit,
+            minValue: minValue,
+            maxValue: maxValue
         )
     }
 
@@ -188,7 +241,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             thresholds: thresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
-            displayUnit: displayUnit
+            displayUnit: displayUnit,
+            minValue: minValue,
+            maxValue: maxValue
         )
     }
 
@@ -222,7 +277,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             thresholds: thresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
-            displayUnit: displayUnit
+            displayUnit: displayUnit,
+            minValue: minValue,
+            maxValue: maxValue
         )
     }
 
@@ -238,6 +295,8 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         case defaultHistoryRange
         case coverControlMode
         case displayUnit
+        case minValue
+        case maxValue
         case temperatureUnit
     }
 
@@ -256,8 +315,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         thresholds = try container.decodeIfPresent(ValueThresholds.self, forKey: .thresholds) ?? ValueThresholds()
         defaultHistoryRange = try container.decodeIfPresent(HistoryRange.self, forKey: .defaultHistoryRange) ?? .hour
         coverControlMode = try container.decodeIfPresent(CoverControlMode.self, forKey: .coverControlMode) ?? .both
-        displayUnit = try container.decodeIfPresent(ValueUnit.self, forKey: .displayUnit)
-            ?? Self.legacyDisplayUnit(from: container)
+        displayUnit = Self.decodeDisplayUnit(from: container)
+        minValue = try container.decodeIfPresent(Double.self, forKey: .minValue)
+        maxValue = try container.decodeIfPresent(Double.self, forKey: .maxValue)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -272,24 +332,36 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         try container.encode(thresholds, forKey: .thresholds)
         try container.encode(defaultHistoryRange, forKey: .defaultHistoryRange)
         try container.encode(coverControlMode, forKey: .coverControlMode)
-        try container.encode(displayUnit, forKey: .displayUnit)
+        try container.encodeIfPresent(displayUnit, forKey: .displayUnit)
+        try container.encodeIfPresent(minValue, forKey: .minValue)
+        try container.encodeIfPresent(maxValue, forKey: .maxValue)
     }
 
-    /// Maps a legacy `temperatureUnit` payload to a `ValueUnit` for back-compat.
+    /// Decodes the optional `displayUnit`, mapping legacy payloads to `nil`.
+    ///
+    /// The dropped `"automatic"` value (and a legacy `temperatureUnit` of
+    /// `"automatic"`) decode to `nil`, meaning "use the detected default". A
+    /// legacy `temperatureUnit` of `"celsius"`/`"fahrenheit"` maps to the
+    /// matching scale.
     ///
     /// - Parameter container: The decoding container for the configuration.
-    /// - Returns: `.celsius`/`.fahrenheit` for a recognized legacy temperature
-    ///   preference, otherwise `.automatic`.
-    private static func legacyDisplayUnit(
+    /// - Returns: The decoded unit, or `nil` for auto-detect.
+    private static func decodeDisplayUnit(
         from container: KeyedDecodingContainer<CodingKeys>
-    ) -> ValueUnit {
+    ) -> ValueUnit? {
+        if let raw = try? container.decodeIfPresent(String.self, forKey: .displayUnit) {
+            if raw == "automatic" {
+                return nil
+            }
+            return ValueUnit(rawValue: raw)
+        }
         switch try? container.decodeIfPresent(String.self, forKey: .temperatureUnit) {
         case "celsius":
-            .celsius
+            return .celsius
         case "fahrenheit":
-            .fahrenheit
+            return .fahrenheit
         default:
-            .automatic
+            return nil
         }
     }
 }
@@ -491,7 +563,9 @@ public struct MenuBarItemRenderer: Sendable {
             locale: locale,
             maximumFractionDigits: configuration.maximumFractionDigits,
             displayUnit: configuration.displayUnit,
-            showsUnit: configuration.showsUnit
+            showsUnit: configuration.showsUnit,
+            minValue: configuration.minValue,
+            maxValue: configuration.maxValue
         ).format(entity, isStale: isStale)
         let gauge = gauge(for: entity, configuration: configuration, availableEntities: availableEntities)
         let severity = severity(for: entity, gauge: gauge, configuration: configuration)

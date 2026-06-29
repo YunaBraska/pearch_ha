@@ -710,18 +710,43 @@ public struct PerchHASettingsView: View {
         for entity: DiscoveredEntity,
         configuration: MenuBarItemConfiguration
     ) -> some View {
-        HStack(spacing: 8) {
-            Text("Unit")
-                .foregroundStyle(.secondary)
-            Picker("Unit", selection: displayUnitBinding(for: entity.id)) {
-                ForEach(ValueUnit.allCases, id: \.rawValue) { unit in
-                    Text(unit.displayName).tag(unit)
+        let detected = EntityDisplayDefaults.detectedUnit(haUnit: entity.unit, state: entity.state)
+        let effectiveUnit = configuration.displayUnit ?? detected
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("Unit")
+                    .foregroundStyle(.secondary)
+                Picker("Unit", selection: displayUnitBinding(for: entity.id)) {
+                    Text("Detected · \(detected.displayName)").tag(ValueUnit?.none)
+                    ForEach(ValueUnit.allCases, id: \.rawValue) { unit in
+                        Text(unit.displayName).tag(ValueUnit?.some(unit))
+                    }
                 }
+                .labelsHidden()
+                .frame(width: 160)
+                .accessibilityLabel("\(entity.name) unit")
+                Spacer(minLength: 0)
             }
-            .labelsHidden()
-            .frame(width: 140)
-            .accessibilityLabel("\(entity.name) unit")
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if effectiveUnit.usesNormalizedFraction {
+                HStack(spacing: 8) {
+                    Text("Min")
+                        .foregroundStyle(.secondary)
+                    TextField("0", text: displayMinBinding(for: entity.id))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 64)
+                        .accessibilityLabel("\(entity.name) minimum value")
+                    Text("Max")
+                        .foregroundStyle(.secondary)
+                    TextField("100", text: displayMaxBinding(for: entity.id))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 64)
+                        .accessibilityLabel("\(entity.name) maximum value")
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1644,13 +1669,39 @@ public struct PerchHASettingsView: View {
         )
     }
 
-    private func displayUnitBinding(for id: EntityID) -> Binding<ValueUnit> {
+    private func displayUnitBinding(for id: EntityID) -> Binding<ValueUnit?> {
         Binding(
             get: {
                 model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).displayUnit
             },
             set: { unit in
                 model.setDisplayUnit(id, displayUnit: unit)
+            }
+        )
+    }
+
+    private func displayMinBinding(for id: EntityID) -> Binding<String> {
+        Binding(
+            get: {
+                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).minValue
+                    .map { PerchHABoundsField.text(for: $0) } ?? ""
+            },
+            set: { text in
+                let configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id)
+                model.setDisplayBounds(id, minValue: PerchHABoundsField.value(from: text), maxValue: configuration.maxValue)
+            }
+        )
+    }
+
+    private func displayMaxBinding(for id: EntityID) -> Binding<String> {
+        Binding(
+            get: {
+                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).maxValue
+                    .map { PerchHABoundsField.text(for: $0) } ?? ""
+            },
+            set: { text in
+                let configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id)
+                model.setDisplayBounds(id, minValue: configuration.minValue, maxValue: PerchHABoundsField.value(from: text))
             }
         )
     }
@@ -1866,4 +1917,20 @@ public struct PerchHASettingsView: View {
         return trimmed
     }
 
+}
+
+/// Locale-independent parsing and display for the per-entity min/max bound
+/// fields. Empty or unparsable text clears the bound.
+private enum PerchHABoundsField {
+    static func value(from text: String) -> Double? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+        return Double(trimmed)
+    }
+
+    static func text(for value: Double) -> String {
+        value == value.rounded() ? String(Int(value)) : String(value)
+    }
 }

@@ -3601,7 +3601,7 @@ struct PerchHASmoke {
         }
         application.updateConnectionForm(urlString: server.baseURL.absoluteString, token: "fake-token")
         await application.connect()
-        try expect(application.snapshot.statusItemTitle == "44 %", "idle CPU launches connected app shell")
+        try expect(application.snapshot.statusItemTitle == "44%", "idle CPU launches connected app shell")
         try expect(application.setMenuBarDisplayStyle("sensor.office_humidity", style: .battery), "idle CPU renders stable gauge once")
         runMainRunLoop(for: SmokePerformanceBudget.idleWarmupSeconds)
 
@@ -3693,7 +3693,7 @@ struct PerchHASmoke {
         await application.connect()
         try expect(application.snapshot.hasPanel, "memory soak launches panel")
         try expect(application.snapshot.hasPanelModel, "memory soak launches panel model")
-        try expect(application.snapshot.statusItemTitle == "44 %", "memory soak renders promoted status item")
+        try expect(application.snapshot.statusItemTitle == "44%", "memory soak renders promoted status item")
         try expect(application.setMenuBarDisplayStyle("sensor.office_humidity", style: .battery), "memory soak enables gauge style")
         try expect(application.snapshot.statusItemHasImage, "memory soak renders status item image")
         try expect(
@@ -4033,7 +4033,7 @@ struct PerchHASmoke {
                 PerchHAHistoryPopoverContent(
                     entityID: "sensor.office_humidity",
                     entityName: "Office humidity",
-                    valueText: "44 %",
+                    valueText: "44%",
                     state: .loaded(SmokePanelSnapshotVariant.loadedHistorySeries),
                     increaseContrastOverride: variant.colorSchemeContrast == .increased,
                     selectedRange: .constant(.day)
@@ -4746,7 +4746,7 @@ struct PerchHASmoke {
             "menu bar normalizes percent gauge"
         )
         try expect(
-            battery.accessibilityLabel == "Office humidity, 44 %, 44 percent, battery",
+            battery.accessibilityLabel == "Office humidity, 44%, 44 percent, battery",
             "menu bar gauge exposes accessible text"
         )
 
@@ -4874,16 +4874,16 @@ struct PerchHASmoke {
         application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await application.connect()
         try expect(gaugeRenderer.renderCount == 0, "menu bar skips gauge rendering before image style is active")
-        try expect(application.snapshot.statusItemTitle == "44 %", "app shell renders promoted menu bar entity")
+        try expect(application.snapshot.statusItemTitle == "44%", "app shell renders promoted menu bar entity")
         try expect(
-            application.snapshot.statusItemAccessibilityLabel == "Office humidity, 44 %",
+            application.snapshot.statusItemAccessibilityLabel == "Office humidity, 44%",
             "app shell exposes promoted menu bar accessibility label"
         )
         try expect(
             application.applyLiveState(EntityState(id: "sensor.office_humidity", name: "Office humidity", state: "47", unit: "%")),
             "app shell accepts live state for promoted entity"
         )
-        try expect(application.snapshot.statusItemTitle == "47 %", "app shell updates menu bar from live state without refresh")
+        try expect(application.snapshot.statusItemTitle == "47%", "app shell updates menu bar from live state without refresh")
         try expect(
             application.setMenuBarEntity("sensor.energy_today", isVisible: true),
             "app shell persists a second promoted menu bar entity"
@@ -4897,7 +4897,7 @@ struct PerchHASmoke {
             application.moveMenuBarEntity("sensor.office_humidity", relativeTo: "sensor.energy_today", placement: .before),
             "app shell places promoted menu bar entity before another"
         )
-        try expect(application.snapshot.statusItemTitle == "47 %", "relative menu bar reorder restores visible status item")
+        try expect(application.snapshot.statusItemTitle == "47%", "relative menu bar reorder restores visible status item")
         try expect(
             !application.moveMenuBarEntity("sensor.office_humidity", direction: .up),
             "app shell ignores menu bar boundary reorder"
@@ -4957,7 +4957,7 @@ struct PerchHASmoke {
         try expect(reconnecting.snapshot.phase == .reconnecting(attempt: 1), "live update keeps reconnecting phase")
         try expect(
             reconnectHumidity.map { reconnecting.snapshot.formattedValue(for: $0, locale: Locale(identifier: "en_US")) }
-                == FormattedEntityValue(text: "Stale: 48 %", status: .stale),
+                == FormattedEntityValue(text: "Stale: 48%", status: .stale),
             "live update keeps reconnecting values stale"
         )
         reconnecting.cancelInFlightAction()
@@ -4985,7 +4985,7 @@ struct PerchHASmoke {
         )
         try expect(
             failedHumidity.map { failed.snapshot.formattedValue(for: $0, locale: Locale(identifier: "en_US")) }
-                == FormattedEntityValue(text: "Stale: 49 %", status: .stale),
+                == FormattedEntityValue(text: "Stale: 49%", status: .stale),
             "live update keeps failed-stale values stale"
         )
 
@@ -4993,14 +4993,14 @@ struct PerchHASmoke {
             application.setMenuBarDisplayStyle("sensor.office_humidity", style: .battery),
             "app shell persists menu bar display style"
         )
-        try expect(application.snapshot.statusItemTitle == "47 %", "display style keeps value title in status item")
+        try expect(application.snapshot.statusItemTitle == "47%", "display style keeps value title in status item")
         try expect(application.snapshot.statusItemHasImage, "display style draws status item gauge image")
         try expect(application.snapshot.statusItemImageWidth == 24, "status item gauge image has stable width")
         try expect(application.snapshot.statusItemImageHeight == 18, "status item gauge image has stable height")
         try expect(application.snapshot.statusItemImageIsTemplate == false, "status item gauge image preserves severity colors")
         try expect(gaugeRenderer.renderCount == 1, "menu bar renders first gauge image once")
         try expect(
-            application.snapshot.statusItemAccessibilityLabel == "Office humidity, 47 %, 47 percent, battery",
+            application.snapshot.statusItemAccessibilityLabel == "Office humidity, 47%, 47 percent, battery",
             "display style applies to status item accessibility immediately"
         )
         try expect(
@@ -5014,7 +5014,7 @@ struct PerchHASmoke {
         )
         try expect(gaugeRenderer.renderCount == 1, "menu bar reuses gauge image when label text changes")
         try expect(
-            application.snapshot.statusItemTitle == "Office humidity 47 %",
+            application.snapshot.statusItemTitle == "Office humidity 47%",
             "label visibility applies to status item value title immediately"
         )
         try expect(

@@ -3284,7 +3284,7 @@ final class PerchHAUITests: XCTestCase {
         ])
         XCTAssertEqual(
             model.snapshot.rooms.first?.entities.first.map { model.snapshot.formattedValue(for: $0, locale: Locale(identifier: "en_US")) },
-            FormattedEntityValue(text: "Stale: 44 %", status: .stale)
+            FormattedEntityValue(text: "Stale: 44%", status: .stale)
         )
         XCTAssertEqual(sink.lastSelection?.entityOrder, [
             "sensor.office_humidity",
@@ -3455,7 +3455,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.phase, .reconnecting(attempt: 1))
         XCTAssertEqual(
             model.snapshot.rooms.first?.entities.last.map { model.snapshot.formattedValue(for: $0, locale: Locale(identifier: "en_US")) },
-            FormattedEntityValue(text: "Stale: 47 %", status: .stale)
+            FormattedEntityValue(text: "Stale: 47%", status: .stale)
         )
 
         model.cancelInFlightAction()
@@ -3512,7 +3512,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.phase, .failedStale(failure))
         XCTAssertEqual(
             model.snapshot.rooms.first?.entities.last.map { model.snapshot.formattedValue(for: $0, locale: Locale(identifier: "en_US")) },
-            FormattedEntityValue(text: "Stale: 47 %", status: .stale)
+            FormattedEntityValue(text: "Stale: 47%", status: .stale)
         )
     }
 
@@ -4210,8 +4210,8 @@ final class PerchHAUITests: XCTestCase {
         application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await application.connect()
 
-        XCTAssertEqual(application.snapshot.statusItemTitle, "44 %")
-        XCTAssertEqual(application.snapshot.statusItemAccessibilityLabel, "Office humidity, 44 %")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
+        XCTAssertEqual(application.snapshot.statusItemAccessibilityLabel, "Office humidity, 44%")
         XCTAssertFalse(application.snapshot.statusItemHasImage)
 
         XCTAssertTrue(
@@ -4224,8 +4224,8 @@ final class PerchHAUITests: XCTestCase {
                 )
             )
         )
-        XCTAssertEqual(application.snapshot.statusItemTitle, "47 %")
-        XCTAssertEqual(application.snapshot.statusItemAccessibilityLabel, "Office humidity, 47 %")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "47%")
+        XCTAssertEqual(application.snapshot.statusItemAccessibilityLabel, "Office humidity, 47%")
         XCTAssertFalse(application.snapshot.statusItemHasImage)
     }
 
@@ -4281,8 +4281,8 @@ final class PerchHAUITests: XCTestCase {
 
         let items = application.snapshot.menuBarItems
         XCTAssertEqual(items.count, 2)
-        XCTAssertEqual(items[0].title, "44 %")
-        XCTAssertEqual(items[0].accessibilityLabel, "Office humidity, 44 %")
+        XCTAssertEqual(items[0].title, "44%")
+        XCTAssertEqual(items[0].accessibilityLabel, "Office humidity, 44%")
         XCTAssertEqual(items[1].title, "21 °C")
         XCTAssertEqual(items[1].accessibilityLabel, "Office temperature, 21 °C")
         for item in items {
@@ -4290,8 +4290,8 @@ final class PerchHAUITests: XCTestCase {
             XCTAssertTrue(item.targetIsApplication)
         }
         // The legacy single-item fields mirror the first promoted item.
-        XCTAssertEqual(application.snapshot.statusItemTitle, "44 %")
-        XCTAssertEqual(application.snapshot.statusItemAccessibilityLabel, "Office humidity, 44 %")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
+        XCTAssertEqual(application.snapshot.statusItemAccessibilityLabel, "Office humidity, 44%")
     }
 
     func test_t_app_shell_menu_bar_item_count_tracks_promotion_changes() async throws {
@@ -4319,7 +4319,7 @@ final class PerchHAUITests: XCTestCase {
         application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await application.connect()
         XCTAssertEqual(application.snapshot.menuBarItems.count, 1)
-        XCTAssertEqual(application.snapshot.menuBarItems[0].title, "44 %")
+        XCTAssertEqual(application.snapshot.menuBarItems[0].title, "44%")
 
         XCTAssertTrue(application.setMenuBarEntity("sensor.office_temperature", isVisible: true))
         XCTAssertEqual(application.snapshot.menuBarItems.count, 2)
@@ -5283,8 +5283,8 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(gaugeRenderer.renderCount, 0)
 
         XCTAssertTrue(application.setMenuBarDisplayStyle("sensor.office_humidity", style: .battery))
-        XCTAssertEqual(application.snapshot.statusItemTitle, "44 %")
-        XCTAssertEqual(application.snapshot.statusItemAccessibilityLabel, "Office humidity, 44 %, 44 percent, battery")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
+        XCTAssertEqual(application.snapshot.statusItemAccessibilityLabel, "Office humidity, 44%, 44 percent, battery")
         XCTAssertTrue(application.snapshot.statusItemHasImage)
         XCTAssertEqual(application.snapshot.statusItemImageWidth, 24)
         XCTAssertEqual(application.snapshot.statusItemImageHeight, 18)
@@ -5304,7 +5304,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(gaugeRenderer.renderCount, 1)
 
         XCTAssertTrue(application.setMenuBarShowsLabel("sensor.office_humidity", showsLabel: true))
-        XCTAssertEqual(application.snapshot.statusItemTitle, "Office humidity 44 %")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "Office humidity 44%")
         XCTAssertEqual(gaugeRenderer.renderCount, 1)
 
         XCTAssertTrue(application.setMenuBarShowsUnit("sensor.office_humidity", showsUnit: false))
@@ -5605,13 +5605,13 @@ final class PerchHAUITests: XCTestCase {
         application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await application.connect()
 
-        XCTAssertEqual(application.snapshot.statusItemTitle, "44 %")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
         XCTAssertFalse(application.setMenuBarDisplayStyle("sensor.office_humidity", style: .battery))
-        XCTAssertEqual(application.snapshot.statusItemTitle, "44 %")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
         XCTAssertEqual(application.snapshot.menuBarItemConfigurations, [])
         XCTAssertTrue(application.snapshot.displayPersistenceFailureDescription?.contains("disk full") == true)
         XCTAssertFalse(application.setMenuBarDefaultHistoryRange("sensor.office_humidity", defaultHistoryRange: .month))
-        XCTAssertEqual(application.snapshot.statusItemTitle, "44 %")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
         XCTAssertEqual(application.snapshot.menuBarItemConfigurations, [])
     }
 
@@ -5671,7 +5671,7 @@ final class PerchHAUITests: XCTestCase {
         application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await application.connect()
 
-        XCTAssertEqual(application.snapshot.statusItemTitle, "44 %")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
         XCTAssertTrue(application.moveMenuBarEntity("sensor.office_humidity", direction: .down))
         let expectedTemperature = EntityValueFormatter(locale: .current, maximumFractionDigits: 0).format(
             DiscoveredEntity(
@@ -5694,7 +5694,7 @@ final class PerchHAUITests: XCTestCase {
                 placement: .before
             )
         )
-        XCTAssertEqual(application.snapshot.statusItemTitle, "44 %")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
         XCTAssertEqual(application.snapshot.menuBarEntityIDs, ["sensor.office_humidity", "sensor.office_temperature"])
         XCTAssertFalse(application.moveMenuBarEntity("sensor.office_humidity", direction: .up))
         XCTAssertEqual(try store.load().menuBarEntityIDs, ["sensor.office_humidity", "sensor.office_temperature"])
@@ -5721,9 +5721,9 @@ final class PerchHAUITests: XCTestCase {
         application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await application.connect()
 
-        XCTAssertEqual(application.snapshot.statusItemTitle, "44 %")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
         XCTAssertFalse(application.moveMenuBarEntity("sensor.office_humidity", direction: .down))
-        XCTAssertEqual(application.snapshot.statusItemTitle, "44 %")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
         XCTAssertEqual(application.snapshot.menuBarEntityIDs, ["sensor.office_humidity", "sensor.office_temperature"])
         XCTAssertTrue(application.snapshot.displayPersistenceFailureDescription?.contains("disk full") == true)
     }

@@ -44,6 +44,9 @@ public struct PerchHAStatusItemGaugeImageRenderer: PerchHAStatusItemGaugeImageRe
     }
 
     public func image(for item: RenderedMenuBarItem) -> NSImage? {
+        if let iconSymbolName = item.value.iconSymbolName {
+            return symbolImage(named: iconSymbolName, accessibilityLabel: item.value.text)
+        }
         guard let gauge = item.gauge, item.style != .text else {
             return nil
         }
@@ -79,6 +82,24 @@ public struct PerchHAStatusItemGaugeImageRenderer: PerchHAStatusItemGaugeImageRe
         image.addRepresentation(bitmap)
         image.isTemplate = false
         return image
+    }
+
+    /// Resolves a dynamic-icon unit's SF Symbol as a menu-bar template image.
+    ///
+    /// - Parameters:
+    ///   - named: The SF Symbol name chosen for the value.
+    ///   - accessibilityLabel: The accessible description (for example `"battery 50%"`).
+    /// - Returns: A template `NSImage` the menu bar tints for the active
+    ///   appearance, or nil when the symbol is unavailable.
+    public func symbolImage(named: String, accessibilityLabel: String) -> NSImage? {
+        guard let image = NSImage(systemSymbolName: named, accessibilityDescription: accessibilityLabel) else {
+            return nil
+        }
+        let configured = image.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: size.height * 0.78, weight: .regular)
+        ) ?? image
+        configured.isTemplate = true
+        return configured
     }
 
     public func foregroundColor(for severity: ValueSeverity) -> NSColor {

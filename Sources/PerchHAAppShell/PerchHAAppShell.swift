@@ -1583,9 +1583,11 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     private func apply(_ presentation: PerchHAMenuBarPresentation, to entry: inout PerchHAStatusItemEntry) {
         let image: NSImage?
         let title: String
-        if let renderedItem = presentation.renderedItem, renderedItem.gauge != nil {
+        if let renderedItem = presentation.renderedItem,
+           renderedItem.gauge != nil || renderedItem.value.iconSymbolName != nil {
             image = cachedStatusItemImage(for: renderedItem, in: &entry)
-            title = presentation.statusItemTitle
+            // Icon units carry the value in the glyph, so the title is dropped.
+            title = renderedItem.value.iconSymbolName != nil ? "" : presentation.statusItemTitle
         } else if presentation == .fallback {
             // Nothing is promoted: show the template logo glyph instead of text.
             entry.imageCache = nil
@@ -1795,11 +1797,13 @@ private struct PerchHAStatusItemImageCacheKey: Equatable {
     let style: MenuBarDisplayStyle
     let gauge: MenuBarGauge?
     let severity: ValueSeverity
+    let iconSymbolName: String?
 
     init(item: RenderedMenuBarItem) {
         style = item.style
         gauge = item.gauge
         severity = item.severity
+        iconSymbolName = item.value.iconSymbolName
     }
 }
 

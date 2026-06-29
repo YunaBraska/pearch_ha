@@ -374,7 +374,7 @@ final class PerchHACoreTests: XCTestCase {
         XCTAssertEqual(rendered.title, "BAT[####------] 44%")
         XCTAssertEqual(rendered.gauge, MenuBarGauge(percent: 44, filledSegments: 4, segmentCount: 10))
         XCTAssertEqual(rendered.severity, .normal)
-        XCTAssertEqual(rendered.accessibilityLabel, "Office humidity, 44 %, 44 percent, battery")
+        XCTAssertEqual(rendered.accessibilityLabel, "Office humidity, 44%, 44 percent, battery")
     }
 
     func testMenuBarRendererRendersAbsoluteRingWithExplicitTotal() {
@@ -476,7 +476,7 @@ final class PerchHACoreTests: XCTestCase {
         )
 
         XCTAssertEqual(rendered.severity, .critical)
-        XCTAssertEqual(rendered.accessibilityLabel, "Battery, 15 %, 15 percent, critical, battery")
+        XCTAssertEqual(rendered.accessibilityLabel, "Battery, 15%, 15 percent, critical, battery")
     }
 
     func testMenuBarItemProjectorPromotesConfiguredEntitiesInOrder() {
@@ -617,7 +617,9 @@ final class PerchHACoreTests: XCTestCase {
         let configuration = MenuBarItemConfiguration(entityID: "sensor.any")
 
         XCTAssertEqual(configuration.coverControlMode, .both)
-        XCTAssertEqual(configuration.displayUnit, .automatic)
+        XCTAssertNil(configuration.displayUnit)
+        XCTAssertNil(configuration.minValue)
+        XCTAssertNil(configuration.maxValue)
         XCTAssertEqual(configuration.style, .text)
     }
 
@@ -630,7 +632,7 @@ final class PerchHACoreTests: XCTestCase {
 
         XCTAssertEqual(decoded.style, .ring)
         XCTAssertEqual(decoded.coverControlMode, .both)
-        XCTAssertEqual(decoded.displayUnit, .automatic)
+        XCTAssertNil(decoded.displayUnit)
     }
 
     func test_t_item_configuration_decodes_legacy_temperature_unit() throws {
@@ -650,7 +652,46 @@ final class PerchHACoreTests: XCTestCase {
 
         let decoded = try JSONDecoder().decode(MenuBarItemConfiguration.self, from: legacy)
 
-        XCTAssertEqual(decoded.displayUnit, .automatic)
+        XCTAssertNil(decoded.displayUnit)
+    }
+
+    func test_t_item_configuration_decodes_legacy_automatic_display_unit_as_nil() throws {
+        let legacy = """
+        {"entityID":"sensor.temp","displayUnit":"automatic"}
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(MenuBarItemConfiguration.self, from: legacy)
+
+        XCTAssertNil(decoded.displayUnit)
+    }
+
+    func test_t_item_configuration_round_trips_bounds() throws {
+        let configuration = MenuBarItemConfiguration(
+            entityID: "sensor.tank",
+            displayUnit: .batteryIcon,
+            minValue: 0,
+            maxValue: 1000
+        )
+
+        let data = try JSONEncoder().encode(configuration)
+        let decoded = try JSONDecoder().decode(MenuBarItemConfiguration.self, from: data)
+
+        XCTAssertEqual(decoded, configuration)
+        XCTAssertEqual(decoded.minValue, 0)
+        XCTAssertEqual(decoded.maxValue, 1000)
+    }
+
+    func test_t_item_configuration_setting_bounds() {
+        let configuration = MenuBarItemConfiguration(entityID: "sensor.any")
+            .settingBounds(minValue: 10, maxValue: 50)
+        XCTAssertEqual(configuration.minValue, 10)
+        XCTAssertEqual(configuration.maxValue, 50)
+    }
+
+    func test_t_item_configuration_setting_display_unit_to_nil() {
+        let configuration = MenuBarItemConfiguration(entityID: "sensor.any", displayUnit: .bytes)
+            .settingDisplayUnit(nil)
+        XCTAssertNil(configuration.displayUnit)
     }
 
     func test_t_item_configuration_round_trips_new_fields() throws {
@@ -684,15 +725,19 @@ final class PerchHACoreTests: XCTestCase {
     }
 
     private func formatter(
-        _ unit: ValueUnit,
+        _ unit: ValueUnit?,
         decimals: Int = 0,
-        showsUnit: Bool = true
+        showsUnit: Bool = true,
+        minValue: Double? = nil,
+        maxValue: Double? = nil
     ) -> EntityValueFormatter {
         EntityValueFormatter(
             locale: Locale(identifier: "en_US"),
             maximumFractionDigits: decimals,
             displayUnit: unit,
-            showsUnit: showsUnit
+            showsUnit: showsUnit,
+            minValue: minValue,
+            maxValue: maxValue
         )
     }
 
@@ -724,23 +769,30 @@ final class PerchHACoreTests: XCTestCase {
         )
     }
 
-    func test_t_value_unit_automatic_keeps_small_value_unchanged() {
+    func test_t_value_unit_detected_temperature_keeps_small_value_unchanged() {
         XCTAssertEqual(
-            formatter(.automatic, decimals: 1).format(entity("sensor.temp", state: "21.4", unit: "°C")),
+            formatter(nil, decimals: 1).format(entity("sensor.temp", state: "21.4", unit: "°C")),
             FormattedEntityValue(text: "21.4 °C", status: .available)
         )
     }
 
-    func test_t_value_unit_automatic_keeps_small_grouped_value() {
+    func test_t_value_unit_number_keeps_small_grouped_value() {
         XCTAssertEqual(
-            formatter(.automatic).format(entity("sensor.q", state: "4054", unit: "queries")),
+            formatter(.number).format(entity("sensor.q", state: "4054", unit: "queries")),
             FormattedEntityValue(text: "4,054 queries", status: .available)
         )
     }
 
-    func test_t_value_unit_automatic_compacts_large_value() {
+    func test_t_value_unit_number_compacts_large_value() {
         XCTAssertEqual(
-            formatter(.automatic).format(entity("sensor.q", state: "4054396", unit: "queries")),
+            formatter(.number).format(entity("sensor.q", state: "4054396", unit: "queries")),
+            FormattedEntityValue(text: "4.05M queries", status: .available)
+        )
+    }
+
+    func test_t_value_unit_detected_number_compacts_large_value() {
+        XCTAssertEqual(
+            formatter(nil).format(entity("sensor.q", state: "4054396", unit: "queries")),
             FormattedEntityValue(text: "4.05M queries", status: .available)
         )
     }
@@ -787,9 +839,173 @@ final class PerchHACoreTests: XCTestCase {
         )
     }
 
-    func test_t_value_unit_non_numeric_passthrough_automatic() {
+    func test_t_value_unit_bytes_renders_petabytes() {
         XCTAssertEqual(
-            formatter(.automatic).format(entity("device_tracker.phone", state: "HOME", unit: nil)),
+            formatter(.bytes).format(entity("sensor.b", state: "1125899906842624", unit: "B")),
+            FormattedEntityValue(text: "1 PB", status: .available)
+        )
+    }
+
+    func test_t_value_unit_data_rate_renders_kilobytes_per_second() {
+        XCTAssertEqual(
+            formatter(.dataRate).format(entity("sensor.net", state: "1536", unit: "B/s")),
+            FormattedEntityValue(text: "1.5 KB/s", status: .available)
+        )
+    }
+
+    func test_t_value_unit_illuminance_compacts_large_values() {
+        XCTAssertEqual(
+            formatter(.illuminance).format(entity("sensor.lux", state: "12000", unit: "lx")),
+            FormattedEntityValue(text: "12k lx", status: .available)
+        )
+    }
+
+    func test_t_value_unit_illuminance_keeps_small_values() {
+        XCTAssertEqual(
+            formatter(.illuminance).format(entity("sensor.lux", state: "350", unit: "lx")),
+            FormattedEntityValue(text: "350 lx", status: .available)
+        )
+    }
+
+    func test_t_value_unit_power_scales_to_kilowatts() {
+        XCTAssertEqual(
+            formatter(.power).format(entity("sensor.p", state: "2500", unit: "W")),
+            FormattedEntityValue(text: "2.5 kW", status: .available)
+        )
+    }
+
+    func test_t_value_unit_power_keeps_watts() {
+        XCTAssertEqual(
+            formatter(.power).format(entity("sensor.p", state: "750", unit: "W")),
+            FormattedEntityValue(text: "750 W", status: .available)
+        )
+    }
+
+    func test_t_value_unit_energy_scales_to_kilowatt_hours() {
+        XCTAssertEqual(
+            formatter(.energy).format(entity("sensor.e", state: "2500", unit: "Wh")),
+            FormattedEntityValue(text: "2.5 kWh", status: .available)
+        )
+    }
+
+    func test_t_value_unit_mass_scales_to_kilograms() {
+        XCTAssertEqual(
+            formatter(.mass).format(entity("sensor.m", state: "1500", unit: "g")),
+            FormattedEntityValue(text: "1.5 kg", status: .available)
+        )
+    }
+
+    func test_t_value_unit_mass_scales_to_tonnes() {
+        XCTAssertEqual(
+            formatter(.mass).format(entity("sensor.m", state: "1500000", unit: "g")),
+            FormattedEntityValue(text: "1.5 t", status: .available)
+        )
+    }
+
+    func test_t_value_unit_scalar_omits_suffix_when_unit_hidden() {
+        XCTAssertEqual(
+            formatter(.power, showsUnit: false).format(entity("sensor.p", state: "2500", unit: "W")),
+            FormattedEntityValue(text: "2.5", status: .available)
+        )
+    }
+
+    func test_t_value_unit_scalar_non_numeric_passthrough() {
+        XCTAssertEqual(
+            formatter(.power).format(entity("sensor.p", state: "off", unit: "W")),
+            FormattedEntityValue(text: "off", status: .available)
+        )
+    }
+
+    func test_t_dynamic_icon_battery_levels_at_boundaries() {
+        XCTAssertEqual(DynamicIconStyle.battery.icon(for: 0.0).symbolName, "battery.0percent")
+        XCTAssertEqual(DynamicIconStyle.battery.icon(for: 0.2).symbolName, "battery.25percent")
+        XCTAssertEqual(DynamicIconStyle.battery.icon(for: 0.5).symbolName, "battery.50percent")
+        XCTAssertEqual(DynamicIconStyle.battery.icon(for: 0.8).symbolName, "battery.75percent")
+        XCTAssertEqual(DynamicIconStyle.battery.icon(for: 1.0).symbolName, "battery.100percent")
+    }
+
+    func test_t_dynamic_icon_battery_accessible_text() {
+        XCTAssertEqual(DynamicIconStyle.battery.icon(for: 0.5).accessibleText, "battery 50%")
+    }
+
+    func test_t_dynamic_icon_signal_levels_at_boundaries() {
+        XCTAssertEqual(DynamicIconStyle.signal.icon(for: 0.0).symbolName, "wifi.slash")
+        XCTAssertEqual(DynamicIconStyle.signal.icon(for: 0.2).symbolName, "wifi.exclamationmark")
+        XCTAssertEqual(DynamicIconStyle.signal.icon(for: 0.5).symbolName, "wifi")
+        XCTAssertEqual(DynamicIconStyle.signal.icon(for: 0.8).symbolName, "wifi")
+        XCTAssertEqual(DynamicIconStyle.signal.icon(for: 1.0).symbolName, "wifi")
+    }
+
+    func test_t_dynamic_icon_sound_levels_at_boundaries() {
+        XCTAssertEqual(DynamicIconStyle.sound.icon(for: 0.0).symbolName, "speaker.slash.fill")
+        XCTAssertEqual(DynamicIconStyle.sound.icon(for: 0.2).symbolName, "speaker.wave.1.fill")
+        XCTAssertEqual(DynamicIconStyle.sound.icon(for: 0.5).symbolName, "speaker.wave.2.fill")
+        XCTAssertEqual(DynamicIconStyle.sound.icon(for: 0.8).symbolName, "speaker.wave.3.fill")
+        XCTAssertEqual(DynamicIconStyle.sound.icon(for: 1.0).symbolName, "speaker.wave.3.fill")
+    }
+
+    func test_t_dynamic_icon_brightness_levels_at_boundaries() {
+        XCTAssertEqual(DynamicIconStyle.brightness.icon(for: 0.0).symbolName, "sun.min")
+        XCTAssertEqual(DynamicIconStyle.brightness.icon(for: 0.2).symbolName, "sun.min")
+        XCTAssertEqual(DynamicIconStyle.brightness.icon(for: 0.5).symbolName, "sun.max")
+        XCTAssertEqual(DynamicIconStyle.brightness.icon(for: 0.8).symbolName, "sun.max.fill")
+        XCTAssertEqual(DynamicIconStyle.brightness.icon(for: 1.0).symbolName, "sun.max.fill")
+    }
+
+    func test_t_dynamic_icon_thermometer_levels_at_boundaries() {
+        XCTAssertEqual(DynamicIconStyle.thermometer.icon(for: 0.0).symbolName, "thermometer.low")
+        XCTAssertEqual(DynamicIconStyle.thermometer.icon(for: 0.5).symbolName, "thermometer.medium")
+        XCTAssertEqual(DynamicIconStyle.thermometer.icon(for: 1.0).symbolName, "thermometer.high")
+    }
+
+    func test_t_dynamic_icon_clamps_out_of_range_fractions() {
+        XCTAssertEqual(DynamicIconStyle.battery.icon(for: -1.0).symbolName, "battery.0percent")
+        XCTAssertEqual(DynamicIconStyle.battery.icon(for: 2.0).symbolName, "battery.100percent")
+    }
+
+    func test_t_normalized_fraction_uses_percentage_scale_without_bounds() {
+        XCTAssertEqual(NormalizedFraction.resolve(value: 50, minimum: nil, maximum: nil), 0.5)
+        XCTAssertEqual(NormalizedFraction.resolve(value: 150, minimum: nil, maximum: nil), 1.0)
+        XCTAssertEqual(NormalizedFraction.resolve(value: -10, minimum: nil, maximum: nil), 0.0)
+    }
+
+    func test_t_normalized_fraction_rescales_with_bounds() {
+        XCTAssertEqual(NormalizedFraction.resolve(value: 500, minimum: 0, maximum: 1000), 0.5)
+        XCTAssertEqual(NormalizedFraction.resolve(value: 1500, minimum: 0, maximum: 1000), 1.0)
+    }
+
+    func test_t_normalized_fraction_ignores_invalid_bounds() {
+        XCTAssertEqual(NormalizedFraction.resolve(value: 50, minimum: 100, maximum: 100), 0.5)
+    }
+
+    func test_t_value_unit_battery_icon_maps_value_to_symbol() {
+        let value = formatter(.batteryIcon).format(entity("sensor.tank", state: "50", unit: nil), isStale: false)
+        XCTAssertEqual(value.iconSymbolName, "battery.50percent")
+        XCTAssertEqual(value.text, "battery 50%")
+    }
+
+    func test_t_value_unit_battery_icon_uses_bounds() {
+        let value = formatter(.batteryIcon, minValue: 0, maxValue: 1000)
+            .format(entity("sensor.tank", state: "500", unit: nil))
+        XCTAssertEqual(value.iconSymbolName, "battery.50percent")
+    }
+
+    func test_t_value_unit_icon_non_numeric_falls_back_to_text() {
+        let value = formatter(.signalIcon).format(entity("sensor.x", state: "off", unit: nil))
+        XCTAssertNil(value.iconSymbolName)
+        XCTAssertEqual(value.text, "off")
+    }
+
+    func test_t_value_unit_icon_stale_keeps_symbol() {
+        let value = formatter(.batteryIcon).format(entity("sensor.tank", state: "50", unit: nil), isStale: true)
+        XCTAssertEqual(value.iconSymbolName, "battery.50percent")
+        XCTAssertEqual(value.status, .stale)
+        XCTAssertEqual(value.text, "Stale: battery 50%")
+    }
+
+    func test_t_value_unit_non_numeric_passthrough_detected() {
+        XCTAssertEqual(
+            formatter(nil).format(entity("device_tracker.phone", state: "HOME", unit: nil)),
             FormattedEntityValue(text: "HOME", status: .available)
         )
     }
@@ -809,33 +1025,35 @@ final class PerchHACoreTests: XCTestCase {
     }
 
     func test_t_display_defaults_percent_unit_uses_percent() {
-        let entity = entity("sensor.office_humidity", name: "Humidity", state: "44", unit: "%")
-        XCTAssertEqual(EntityDisplayDefaults.displayUnit(for: entity), .percent)
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "%"), .percent)
     }
 
     func test_t_display_defaults_temperature_unit_matches_scale() {
-        XCTAssertEqual(
-            EntityDisplayDefaults.displayUnit(for: entity("sensor.t", state: "20", unit: "°F")),
-            .fahrenheit
-        )
-        XCTAssertEqual(
-            EntityDisplayDefaults.displayUnit(for: entity("sensor.t", state: "20", unit: "K")),
-            .kelvin
-        )
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "°F"), .fahrenheit)
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "K"), .kelvin)
     }
 
     func test_t_display_defaults_byte_unit_uses_bytes() {
-        XCTAssertEqual(
-            EntityDisplayDefaults.displayUnit(for: entity("sensor.disk", state: "100", unit: "GiB")),
-            .bytes
-        )
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "GiB"), .bytes)
     }
 
-    func test_t_display_defaults_unknown_unit_uses_automatic() {
-        XCTAssertEqual(
-            EntityDisplayDefaults.displayUnit(for: entity("sensor.power", state: "120", unit: "W")),
-            .automatic
-        )
+    func test_t_display_defaults_scalar_units_are_not_auto_detected() {
+        // Scalar units reinterpret magnitude, so the reported unit string is kept
+        // verbatim under `.number` instead of being rescaled automatically.
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "lx"), .number)
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "W"), .number)
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "kWh"), .number)
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "kg"), .number)
+    }
+
+    func test_t_display_defaults_unknown_unit_uses_number() {
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "queries"), .number)
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: nil), .number)
+    }
+
+    func test_t_display_defaults_effective_unit_prefers_selection() {
+        XCTAssertEqual(EntityDisplayDefaults.effectiveUnit(.bytes, haUnit: "%"), .bytes)
+        XCTAssertEqual(EntityDisplayDefaults.effectiveUnit(nil, haUnit: "%"), .percent)
     }
 
     func test_t_display_defaults_battery_sensor_uses_battery_style() {
@@ -843,7 +1061,7 @@ final class PerchHACoreTests: XCTestCase {
         let configuration = EntityDisplayDefaults.configuration(for: entity)
 
         XCTAssertEqual(configuration.style, .battery)
-        XCTAssertEqual(configuration.displayUnit, .percent)
+        XCTAssertNil(configuration.displayUnit)
         XCTAssertEqual(configuration.coverControlMode, .both)
     }
 
