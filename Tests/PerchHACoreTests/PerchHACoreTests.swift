@@ -1175,5 +1175,150 @@ final class PerchHACoreTests: XCTestCase {
             deviceID: nil
         )
     }
+
+    // MARK: - History state segments
+
+    func testHistoryStateSegmentsMergesConsecutiveEqualStates() {
+        let series = HistorySeries(
+            entityID: "cover.blinds",
+            range: .day,
+            samples: [
+                HistorySample(timestamp: Date(timeIntervalSince1970: 0), state: "open", numericValue: nil),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 100), state: "open", numericValue: nil),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 300), state: "closed", numericValue: nil),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 600), state: "closed", numericValue: nil)
+            ]
+        )
+        let segments = HistoryStateSegments.segments(of: series)
+        XCTAssertEqual(segments.count, 2)
+        XCTAssertEqual(segments[0].state, "open")
+        XCTAssertEqual(segments[0].start, Date(timeIntervalSince1970: 0))
+        XCTAssertEqual(segments[0].end, Date(timeIntervalSince1970: 300))
+        XCTAssertEqual(segments[0].duration, 300)
+        XCTAssertEqual(segments[1].state, "closed")
+        XCTAssertEqual(segments[1].start, Date(timeIntervalSince1970: 300))
+        XCTAssertEqual(segments[1].end, Date(timeIntervalSince1970: 600))
+        XCTAssertEqual(segments[1].duration, 300)
+    }
+
+    func testHistoryStateSegmentsSortsOutOfOrderSamplesByTimestamp() {
+        let series = HistorySeries(
+            entityID: "switch.lamp",
+            range: .day,
+            samples: [
+                HistorySample(timestamp: Date(timeIntervalSince1970: 300), state: "off", numericValue: nil),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 0), state: "on", numericValue: nil),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 150), state: "on", numericValue: nil)
+            ]
+        )
+        let segments = HistoryStateSegments.segments(of: series)
+        XCTAssertEqual(segments.map(\.state), ["on", "off"])
+        XCTAssertEqual(segments[0].duration, 300)
+    }
+
+    func testHistoryStateSegmentsSingleSampleIsOneZeroDurationSegment() {
+        let series = HistorySeries(
+            entityID: "binary_sensor.door",
+            range: .hour,
+            samples: [HistorySample(timestamp: Date(timeIntervalSince1970: 42), state: "on", numericValue: nil)]
+        )
+        let segments = HistoryStateSegments.segments(of: series)
+        XCTAssertEqual(segments.count, 1)
+        XCTAssertEqual(segments[0].state, "on")
+        XCTAssertEqual(segments[0].start, segments[0].end)
+        XCTAssertEqual(segments[0].duration, 0)
+    }
+
+    func testHistoryStateSegmentsEmptySeriesYieldsNoSegments() {
+        let series = HistorySeries(entityID: "switch.lamp", range: .day, samples: [])
+        XCTAssertTrue(HistoryStateSegments.segments(of: series).isEmpty)
+    }
+
+    func testHistoryStateColorKindClassifiesCommonStates() {
+        XCTAssertEqual(HistoryStateColorKind.classify("on"), .active)
+        XCTAssertEqual(HistoryStateColorKind.classify(" OPEN "), .active)
+        XCTAssertEqual(HistoryStateColorKind.classify("home"), .active)
+        XCTAssertEqual(HistoryStateColorKind.classify("off"), .inactive)
+        XCTAssertEqual(HistoryStateColorKind.classify("Closed"), .inactive)
+        XCTAssertEqual(HistoryStateColorKind.classify("away"), .inactive)
+    }
+
+    func testHistoryStateColorKindHashesUnknownStatesIntoStablePaletteSlots() {
+        let first = HistoryStateColorKind.classify("heating_cooldown")
+        let second = HistoryStateColorKind.classify("heating_cooldown")
+        XCTAssertEqual(first, second)
+        guard case let .palette(slot) = first else {
+            return XCTFail("expected palette slot for unmapped state")
+        }
+        XCTAssertTrue((0..<HistoryStateColorKind.paletteSlotCount).contains(slot))
+    }
+
+    // MARK: - Entity row presentation
+
+    func testEntityRowPresentationUsesGaugeForPercentUnit() {
+        let presentation = PerchHAEntityRowPresentation.resolve(
+            entity: entity("sensor.humidity", state: "44", unit: "%"),
+            configuration: MenuBarItemConfiguration(entityID: "sensor.humidity")
+        )
+        guard case let .gauge(gauge) = presentation else {
+            return XCTFail("expected gauge for percent unit")
+        }
+        XCTAssertEqual(gauge.fraction, 0.44, accuracy: 0.0001)
+        XCTAssertEqual(gauge.severity, .normal)
+        XCTAssertEqual(gauge.style, .ring)
+    }
+
+    func testEntityRowPresentationGaugeUsesConfiguredStyleAndTotal() {
+        let presentation = PerchHAEntityRowPresentation.resolve(
+            entity: entity("sensor.tank", state: "75", unit: "L"),
+            configuration: MenuBarItemConfiguration(entityID: "sensor.tank", style: .battery, absoluteTotal: 150)
+        )
+        guard case let .gauge(gauge) = presentation else {
+            return XCTFail("expected gauge for value with absolute total")
+        }
+        XCTAssertEqual(gauge.fraction, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(gauge.style, .battery)
+    }
+
+    func testEntityRowPresentationGaugeSeverityFollowsThresholds() {
+        let presentation = PerchHAEntityRowPresentation.resolve(
+            entity: entity("sensor.cpu", state: "95", unit: "%"),
+            configuration: MenuBarItemConfiguration(
+                entityID: "sensor.cpu",
+                thresholds: ValueThresholds(critical: ValueThreshold(value: 90, direction: .aboveOrEqual))
+            )
+        )
+        guard case let .gauge(gauge) = presentation else {
+            return XCTFail("expected gauge")
+        }
+        XCTAssertEqual(gauge.severity, .critical)
+    }
+
+    func testEntityRowPresentationUsesStatePillForOnOff() {
+        XCTAssertEqual(
+            PerchHAEntityRowPresentation.resolve(
+                entity: entity("switch.lamp", state: "on", unit: nil),
+                configuration: MenuBarItemConfiguration(entityID: "switch.lamp")
+            ),
+            .statePill(isActive: true)
+        )
+        XCTAssertEqual(
+            PerchHAEntityRowPresentation.resolve(
+                entity: entity("cover.blinds", state: "closed", unit: nil),
+                configuration: MenuBarItemConfiguration(entityID: "cover.blinds")
+            ),
+            .statePill(isActive: false)
+        )
+    }
+
+    func testEntityRowPresentationUsesPlainValueWhenNoFractionOrState() {
+        XCTAssertEqual(
+            PerchHAEntityRowPresentation.resolve(
+                entity: entity("sensor.power", state: "120", unit: "W"),
+                configuration: MenuBarItemConfiguration(entityID: "sensor.power")
+            ),
+            .value(severity: .normal)
+        )
+    }
 }
 #endif

@@ -383,8 +383,13 @@ public struct PerchHAHistoryStatistics: Equatable, Sendable {
 public enum PerchHAHistoryContentSummary: Equatable, Sendable {
     /// The series fetched successfully but contained no samples at all.
     case empty
-    /// The series contained samples, but none carried a numeric value.
+    /// The series contained samples, but none carried a numeric value. Retained
+    /// only for genuinely empty state runs; non-numeric series with state samples
+    /// surface as ``stateTimeline`` instead.
     case noNumericData
+    /// The series carried only non-numeric state samples, collapsed into ordered
+    /// timeline segments (covers, switches, binary sensors).
+    case stateTimeline([HistoryStateSegment])
     case statistics(PerchHAHistoryStatistics)
 
     public init(series: HistorySeries) {
@@ -398,7 +403,8 @@ public enum PerchHAHistoryContentSummary: Equatable, Sendable {
               let minimum = values.min(),
               let maximum = values.max()
         else {
-            self = .noNumericData
+            let segments = HistoryStateSegments.segments(of: series)
+            self = segments.isEmpty ? .noNumericData : .stateTimeline(segments)
             return
         }
         self = .statistics(
@@ -417,8 +423,11 @@ public enum PerchHAHistoryBodyPresentation: Equatable, Sendable {
     case loadingSkeleton
     /// A successful fetch that returned no history for the selected range.
     case empty
-    /// A successful fetch whose samples carried no numeric values.
+    /// A successful fetch whose samples carried no numeric values and no state
+    /// runs (a degenerate case kept for completeness).
     case noNumericData
+    /// A successful fetch of a non-numeric series, presented as a state timeline.
+    case stateTimeline(series: HistorySeries, segments: [HistoryStateSegment])
     case statistics(series: HistorySeries, statistics: PerchHAHistoryStatistics)
     case unavailable(String)
 
@@ -434,6 +443,8 @@ public enum PerchHAHistoryBodyPresentation: Equatable, Sendable {
                 self = .empty
             case .noNumericData:
                 self = .noNumericData
+            case let .stateTimeline(segments):
+                self = .stateTimeline(series: series, segments: segments)
             case let .statistics(statistics):
                 self = .statistics(series: series, statistics: statistics)
             }
@@ -1052,6 +1063,16 @@ private struct PerchHAHistoryCache {
         return entry.series
     }
 
+    /// Reads a cached series without touching recency or evicting expired
+    /// entries, so views can opportunistically render an already-cached
+    /// sparkline without mutating cache state or triggering any fetch.
+    func peek(for key: PerchHAHistoryCacheKey, now: PerchInstant) -> HistorySeries? {
+        guard let entry = entries[key], entry.expiresAt > now else {
+            return nil
+        }
+        return entry.series
+    }
+
     mutating func insert(
         _ series: HistorySeries,
         for key: PerchHAHistoryCacheKey,
@@ -1132,6 +1153,7 @@ public final class PerchHAPanelModel: ObservableObject {
     private let snapshotSink: SnapshotSink
     private let signOutHandler: SignOutHandler
     private var historyCache = PerchHAHistoryCache()
+    private var lastObservedInstant = PerchInstant(nanosecondsSinceStart: 0)
     private var lastConnectedForm: PerchHAConnectionForm?
     private var editableForm: PerchHAConnectionForm
     private var actionTask: Task<Void, Never>?
@@ -1680,6 +1702,7 @@ public final class PerchHAPanelModel: ObservableObject {
         let resolvedRange = range ?? snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).defaultHistoryRange
         let cacheKey = PerchHAHistoryCacheKey(entityID: id, range: resolvedRange)
         let now = await clock.now()
+        lastObservedInstant = now
         if let cachedSeries = historyCache.series(for: cacheKey, now: now) {
             applyHistoryState(.loaded(cachedSeries))
             return
@@ -1717,6 +1740,7 @@ public final class PerchHAPanelModel: ObservableObject {
                 return
             }
             let insertNow = await clock.now()
+            lastObservedInstant = insertNow
             historyCache.insert(
                 series,
                 for: cacheKey,
@@ -1727,6 +1751,24 @@ public final class PerchHAPanelModel: ObservableObject {
         case let .unavailable(message):
             applyHistoryState(.unavailable(entityID: id, range: resolvedRange, message: message))
         }
+    }
+
+    /// Returns an already-cached history series for an entity without fetching.
+    ///
+    /// This is the *only* history access intended for visible-row rendering: it
+    /// reads the in-memory cache without mutating recency, without evicting, and
+    /// crucially without ever triggering a network fetch. Rows use it to draw an
+    /// opportunistic inline sparkline only when the data is already present (for
+    /// example after the user has hovered the row once). When nothing is cached it
+    /// returns `nil` and the row draws no sparkline. Honoring this contract keeps
+    /// the idle-CPU and request-volume budgets intact.
+    ///
+    /// - Parameter id: The entity whose cached history is requested.
+    /// - Returns: The cached series for the entity's default range, or `nil`.
+    public func cachedHistorySeries(for id: EntityID) -> HistorySeries? {
+        let range = snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).defaultHistoryRange
+        let key = PerchHAHistoryCacheKey(entityID: id, range: range)
+        return historyCache.peek(for: key, now: lastObservedInstant)
     }
 
     public func dismissHistoryPopover() {
@@ -4139,6 +4181,15 @@ public struct PerchHAHistoryPopoverContent: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("\(entityName) history has no numeric data")
+        case let .stateTimeline(_, segments):
+            // Constant height: the state timeline plus its legend occupy a fixed
+            // block so hovering the cursor never resizes the popover window.
+            PerchHAHistoryStateTimelinePopoverBody(
+                segments: segments,
+                entityName: entityName,
+                labelColor: historyLabelForegroundStyle,
+                valueColor: historyValueForegroundStyle
+            )
         case let .statistics(series, statistics):
             // Keep a constant height: always show the chart and stats, and float
             // the cursor readout as an overlay on the chart. Swapping the area
@@ -4549,58 +4600,49 @@ public struct PerchHAPanelView: View {
         }
     }
     private func roomSection(_ room: Room) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 5) {
                 Text(room.name.uppercased())
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
-                    .tracking(0.4)
+                    .tracking(0.6)
                     .lineLimit(1)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 4)
-            VStack(spacing: 0) {
-                ForEach(Array(room.entities.enumerated()), id: \.element.id.rawValue) { index, entity in
-                    entityRow(entity)
-                    if index < room.entities.count - 1 {
-                        Divider()
-                            .padding(.leading, 34)
+            PerchHACard {
+                VStack(spacing: 0) {
+                    ForEach(Array(room.entities.enumerated()), id: \.element.id.rawValue) { index, entity in
+                        entityRow(entity)
+                        if index < room.entities.count - 1 {
+                            Divider()
+                                .padding(.leading, 42)
+                        }
                     }
                 }
             }
-            .background(Color(nsColor: .controlBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.06))
-            )
         }
     }
 
     private func entityRow(_ entity: DiscoveredEntity) -> some View {
         let value = entityValue(entity)
+        let presentation = rowPresentation(for: entity)
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 10) {
                 Image(systemName: entityIconName(for: entity))
                     .font(.system(size: 14))
-                    .frame(width: 22, alignment: .center)
-                    .foregroundStyle(value.status == .available ? Color.accentColor : Color.secondary)
+                    .frame(width: 24, alignment: .center)
+                    .foregroundStyle(value.status == .available ? PerchHATheme.accent : Color.secondary)
                     .accessibilityHidden(true)
-                Text(entity.name)
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                if let iconSymbolName = value.iconSymbolName {
-                    Image(systemName: iconSymbolName)
-                        .font(.system(size: 14))
-                        .foregroundStyle(value.status == .available ? .primary : .secondary)
-                        .accessibilityLabel(value.text)
-                } else {
-                    Text(value.text)
-                        .monospacedDigit()
-                        .fontWeight(.medium)
+                VStack(alignment: .leading, spacing: 1) {
+                    rowHero(entity: entity, value: value, presentation: presentation)
+                    Text(entity.name)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
-                        .foregroundStyle(value.status == .available ? .primary : .secondary)
                 }
+                Spacer(minLength: 8)
+                rowAccessory(entity: entity, value: value, presentation: presentation)
                 if let control = model.snapshot.control(for: entity) {
                     Toggle("", isOn: entityControlBinding(for: entity))
                         .labelsHidden()
@@ -4840,6 +4882,101 @@ public struct PerchHAPanelView: View {
 
     private func entityValue(_ entity: DiscoveredEntity) -> FormattedEntityValue {
         model.snapshot.formattedValue(for: entity)
+    }
+
+    private func rowPresentation(for entity: DiscoveredEntity) -> PerchHAEntityRowPresentation {
+        PerchHAEntityRowPresentation.resolve(
+            entity: entity,
+            configuration: model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entity.id),
+            availableEntities: model.snapshot.rooms.flatMap(\.entities)
+        )
+    }
+
+    /// The hero element of a row: a big value, a state pill, or an icon symbol.
+    ///
+    /// Numeric/gauge and plain-numeric rows show the big monospaced value; the
+    /// name lives in the caption line. On/off & open/closed rows show a colored
+    /// pill carrying the value text. Icon-unit entities render their dynamic
+    /// glyph as the hero.
+    @ViewBuilder
+    private func rowHero(
+        entity: DiscoveredEntity,
+        value: FormattedEntityValue,
+        presentation: PerchHAEntityRowPresentation
+    ) -> some View {
+        if let iconSymbolName = value.iconSymbolName {
+            Image(systemName: iconSymbolName)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(value.status == .available ? Color.primary : Color.secondary)
+                .accessibilityLabel(value.text)
+        } else if case let .statePill(isActive) = presentation {
+            statePill(text: value.text, isActive: isActive, available: value.status == .available)
+        } else {
+            Text(value.text)
+                .font(.title3)
+                .fontWeight(.medium)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .foregroundStyle(value.status == .available ? heroSeverityColor(presentation) : Color.secondary)
+                .accessibilityHidden(true)
+        }
+    }
+
+    private func heroSeverityColor(_ presentation: PerchHAEntityRowPresentation) -> Color {
+        switch presentation {
+        case let .gauge(gauge):
+            gauge.severity == .normal ? Color.primary : PerchHATheme.color(for: gauge.severity)
+        case let .value(severity):
+            severity == .normal ? Color.primary : PerchHATheme.color(for: severity)
+        case .statePill:
+            Color.primary
+        }
+    }
+
+    private func statePill(text: String, isActive: Bool, available: Bool) -> some View {
+        let color = available ? (isActive ? PerchHATheme.accent : Color.secondary) : Color.secondary
+        return Text(text)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(isActive && available ? color : .secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 2)
+            .background(
+                Capsule().fill(color.opacity(isActive && available ? 0.16 : 0.10))
+            )
+            .accessibilityHidden(true)
+    }
+
+    /// The trailing accessory: a gauge for fraction-resolvable entities, or an
+    /// opportunistic inline sparkline drawn only from already-cached history.
+    @ViewBuilder
+    private func rowAccessory(
+        entity: DiscoveredEntity,
+        value: FormattedEntityValue,
+        presentation: PerchHAEntityRowPresentation
+    ) -> some View {
+        if case let .gauge(gauge) = presentation, value.status == .available {
+            gaugeAccessory(gauge)
+        } else if let series = model.cachedHistorySeries(for: entity.id) {
+            // OPPORTUNISTIC ONLY: never fetches. Draws only when already cached.
+            PerchHAInlineSparkline(series: series, color: PerchHATheme.accent.opacity(0.85))
+                .frame(width: 48, height: 16)
+        }
+    }
+
+    @ViewBuilder
+    private func gaugeAccessory(_ gauge: PerchHAEntityGauge) -> some View {
+        switch gauge.style {
+        case .ring:
+            PerchHAEntityGaugeView(gauge: gauge)
+                .frame(width: 22, height: 22)
+        case .bar:
+            PerchHAEntityGaugeView(gauge: gauge)
+                .frame(width: 48, height: 8)
+        case .battery:
+            PerchHAEntityGaugeView(gauge: gauge)
+                .frame(width: 30, height: 16)
+        }
     }
 
 }

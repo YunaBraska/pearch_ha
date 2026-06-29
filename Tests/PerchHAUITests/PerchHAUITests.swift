@@ -1054,22 +1054,48 @@ final class PerchHAUITests: XCTestCase {
         )
     }
 
-    func testHistoryContentSummaryNonNumericOnlySeriesIsNoNumericData() {
+    func testHistoryContentSummaryNonNumericSeriesBecomesStateTimeline() {
+        let series = HistorySeries(
+            entityID: "cover.office_blinds",
+            range: .day,
+            samples: [
+                HistorySample(timestamp: Date(timeIntervalSince1970: 0), state: "open", numericValue: nil),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 600), state: "open", numericValue: nil),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 1_200), state: "closed", numericValue: nil)
+            ]
+        )
         XCTAssertEqual(
-            PerchHAHistoryContentSummary(
-                series: HistorySeries(
-                    entityID: "sensor.office_temperature",
-                    range: .hour,
-                    samples: [
-                        HistorySample(
-                            timestamp: Date(timeIntervalSince1970: 1_789_999_200),
-                            state: "unknown",
-                            numericValue: nil
-                        )
-                    ]
-                )
-            ),
-            .noNumericData
+            PerchHAHistoryContentSummary(series: series),
+            .stateTimeline(
+                [
+                    HistoryStateSegment(
+                        state: "open",
+                        start: Date(timeIntervalSince1970: 0),
+                        end: Date(timeIntervalSince1970: 1_200)
+                    ),
+                    HistoryStateSegment(
+                        state: "closed",
+                        start: Date(timeIntervalSince1970: 1_200),
+                        end: Date(timeIntervalSince1970: 1_200)
+                    )
+                ]
+            )
+        )
+    }
+
+    func testHistoryBodyPresentationMapsNonNumericSeriesToStateTimeline() {
+        let series = HistorySeries(
+            entityID: "switch.office_lamp",
+            range: .day,
+            samples: [
+                HistorySample(timestamp: Date(timeIntervalSince1970: 0), state: "on", numericValue: nil),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 300), state: "off", numericValue: nil)
+            ]
+        )
+        let segments = HistoryStateSegments.segments(of: series)
+        XCTAssertEqual(
+            PerchHAHistoryBodyPresentation(state: .loaded(series), entityID: "switch.office_lamp"),
+            .stateTimeline(series: series, segments: segments)
         )
     }
 
