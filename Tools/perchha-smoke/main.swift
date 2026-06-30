@@ -3991,11 +3991,11 @@ struct PerchHASmoke {
     }
 
     /// Builds a connected panel model whose inline-history cache has been warmed
-    /// through the real public prefetch path (panel active + visible entities +
-    /// settle-delay clock advance), so the graph-forward rows render their
-    /// full-width sparkline and state-timeline bands from cache without any
-    /// render-time fetch. Mirrors the prefetch coordinator's own flow rather than
-    /// poking private cache state.
+    /// through the real public background bulk-sync path (panel active + visible
+    /// entities + settle-delay clock advance), so the graph-forward rows render
+    /// their full-width sparkline and state-timeline bands from cache without any
+    /// render-time fetch. Mirrors the bulk sync loop's own flow rather than poking
+    /// private cache state.
     @MainActor
     private static func warmedInlineHistoryModel(
         for variant: SmokePanelSnapshotVariant
@@ -4007,15 +4007,18 @@ struct PerchHASmoke {
         let model = PerchHAPanelModel(
             snapshot: snapshot,
             connector: { _ in .success(rooms: snapshot.rooms) },
-            historyProvider: { _, entityID, range in
-                guard let match = series[entityID], match.range == range else {
-                    return .unavailable("no warmed series")
+            bulkHistoryProvider: { _, entityIDs, range in
+                var result: [EntityID: HistorySeries] = [:]
+                for id in entityIDs {
+                    if let match = series[id], match.range == range {
+                        result[id] = match
+                    }
                 }
-                return .success(match)
+                return result
             },
             oauthSignInRunner: variant.oauthSignInRunner,
             clock: clock,
-            historyPrefetchConfiguration: PerchHAHistoryPrefetchConfiguration(settleDelay: settleDelay),
+            bulkSyncConfiguration: PerchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1),
             selectionConfiguration: snapshot.selectionConfiguration,
             menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
             customActionConfiguration: variant.customActionConfiguration

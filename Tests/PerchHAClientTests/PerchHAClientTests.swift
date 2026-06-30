@@ -1264,6 +1264,189 @@ final class PerchHAClientTests: XCTestCase {
         }
     }
 
+    func test_t_bulk_history_returns_multiple_series_in_one_request() async throws {
+        // HA returns one array per requested entity; under minimal_response only the
+        // first row of each group carries entity_id.
+        let historyBody = """
+        [
+          [
+            {"entity_id":"sensor.a","state":"1.0","last_changed":"2026-06-27T10:00:00+00:00"},
+            {"state":"2.0","last_changed":"2026-06-27T11:00:00+00:00"}
+          ],
+          [
+            {"entity_id":"sensor.b","state":"5.0","last_changed":"2026-06-27T10:30:00+00:00"}
+          ]
+        ]
+        """
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(historyBody.utf8)))
+            ]
+        )
+        let client = HomeAssistantClient(transport: transport)
+
+        let result = await client.historyBatch(
+            try connectionInput(),
+            entityIDs: ["sensor.a", "sensor.b"],
+            range: .hour,
+            end: try historyDate("2026-06-27T12:00:00+00:00")
+        )
+
+        XCTAssertEqual(
+            result["sensor.a"],
+            HistorySeries(
+                entityID: "sensor.a",
+                range: .hour,
+                samples: [
+                    HistorySample(timestamp: try historyDate("2026-06-27T10:00:00+00:00"), state: "1.0", numericValue: 1.0),
+                    HistorySample(timestamp: try historyDate("2026-06-27T11:00:00+00:00"), state: "2.0", numericValue: 2.0)
+                ]
+            )
+        )
+        XCTAssertEqual(
+            result["sensor.b"],
+            HistorySeries(
+                entityID: "sensor.b",
+                range: .hour,
+                samples: [
+                    HistorySample(timestamp: try historyDate("2026-06-27T10:30:00+00:00"), state: "5.0", numericValue: 5.0)
+                ]
+            )
+        )
+        let requests = await transport.requests
+        XCTAssertEqual(requests.count, 1, "two entities fetched in a single bulk request")
+        let request = try XCTUnwrap(requests.first)
+        let items = Dictionary(
+            uniqueKeysWithValues: (URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
+                .compactMap { item in item.value.map { (item.name, $0) } }
+        )
+        XCTAssertEqual(items["filter_entity_id"], "sensor.a,sensor.b")
+        XCTAssertEqual(items["minimal_response"], "true")
+        XCTAssertEqual(items["no_attributes"], "true")
+    }
+
+    func test_t_bulk_history_splits_sets_larger_than_cap_into_batches() async throws {
+        // 3 ids with a cap of 2 → two sequential requests (2 ids, then 1).
+        func body(for ids: [String]) -> String {
+            let groups = ids.map { id in
+                #"[{"entity_id":"\#(id)","state":"1.0","last_changed":"2026-06-27T10:00:00+00:00"}]"#
+            }
+            return "[\(groups.joined(separator: ","))]"
+        }
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(body(for: ["sensor.a", "sensor.b"]).utf8))),
+                .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(body(for: ["sensor.c"]).utf8)))
+            ]
+        )
+        let client = HomeAssistantClient(transport: transport)
+
+        let result = await client.historyBatch(
+            try connectionInput(),
+            entityIDs: ["sensor.a", "sensor.b", "sensor.c"],
+            range: .hour,
+            end: try historyDate("2026-06-27T12:00:00+00:00"),
+            batchSize: 2
+        )
+
+        XCTAssertEqual(Set(result.keys), ["sensor.a", "sensor.b", "sensor.c"])
+        let requests = await transport.requests
+        XCTAssertEqual(requests.count, 2, "a >cap set splits into sequential batches")
+        let filters = requests.map { request in
+            (URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
+                .first { $0.name == "filter_entity_id" }?.value
+        }
+        XCTAssertEqual(filters, ["sensor.a,sensor.b", "sensor.c"])
+    }
+
+    func test_t_bulk_history_partial_or_empty_entity_yields_no_series_without_failing() async throws {
+        // sensor.a returns rows; sensor.b is absent entirely; an empty group is
+        // ignored. The batch still succeeds for the entities that came back.
+        let historyBody = """
+        [
+          [
+            {"entity_id":"sensor.a","state":"1.0","last_changed":"2026-06-27T10:00:00+00:00"}
+          ],
+          []
+        ]
+        """
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(historyBody.utf8)))
+            ]
+        )
+        let client = HomeAssistantClient(transport: transport)
+
+        let result = await client.historyBatch(
+            try connectionInput(),
+            entityIDs: ["sensor.a", "sensor.b"],
+            range: .hour,
+            end: try historyDate("2026-06-27T12:00:00+00:00")
+        )
+
+        XCTAssertNotNil(result["sensor.a"])
+        XCTAssertNil(result["sensor.b"], "an entity with no rows is simply absent")
+    }
+
+    func test_t_bulk_history_falls_back_to_next_url_on_unreachable_primary() async throws {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .urlError(URLError(.cannotConnectToHost)),
+                .success(HARESTResponse(
+                    statusCode: 200,
+                    headers: [:],
+                    body: Data(#"[[{"entity_id":"sensor.a","state":"1.0","last_changed":"2026-06-27T10:00:00+00:00"}]]"#.utf8)
+                ))
+            ]
+        )
+        let client = HomeAssistantClient(transport: transport)
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(
+                primaryURL: try XCTUnwrap(URL(string: "http://primary.local:8123")),
+                fallbackURL: try XCTUnwrap(URL(string: "https://fallback.example"))
+            ),
+            token: "secret-token"
+        )
+
+        let result = await client.historyBatch(
+            input,
+            entityIDs: ["sensor.a"],
+            range: .hour,
+            end: try historyDate("2026-06-27T12:00:00+00:00")
+        )
+
+        XCTAssertNotNil(result["sensor.a"])
+        let requests = await transport.requests
+        XCTAssertEqual(requests.map { $0.url.host }, ["primary.local", "fallback.example"])
+    }
+
+    func test_t_bulk_history_never_leaks_token_on_failure() async throws {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .transportError("connection died super-secret-token leaked")
+            ]
+        )
+        let client = HomeAssistantClient(transport: transport)
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: try XCTUnwrap(URL(string: "http://primary.local:8123")), fallbackURL: nil),
+            token: "super-secret-token"
+        )
+
+        let result = await client.historyBatch(
+            input,
+            entityIDs: ["sensor.a"],
+            range: .hour,
+            end: try historyDate("2026-06-27T12:00:00+00:00")
+        )
+
+        // A failed batch yields no series, and never surfaces the token anywhere.
+        XCTAssertTrue(result.isEmpty)
+        let requests = await transport.requests
+        XCTAssertEqual(requests.first?.headers["Authorization"], "Bearer super-secret-token")
+        // The Authorization header is the only place the token appears; the result
+        // is empty and carries no failure string at all.
+    }
+
     func test_t_history_week_routes_to_recorder_statistics() async throws {
         let fixtures = FakeHAFixtures(
             apiBody: #"{"message":"API running."}"#,

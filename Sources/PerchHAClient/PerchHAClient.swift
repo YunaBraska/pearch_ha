@@ -419,6 +419,7 @@ public protocol HAClient: Sendable {
     func callService(_ input: HAConnectionInput, call: HAServiceCall) async -> HAClientResult<HAServiceCallResult>
     func discovery(_ input: HAConnectionInput) async -> HAClientResult<DiscoverySnapshot>
     func history(_ input: HAConnectionInput, entityID: EntityID, range: HistoryRange, end: Date) async -> HAClientResult<HistorySeries>
+    func historyBatch(_ input: HAConnectionInput, entityIDs: [EntityID], range: HistoryRange, end: Date) async -> [EntityID: HistorySeries]
 }
 
 public struct PlannedHAClient: HAClient {
@@ -466,6 +467,10 @@ public struct PlannedHAClient: HAClient {
 
     public func history(_ input: HAConnectionInput, entityID: EntityID, range: HistoryRange, end: Date = Date()) async -> HAClientResult<HistorySeries> {
         await client.history(input, entityID: entityID, range: range, end: end)
+    }
+
+    public func historyBatch(_ input: HAConnectionInput, entityIDs: [EntityID], range: HistoryRange, end: Date = Date()) async -> [EntityID: HistorySeries] {
+        await client.historyBatch(input, entityIDs: entityIDs, range: range, end: end)
     }
 }
 
@@ -834,6 +839,118 @@ public struct HomeAssistantClient: HAClient {
                 return HistorySeries(entityID: entityID, range: range, samples: samples)
             }
         }
+    }
+
+    /// The maximum number of entity IDs packed into a single bulk history
+    /// request. Larger sets are split into sequential batches so the request URL
+    /// stays comfortably bounded.
+    public static let bulkHistoryDefaultBatchSize = 40
+
+    /// Fetches history for many entities in as few REST requests as possible.
+    ///
+    /// Entities are packed into batches of at most `batchSize` IDs, each sent as a
+    /// single `/api/history/period/<start>?filter_entity_id=id1,id2,...` request
+    /// (with the same `minimal_response`/`no_attributes` shaping as the
+    /// single-entity fetch and the same ordered multi-URL fallback). Home
+    /// Assistant returns one array per requested entity; each is attributed to its
+    /// entity by the first row carrying an `entity_id` (later rows omit it under
+    /// `minimal_response`). A failed batch is skipped without failing the others,
+    /// and an entity that returned no rows is simply absent from the result.
+    ///
+    /// - Parameters:
+    ///   - input: The authorized connection input (endpoint, token, trust policy).
+    ///   - entityIDs: The entities to fetch. Duplicates are coalesced; order within
+    ///     a batch is preserved for attribution.
+    ///   - range: The history range applied to every returned series.
+    ///   - end: The window end (defaults to now).
+    ///   - batchSize: Maximum entity IDs per request. Defaults to
+    ///     ``bulkHistoryDefaultBatchSize``; values below 1 are clamped to 1.
+    /// - Returns: A map from entity ID to its fetched series. Entities whose batch
+    ///   failed or that returned no rows are absent. Never carries a token.
+    public func historyBatch(
+        _ input: HAConnectionInput,
+        entityIDs: [EntityID],
+        range: HistoryRange,
+        end: Date
+    ) async -> [EntityID: HistorySeries] {
+        await historyBatch(input, entityIDs: entityIDs, range: range, end: end, batchSize: HomeAssistantClient.bulkHistoryDefaultBatchSize)
+    }
+
+    public func historyBatch(
+        _ input: HAConnectionInput,
+        entityIDs: [EntityID],
+        range: HistoryRange,
+        end: Date = Date(),
+        batchSize: Int = HomeAssistantClient.bulkHistoryDefaultBatchSize
+    ) async -> [EntityID: HistorySeries] {
+        let uniqueIDs = Self.deduplicatedPreservingOrder(entityIDs)
+        guard !uniqueIDs.isEmpty else {
+            return [:]
+        }
+        let cap = max(1, batchSize)
+        let start = end.addingTimeInterval(-range.historyDuration)
+        var series: [EntityID: HistorySeries] = [:]
+        var index = 0
+        while index < uniqueIDs.count {
+            let batch = Array(uniqueIDs[index..<min(index + cap, uniqueIDs.count)])
+            index += cap
+            let batchSeries = await restHistoryBatch(input, entityIDs: batch, range: range, start: start, end: end)
+            series.merge(batchSeries) { _, new in new }
+        }
+        return series
+    }
+
+    private func restHistoryBatch(
+        _ input: HAConnectionInput,
+        entityIDs: [EntityID],
+        range: HistoryRange,
+        start: Date,
+        end: Date
+    ) async -> [EntityID: HistorySeries] {
+        let requested = Set(entityIDs)
+        let path = "/api/history/period/\(Self.historyDateFormatter.string(from: start))"
+        let result = await get(
+            path: path,
+            queryItems: [
+                URLQueryItem(name: "filter_entity_id", value: entityIDs.map(\.rawValue).joined(separator: ",")),
+                URLQueryItem(name: "end_time", value: Self.historyDateFormatter.string(from: end)),
+                URLQueryItem(name: "minimal_response", value: "true"),
+                URLQueryItem(name: "no_attributes", value: "true")
+            ],
+            input: input
+        ) { response in
+            decode(path: "/api/history/period", response: response, as: [[HAHistoryStateDTO]].self)
+        }
+        guard case let .success(groups) = result else {
+            return [:]
+        }
+        var series: [EntityID: HistorySeries] = [:]
+        for group in groups {
+            // Under `minimal_response`, only the first row of each per-entity group
+            // carries `entity_id`; later rows inherit it. Attribute the whole group
+            // to that first-seen identifier and keep only requested entities.
+            guard let rawID = group.first(where: { $0.entityID != nil })?.entityID else {
+                continue
+            }
+            let entityID = EntityID(rawID)
+            guard requested.contains(entityID) else {
+                continue
+            }
+            let samples = group
+                .map(\.sample)
+                .sorted { $0.timestamp < $1.timestamp }
+            series[entityID] = HistorySeries(entityID: entityID, range: range, samples: samples)
+        }
+        return series
+    }
+
+    private static func deduplicatedPreservingOrder(_ ids: [EntityID]) -> [EntityID] {
+        var seen = Set<EntityID>()
+        var ordered: [EntityID] = []
+        for id in ids where seen.insert(id).inserted {
+            ordered.append(id)
+        }
+        return ordered
     }
 
     private func recorderStatisticsHistory(

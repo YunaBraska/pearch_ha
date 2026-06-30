@@ -220,6 +220,7 @@ extension PerchHAAuthSessionStore: PerchHAAuthSessionStorage {}
 public protocol PerchHARefreshingHomeAssistantClient: Sendable {
     func discovery(_ input: HAConnectionInput) async -> HAClientResult<DiscoverySnapshot>
     func history(_ input: HAConnectionInput, entityID: EntityID, range: HistoryRange, end: Date) async -> HAClientResult<HistorySeries>
+    func historyBatch(_ input: HAConnectionInput, entityIDs: [EntityID], range: HistoryRange, end: Date) async -> [EntityID: HistorySeries]
     func services(_ input: HAConnectionInput) async -> HAClientResult<[HAServiceMetadata]>
     func callService(_ input: HAConnectionInput, call: HAServiceCall) async -> HAClientResult<HAServiceCallResult>
     func refreshAccessToken(baseURL: URL, refreshToken: String, clientID: String) async -> HAClientResult<HAOAuthToken>
@@ -283,6 +284,33 @@ public struct PerchHAAuthorizedHomeAssistantGateway: Sendable {
         case let .failure(failure):
             return .unavailable(failure.connectionFailure.historyDescription)
         }
+    }
+
+    /// Fetches history for many entities sharing a range in as few requests as
+    /// possible, for the background bulk sync loop.
+    ///
+    /// Resolves the authorized input once and delegates batching plus the ordered
+    /// multi-URL fallback to the client. Failures are absorbed per batch by the
+    /// client, so a partial result simply returns the entities that came back. No
+    /// token is ever logged or leaked.
+    ///
+    /// - Parameters:
+    ///   - form: The active connection profile.
+    ///   - entityIDs: The entities to fetch.
+    ///   - range: The shared history range.
+    /// - Returns: A series per entity that came back; missing entities are absent.
+    public func bulkHistory(
+        form: PerchHAConnectionForm,
+        entityIDs: [EntityID],
+        range: HistoryRange
+    ) async -> [EntityID: HistorySeries] {
+        guard let primaryURL = form.primaryURL(), !entityIDs.isEmpty else {
+            return [:]
+        }
+        guard case let .success(authorizedInput) = resolveInput(form: form, primaryURL: primaryURL) else {
+            return [:]
+        }
+        return await client.historyBatch(authorizedInput.input, entityIDs: entityIDs, range: range, end: Date())
     }
 
     public func services(form: PerchHAConnectionForm) async -> PerchHAServiceMetadataProviderResult {
@@ -891,6 +919,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     private let authSessionStore: (any PerchHAAuthSessionStorage)?
     private let connector: PerchHAPanelModel.Connector
     private let historyProvider: PerchHAPanelModel.HistoryProvider
+    private let bulkHistoryProvider: PerchHAPanelModel.BulkHistoryProvider
     private let serviceMetadataProvider: PerchHAPanelModel.ServiceMetadataProvider
     private let actionRunner: PerchHAPanelModel.ActionRunner
     private let oauthSignInRunner: PerchHAPanelModel.OAuthSignInRunner
@@ -930,6 +959,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             authSessionStore: authSessionStore,
             connector: gateway.connect(form:),
             historyProvider: gateway.history(form:entityID:range:),
+            bulkHistoryProvider: gateway.bulkHistory(form:entityIDs:range:),
             serviceMetadataProvider: gateway.services(form:),
             actionRunner: gateway.action(form:action:),
             protectedActionValueStore: KeychainProtectedActionValueStore(),
@@ -952,6 +982,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             authSessionStore: authSessionStore,
             connector: gateway.connect(form:),
             historyProvider: gateway.history(form:entityID:range:),
+            bulkHistoryProvider: gateway.bulkHistory(form:entityIDs:range:),
             serviceMetadataProvider: gateway.services(form:),
             actionRunner: gateway.action(form:action:),
             protectedActionValueStore: KeychainProtectedActionValueStore(),
@@ -989,6 +1020,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         authSessionStore: (any PerchHAAuthSessionStorage)? = nil,
         connector: @escaping PerchHAPanelModel.Connector,
         historyProvider: @escaping PerchHAPanelModel.HistoryProvider,
+        bulkHistoryProvider: @escaping PerchHAPanelModel.BulkHistoryProvider = { _, _, _ in [:] },
         serviceMetadataProvider: @escaping PerchHAPanelModel.ServiceMetadataProvider = { _ in .success([]) },
         actionRunner: @escaping PerchHAPanelModel.ActionRunner = PerchHAApplication.action(form:action:),
         protectedActionValueStore: any ProtectedActionValueStore = KeychainProtectedActionValueStore(),
@@ -1001,6 +1033,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         self.authSessionStore = authSessionStore
         self.connector = connector
         self.historyProvider = historyProvider
+        self.bulkHistoryProvider = bulkHistoryProvider
         self.serviceMetadataProvider = serviceMetadataProvider
         self.actionRunner = actionRunner
         self.protectedActionValueStore = protectedActionValueStore
@@ -1043,6 +1076,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
                 return result
             },
             historyProvider: historyProvider,
+            bulkHistoryProvider: bulkHistoryProvider,
             serviceMetadataProvider: serviceMetadataProvider,
             actionRunner: actionRunner,
             oauthSignInRunner: oauthSignInRunner,

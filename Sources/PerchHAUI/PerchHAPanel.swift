@@ -856,6 +856,61 @@ public struct PerchHAPeriodicRefreshConfiguration: Equatable, Sendable {
     public static let disabled = PerchHAPeriodicRefreshConfiguration(interval: .seconds(0))
 }
 
+/// Tuning for the intelligent bulk history sync loop.
+///
+/// While the panel is open the model keeps the inline-history cache fresh with a
+/// single re-arming background loop: each cycle fetches many entities' history in
+/// as few requests as possible (bulk), prioritizing the rows the user is actually
+/// looking at. Hot entities (visible or recently inspected) refresh every cycle;
+/// cold ones refresh every `coldRefreshDivisor`-th cycle so everything stays
+/// covered without inflating request volume. The loop re-arms itself each cycle —
+/// that is what keeps the cache from going stale after a single pass.
+public struct PerchHAHistoryBulkSyncConfiguration: Equatable, Sendable {
+    /// The interval between sync cycles while the panel is active.
+    public let interval: PerchDuration
+    /// How long visibility must stay unchanged before the first cycle runs, so
+    /// scrolling never thrashes the sync.
+    public let settleDelay: PerchDuration
+    /// Maximum entity IDs requested per bulk batch (mirrors the client cap).
+    public let batchSize: Int
+    /// Maximum bulk batches dispatched concurrently per cycle.
+    public let maxConcurrentBatches: Int
+    /// Cold (non-hot) entities are synced every `coldRefreshDivisor`-th cycle. A
+    /// value of 1 syncs everything every cycle; larger values keep hot rows
+    /// freshest while still covering the whole list periodically.
+    public let coldRefreshDivisor: Int
+
+    /// Creates a bulk sync configuration.
+    ///
+    /// - Parameters:
+    ///   - interval: The cycle interval (default 30 s).
+    ///   - settleDelay: Quiet period before the first cycle (default 250 ms).
+    ///   - batchSize: Entity IDs per bulk request (default 40, clamped to >= 1).
+    ///   - maxConcurrentBatches: Concurrent batch cap (default 2, clamped to >= 1).
+    ///   - coldRefreshDivisor: Cold-entity refresh cadence (default 4, clamped to >= 1).
+    public init(
+        interval: PerchDuration = .seconds(30),
+        settleDelay: PerchDuration = .milliseconds(250),
+        batchSize: Int = 40,
+        maxConcurrentBatches: Int = 2,
+        coldRefreshDivisor: Int = 4
+    ) {
+        self.interval = interval
+        self.settleDelay = settleDelay
+        self.batchSize = max(1, batchSize)
+        self.maxConcurrentBatches = max(1, maxConcurrentBatches)
+        self.coldRefreshDivisor = max(1, coldRefreshDivisor)
+    }
+
+    /// Whether the bulk sync loop runs. `false` when the interval is zero.
+    public var isEnabled: Bool {
+        interval.nanoseconds > 0
+    }
+
+    /// A configuration that disables the bulk sync loop (no cycles run).
+    public static let disabled = PerchHAHistoryBulkSyncConfiguration(interval: .seconds(0))
+}
+
 public struct PerchHAPanelSnapshot: Equatable, Sendable {
     public let connectionState: ConnectionState
     public let phase: PerchHAPanelPhase
@@ -1383,12 +1438,6 @@ private struct PerchHAHistoryCacheKey: Hashable, Sendable {
     let range: HistoryRange
 }
 
-private struct PrefetchJob: Sendable {
-    let entityID: EntityID
-    let range: HistoryRange
-    let key: PerchHAHistoryCacheKey
-}
-
 private struct PerchHAHistoryCacheEntry {
     let series: HistorySeries
     let expiresAt: PerchInstant
@@ -1410,22 +1459,11 @@ private struct PerchHAHistoryCache {
         return entry.series
     }
 
-    /// Reads a *fresh* cached series without touching recency or evicting expired
-    /// entries. Returns `nil` once the entry has crossed its TTL, so the prefetch
-    /// freshness check (``shouldPrefetch``) treats an expired entry as needing a
-    /// refetch. This is the refetch-decision peek, not the display peek.
-    func peek(for key: PerchHAHistoryCacheKey, now: PerchInstant) -> HistorySeries? {
-        guard let entry = entries[key], entry.expiresAt > now else {
-            return nil
-        }
-        return entry.series
-    }
-
     /// Reads a cached series for DISPLAY regardless of TTL expiry, so an
     /// already-fetched inline sparkline keeps rendering its last-known data
     /// instead of blinking out the moment the entry crosses its refresh TTL.
-    /// Freshness (whether to refetch) is decided separately by ``peek(for:now:)``;
-    /// an entry only disappears here once it is truly evicted by capacity.
+    /// The background bulk sync refreshes entries underneath; an entry only
+    /// disappears here once it is truly evicted by capacity.
     func peekAllowingStale(for key: PerchHAHistoryCacheKey) -> HistorySeries? {
         entries[key]?.series
     }
@@ -1475,6 +1513,11 @@ private struct PendingControlChange {
 public final class PerchHAPanelModel: ObservableObject {
     public typealias Connector = @Sendable (PerchHAConnectionForm) async -> PerchHAConnectionAttemptResult
     public typealias HistoryProvider = @Sendable (PerchHAConnectionForm, EntityID, HistoryRange) async -> PerchHAHistoryProviderResult
+    /// Fetches history for many entities sharing a range in as few requests as
+    /// possible. Used only by the background bulk sync loop (never by hover/detail).
+    /// Returns a series per entity that came back; missing/failed entities are
+    /// simply absent. Must never carry or leak a token.
+    public typealias BulkHistoryProvider = @Sendable (PerchHAConnectionForm, [EntityID], HistoryRange) async -> [EntityID: HistorySeries]
     public typealias ServiceMetadataProvider = @Sendable (PerchHAConnectionForm) async -> PerchHAServiceMetadataProviderResult
     public typealias ActionRunner = @Sendable (PerchHAConnectionForm, ActionSpec) async -> PerchHAActionResult
     public typealias OAuthSignInRunner = @MainActor @Sendable (PerchHAConnectionForm) async -> PerchHAOAuthSignInResult
@@ -1535,6 +1578,7 @@ public final class PerchHAPanelModel: ObservableObject {
 
     private let connector: Connector
     private let historyProvider: HistoryProvider
+    private let bulkHistoryProvider: BulkHistoryProvider
     private let serviceMetadataProvider: ServiceMetadataProvider
     private let actionRunner: ActionRunner
     private let oauthSignInRunner: OAuthSignInRunner
@@ -1543,6 +1587,7 @@ public final class PerchHAPanelModel: ObservableObject {
     private let historyHoverGrace: PerchDuration
     private let historyCacheConfiguration: PerchHAHistoryCacheConfiguration
     private let historyPrefetchConfiguration: PerchHAHistoryPrefetchConfiguration
+    private let bulkSyncConfiguration: PerchHAHistoryBulkSyncConfiguration
     private let periodicRefreshConfiguration: PerchHAPeriodicRefreshConfiguration
     private let selectionSink: SelectionConfigurationSink
     private let menuBarDisplaySink: MenuBarDisplayConfigurationSink
@@ -1563,11 +1608,16 @@ public final class PerchHAPanelModel: ObservableObject {
     private var protectedValueDrafts: [String: String] = [:]
     private var isPanelActive = false
     private var visibleEntityIDs: [EntityID] = []
-    private var prefetchTask: Task<Void, Never>?
-    private var prefetchLastFetched: [PerchHAHistoryCacheKey: PerchInstant] = [:]
-    private var prefetchQueue: [PrefetchJob] = []
-    private var prefetchCursor = 0
-    private var prefetchWorkers: [Task<Void, Never>] = []
+    /// The single re-arming background bulk-history sync loop. Active only while
+    /// the panel is open and a session is connected.
+    private var bulkSyncTask: Task<Void, Never>?
+    /// Per-entity interest score: bumped when an entity is visible and when its
+    /// detail/hover is opened. Drives prioritization — high-interest entities sync
+    /// every cycle, cold ones every Nth cycle. Bounded so it never grows without
+    /// limit (capped per entity; pruned to displayed/visible entities each cycle).
+    private var entityInterest: [EntityID: Int] = [:]
+    /// Monotonic count of completed sync cycles, used to gate cold-entity refresh.
+    private var bulkSyncCycle = 0
     private var periodicRefreshTask: Task<Void, Never>?
     private var periodicRefreshFailureStreak = 0
     private var diagnosticLog = PerchHADiagnosticLog()
@@ -1584,6 +1634,7 @@ public final class PerchHAPanelModel: ObservableObject {
         snapshot: PerchHAPanelSnapshot = PerchHAPanelSnapshot(),
         connector: @escaping Connector = { _ in .failure(.protocolError("connection client is not configured")) },
         historyProvider: @escaping HistoryProvider = { _, _, _ in .unavailable("history client is not configured") },
+        bulkHistoryProvider: @escaping BulkHistoryProvider = { _, _, _ in [:] },
         serviceMetadataProvider: @escaping ServiceMetadataProvider = { _ in .success([]) },
         actionRunner: @escaping ActionRunner = { _, _ in .failed("action client is not configured") },
         oauthSignInRunner: @escaping OAuthSignInRunner = { _ in .failed("OAuth sign-in is not configured") },
@@ -1592,6 +1643,7 @@ public final class PerchHAPanelModel: ObservableObject {
         historyHoverGrace: PerchDuration = .milliseconds(300),
         historyCacheConfiguration: PerchHAHistoryCacheConfiguration = PerchHAHistoryCacheConfiguration(),
         historyPrefetchConfiguration: PerchHAHistoryPrefetchConfiguration = PerchHAHistoryPrefetchConfiguration(),
+        bulkSyncConfiguration: PerchHAHistoryBulkSyncConfiguration = PerchHAHistoryBulkSyncConfiguration(),
         periodicRefreshConfiguration: PerchHAPeriodicRefreshConfiguration = PerchHAPeriodicRefreshConfiguration(),
         selectionConfiguration: EntitySelectionConfiguration = EntitySelectionConfiguration(),
         menuBarDisplayConfiguration: MenuBarDisplayConfiguration = MenuBarDisplayConfiguration(),
@@ -1637,6 +1689,7 @@ public final class PerchHAPanelModel: ObservableObject {
         self.editableForm = snapshot.connectionForm
         self.connector = connector
         self.historyProvider = historyProvider
+        self.bulkHistoryProvider = bulkHistoryProvider
         self.serviceMetadataProvider = serviceMetadataProvider
         self.actionRunner = actionRunner
         self.oauthSignInRunner = oauthSignInRunner
@@ -1645,6 +1698,7 @@ public final class PerchHAPanelModel: ObservableObject {
         self.historyHoverGrace = historyHoverGrace
         self.historyCacheConfiguration = historyCacheConfiguration
         self.historyPrefetchConfiguration = historyPrefetchConfiguration
+        self.bulkSyncConfiguration = bulkSyncConfiguration
         self.periodicRefreshConfiguration = periodicRefreshConfiguration
         self.selectionSink = selectionSink
         self.menuBarDisplaySink = menuBarDisplaySink
@@ -1657,8 +1711,7 @@ public final class PerchHAPanelModel: ObservableObject {
         controlActionTask?.cancel()
         historyTask?.cancel()
         historyCloseTask?.cancel()
-        prefetchTask?.cancel()
-        prefetchWorkers.forEach { $0.cancel() }
+        bulkSyncTask?.cancel()
         periodicRefreshTask?.cancel()
     }
 
@@ -2177,6 +2230,9 @@ public final class PerchHAPanelModel: ObservableObject {
     ///   - range: An explicit range, or `nil` to use the entity's default.
     public func startHistoryHover(_ id: EntityID, range: HistoryRange? = nil) {
         let resolvedRange = range ?? snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).defaultHistoryRange
+        // Opening a detail/hover marks the entity as hot so the bulk sync keeps it
+        // freshest across cycles.
+        bumpInterest(id)
         cancelPendingHistoryClose()
         historyTask?.cancel()
         applyHistoryPresentationEntityID(id)
@@ -2315,7 +2371,7 @@ public final class PerchHAPanelModel: ObservableObject {
     /// This is the *only* history access intended for visible-row rendering: it
     /// reads the in-memory cache without mutating recency, without evicting, and
     /// crucially without ever triggering a network fetch. Rows use it to draw an
-    /// inline sparkline whenever the auto-prefetch coordinator has warmed the
+    /// inline sparkline whenever the background bulk sync has warmed the
     /// entity — never gated on hover. Hover only drives the detail popover. When
     /// nothing is cached yet it returns `nil` and the row draws no sparkline.
     /// Re-rendering as fresh data lands is driven by ``historyRevision``; honoring
@@ -2328,7 +2384,7 @@ public final class PerchHAPanelModel: ObservableObject {
         let key = PerchHAHistoryCacheKey(entityID: id, range: range)
         // Display uses the stale-tolerant peek so the inline sparkline keeps
         // showing its last-known data instead of flickering out when the entry
-        // crosses its TTL; the prefetch loop refreshes it underneath.
+        // crosses its TTL; the bulk sync loop refreshes it underneath.
         return historyCache.peekAllowingStale(for: key)
     }
 
@@ -2350,14 +2406,14 @@ public final class PerchHAPanelModel: ObservableObject {
         historyRevision &+= 1
     }
 
-    // MARK: - History prefetch coordinator
+    // MARK: - History bulk sync loop
 
-    /// Marks the panel as shown or hidden, gating all history prefetch.
+    /// Marks the panel as shown or hidden, gating the background history sync.
     ///
     /// The app shell calls this with `true` when the panel becomes visible and
-    /// `false` when it is hidden or closed. While inactive the coordinator does no
-    /// fetching whatsoever: any in-flight prefetch is cancelled and no background
-    /// sync runs. Re-activating with a known visible set re-arms a settle pass.
+    /// `false` when it is hidden or closed. While inactive the model does no
+    /// background fetching whatsoever: the re-arming bulk sync loop is cancelled
+    /// and no cycle runs. Re-activating with a known visible set re-arms the loop.
     ///
     /// - Parameter active: Whether the panel is currently shown.
     public func setPanelActive(_ active: Bool) {
@@ -2366,10 +2422,10 @@ public final class PerchHAPanelModel: ObservableObject {
         }
         isPanelActive = active
         if active {
-            scheduleHistoryPrefetch()
+            startHistoryBulkSync()
             startPeriodicRefresh()
         } else {
-            cancelHistoryPrefetch()
+            cancelHistoryBulkSync()
             cancelPeriodicRefresh()
         }
     }
@@ -2524,14 +2580,16 @@ public final class PerchHAPanelModel: ObservableObject {
         refreshRetryBackoffState()
     }
 
+    /// The maximum interest score any single entity can accumulate, so a row that
+    /// stays visible for a long time cannot grow an unbounded score.
+    private static let maxEntityInterest = 1_000
+
     /// Reports the entities currently visible in the panel, in display order.
     ///
-    /// The view calls this as rows appear and disappear. The coordinator warms the
-    /// history cache for these entities first, then progressively walks the rest of
-    /// the panel's ordered list (bounded by ``PerchHAHistoryPrefetchConfiguration/lookahead``;
-    /// the default covers the whole list). Calls are coalesced: a prefetch pass
-    /// runs only once visibility has stayed unchanged for the configured settle
-    /// delay, so rapid updates while scrolling never fetch.
+    /// The view calls this as rows appear and disappear. Visibility feeds two
+    /// things: the per-entity interest score (visible entities are "hot" and sync
+    /// every cycle), and a re-arm of the bulk sync loop coalesced behind the
+    /// configured settle delay so rapid scroll updates never thrash the sync.
     ///
     /// - Parameter ids: The visible entity IDs in display order.
     public func updateVisibleEntities(_ ids: [EntityID]) {
@@ -2539,81 +2597,19 @@ public final class PerchHAPanelModel: ObservableObject {
             return
         }
         visibleEntityIDs = ids
-        scheduleHistoryPrefetch()
+        for id in ids {
+            bumpInterest(id)
+        }
+        startHistoryBulkSync()
     }
 
-    /// Arms (or re-arms) a debounced prefetch pass on the injected clock.
+    /// Records user interest in an entity (visible row or opened detail/hover).
     ///
-    /// Cancelling and restarting the single pending task is what coalesces rapid
-    /// visibility changes: only the task armed by the final change survives the
-    /// settle delay. Does nothing while the panel is inactive.
-    private func scheduleHistoryPrefetch() {
-        prefetchTask?.cancel()
-        prefetchTask = nil
-        guard isPanelActive, lastConnectedForm != nil, !visibleEntityIDs.isEmpty else {
-            return
-        }
-        let settleDelay = historyPrefetchConfiguration.settleDelay
-        prefetchTask = Task { @MainActor [weak self] in
-            guard let self else {
-                return
-            }
-            do {
-                _ = try await clock.sleep(for: settleDelay)
-            } catch {
-                return
-            }
-            guard !Task.isCancelled else {
-                return
-            }
-            await runHistoryPrefetchPass()
-            if !Task.isCancelled {
-                prefetchTask = nil
-            }
-        }
-    }
-
-    private func cancelHistoryPrefetch() {
-        prefetchTask?.cancel()
-        prefetchTask = nil
-        prefetchWorkers.forEach { $0.cancel() }
-        prefetchWorkers = []
-    }
-
-    /// Computes the ordered, de-duplicated prefetch target list.
-    ///
-    /// Priority order: the visible entities first (in display order), then the
-    /// entities after the last visible row (nearest-after), then the remainder of
-    /// the list. With an unbounded lookahead the whole list is covered
-    /// progressively; a finite lookahead caps the nearest-after window and drops
-    /// the remainder so behavior stays bounded for callers that opt out.
-    private func prefetchTargets() -> [EntityID] {
-        let ordered = displayedEntityIDs()
-        let visible = Set(visibleEntityIDs)
-        guard let lastVisibleIndex = ordered.lastIndex(where: { visible.contains($0) }) else {
-            return visibleEntityIDs
-        }
-
-        let afterStart = lastVisibleIndex + 1
-        let nearestAfter: ArraySlice<EntityID>
-        let remainder: [EntityID]
-        if historyPrefetchConfiguration.isLookaheadUnbounded {
-            nearestAfter = ordered[afterStart...]
-            // Everything before the visible block, walked after the after-window so
-            // the whole list is eventually warmed while the panel stays open.
-            remainder = Array(ordered[..<afterStart]).filter { !visible.contains($0) }
-        } else {
-            let lookaheadEnd = min(ordered.count, afterStart + historyPrefetchConfiguration.lookahead)
-            nearestAfter = ordered[afterStart..<lookaheadEnd]
-            remainder = []
-        }
-
-        var seen = Set<EntityID>()
-        var targets: [EntityID] = []
-        for id in visibleEntityIDs + Array(nearestAfter) + remainder where seen.insert(id).inserted {
-            targets.append(id)
-        }
-        return targets
+    /// Interest is the prioritization signal for the bulk sync loop: hot entities
+    /// (interest above zero or currently visible) sync every cycle. The score is
+    /// clamped so it can never grow without bound.
+    private func bumpInterest(_ id: EntityID) {
+        entityInterest[id] = min(Self.maxEntityInterest, (entityInterest[id] ?? 0) + 1)
     }
 
     /// The panel's displayed entities flattened in display order.
@@ -2621,92 +2617,159 @@ public final class PerchHAPanelModel: ObservableObject {
         snapshot.rooms.flatMap(\.entities).map(\.id)
     }
 
-    /// Runs one bounded prefetch pass for the current targets, skipping anything
-    /// still fresh and capping concurrent fetches.
-    private func runHistoryPrefetchPass() async {
+    /// Starts (or re-arms) the single background bulk history sync loop.
+    ///
+    /// Cancelling and restarting the one task is what coalesces rapid visibility
+    /// changes: only the loop armed by the final change survives the settle delay.
+    /// The loop is silent (it overrides cache entries in place and never flips the
+    /// connection state), gated on an active panel with a connected session, and
+    /// re-arms itself every cycle — fixing "runs once then goes stale". Does
+    /// nothing while inactive, disconnected, or when bulk sync is disabled.
+    private func startHistoryBulkSync() {
+        bulkSyncTask?.cancel()
+        bulkSyncTask = nil
+        guard bulkSyncConfiguration.isEnabled, isPanelActive, lastConnectedForm != nil else {
+            return
+        }
+        let settleDelay = bulkSyncConfiguration.settleDelay
+        let interval = bulkSyncConfiguration.interval
+        bulkSyncTask = Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            do {
+                // Settle first so scrolling coalesces into one armed loop.
+                _ = try await clock.sleep(for: settleDelay)
+            } catch {
+                return
+            }
+            while !Task.isCancelled, self.isPanelActive, self.lastConnectedForm != nil {
+                await self.runBulkSyncCycle()
+                guard !Task.isCancelled, self.isPanelActive else {
+                    return
+                }
+                do {
+                    _ = try await self.clock.sleep(for: interval)
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func cancelHistoryBulkSync() {
+        bulkSyncTask?.cancel()
+        bulkSyncTask = nil
+    }
+
+    /// Runs one bulk sync cycle: fetches history for the prioritized entities via
+    /// the bulk provider (grouped by range), then overrides matching cache entries
+    /// in place. Entities absent from a bulk result keep their existing cached
+    /// series — a cycle never deletes a valid entry. Bounded by the batch cap and
+    /// the concurrent-batch limit so request volume stays well below per-entity.
+    private func runBulkSyncCycle() async {
         guard let form = lastConnectedForm else {
             return
         }
-        let visible = Set(visibleEntityIDs)
-        let now = await clock.now()
-        lastObservedInstant = now
+        let cycle = bulkSyncCycle
+        bulkSyncCycle &+= 1
+        pruneInterest()
 
-        let pending = prefetchTargets().compactMap { id -> PrefetchJob? in
-            let range = snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).defaultHistoryRange
-            let key = PerchHAHistoryCacheKey(entityID: id, range: range)
-            return shouldPrefetch(key: key, isActive: visible.contains(id), now: now)
-                ? PrefetchJob(entityID: id, range: range, key: key)
-                : nil
-        }
-        guard !pending.isEmpty else {
+        let targets = bulkSyncTargets(cycle: cycle)
+        guard !targets.isEmpty else {
             return
         }
 
-        let limit = min(historyPrefetchConfiguration.maxConcurrentFetches, pending.count)
-        prefetchQueue = pending
-        prefetchCursor = 0
-        // Up to `limit` workers run concurrently. Each pulls the next job from the
-        // shared, MainActor-isolated cursor, so at most `limit` fetches are ever in
-        // flight; the rest start only as a worker frees up.
-        let workers: [Task<Void, Never>] = (0..<limit).map { _ in
-            Task { @MainActor [weak self] in
-                guard let self else {
-                    return
-                }
-                await drainPrefetchQueue(form: form)
+        // Group entities by their default range so each bulk request covers a
+        // single range, then split each range group into client-capped batches.
+        let byRange = Dictionary(grouping: targets) { id in
+            snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).defaultHistoryRange
+        }
+        var batches: [(range: HistoryRange, ids: [EntityID])] = []
+        for (range, ids) in byRange {
+            var index = 0
+            while index < ids.count {
+                let upper = min(index + bulkSyncConfiguration.batchSize, ids.count)
+                batches.append((range: range, ids: Array(ids[index..<upper])))
+                index = upper
             }
         }
-        prefetchWorkers = workers
-        for worker in workers {
-            await worker.value
+        guard !batches.isEmpty else {
+            return
         }
-        prefetchWorkers = []
-    }
 
-    /// A single prefetch worker: repeatedly claims the next queued job and fetches
-    /// it until the queue is drained, the task is cancelled, or the panel hides.
-    private func drainPrefetchQueue(form: PerchHAConnectionForm) async {
-        while !Task.isCancelled, isPanelActive {
-            guard prefetchCursor < prefetchQueue.count else {
+        // Dispatch up to `maxConcurrentBatches` batches at a time. Each batch is a
+        // single bulk request; results are applied on the MainActor after the
+        // window completes so cache writes stay serialized.
+        let limit = bulkSyncConfiguration.maxConcurrentBatches
+        var index = 0
+        while index < batches.count {
+            guard !Task.isCancelled, isPanelActive, lastConnectedForm == form else {
                 return
             }
-            let job = prefetchQueue[prefetchCursor]
-            prefetchCursor += 1
-            await prefetchOne(job, form: form)
+            let window = batches[index..<min(index + limit, batches.count)]
+            index += limit
+            let results = await withTaskGroup(of: [EntityID: HistorySeries].self) { group in
+                for batch in window {
+                    let ids = batch.ids
+                    let range = batch.range
+                    group.addTask { [bulkHistoryProvider] in
+                        await bulkHistoryProvider(form, ids, range)
+                    }
+                }
+                var merged: [EntityID: HistorySeries] = [:]
+                for await partial in group {
+                    merged.merge(partial) { _, new in new }
+                }
+                return merged
+            }
+            await applyBulkSyncResults(results)
         }
     }
 
-    /// Decides whether an entity needs a fetch this pass.
+    /// The prioritized entity set to sync this cycle.
     ///
-    /// Lookahead entities fetch only when their cached series is absent or expired
-    /// per the cache TTL. Visible (active) entities additionally refetch once the
-    /// active refresh interval has elapsed since their last fetch, even while their
-    /// cached series remains within the cache TTL.
-    private func shouldPrefetch(key: PerchHAHistoryCacheKey, isActive: Bool, now: PerchInstant) -> Bool {
-        let isCached = historyCache.peek(for: key, now: now) != nil
-        guard isCached else {
-            return true
+    /// Hot entities (currently visible, or with a non-zero interest score from past
+    /// visibility/hover) sync every cycle. Cold entities (displayed but never
+    /// looked at) sync only every `coldRefreshDivisor`-th cycle, so hot rows stay
+    /// freshest while the whole list is still covered periodically.
+    private func bulkSyncTargets(cycle: Int) -> [EntityID] {
+        let displayed = displayedEntityIDs()
+        let visible = Set(visibleEntityIDs)
+        let includeCold = cycle % bulkSyncConfiguration.coldRefreshDivisor == 0
+
+        var seen = Set<EntityID>()
+        var targets: [EntityID] = []
+        // Visible first (highest priority), then the rest of the displayed list.
+        for id in visibleEntityIDs + displayed where seen.insert(id).inserted {
+            let isHot = visible.contains(id) || (entityInterest[id] ?? 0) > 0
+            if isHot || includeCold {
+                targets.append(id)
+            }
         }
-        guard isActive, let fetchedAt = prefetchLastFetched[key] else {
-            return false
-        }
-        return fetchedAt.advanced(by: historyPrefetchConfiguration.activeRefreshInterval) <= now
+        return targets
     }
 
-    /// Fetches one entity's history into the cache without touching the popover
-    /// history state, recording the fetch instant for active-refresh accounting.
-    private func prefetchOne(_ job: PrefetchJob, form: PerchHAConnectionForm) async {
-        let result = await historyProvider(form, job.entityID, job.range)
-        guard !Task.isCancelled, isPanelActive else {
-            return
-        }
-        guard case let .success(series) = result, series.entityID == job.entityID, series.range == job.range else {
+    /// Drops interest entries for entities no longer displayed so the score map
+    /// stays bounded to the live working set.
+    private func pruneInterest() {
+        let live = Set(displayedEntityIDs() + visibleEntityIDs)
+        entityInterest = entityInterest.filter { live.contains($0.key) }
+    }
+
+    /// Overrides the cache in place for every series a cycle successfully fetched.
+    /// Bumps ``historyRevision`` once per changed entry so inline previews redraw.
+    /// Never removes an entry: entities absent here simply keep their prior series.
+    private func applyBulkSyncResults(_ results: [EntityID: HistorySeries]) async {
+        guard !results.isEmpty, isPanelActive else {
             return
         }
         let now = await clock.now()
         lastObservedInstant = now
-        prefetchLastFetched[job.key] = now
-        insertHistory(series, for: job.key, now: now)
+        for (entityID, series) in results {
+            let key = PerchHAHistoryCacheKey(entityID: entityID, range: series.range)
+            insertHistory(series, for: key, now: now)
+        }
     }
 
     public func dismissHistoryPopover() {
@@ -4007,8 +4070,9 @@ public final class PerchHAPanelModel: ObservableObject {
         historyRequestGeneration += 1
         pendingControlChange = nil
         evictAllHistory()
-        cancelHistoryPrefetch()
-        prefetchLastFetched = [:]
+        cancelHistoryBulkSync()
+        entityInterest = [:]
+        bulkSyncCycle = 0
         visibleEntityIDs = []
         lastConnectedForm = nil
         oauthSignInState = .idle
@@ -4225,8 +4289,9 @@ public final class PerchHAPanelModel: ObservableObject {
                 historyCloseTask = nil
                 historyRequestGeneration += 1
                 evictAllHistory()
-                cancelHistoryPrefetch()
-                prefetchLastFetched = [:]
+                cancelHistoryBulkSync()
+                entityInterest = [:]
+                bulkSyncCycle = 0
                 pendingControlChange = nil
             }
             lastConnectedForm = form
@@ -4255,10 +4320,10 @@ public final class PerchHAPanelModel: ObservableObject {
             serviceMetadata: connectionChanged ? [] : snapshot.serviceMetadata
             )
             if connectionChanged {
-                // A genuine new connection cleared the cache and cancelled prefetch
-                // above; re-arm so the visible rows warm again instead of staying
-                // blank forever.
-                scheduleHistoryPrefetch()
+                // A genuine new connection cleared the cache and cancelled the bulk
+                // sync above; re-arm so the visible rows warm again instead of
+                // staying blank forever.
+                startHistoryBulkSync()
             }
             if diagnosticIsDegraded {
                 diagnosticIsDegraded = false
