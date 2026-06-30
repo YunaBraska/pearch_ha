@@ -70,6 +70,53 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(increased.contrastPolicy, .increased)
     }
 
+    func test_t_design_tokens_expose_the_documented_spacing_and_radius_scale() {
+        XCTAssertEqual(PerchHASpacing.xs, 4)
+        XCTAssertEqual(PerchHASpacing.sm, 8)
+        XCTAssertEqual(PerchHASpacing.md, 12)
+        XCTAssertEqual(PerchHASpacing.lg, 16)
+        XCTAssertEqual(PerchHASpacing.xl, 24)
+        XCTAssertEqual(PerchHACornerRadius.control, 8)
+        XCTAssertEqual(PerchHACornerRadius.card, 12)
+        XCTAssertEqual(PerchHACornerRadius.panel, 16)
+    }
+
+    func test_t_motion_token_duration_sits_in_the_documented_range() {
+        XCTAssertEqual(PerchHAMotion.standardDuration, 0.18, accuracy: 0.0001)
+        XCTAssertGreaterThanOrEqual(PerchHAMotion.standardDuration, 0.12)
+        XCTAssertLessThanOrEqual(PerchHAMotion.standardDuration, 0.20)
+    }
+
+    func test_t_motion_animation_helper_is_nil_only_when_reduce_motion_is_on() {
+        XCTAssertNil(PerchHAMotion.animation(reduceMotion: true))
+        XCTAssertNotNil(PerchHAMotion.animation(reduceMotion: false))
+    }
+
+    func test_t_state_view_kind_maps_loading_phase() {
+        XCTAssertEqual(PerchHAStateViewKind.forContent(phase: .connecting), .loading)
+    }
+
+    func test_t_state_view_kind_maps_empty_phase() {
+        XCTAssertEqual(PerchHAStateViewKind.forContent(phase: .connectedEmpty), .empty)
+    }
+
+    func test_t_state_view_kind_maps_connection_form_phases() {
+        XCTAssertEqual(PerchHAStateViewKind.forContent(phase: .firstRun), .connectionForm)
+        XCTAssertEqual(
+            PerchHAStateViewKind.forContent(phase: .failed(.authentication)),
+            .connectionForm
+        )
+    }
+
+    func test_t_state_view_kind_maps_data_phases() {
+        XCTAssertEqual(PerchHAStateViewKind.forContent(phase: .connectedData), .data)
+        XCTAssertEqual(PerchHAStateViewKind.forContent(phase: .reconnecting(attempt: 1)), .data)
+        XCTAssertEqual(
+            PerchHAStateViewKind.forContent(phase: .failedStale(.unreachable(host: "ha.local"))),
+            .data
+        )
+    }
+
     func test_t_accessibility_view_root_surfaces_state_announcements_and_platform_preferences() {
         let snapshot = PerchHAPanelSnapshot(
             connectionState: .failed(.authentication),

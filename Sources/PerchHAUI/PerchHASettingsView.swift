@@ -211,26 +211,17 @@ struct PerchHAConnectionFormFields: View {
             .accessibilityHidden(true)
     }
 
-    @ViewBuilder
     private func connectionMessage(
         _ message: String,
         hint: String?,
         accessibilityPrefix: String
     ) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(message)
-                .font(.callout)
-                .foregroundStyle(.red)
-                .fixedSize(horizontal: false, vertical: true)
-            if let hint {
-                Text(hint)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(accessibilityPrefix): \(message)\(hint.map { ". \($0)" } ?? "")")
+        PerchHAErrorState(
+            title: message,
+            message: hint,
+            style: .inline,
+            accessibilityPrefix: accessibilityPrefix
+        )
     }
 
     private func connectionFailureHint(_ message: String) -> String? {
@@ -328,6 +319,7 @@ public struct PerchHASettingsView: View {
     @State private var expandedEntityIDs: Set<EntityID>
     @State private var displayPreferences: PerchHADisplayPreferences
     @State private var launchAtLogin: Bool
+    @State private var launchAtLoginPermissionDenied = false
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
@@ -447,7 +439,7 @@ public struct PerchHASettingsView: View {
 
     private var connectionTab: some View {
         ScrollView(.vertical) {
-            PerchHACard(cornerRadius: 12) {
+            PerchHACard(cornerRadius: PerchHACornerRadius.card) {
                 PerchHAConnectionFormFields(model: model)
                     .textFieldStyle(.roundedBorder)
                     .padding(16)
@@ -469,7 +461,7 @@ public struct PerchHASettingsView: View {
     private var generalTab: some View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 14) {
-                PerchHACard(cornerRadius: 12) {
+                PerchHACard(cornerRadius: PerchHACornerRadius.card) {
                     VStack(alignment: .leading, spacing: 12) {
                         settingsSection(title: "Menu bar", systemImage: "menubar.rectangle") {
                             VStack(alignment: .leading, spacing: 10) {
@@ -498,7 +490,7 @@ public struct PerchHASettingsView: View {
                     .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                PerchHACard(cornerRadius: 12) {
+                PerchHACard(cornerRadius: PerchHACornerRadius.card) {
                     VStack(alignment: .leading, spacing: 12) {
                         settingsSection(title: "Appearance", systemImage: "paintbrush") {
                             VStack(alignment: .leading, spacing: 10) {
@@ -525,24 +517,33 @@ public struct PerchHASettingsView: View {
                                     .accessibilityLabel("Accent color")
                                 }
                                 accentSwatchPreview
+                                settingsSectionDivider
+                                PerchHASectionHeader("Preview", systemImage: "eye")
+                                PerchHAAppearancePreview(preferences: displayPreferences)
                             }
                         }
                     }
                     .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                PerchHACard(cornerRadius: 12) {
+                PerchHACard(cornerRadius: PerchHACornerRadius.card) {
                     VStack(alignment: .leading, spacing: 12) {
                         settingsSection(title: "Startup", systemImage: "power") {
-                            VStack(alignment: .leading, spacing: 6) {
+                            VStack(alignment: .leading, spacing: PerchHASpacing.sm - 2) {
                                 Toggle("Launch at login", isOn: launchAtLoginBinding)
                                     .toggleStyle(.checkbox)
                                     .fixedSize()
                                     .accessibilityLabel("Launch PearchHA at login")
                                 Text("Start PearchHA automatically when you sign in to this Mac.")
-                                    .font(.caption)
+                                    .font(PerchHATypography.caption().weight(.regular))
                                     .foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
+                                if launchAtLoginPermissionDenied {
+                                    PerchHAPermissionState(
+                                        title: "Couldn't enable launch at login",
+                                        message: "Open System Settings > General > Login Items and allow PearchHA."
+                                    )
+                                }
                             }
                         }
                     }
@@ -598,7 +599,7 @@ public struct PerchHASettingsView: View {
     private var advancedTab: some View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 14) {
-                PerchHACard(cornerRadius: 12) {
+                PerchHACard(cornerRadius: PerchHACornerRadius.card) {
                     VStack(alignment: .leading, spacing: 12) {
                         settingsSection(title: "History prefetch", systemImage: "chart.line.uptrend.xyaxis") {
                             VStack(alignment: .leading, spacing: 6) {
@@ -621,7 +622,7 @@ public struct PerchHASettingsView: View {
                     .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                PerchHACard(cornerRadius: 12) {
+                PerchHACard(cornerRadius: PerchHACornerRadius.card) {
                     VStack(alignment: .leading, spacing: 12) {
                         settingsSection(title: "Reset", systemImage: "arrow.counterclockwise") {
                             VStack(alignment: .leading, spacing: 8) {
@@ -663,7 +664,7 @@ public struct PerchHASettingsView: View {
     private var privacyTab: some View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 14) {
-                PerchHACard(cornerRadius: 12) {
+                PerchHACard(cornerRadius: PerchHACornerRadius.card) {
                     VStack(alignment: .leading, spacing: 12) {
                         settingsSection(title: "What PearchHA reads", systemImage: "doc.text.magnifyingglass") {
                             Text("PearchHA talks only to the Home Assistant server you configure. It reads your Home Assistant address and the access token (or browser sign-in) you provide, plus the entity states needed to show your values.")
@@ -743,13 +744,16 @@ public struct PerchHASettingsView: View {
                 // call fails, the toggle snaps back instead of lying.
                 let applied = launchAtLoginSink(requested)
                 launchAtLogin = applied ? requested : launchAtLoginProvider()
+                // Surface a calm permission message only when the user asked to
+                // enable launch at login and the system declined.
+                launchAtLoginPermissionDenied = requested && !applied
             }
         )
     }
 
     private var aboutTab: some View {
         VStack(alignment: .leading, spacing: 14) {
-            PerchHACard(cornerRadius: 12) {
+            PerchHACard(cornerRadius: PerchHACornerRadius.card) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 10) {
                         Image(systemName: "house.circle.fill")
@@ -921,13 +925,7 @@ public struct PerchHASettingsView: View {
     private func selectionRoom(_ room: SelectableRoom, canMoveUp: Bool, canMoveDown: Bool) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             selectionDragDrop(
-                HStack(spacing: 5) {
-                    Text(room.name.uppercased())
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .tracking(0.4)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
+                PerchHASectionHeader(room.name) {
                     selectionMoveButtons(
                         up: {
                             model.moveRoom(room.id, direction: .up)
@@ -941,10 +939,10 @@ public struct PerchHASettingsView: View {
                         canMoveDown: canMoveDown
                     )
                 }
-                .padding(.horizontal, 4),
+                .padding(.horizontal, PerchHASpacing.xs),
                 item: .room(room.id)
             )
-            PerchHACard(cornerRadius: 12) {
+            PerchHACard(cornerRadius: PerchHACornerRadius.card) {
                 VStack(spacing: 0) {
                     ForEach(Array(room.entities.enumerated()), id: \.element.entity.id.rawValue) { index, selectable in
                         selectionDragDrop(
@@ -1074,25 +1072,13 @@ public struct PerchHASettingsView: View {
         systemImage: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label {
-                Text(title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-                    .tracking(0.5)
-            } icon: {
-                Image(systemName: systemImage)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(PerchHATheme.accent)
-            }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(title)
+        VStack(alignment: .leading, spacing: PerchHASpacing.sm) {
+            PerchHASectionHeader(title, systemImage: systemImage)
             content()
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 8)
+        .padding(.vertical, PerchHASpacing.sm)
     }
 
     private var settingsSectionDivider: some View {

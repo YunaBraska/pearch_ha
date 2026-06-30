@@ -4787,12 +4787,14 @@ public struct PerchHAPanelView: View {
 
     @ViewBuilder
     private var content: some View {
-        switch model.snapshot.phase {
-        case .firstRun, .connecting, .failed:
+        switch PerchHAStateViewKind.forContent(phase: model.snapshot.phase) {
+        case .loading:
+            loadingState
+        case .connectionForm:
             connectionForm
-        case .connectedEmpty:
+        case .empty:
             connectedEmptyState
-        case .connectedData, .reconnecting, .failedStale:
+        case .data:
             let rooms = PerchHARoomSearch.filter(model.snapshot.rooms, query: panelSearch)
             ScrollView {
                 if rooms.isEmpty {
@@ -4800,48 +4802,37 @@ public struct PerchHAPanelView: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(14)
+                        .padding(PerchHASpacing.lg - 2)
                         .accessibilityLabel("No matching values")
                 } else {
-                    LazyVStack(alignment: .leading, spacing: 12) {
+                    LazyVStack(alignment: .leading, spacing: PerchHASpacing.md) {
                         ForEach(rooms, id: \.id.rawValue) { room in
                             roomSection(room)
                         }
                     }
-                    .padding(14)
+                    .padding(PerchHASpacing.lg - 2)
                 }
             }
         }
     }
 
+    private var loadingState: some View {
+        PerchHALoadingState(
+            title: "Connecting…",
+            message: "Reaching your Home Assistant and loading values."
+        )
+    }
+
     private var connectedEmptyState: some View {
-        VStack(spacing: 12) {
-            Spacer()
-            Image(systemName: "square.dashed")
-                .font(.system(size: 34))
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            VStack(spacing: 4) {
-                Text("No values yet")
-                    .font(.headline)
-                Text("Pick the rooms and sensors you want to keep an eye on.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Button {
-                openSettings()
-            } label: {
-                Label("Choose values…", systemImage: "slider.horizontal.3")
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(model.snapshot.availableRooms.isEmpty)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity)
-        .padding(24)
-        .accessibilityElement(children: .contain)
+        PerchHAEmptyState(
+            systemImage: "square.dashed",
+            title: "No values yet",
+            message: "Pick the rooms and sensors you want to keep an eye on.",
+            actionTitle: "Choose values…",
+            actionSystemImage: "slider.horizontal.3",
+            actionDisabled: model.snapshot.availableRooms.isEmpty,
+            action: { openSettings() }
+        )
     }
 
     private var connectionForm: some View {
@@ -4852,17 +4843,10 @@ public struct PerchHAPanelView: View {
         }
     }
     private func roomSection(_ room: Room) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 5) {
-                Text(room.name.uppercased())
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .tracking(0.6)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 4)
-            PerchHACard(cornerRadius: 12) {
+        VStack(alignment: .leading, spacing: PerchHASpacing.sm - 2) {
+            PerchHASectionHeader(room.name)
+                .padding(.horizontal, PerchHASpacing.xs)
+            PerchHACard(cornerRadius: PerchHACornerRadius.card) {
                 VStack(spacing: 0) {
                     ForEach(Array(room.entities.enumerated()), id: \.element.id.rawValue) { index, entity in
                         entityRow(entity)
