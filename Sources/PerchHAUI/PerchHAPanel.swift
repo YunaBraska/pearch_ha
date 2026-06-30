@@ -844,6 +844,77 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
         }
     }
 
+    /// Builds the dashboard header's summary strip projection from real data.
+    ///
+    /// The connection state always yields a status pill. The primary metric is the
+    /// first promoted menu-bar entity that resolves to a numeric value, falling
+    /// back to the first numeric entity across rooms; entities that present as a
+    /// state pill (on/off, open/closed) are skipped so the metric is always a
+    /// number. The warning count is the number of visible entities whose value is
+    /// unavailable, unknown, or stale — `nil` when there are no visible entities so
+    /// the chip is omitted rather than fabricated.
+    ///
+    /// - Parameter locale: The locale used to format the primary metric value.
+    /// - Returns: A pure ``PerchHADashboardSummary`` for the header.
+    public func dashboardSummary(locale: Locale = .current) -> PerchHADashboardSummary {
+        let allEntities = rooms.flatMap(\.entities)
+        let primary = resolvePrimaryMetric(allEntities: allEntities, locale: locale)
+        let warningCount: Int? = allEntities.isEmpty
+            ? nil
+            : allEntities.reduce(0) { count, entity in
+                switch formattedValue(for: entity, locale: locale).status {
+                case .unavailable, .unknown, .stale:
+                    count + 1
+                case .available:
+                    count
+                }
+            }
+        return PerchHADashboardSummary(
+            connectionState: connectionState,
+            connectionLabel: connectionSummary,
+            primaryMetric: primary,
+            warningCount: warningCount
+        )
+    }
+
+    private func resolvePrimaryMetric(
+        allEntities: [DiscoveredEntity],
+        locale: Locale
+    ) -> PerchHADashboardSummary.PrimaryMetric? {
+        let promotedFirst = menuBarDisplayConfiguration.promotedEntityIDs
+            .compactMap { id in allEntities.first { $0.id == id } }
+        for entity in promotedFirst + allEntities {
+            let presentation = PerchHAEntityRowPresentation.resolve(
+                entity: entity,
+                configuration: menuBarDisplayConfiguration.itemConfiguration(for: entity.id),
+                availableEntities: allEntities,
+                locale: locale
+            )
+            let value = formattedValue(for: entity, locale: locale)
+            switch presentation {
+            case let .gauge(gauge):
+                return PerchHADashboardSummary.PrimaryMetric(
+                    entityID: entity.id,
+                    name: entity.name,
+                    valueText: value.text,
+                    fraction: gauge.fraction,
+                    severity: gauge.severity
+                )
+            case let .value(severity) where value.status == .available && Double(entity.state) != nil:
+                return PerchHADashboardSummary.PrimaryMetric(
+                    entityID: entity.id,
+                    name: entity.name,
+                    valueText: value.text,
+                    fraction: nil,
+                    severity: severity
+                )
+            case .value, .statePill:
+                continue
+            }
+        }
+        return nil
+    }
+
     public func formattedValue(for entity: DiscoveredEntity, locale: Locale = .current) -> FormattedEntityValue {
         let configuration = menuBarDisplayConfiguration.itemConfiguration(for: entity.id)
         return EntityValueFormatter(
@@ -4610,7 +4681,6 @@ public struct PerchHAPanelView: View {
     private let accessibilityPreferencesOverride: PerchHAAccessibilityPreferences?
     private let onOpenSettings: (() -> Void)?
     @State private var pendingCustomActionID: CustomActionID?
-    @State private var panelSearch: String = ""
     @State private var visibleEntityIDs: Set<EntityID> = []
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
@@ -4640,20 +4710,24 @@ public struct PerchHAPanelView: View {
         )
         VStack(alignment: .leading, spacing: 0) {
             topBar
-            Divider()
+            dashboardDivider
             content
-            Divider()
+            dashboardDivider
             footer
         }
         .frame(width: 360, height: 420, alignment: .top)
-        .background(.regularMaterial)
-        .contrast(accessibility.contrastPolicy == .increased ? 1.12 : 1)
+        .background(dashboardBackground)
+        .environment(\.colorScheme, .dark)
         .overlay {
-            if accessibility.contrastPolicy == .increased {
-                Rectangle()
-                    .stroke(Color.primary.opacity(0.32), lineWidth: 1)
-            }
+            RoundedRectangle(cornerRadius: PerchHATheme.Dashboard.panelCornerRadius, style: .continuous)
+                .strokeBorder(
+                    accessibility.contrastPolicy == .increased
+                        ? Color.white.opacity(0.32)
+                        : PerchHATheme.Dashboard.borderEmphatic,
+                    lineWidth: 1
+                )
         }
+        .contrast(accessibility.contrastPolicy == .increased ? 1.12 : 1)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibility.label)
         .accessibilityValue(accessibility.value)
@@ -4716,49 +4790,54 @@ public struct PerchHAPanelView: View {
         )
     }
 
+    /// The opaque dark base fill plus a thin translucent material, painted
+    /// edge-to-edge so the popover reads as a dark instrument panel and never
+    /// shows a transparent seam. The runtime window provides the rounded corners
+    /// and shadow; the base fill keeps every edge opaque.
+    private var dashboardBackground: some View {
+        PerchHATheme.Dashboard.panelBackground
+            .overlay(Rectangle().fill(.ultraThinMaterial).opacity(0.5))
+    }
+
+    private var dashboardDivider: some View {
+        Rectangle()
+            .fill(PerchHATheme.Dashboard.borderSubtle)
+            .frame(height: 1)
+    }
+
+    /// The dashboard header. For connected/data and stale phases it shows the
+    /// brand row plus the real-data summary strip; during onboarding/connecting/
+    /// empty/failed phases the summary strip would have no meaningful values, so
+    /// only the compact brand+refresh row is shown.
     @ViewBuilder
     private var topBar: some View {
         switch model.snapshot.phase {
         case .connectedData, .reconnecting, .failedStale:
-            searchBar
+            DashboardHeader(
+                summary: model.snapshot.dashboardSummary(),
+                canRefresh: model.snapshot.canRefresh,
+                onRefresh: { model.startRefresh() }
+            )
         case .firstRun, .connecting, .connectedEmpty, .failed:
             statusBar
         }
     }
 
-    private var searchBar: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(connectionStatusColor)
-                .frame(width: 8, height: 8)
-                .accessibilityHidden(true)
-            PerchHACapsuleField(systemImage: "magnifyingglass") {
-                PerchHANativeTextField(
-                    placeholder: "Search",
-                    text: $panelSearch,
-                    contentType: nil,
-                    normalizeOnCommit: nil,
-                    isBezeled: false
-                )
-                .frame(height: 18)
-            }
-            refreshButton
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-    }
-
     private var statusBar: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: PerchHASpacing.sm - 2) {
             Circle()
                 .fill(connectionStatusColor)
-                .frame(width: 8, height: 8)
+                .frame(width: 7, height: 7)
                 .accessibilityHidden(true)
+            Text("PearchHA")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(PerchHATheme.Dashboard.textPrimary)
             Spacer(minLength: 0)
             refreshButton
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.horizontal, PerchHASpacing.md)
+        .padding(.top, PerchHASpacing.md)
+        .padding(.bottom, PerchHASpacing.sm)
     }
 
     private var refreshButton: some View {
@@ -4767,22 +4846,14 @@ public struct PerchHAPanelView: View {
         } label: {
             Image(systemName: "arrow.clockwise")
         }
+        .buttonStyle(PerchHAIconButtonStyle())
         .disabled(!model.snapshot.canRefresh)
         .help("Refresh")
         .accessibilityLabel("Refresh")
     }
 
     private var connectionStatusColor: Color {
-        switch model.snapshot.connectionState {
-        case .connected:
-            return .green
-        case .connecting, .reconnecting:
-            return .orange
-        case .failed:
-            return .red
-        case .disconnected:
-            return Color.secondary
-        }
+        PerchHATheme.Dashboard.connectionColor(model.snapshot.connectionState)
     }
 
     @ViewBuilder
@@ -4795,23 +4866,13 @@ public struct PerchHAPanelView: View {
         case .empty:
             connectedEmptyState
         case .data:
-            let rooms = PerchHARoomSearch.filter(model.snapshot.rooms, query: panelSearch)
             ScrollView {
-                if rooms.isEmpty {
-                    Text("No matching values")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(PerchHASpacing.lg - 2)
-                        .accessibilityLabel("No matching values")
-                } else {
-                    LazyVStack(alignment: .leading, spacing: PerchHASpacing.md) {
-                        ForEach(rooms, id: \.id.rawValue) { room in
-                            roomSection(room)
-                        }
+                LazyVStack(alignment: .leading, spacing: PerchHASpacing.md) {
+                    ForEach(model.snapshot.rooms, id: \.id.rawValue) { room in
+                        roomSection(room)
                     }
-                    .padding(PerchHASpacing.lg - 2)
                 }
+                .padding(PerchHASpacing.lg - 2)
             }
         }
     }
@@ -4846,12 +4907,12 @@ public struct PerchHAPanelView: View {
         VStack(alignment: .leading, spacing: PerchHASpacing.sm - 2) {
             PerchHASectionHeader(room.name)
                 .padding(.horizontal, PerchHASpacing.xs)
-            PerchHACard(cornerRadius: PerchHACornerRadius.card) {
+            PerchHADashboardCard(cornerRadius: PerchHACornerRadius.card) {
                 VStack(spacing: 0) {
                     ForEach(Array(room.entities.enumerated()), id: \.element.id.rawValue) { index, entity in
                         entityRow(entity)
                         if index < room.entities.count - 1 {
-                            Divider()
+                            dashboardDivider
                                 .padding(.leading, 46)
                         }
                     }
@@ -4879,11 +4940,11 @@ public struct PerchHAPanelView: View {
                 Image(systemName: entityIconName(for: entity))
                     .font(.system(size: 13))
                     .frame(width: 18, alignment: .center)
-                    .foregroundStyle(value.status == .available ? PerchHATheme.accent : Color.secondary)
+                    .foregroundStyle(value.status == .available ? PerchHATheme.Dashboard.accentPrimary : PerchHATheme.Dashboard.textTertiary)
                     .accessibilityHidden(true)
                 Text(entity.name)
                     .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(PerchHATheme.Dashboard.textSecondary)
                     .lineLimit(1)
                 Spacer(minLength: 8)
                 rowTopLineTrailing(entity: entity, value: value, presentation: presentation)
@@ -5103,40 +5164,19 @@ public struct PerchHAPanelView: View {
         }
     }
 
+    /// The quiet anchored footer. Shows a short problem message when present,
+    /// otherwise the calm relative "updated" caption, plus the refresh, settings,
+    /// and quit controls.
     private var footer: some View {
-        HStack(spacing: 6) {
-            if let problem = model.snapshot.problemDescription {
-                Text(problem)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .accessibilityLabel("Status: \(problem)")
-            }
-            Spacer(minLength: 4)
-            Button {
-                openSettings()
-            } label: {
-                Label("Settings", systemImage: "gearshape")
-                    .labelStyle(.titleAndIcon)
-                    .lineLimit(1)
-            }
-            .buttonStyle(PerchHAIconButtonStyle())
-            .disabled(model.snapshot.availableRooms.isEmpty)
-            .help("Settings")
-            .accessibilityLabel("Settings")
-            Button {
-                NSApplication.shared.terminate(nil)
-            } label: {
-                Label("Quit", systemImage: "power")
-                    .labelStyle(.titleAndIcon)
-                    .lineLimit(1)
-            }
-            .buttonStyle(PerchHAIconButtonStyle())
-            .help("Quit")
-            .accessibilityLabel("Quit")
-        }
-        .font(.footnote)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        DashboardFooter(
+            connectionColor: connectionStatusColor,
+            updatedText: model.snapshot.problemDescription ?? model.snapshot.lastUpdateDescription,
+            canRefresh: model.snapshot.canRefresh,
+            settingsDisabled: model.snapshot.availableRooms.isEmpty,
+            onRefresh: { model.startRefresh() },
+            onSettings: { openSettings() },
+            onQuit: { NSApplication.shared.terminate(nil) }
+        )
     }
 
     private func entityValue(_ entity: DiscoveredEntity) -> FormattedEntityValue {
@@ -5205,7 +5245,7 @@ public struct PerchHAPanelView: View {
             .monospacedDigit()
             .lineLimit(1)
             .minimumScaleFactor(0.7)
-            .foregroundStyle(value.status == .available ? heroSeverityColor(presentation) : Color.secondary)
+            .foregroundStyle(value.status == .available ? heroSeverityColor(presentation) : PerchHATheme.Dashboard.textTertiary)
             .accessibilityHidden(true)
     }
 
@@ -5236,11 +5276,11 @@ public struct PerchHAPanelView: View {
     private func heroSeverityColor(_ presentation: PerchHAEntityRowPresentation) -> Color {
         switch presentation {
         case let .gauge(gauge):
-            gauge.severity == .normal ? Color.primary : PerchHATheme.color(for: gauge.severity)
+            gauge.severity == .normal ? PerchHATheme.Dashboard.textPrimary : PerchHATheme.color(for: gauge.severity)
         case let .value(severity):
-            severity == .normal ? Color.primary : PerchHATheme.color(for: severity)
+            severity == .normal ? PerchHATheme.Dashboard.textPrimary : PerchHATheme.color(for: severity)
         case .statePill:
-            Color.primary
+            PerchHATheme.Dashboard.textPrimary
         }
     }
 

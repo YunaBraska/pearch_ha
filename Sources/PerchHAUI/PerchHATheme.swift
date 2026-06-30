@@ -113,6 +113,84 @@ public enum PerchHATheme {
         scheme == .dark ? Color.clear : Color.black.opacity(0.06)
     }
 
+    /// The fixed dark palette for the menu-bar dashboard popover.
+    ///
+    /// Unlike the rest of ``PerchHATheme``, these values do **not** adapt to the
+    /// system appearance: the dashboard renders dark in both light and dark mode
+    /// (a deliberate, iStat-Menus-class "instrument panel" look). The numbers are
+    /// graphite/blue-leaning so the calm Home Assistant ``accent`` blue and the
+    /// semantic trio read cleanly against them. The Settings window keeps the
+    /// adaptive palette above and never uses these.
+    public enum Dashboard {
+        /// The opaque base fill of the panel, behind the translucent material.
+        ///
+        /// A deep graphite-blue. Painted edge-to-edge so the popover never shows a
+        /// transparent seam and the material has something dark to sample.
+        public static let panelBackground = Color(red: 0.071, green: 0.078, blue: 0.094)
+
+        /// The room/metric card fill — a hair lighter than the panel.
+        public static let cardBackground = Color(red: 0.110, green: 0.122, blue: 0.145)
+
+        /// An elevated card fill for the header summary strip and hovered surfaces.
+        public static let cardBackgroundElevated = Color(red: 0.145, green: 0.161, blue: 0.188)
+
+        /// The hairline border drawn around cards and the panel (white ≈ 0.08).
+        public static let borderSubtle = Color.white.opacity(0.08)
+
+        /// A slightly stronger hairline for the outer panel edge (white ≈ 0.10).
+        public static let borderEmphatic = Color.white.opacity(0.10)
+
+        /// The near-white primary text color for values and titles.
+        public static let textPrimary = Color(red: 0.93, green: 0.95, blue: 0.97)
+
+        /// The muted blue-gray secondary text color for labels and captions.
+        public static let textSecondary = Color(red: 0.62, green: 0.66, blue: 0.73)
+
+        /// The faint tertiary text color for de-emphasized hints.
+        public static let textTertiary = Color(red: 0.44, green: 0.48, blue: 0.55)
+
+        /// The primary accent (the calm Home Assistant blue, resolved live).
+        public static var accentPrimary: Color { PerchHATheme.accent }
+
+        /// A violet/pink secondary-series accent for secondary data.
+        public static let accentSecondary = Color(red: 0.71, green: 0.55, blue: 0.93)
+
+        /// The warning accent (amber), aligned with ``PerchHATheme/warn``.
+        public static let accentWarning = PerchHATheme.warn
+
+        /// The success accent (green), aligned with ``PerchHATheme/ok``.
+        public static let accentSuccess = PerchHATheme.ok
+
+        /// The danger accent (red), aligned with ``PerchHATheme/critical``.
+        public static let accentDanger = PerchHATheme.critical
+
+        /// The muted gray-blue track behind gauges and bars.
+        public static let trackColor = Color.white.opacity(0.10)
+
+        /// The outer corner radius of the dashboard panel surface.
+        public static let panelCornerRadius: CGFloat = 20
+
+        /// The semantic color for a connection state, used by the status pill and
+        /// the header status dot.
+        ///
+        /// - Parameter state: The current connection state.
+        /// - Returns: Success for connected, warning while connecting/reconnecting,
+        ///   danger for failed, and the muted secondary text color when
+        ///   disconnected.
+        public static func connectionColor(_ state: ConnectionState) -> Color {
+            switch state {
+            case .connected:
+                accentSuccess
+            case .connecting, .reconnecting:
+                accentWarning
+            case .failed:
+                accentDanger
+            case .disconnected:
+                textSecondary
+            }
+        }
+    }
+
     /// The subtle fill of an inset capsule control (search field, footer bar).
     ///
     /// - Parameter scheme: The current appearance.

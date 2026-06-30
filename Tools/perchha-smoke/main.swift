@@ -3850,12 +3850,12 @@ struct PerchHASmoke {
         }
 
         try expect(
-            connectedLight.sampledHash != connectedDark.sampledHash,
-            "panel snapshots distinguish light and dark appearance"
+            connectedLight.sampledHash == connectedDark.sampledHash,
+            "dashboard popover renders identically in light and dark system appearance (it is always dark)"
         )
         try expect(
             connectedDark.sampledHash != increasedContrast.sampledHash,
-            "panel snapshots distinguish increased contrast appearance"
+            "dashboard popover still distinguishes increased contrast"
         )
         try expect(
             reducedMotion.pixelsWide == connectedLight.pixelsWide && reducedMotion.pixelsHigh == connectedLight.pixelsHigh,
