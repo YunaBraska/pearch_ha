@@ -383,16 +383,37 @@ public struct TelemetryRowSeparator: View {
 
 // MARK: - Telemetry row
 
+/// The fixed-column geometry shared by every telemetry row so the panel reads as
+/// an aligned table: the same reserved widths and preview height are used for
+/// every row, whether or not its data has landed yet. Reserving the columns is
+/// what keeps the cache-fill flicker-free — content lands inside a slot that was
+/// already occupying its final footprint.
+public enum TelemetryRowMetrics {
+    /// The fixed leading icon column width.
+    public static let iconWidth: CGFloat = 16
+    /// The reserved history-preview column width (micro chart or placeholder).
+    public static let previewWidth: CGFloat = 92
+    /// The reserved history-preview column height.
+    public static let previewHeight: CGFloat = 24
+    /// The reserved value/status column minimum width, right-aligned.
+    public static let valueMinWidth: CGFloat = 66
+    /// The reserved trailing control column width so toggles align across rows.
+    public static let controlWidth: CGFloat = 38
+}
+
 /// A compact, single-line telemetry row — the cockpit replacement for the old
 /// entity row.
 ///
-/// Layout: `[icon] [label (+ tiny subtitle)] … [inline middle] [trailing]`. The
-/// row has a fixed compact height, no rounded background, no chevron, and no
-/// per-row border. The `middle` slot holds an inline micro chart or state glyph;
-/// the `trailing` slot holds the right-aligned value/status and any compact
-/// control. Both slots are supplied by the caller so the row stays a thin,
-/// reusable renderer. Accessibility is framed by the caller via the row label.
-public struct TelemetryRow<Middle: View, Trailing: View>: View {
+/// Layout is a fixed-column reserved grid so every row lines up like a table and
+/// nothing reflows when cached data arrives:
+/// `[icon 16] [label (+ subtitle), flexible] [preview 92×24] [value ≥66] [control 38]`.
+/// Each non-flexible column is a reserved fixed (or fixed-min) width that is
+/// always present, so a row that has no cached history shows a muted placeholder
+/// in the same footprint a chart would occupy. The `preview`, `value`, and
+/// `control` slots are supplied by the caller (which decides chart-vs-placeholder
+/// and value-vs-dash) so the row stays a thin, reusable renderer that only owns
+/// alignment. Accessibility is framed by the caller via the row label.
+public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
     @Environment(\.dashboardPalette) private var palette
     @Environment(\.dashboardRowDensity) private var rowDensity
     private let icon: String
@@ -400,8 +421,9 @@ public struct TelemetryRow<Middle: View, Trailing: View>: View {
     private let label: String
     private let subtitle: String?
     private let secondLine: AnyView?
-    private let middle: Middle
-    private let trailing: Trailing
+    private let preview: Preview
+    private let value: Value
+    private let control: Control
 
     /// Creates a telemetry row.
     ///
@@ -411,24 +433,32 @@ public struct TelemetryRow<Middle: View, Trailing: View>: View {
     ///   - label: The single-line entity name.
     ///   - subtitle: An optional tiny muted subtitle (e.g. a unit).
     ///   - secondLine: An optional compact second line (e.g. cover controls).
-    ///   - middle: The inline middle slot (micro chart or glyph).
-    ///   - trailing: The right-aligned value/status/control slot.
+    ///   - preview: The reserved history-preview column (micro chart or muted
+    ///     placeholder); always present so swapping placeholder→chart never
+    ///     changes row height or shifts neighbors.
+    ///   - value: The reserved right-aligned value/status column (or a muted
+    ///     placeholder when the value is not yet known).
+    ///   - control: The reserved trailing control column (e.g. a toggle), or an
+    ///     empty view when the row exposes no control; the slot stays reserved so
+    ///     controls align across rows.
     public init(
         icon: String,
         iconActive: Bool,
         label: String,
         subtitle: String? = nil,
         secondLine: AnyView? = nil,
-        @ViewBuilder middle: () -> Middle,
-        @ViewBuilder trailing: () -> Trailing
+        @ViewBuilder preview: () -> Preview,
+        @ViewBuilder value: () -> Value,
+        @ViewBuilder control: () -> Control
     ) {
         self.icon = icon
         self.iconActive = iconActive
         self.label = label
         self.subtitle = subtitle
         self.secondLine = secondLine
-        self.middle = middle()
-        self.trailing = trailing()
+        self.preview = preview()
+        self.value = value()
+        self.control = control()
     }
 
     public var body: some View {
@@ -436,7 +466,7 @@ public struct TelemetryRow<Middle: View, Trailing: View>: View {
             HStack(spacing: 10) {
                 Image(systemName: icon)
                     .font(.system(size: 14))
-                    .frame(width: 16, alignment: .center)
+                    .frame(width: TelemetryRowMetrics.iconWidth, alignment: .center)
                     .foregroundStyle(iconActive ? palette.accentPrimary : palette.textTertiary)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 0) {
@@ -452,10 +482,18 @@ public struct TelemetryRow<Middle: View, Trailing: View>: View {
                             .lineLimit(1)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .layoutPriority(1)
-                Spacer(minLength: 8)
-                middle
-                trailing
+                preview
+                    .frame(
+                        width: TelemetryRowMetrics.previewWidth,
+                        height: TelemetryRowMetrics.previewHeight,
+                        alignment: .center
+                    )
+                value
+                    .frame(minWidth: TelemetryRowMetrics.valueMinWidth, alignment: .trailing)
+                control
+                    .frame(width: TelemetryRowMetrics.controlWidth, alignment: .trailing)
             }
             secondLine
         }
@@ -463,6 +501,23 @@ public struct TelemetryRow<Middle: View, Trailing: View>: View {
         .padding(.vertical, rowDensity == .compact ? 4 : 7)
         .frame(minHeight: rowDensity == .compact ? 30 : 38)
         .contentShape(Rectangle())
+    }
+}
+
+/// A muted reserved-slot placeholder: a faint baseline dash filling the history
+/// preview column when an entity has no cached history yet. It occupies the same
+/// footprint as a micro chart so the column never changes geometry when real data
+/// lands — calm, not a shimmering skeleton.
+public struct TelemetryPreviewPlaceholder: View {
+    @Environment(\.dashboardPalette) private var palette
+
+    /// Creates the placeholder.
+    public init() {}
+
+    public var body: some View {
+        MicroDash(color: palette.meterTrack)
+            .frame(width: TelemetryRowMetrics.previewWidth, height: 7)
+            .accessibilityHidden(true)
     }
 }
 

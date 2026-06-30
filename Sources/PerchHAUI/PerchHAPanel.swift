@@ -5368,7 +5368,7 @@ public struct PerchHAPanelView: View {
             dashboardDivider
             footer
         }
-        .frame(width: 360, height: 420, alignment: .top)
+        .frame(width: 384, height: 468, alignment: .top)
         .environment(\.dashboardPalette, palette)
         .environment(\.dashboardRowDensity, model.displayPreferences.dashboardRowDensity)
         .background(dashboardBackground(palette))
@@ -5622,11 +5622,14 @@ public struct PerchHAPanelView: View {
 
     /// A compact cockpit telemetry row built on the reusable ``TelemetryRow``.
     ///
-    /// Left: the domain icon + name (+ optional unit subtitle). Middle: an inline
-    /// micro chart drawn only from already-cached history (omitted when nothing is
-    /// cached — never fetches on render or scroll). Trailing: the right-aligned
-    /// value/status plus at most one compact control. Cover controls, when
-    /// enabled, drop onto a compact second line.
+    /// Built as a fixed-column reserved grid: the domain icon + name (+ optional
+    /// unit subtitle), then an always-present reserved history-preview column (an
+    /// inline micro chart drawn only from already-cached history, or a muted
+    /// placeholder when nothing is cached — never fetches on render or scroll),
+    /// then the right-aligned value/status column, then a reserved control column
+    /// holding at most one compact control. Cover controls, when enabled, drop
+    /// onto a compact second line. Reserving the columns keeps every row aligned
+    /// and lets cached data fill its slot in place without any layout shift.
     private func telemetryRow(_ entity: DiscoveredEntity) -> some View {
         let value = entityValue(entity)
         let presentation = rowPresentation(for: entity)
@@ -5636,8 +5639,9 @@ public struct PerchHAPanelView: View {
             label: entity.name,
             subtitle: rowSubtitle(for: entity, value: value),
             secondLine: rowSecondLine(for: entity),
-            middle: { rowMiddle(for: entity, presentation: presentation) },
-            trailing: { rowTrailing(entity: entity, value: value, presentation: presentation) }
+            preview: { rowPreview(for: entity, presentation: presentation) },
+            value: { rowValueOrPill(entity: entity, value: value, presentation: presentation) },
+            control: { rowControls(for: entity) }
         )
         .onAppear {
             markEntityVisible(entity.id, isVisible: true)
@@ -5885,15 +5889,18 @@ public struct PerchHAPanelView: View {
         )
     }
 
-    /// The row's inline middle slot: a tiny micro chart (or state glyph) drawn
-    /// only from already-cached history.
+    /// The row's reserved history-preview column: a tiny micro chart (or bounded
+    /// meter) drawn only from already-cached history, or a muted placeholder when
+    /// nothing is cached yet.
     ///
     /// Percentage/bounded rows draw a ``MicroMeter``; numeric rows draw a
     /// ``MicroSparkline`` from cache; non-numeric series draw ``MicroActivityBars``.
-    /// When nothing is cached and the row is not a percentage gauge, nothing is
-    /// drawn (no empty box). It never fetches on render or scroll.
+    /// When nothing is cached and the row is not a percentage gauge, a muted
+    /// ``TelemetryPreviewPlaceholder`` fills the same reserved footprint so the
+    /// placeholder→chart swap never shifts the row. It never fetches on render or
+    /// scroll.
     @ViewBuilder
-    private func rowMiddle(
+    private func rowPreview(
         for entity: DiscoveredEntity,
         presentation: PerchHAEntityRowPresentation
     ) -> some View {
@@ -5909,12 +5916,15 @@ public struct PerchHAPanelView: View {
             .frame(width: 54, height: 6)
         } else if let series = revisionedCachedHistorySeries(for: entity.id) {
             inlineMicroChart(series: series, palette: palette)
+        } else {
+            TelemetryPreviewPlaceholder()
         }
     }
 
     /// Picks the inline micro chart for a cached series: a numeric sparkline (a
     /// taller trace) or a discrete-state activity band (a thin strip, so it reads
-    /// as a timeline rather than a heavy block beside a state pill).
+    /// as a timeline rather than a heavy block beside a state pill). Both fill the
+    /// reserved preview column width so a numeric and a state row stay aligned.
     @ViewBuilder
     private func inlineMicroChart(
         series: HistorySeries,
@@ -5922,24 +5932,10 @@ public struct PerchHAPanelView: View {
     ) -> some View {
         if PerchHAHistoryCursor.numericSamples(of: series).count > 1 {
             MicroSparkline(series: series, color: palette.chartPrimary, muted: palette.chartMuted)
-                .frame(width: 88, height: 22)
+                .frame(width: TelemetryRowMetrics.previewWidth, height: 22)
         } else {
             MicroActivityBars(series: series, muted: palette.chartMuted)
-                .frame(width: 72, height: 7)
-        }
-    }
-
-    /// The right-aligned trailing slot: a status pill for booleans, a value (with
-    /// optional dynamic glyph) for numerics, plus at most one compact control.
-    @ViewBuilder
-    private func rowTrailing(
-        entity: DiscoveredEntity,
-        value: FormattedEntityValue,
-        presentation: PerchHAEntityRowPresentation
-    ) -> some View {
-        HStack(spacing: 8) {
-            rowValueOrPill(entity: entity, value: value, presentation: presentation)
-            rowControls(for: entity)
+                .frame(width: TelemetryRowMetrics.previewWidth, height: 7)
         }
     }
 

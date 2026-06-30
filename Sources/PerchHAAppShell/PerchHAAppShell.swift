@@ -9,7 +9,7 @@ import ServiceManagement
 import SwiftUI
 
 private enum AppShellLayout {
-    static let panelContentSize = NSSize(width: 360, height: 420)
+    static let panelContentSize = NSSize(width: 384, height: 468)
     static let settingsMinContentSize = NSSize(width: 660, height: 560)
 }
 

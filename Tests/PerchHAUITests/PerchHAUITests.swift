@@ -3,6 +3,7 @@ import AppKit
 import Combine
 import Foundation
 import FakeHA
+import SwiftUI
 import XCTest
 import PerchHACore
 import PerchHAClient
@@ -1166,6 +1167,69 @@ final class PerchHAUITests: XCTestCase {
             PerchHAHistoryBodyPresentation(state: model.snapshot.historyState, entityID: "sensor.office_temperature"),
             .unavailable("lost connection to Home Assistant")
         )
+    }
+
+    /// The reserved-grid promise: swapping a row's history-preview placeholder for
+    /// a real micro chart must not change the row's height, so cache-fill lands in
+    /// place without shifting neighbors. Rendered through the public ``TelemetryRow``
+    /// entrypoint into a hosting view at a fixed width.
+    func testTelemetryRowHeightIsStableBetweenPlaceholderAndChartPreview() {
+        let series = HistorySeries(
+            entityID: "sensor.office_temperature",
+            range: .hour,
+            samples: [
+                HistorySample(timestamp: Date(timeIntervalSince1970: 0), state: "20", numericValue: 20),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 600), state: "21", numericValue: 21),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 1_200), state: "22", numericValue: 22)
+            ]
+        )
+        let placeholderRow = TelemetryRow(
+            icon: "thermometer.medium",
+            iconActive: true,
+            label: "Office temperature",
+            preview: { TelemetryPreviewPlaceholder() },
+            value: { Text("21°") },
+            control: { EmptyView() }
+        )
+        let chartRow = TelemetryRow(
+            icon: "thermometer.medium",
+            iconActive: true,
+            label: "Office temperature",
+            preview: {
+                MicroSparkline(series: series, color: .blue, muted: .gray)
+                    .frame(width: TelemetryRowMetrics.previewWidth, height: 22)
+            },
+            value: { Text("21°") },
+            control: { EmptyView() }
+        )
+
+        let placeholderHeight = telemetryRowFittingHeight(placeholderRow)
+        let chartHeight = telemetryRowFittingHeight(chartRow)
+
+        XCTAssertEqual(placeholderHeight, chartHeight, accuracy: 0.5,
+                       "placeholder→chart swap must not change row height")
+    }
+
+    /// The reserved history-preview placeholder occupies the full reserved column
+    /// width so a no-history row's preview column matches a charted row's column.
+    func testTelemetryPreviewPlaceholderReservesColumnWidth() {
+        let hostingView = NSHostingView(rootView: TelemetryPreviewPlaceholder())
+        hostingView.layoutSubtreeIfNeeded()
+        let width = hostingView.fittingSize.width
+
+        XCTAssertEqual(width, TelemetryRowMetrics.previewWidth, accuracy: 0.5,
+                       "placeholder reserves the full preview column width")
+    }
+
+    private func telemetryRowFittingHeight(_ row: some View) -> CGFloat {
+        let hostingView = NSHostingView(
+            rootView: row
+                .frame(width: 360)
+                .environment(\.dashboardPalette, PerchHATheme.Dashboard.palette(.light))
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 360, height: 200)
+        hostingView.layoutSubtreeIfNeeded()
+        return hostingView.fittingSize.height
     }
 
     func testHistoryContentSummaryEmptySeriesIsEmpty() {
@@ -3389,6 +3453,103 @@ final class PerchHAUITests: XCTestCase {
         )
     }
 
+    /// A room not in the collapsed set is expanded by default, so the Entities
+    /// tab does not surprise the user by hiding rows on first render.
+    func testSelectionRoomExpandedByDefault() {
+        XCTAssertTrue(
+            SelectionRoomCollapse.isExpanded(
+                roomID: "office",
+                collapsedRoomIDs: [],
+                isSearching: false,
+                roomContainsInspectedEntity: false
+            )
+        )
+    }
+
+    /// A room whose id is in the collapsed set hides its rows when not searching
+    /// and not holding the open inspector.
+    func testSelectionRoomCollapsedHidesRows() {
+        XCTAssertFalse(
+            SelectionRoomCollapse.isExpanded(
+                roomID: "office",
+                collapsedRoomIDs: ["office"],
+                isSearching: false,
+                roomContainsInspectedEntity: false
+            )
+        )
+    }
+
+    /// An active search forces a collapsed room expanded so matches stay visible,
+    /// without clearing the stored collapsed state.
+    func testSelectionSearchForcesCollapsedRoomVisible() {
+        XCTAssertTrue(
+            SelectionRoomCollapse.isExpanded(
+                roomID: "office",
+                collapsedRoomIDs: ["office"],
+                isSearching: true,
+                roomContainsInspectedEntity: false
+            )
+        )
+    }
+
+    /// The room holding the open inspector is forced expanded so the inspected
+    /// entity stays reachable even if the room is otherwise collapsed.
+    func testSelectionInspectedRoomForcedVisible() {
+        XCTAssertTrue(
+            SelectionRoomCollapse.isExpanded(
+                roomID: "office",
+                collapsedRoomIDs: ["office"],
+                isSearching: false,
+                roomContainsInspectedEntity: true
+            )
+        )
+    }
+
+    /// Collapse-all reports true only when every shown room is collapsed.
+    func testSelectionAllCollapsedWhenEveryRoomCollapsed() {
+        XCTAssertTrue(
+            SelectionRoomCollapse.allCollapsed(
+                roomIDs: ["kitchen", "office"],
+                collapsedRoomIDs: ["kitchen", "office"],
+                isSearching: false
+            )
+        )
+    }
+
+    /// Collapse-all reports false while any shown room is still expanded.
+    func testSelectionAllCollapsedFalseWhenAnyRoomExpanded() {
+        XCTAssertFalse(
+            SelectionRoomCollapse.allCollapsed(
+                roomIDs: ["kitchen", "office"],
+                collapsedRoomIDs: ["kitchen"],
+                isSearching: false
+            )
+        )
+    }
+
+    /// During a search no room counts as collapsed, since search forces rooms
+    /// open; the affordance must then read as "Collapse all", not "Expand all".
+    func testSelectionAllCollapsedFalseWhileSearching() {
+        XCTAssertFalse(
+            SelectionRoomCollapse.allCollapsed(
+                roomIDs: ["kitchen", "office"],
+                collapsedRoomIDs: ["kitchen", "office"],
+                isSearching: true
+            )
+        )
+    }
+
+    /// With no rooms shown the affordance is inert, so collapse-all reports false.
+    func testSelectionAllCollapsedFalseWhenNoRooms() {
+        XCTAssertFalse(
+            SelectionRoomCollapse.allCollapsed(
+                roomIDs: [],
+                collapsedRoomIDs: [],
+                isSearching: false
+            )
+        )
+    }
+
     func test_t_settings_reorder_boundary_move_does_not_persist() async {
         let sink = SelectionSinkRecorder()
         let model = PerchHAPanelModel(
@@ -3808,8 +3969,8 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertTrue(panel.isFloatingPanel)
         XCTAssertTrue(panel.hidesOnDeactivate)
         XCTAssertNotNil(panel.contentViewController)
-        XCTAssertEqual(Int(frameSize.width.rounded()), 360)
-        XCTAssertGreaterThanOrEqual(Int(frameSize.height.rounded()), 420)
+        XCTAssertEqual(Int(frameSize.width.rounded()), 384)
+        XCTAssertGreaterThanOrEqual(Int(frameSize.height.rounded()), 468)
     }
 
     func testAppShellSettingsButtonEditorExposesGuidedNameFieldAndServiceTargetPickers() {
@@ -4214,8 +4375,8 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertTrue(snapshot.panelCanBecomeMain)
         XCTAssertTrue(snapshot.panelIsFloating)
         XCTAssertTrue(snapshot.panelHidesOnDeactivate)
-        XCTAssertEqual(snapshot.panelContentWidth, 360)
-        XCTAssertEqual(snapshot.panelContentHeight, 420)
+        XCTAssertEqual(snapshot.panelContentWidth, 384)
+        XCTAssertEqual(snapshot.panelContentHeight, 468)
         XCTAssertEqual(snapshot.selectedEntityIDs, [])
         XCTAssertEqual(snapshot.menuBarEntityIDs, [])
         XCTAssertEqual(snapshot.roomOrder, [])

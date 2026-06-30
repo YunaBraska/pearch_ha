@@ -2969,8 +2969,8 @@ struct PerchHASmoke {
         try expect(panel.isFloatingPanel, "app shell panel floats above normal windows")
         try expect(panel.hidesOnDeactivate, "app shell panel hides on deactivate")
         try expect(panel.contentViewController != nil, "app shell hosts SwiftUI content")
-        try expect(Int(frameSize.width.rounded()) == 360, "app shell panel frame width is stable")
-        try expect(Int(frameSize.height.rounded()) >= 420, "app shell panel frame height fits first-run content")
+        try expect(Int(frameSize.width.rounded()) == 384, "app shell panel frame width is stable")
+        try expect(Int(frameSize.height.rounded()) >= 468, "app shell panel frame height fits first-run content")
 
         panel.makeKeyAndOrderFront(nil)
         drainMainRunLoop()
@@ -4088,7 +4088,7 @@ struct PerchHASmoke {
                 )
                 .environment(\.colorScheme, variant.colorScheme)
             )
-            size = NSSize(width: 360, height: 420)
+            size = NSSize(width: 384, height: 468)
         }
         let hostingView = NSHostingView(rootView: view)
 
@@ -4468,8 +4468,8 @@ struct PerchHASmoke {
         try expect(snapshot.panelCanBecomeMain, "app launch creates main-capable panel")
         try expect(snapshot.panelIsFloating, "app launch creates floating panel")
         try expect(snapshot.panelHidesOnDeactivate, "app launch creates dismissible panel")
-        try expect(snapshot.panelContentWidth == 360, "app launch preserves panel content width")
-        try expect(snapshot.panelContentHeight == 420, "app launch preserves panel content height")
+        try expect(snapshot.panelContentWidth == 384, "app launch preserves panel content width")
+        try expect(snapshot.panelContentHeight == 468, "app launch preserves panel content height")
         try expect(snapshot.menuBarEntityIDs.isEmpty, "app launch starts without promoted menu bar entities")
 
         guard let callbackURL = URL(string: "perchha://auth?code=smoke-code&state=smoke-state") else {

@@ -449,6 +449,12 @@ public struct PerchHASettingsView: View {
     /// The single entity whose inspector is open in the Entities tab, or `nil`
     /// when every row is collapsed. Only one inspector is open at a time.
     @State private var inspectedEntityID: EntityID?
+    /// Room ids (``RoomID/rawValue``) whose entity rows are collapsed in the
+    /// Entities tab. Rooms default to expanded, so a room is hidden only when it
+    /// appears here. A live search or an open inspector force the affected room
+    /// visible regardless of this set, without mutating it, so clearing the
+    /// search restores the prior collapsed state.
+    @State private var collapsedRooms: Set<String> = []
     @State private var displayPreferences: PerchHADisplayPreferences
     @State private var launchAtLogin: Bool
     @State private var launchAtLoginPermissionDenied = false
@@ -1105,15 +1111,16 @@ public struct PerchHASettingsView: View {
                 iconActive: true,
                 label: "Living room",
                 subtitle: "Temperature",
-                middle: {
+                preview: {
                     MicroMeter(fraction: 0.62, color: accent, trackColor: palette.meterTrack)
                         .frame(width: 54, height: 6)
                 },
-                trailing: {
+                value: {
                     Text("21.4°")
                         .font(PerchHATypography.bodyValue())
                         .foregroundStyle(palette.textPrimary)
-                }
+                },
+                control: { EmptyView() }
             )
             .background(
                 RoundedRectangle(cornerRadius: PerchHACornerRadius.control, style: .continuous)
@@ -1859,6 +1866,7 @@ public struct PerchHASettingsView: View {
                 .buttonStyle(PerchHAIconButtonStyle())
                 .help("Hide every value from the panel")
                 .accessibilityLabel("Clear")
+                collapseAllControl
             }
             .disabled(model.snapshot.availableRooms.isEmpty)
             if let selectionPersistenceFailure = model.snapshot.selectionPersistenceFailureDescription {
@@ -1943,27 +1951,170 @@ public struct PerchHASettingsView: View {
         model.snapshot.canReorderSelectionWithKeyboard
     }
 
-    private func selectionRoom(_ room: SelectableRoom, canMoveUp: Bool, canMoveDown: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            selectionDragDrop(
-                PerchHASectionHeader(room.name) {
-                    selectionMoveButtons(
-                        up: {
-                            model.moveRoom(room.id, direction: .up)
-                        },
-                        down: {
-                            model.moveRoom(room.id, direction: .down)
-                        },
-                        upLabel: "Move \(room.name) up",
-                        downLabel: "Move \(room.name) down",
-                        canMoveUp: canMoveUp,
-                        canMoveDown: canMoveDown
-                    )
+    /// True while the user is filtering the entity tree. During a search every
+    /// rendered room is forced expanded so matches are never hidden behind a
+    /// collapsed header; the stored ``collapsedRooms`` set is left untouched so
+    /// clearing the search restores the prior state.
+    private var isSelectionSearching: Bool {
+        !model.snapshot.selectionQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Whether `room` should show its entity rows. A room is expanded unless it
+    /// is in ``collapsedRooms``; an active search or the room holding the open
+    /// inspector forces it expanded without mutating the stored state.
+    private func isRoomExpanded(_ room: SelectableRoom) -> Bool {
+        let containsInspected = inspectedEntityID.map { id in
+            room.entities.contains { $0.entity.id == id }
+        } ?? false
+        return SelectionRoomCollapse.isExpanded(
+            roomID: room.id.rawValue,
+            collapsedRoomIDs: collapsedRooms,
+            isSearching: isSelectionSearching,
+            roomContainsInspectedEntity: containsInspected
+        )
+    }
+
+    /// True when every currently-shown room is collapsed, used to flip the
+    /// collapse-all affordance to "Expand all". Searching counts as expanded.
+    private var allRoomsCollapsed: Bool {
+        SelectionRoomCollapse.allCollapsed(
+            roomIDs: settingsTree.map { $0.id.rawValue },
+            collapsedRoomIDs: collapsedRooms,
+            isSearching: isSelectionSearching
+        )
+    }
+
+    /// A small token-styled control that collapses or expands every room at once.
+    /// While searching it is disabled, since search already forces rooms open.
+    private var collapseAllControl: some View {
+        let expandAll = allRoomsCollapsed
+        return Button {
+            withSelectionAnimation {
+                if expandAll {
+                    collapsedRooms.removeAll()
+                } else {
+                    collapsedRooms = Set(settingsTree.map { $0.id.rawValue })
                 }
+            }
+        } label: {
+            Label(
+                expandAll ? "Expand all" : "Collapse all",
+                systemImage: expandAll ? "chevron.down.square" : "chevron.up.square"
+            )
+            .labelStyle(.titleAndIcon)
+        }
+        .buttonStyle(PerchHAIconButtonStyle())
+        .disabled(isSelectionSearching || settingsTree.isEmpty)
+        .help(expandAll ? "Show every room's values" : "Hide every room's values")
+        .accessibilityLabel(expandAll ? "Expand all rooms" : "Collapse all rooms")
+    }
+
+    /// Toggles `room`'s collapsed state. Collapsing the room that holds the open
+    /// inspector also closes the inspector, so the inspected entity is never left
+    /// stranded behind a collapsed header.
+    private func toggleRoomCollapsed(_ room: SelectableRoom) {
+        let id = room.id.rawValue
+        withSelectionAnimation {
+            if collapsedRooms.contains(id) {
+                collapsedRooms.remove(id)
+            } else {
+                collapsedRooms.insert(id)
+                if let inspectedEntityID, room.entities.contains(where: { $0.entity.id == inspectedEntityID }) {
+                    self.inspectedEntityID = nil
+                }
+            }
+        }
+    }
+
+    /// Runs `body` inside a calm expand/collapse animation, or with no animation
+    /// when the resolved accessibility preference asks for reduced motion.
+    private func withSelectionAnimation(_ body: () -> Void) {
+        if accessibilityPreferences.motionPolicy == .reduced {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction, body)
+        } else {
+            withAnimation(.easeInOut(duration: 0.18), body)
+        }
+    }
+
+    private func selectionRoom(_ room: SelectableRoom, canMoveUp: Bool, canMoveDown: Bool) -> some View {
+        let isExpanded = isRoomExpanded(room)
+        return VStack(alignment: .leading, spacing: 5) {
+            selectionDragDrop(
+                selectionRoomHeader(
+                    room,
+                    isExpanded: isExpanded,
+                    canMoveUp: canMoveUp,
+                    canMoveDown: canMoveDown
+                )
                 .padding(.horizontal, PerchHASpacing.xs),
                 item: .room(room.id)
             )
-            entitiesRoomCard(room)
+            if isExpanded {
+                entitiesRoomCard(room)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+    }
+
+    /// A tappable room header that reads as a section header (uppercase room name
+    /// + entity count) and toggles the room's collapsed state. A leading chevron
+    /// rotates to communicate expanded/collapsed; the per-room reorder controls
+    /// stay in the trailing slot. The toggle is a `Button`, so it is keyboard
+    /// activatable and carries an expanded/collapsed accessibility value.
+    private func selectionRoomHeader(
+        _ room: SelectableRoom,
+        isExpanded: Bool,
+        canMoveUp: Bool,
+        canMoveDown: Bool
+    ) -> some View {
+        let palette = PerchHATheme.Dashboard.palette(colorScheme)
+        let count = room.entities.count
+        let countLabel = count == 1 ? "1 entity" : "\(count) entities"
+        return HStack(spacing: PerchHASpacing.xs + 1) {
+            Button {
+                toggleRoomCollapsed(room)
+            } label: {
+                HStack(spacing: PerchHASpacing.xs + 1) {
+                    Image(systemName: "chevron.right")
+                        .font(PerchHATypography.caption())
+                        .foregroundStyle(palette.textSecondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .accessibilityHidden(true)
+                    Text(room.name)
+                        .font(PerchHATypography.caption())
+                        .foregroundStyle(.secondary)
+                        .textCase(.uppercase)
+                        .tracking(0.5)
+                        .lineLimit(1)
+                    Text("· \(count)")
+                        .font(PerchHATypography.caption())
+                        .foregroundStyle(palette.textTertiary)
+                        .accessibilityHidden(true)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(isSelectionSearching)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(room.name), \(countLabel)")
+            .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+            .accessibilityHint(isExpanded ? "Collapse room" : "Expand room")
+            .accessibilityAddTraits(.isButton)
+            selectionMoveButtons(
+                up: {
+                    model.moveRoom(room.id, direction: .up)
+                },
+                down: {
+                    model.moveRoom(room.id, direction: .down)
+                },
+                upLabel: "Move \(room.name) up",
+                downLabel: "Move \(room.name) down",
+                canMoveUp: canMoveUp,
+                canMoveDown: canMoveDown
+            )
         }
     }
 
