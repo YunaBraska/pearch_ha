@@ -5,26 +5,83 @@ import UniformTypeIdentifiers
 import PerchHACore
 import PerchHASupport
 
+/// A single editable Home Assistant address in the connection form.
+///
+/// Carries an optional display label and a URL string, both edited inline in the
+/// Connection settings. Empty labels are allowed; an empty URL marks a blank row
+/// that is ignored when building the endpoint.
+public struct PerchHAConnectionAddressField: Equatable, Identifiable, Sendable {
+    public let id: UUID
+    public var label: String
+    public var urlString: String
+
+    public init(id: UUID = UUID(), label: String = "", urlString: String = "") {
+        self.id = id
+        self.label = label
+        self.urlString = urlString
+    }
+
+    /// Whether both the label and URL are blank.
+    public var isBlank: Bool {
+        label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The normalized, validated URL for this address, or `nil` when invalid or
+    /// blank.
+    public var validURL: URL? {
+        guard !urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return PerchHAConnectionForm.validURL(urlString)
+    }
+}
+
 public struct PerchHAConnectionForm: Equatable, Sendable {
     public var urlString: String
-    public var fallbackURLString: String
+    /// Ordered alternative addresses tried after the primary ``urlString``.
+    public var addresses: [PerchHAConnectionAddressField]
     public var token: String
     public var usesStoredAuthSession: Bool
 
     public init(
         urlString: String = "",
-        fallbackURLString: String = "",
+        addresses: [PerchHAConnectionAddressField] = [],
         token: String = "",
         usesStoredAuthSession: Bool = false
     ) {
         self.urlString = urlString
-        self.fallbackURLString = fallbackURLString
+        self.addresses = addresses
         self.token = token
         self.usesStoredAuthSession = usesStoredAuthSession
     }
 
+    /// Creates a form from a primary URL and a single fallback URL string.
+    ///
+    /// Retained for back-compatibility with the primary/fallback shape. An empty
+    /// fallback produces no extra address.
+    public init(
+        urlString: String,
+        fallbackURLString: String,
+        token: String = "",
+        usesStoredAuthSession: Bool = false
+    ) {
+        let trimmedFallback = fallbackURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.init(
+            urlString: urlString,
+            addresses: trimmedFallback.isEmpty ? [] : [PerchHAConnectionAddressField(urlString: fallbackURLString)],
+            token: token,
+            usesStoredAuthSession: usesStoredAuthSession
+        )
+    }
+
     public var trimmedToken: String {
         token.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The first alternative URL string, or `""` when none. Back-compat accessor.
+    public var fallbackURLString: String {
+        addresses.first?.urlString ?? ""
     }
 
     public func primaryURL() -> URL? {
@@ -39,12 +96,35 @@ public struct PerchHAConnectionForm: Equatable, Sendable {
         return Self.validURL(trimmed)
     }
 
+    /// The ordered, validated, de-duplicated list of base URLs to try.
+    ///
+    /// The primary ``urlString`` comes first, followed by each non-blank
+    /// alternative address in order. Invalid or blank entries are dropped and
+    /// duplicate URLs (by absolute string) are removed, preserving first-seen
+    /// order. Returns an empty array when the primary URL is invalid.
+    public func urls() -> [URL] {
+        guard let primary = primaryURL() else {
+            return []
+        }
+        var seen = Set<String>()
+        var ordered: [URL] = []
+        for url in [primary] + addresses.compactMap(\.validURL) {
+            let key = url.absoluteString
+            if seen.insert(key).inserted {
+                ordered.append(url)
+            }
+        }
+        return ordered
+    }
+
     public var validationFailure: ConnectionFailure? {
         guard primaryURL() != nil else {
             return .protocolError("invalid Home Assistant URL")
         }
-        if !fallbackURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, fallbackURL() == nil {
-            return .protocolError("invalid fallback URL")
+        for address in addresses where !address.urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if address.validURL == nil {
+                return .protocolError("invalid alternative address")
+            }
         }
         guard !trimmedToken.isEmpty || usesStoredAuthSession else {
             return .authentication
@@ -75,7 +155,7 @@ public struct PerchHAConnectionForm: Equatable, Sendable {
         return components.url?.absoluteString ?? trimmed
     }
 
-    private static func validURL(_ text: String) -> URL? {
+    static func validURL(_ text: String) -> URL? {
         let normalized = normalizedHomeAssistantURLString(text)
         guard let url = URL(string: normalized),
               ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
@@ -670,8 +750,14 @@ public struct PerchHAHistoryCacheConfiguration: Equatable, Sendable {
 /// panel being active and on settled visibility, and is bounded so it never
 /// inflates request volume.
 public struct PerchHAHistoryPrefetchConfiguration: Equatable, Sendable {
-    /// Extra entities beyond the visible set to warm, taken in display order from
-    /// the panel's ordered entity list.
+    /// Sentinel for ``lookahead`` meaning "warm every entity after the visible
+    /// set", so the coordinator walks the full ordered list progressively while
+    /// the panel is open instead of stopping after a fixed window.
+    public static let unboundedLookahead = -1
+
+    /// Entities beyond the visible set to warm, taken in display order from the
+    /// panel's ordered entity list. ``unboundedLookahead`` (the default) walks the
+    /// entire remaining list progressively; a non-negative value caps the window.
     public let lookahead: Int
     /// How long visibility must stay unchanged before a prefetch pass runs, so
     /// scrolling never fetches.
@@ -687,21 +773,28 @@ public struct PerchHAHistoryPrefetchConfiguration: Equatable, Sendable {
     /// Creates a prefetch configuration.
     ///
     /// - Parameters:
-    ///   - lookahead: Entities to warm beyond the visible set (default 6).
+    ///   - lookahead: Entities to warm beyond the visible set. Defaults to
+    ///     ``unboundedLookahead``, which progressively covers the whole list. A
+    ///     non-negative value caps the lookahead window to that many entities.
     ///   - settleDelay: Quiet period before a pass runs (default 250 ms).
     ///   - activeRefreshInterval: Visible-entity refresh interval (default 30 s,
     ///     shorter than the typical 60 s cache TTL so visible rows refresh sooner).
     ///   - maxConcurrentFetches: In-flight fetch cap (default 3).
     public init(
-        lookahead: Int = 6,
+        lookahead: Int = PerchHAHistoryPrefetchConfiguration.unboundedLookahead,
         settleDelay: PerchDuration = .milliseconds(250),
         activeRefreshInterval: PerchDuration = .seconds(30),
         maxConcurrentFetches: Int = 3
     ) {
-        self.lookahead = max(0, lookahead)
+        self.lookahead = lookahead < 0 ? Self.unboundedLookahead : lookahead
         self.settleDelay = settleDelay
         self.activeRefreshInterval = activeRefreshInterval
         self.maxConcurrentFetches = max(1, maxConcurrentFetches)
+    }
+
+    /// Whether the coordinator walks the entire list beyond the visible set.
+    public var isLookaheadUnbounded: Bool {
+        lookahead == Self.unboundedLookahead
     }
 }
 
@@ -1068,7 +1161,7 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
             isSettingsPresented: isSettingsPresented,
             connectionForm: PerchHAConnectionForm(
                 urlString: connectionForm.urlString,
-                fallbackURLString: connectionForm.fallbackURLString,
+                addresses: connectionForm.addresses,
                 token: "",
                 usesStoredAuthSession: connectionForm.usesStoredAuthSession
             ),
@@ -1325,6 +1418,17 @@ public final class PerchHAPanelModel: ObservableObject {
     @Published public private(set) var customActionPersistenceFailureDescription: String?
     @Published public private(set) var oauthSignInState = PerchHAOAuthSignInState.idle
 
+    /// A monotonically increasing token bumped on every history cache mutation
+    /// (insert from prefetch or hover load, and full-cache eviction).
+    ///
+    /// Inline-row previews read ``cachedHistorySeries(for:)``, which peeks the
+    /// cache without itself being observable. Reading this published token in the
+    /// same view makes SwiftUI re-evaluate the affected rows the moment new
+    /// history lands, so a freshly prefetched sparkline appears immediately rather
+    /// than waiting for an unrelated snapshot change. The token is a cheap counter,
+    /// not the series data, so the existing chart redraw throttling is unaffected.
+    @Published public private(set) var historyRevision = 0
+
     private let connector: Connector
     private let historyProvider: HistoryProvider
     private let serviceMetadataProvider: ServiceMetadataProvider
@@ -1448,17 +1552,111 @@ public final class PerchHAPanelModel: ObservableObject {
     public func updateConnectionForm(
         urlString: String? = nil,
         fallbackURLString: String? = nil,
+        addresses: [PerchHAConnectionAddressField]? = nil,
         token: String? = nil,
         usesStoredAuthSession: Bool? = nil
     ) {
         let nextUsesStoredAuthSession = usesStoredAuthSession
             ?? (token?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? false : editableForm.usesStoredAuthSession)
+        let nextAddresses: [PerchHAConnectionAddressField]
+        if let addresses {
+            nextAddresses = addresses
+        } else if let fallbackURLString {
+            nextAddresses = Self.replacingFirstAddress(in: editableForm.addresses, urlString: fallbackURLString)
+        } else {
+            nextAddresses = editableForm.addresses
+        }
         editableForm = PerchHAConnectionForm(
             urlString: urlString ?? editableForm.urlString,
-            fallbackURLString: fallbackURLString ?? editableForm.fallbackURLString,
+            addresses: nextAddresses,
             token: token ?? editableForm.token,
             usesStoredAuthSession: nextUsesStoredAuthSession
         )
+        publishEditableForm()
+    }
+
+    /// Appends a new blank alternative address row.
+    public func addConnectionAddress() {
+        editableForm.addresses.append(PerchHAConnectionAddressField())
+        publishEditableForm()
+    }
+
+    /// Removes the alternative address with the given identifier.
+    ///
+    /// - Parameter id: The address row identifier.
+    public func removeConnectionAddress(id: PerchHAConnectionAddressField.ID) {
+        editableForm.addresses.removeAll { $0.id == id }
+        publishEditableForm()
+    }
+
+    /// Updates the label or URL of an alternative address row.
+    ///
+    /// - Parameters:
+    ///   - id: The address row identifier.
+    ///   - label: A new label, or `nil` to leave it unchanged.
+    ///   - urlString: A new URL string, or `nil` to leave it unchanged.
+    public func updateConnectionAddress(
+        id: PerchHAConnectionAddressField.ID,
+        label: String? = nil,
+        urlString: String? = nil
+    ) {
+        guard let index = editableForm.addresses.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        if let label {
+            editableForm.addresses[index].label = label
+        }
+        if let urlString {
+            editableForm.addresses[index].urlString = urlString
+        }
+        publishEditableForm()
+    }
+
+    /// Moves an alternative address one position up or down within the list.
+    ///
+    /// - Parameters:
+    ///   - id: The address row identifier.
+    ///   - direction: The direction to move the row.
+    /// - Returns: True when the row moved; false when it was already at a boundary
+    ///   or not found.
+    @discardableResult
+    public func moveConnectionAddress(id: PerchHAConnectionAddressField.ID, direction: SelectionMoveDirection) -> Bool {
+        guard let index = editableForm.addresses.firstIndex(where: { $0.id == id }) else {
+            return false
+        }
+        let target: Int
+        switch direction {
+        case .up:
+            target = index - 1
+        case .down:
+            target = index + 1
+        }
+        guard editableForm.addresses.indices.contains(target) else {
+            return false
+        }
+        editableForm.addresses.swapAt(index, target)
+        publishEditableForm()
+        return true
+    }
+
+    private static func replacingFirstAddress(
+        in addresses: [PerchHAConnectionAddressField],
+        urlString: String
+    ) -> [PerchHAConnectionAddressField] {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        var updated = addresses
+        if updated.isEmpty {
+            guard !trimmed.isEmpty else {
+                return []
+            }
+            updated.append(PerchHAConnectionAddressField(urlString: urlString))
+            return updated
+        }
+        updated[0].urlString = urlString
+        return updated
+    }
+
+    private func publishEditableForm() {
         snapshot = PerchHAPanelSnapshot(
             connectionState: snapshot.connectionState,
             phase: snapshot.phase,
@@ -1489,6 +1687,22 @@ public final class PerchHAPanelModel: ObservableObject {
         }
     }
 
+    /// Re-applies the edited address list while keeping the stored session.
+    ///
+    /// Used by the "Update connection" affordance when the user edits, adds,
+    /// removes, or reorders addresses while connected. It reconnects using the
+    /// existing stored authentication session (no token is cleared); only an
+    /// explicit sign-out clears the token.
+    public func applyConnectionEdits() {
+        startConnect()
+    }
+
+    /// Whether the form has a stored session, so address edits can be re-applied
+    /// without signing in again.
+    public var canApplyConnectionEdits: Bool {
+        editableForm.usesStoredAuthSession || !editableForm.trimmedToken.isEmpty
+    }
+
     public func startOAuthSignIn() {
         startAction { [weak self] in
             await self?.signInWithOAuth()
@@ -1502,10 +1716,12 @@ public final class PerchHAPanelModel: ObservableObject {
             applyFailure(.protocolError("invalid Home Assistant URL"), refreshCount: snapshot.refreshCount, canRetry: false)
             return
         }
-        if !form.fallbackURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, form.fallbackURL() == nil {
-            oauthSignInState = .failed("invalid fallback URL")
-            applyFailure(.protocolError("invalid fallback URL"), refreshCount: snapshot.refreshCount, canRetry: false)
-            return
+        for address in form.addresses where !address.urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if address.validURL == nil {
+                oauthSignInState = .failed("invalid alternative address")
+                applyFailure(.protocolError("invalid alternative address"), refreshCount: snapshot.refreshCount, canRetry: false)
+                return
+            }
         }
 
         oauthSignInState = .signingIn
@@ -1518,7 +1734,7 @@ public final class PerchHAPanelModel: ObservableObject {
             oauthSignInState = .idle
             updateConnectionForm(
                 urlString: form.urlString,
-                fallbackURLString: form.fallbackURLString,
+                addresses: form.addresses,
                 token: "",
                 usesStoredAuthSession: true
             )
@@ -1660,6 +1876,21 @@ public final class PerchHAPanelModel: ObservableObject {
     public func setMenuBarShowsLabel(_ id: EntityID, showsLabel: Bool) -> Bool {
         updateMenuBarItemConfiguration(
             snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).updating(showsLabel: showsLabel)
+        )
+    }
+
+    /// Sets the per-entity menu-bar appearance (icon / text / both), overriding
+    /// the global default for this entity.
+    ///
+    /// - Parameters:
+    ///   - id: The entity whose menu-bar appearance changes.
+    ///   - appearance: The appearance to apply, or `nil` to inherit the global
+    ///     default appearance.
+    /// - Returns: `true` when the configuration was updated and persisted.
+    @discardableResult
+    public func setMenuBarAppearance(_ id: EntityID, appearance: PerchHAMenuBarAppearance?) -> Bool {
+        updateMenuBarItemConfiguration(
+            snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).settingAppearance(appearance)
         )
     }
 
@@ -1947,12 +2178,7 @@ public final class PerchHAPanelModel: ObservableObject {
             }
             let insertNow = await clock.now()
             lastObservedInstant = insertNow
-            historyCache.insert(
-                series,
-                for: cacheKey,
-                now: insertNow,
-                configuration: historyCacheConfiguration
-            )
+            insertHistory(series, for: cacheKey, now: insertNow)
             applyHistoryState(.loaded(series))
         case let .unavailable(message):
             applyHistoryState(.unavailable(entityID: id, range: resolvedRange, message: message))
@@ -1964,10 +2190,11 @@ public final class PerchHAPanelModel: ObservableObject {
     /// This is the *only* history access intended for visible-row rendering: it
     /// reads the in-memory cache without mutating recency, without evicting, and
     /// crucially without ever triggering a network fetch. Rows use it to draw an
-    /// opportunistic inline sparkline only when the data is already present (for
-    /// example after the user has hovered the row once). When nothing is cached it
-    /// returns `nil` and the row draws no sparkline. Honoring this contract keeps
-    /// the idle-CPU and request-volume budgets intact.
+    /// inline sparkline whenever the auto-prefetch coordinator has warmed the
+    /// entity — never gated on hover. Hover only drives the detail popover. When
+    /// nothing is cached yet it returns `nil` and the row draws no sparkline.
+    /// Re-rendering as fresh data lands is driven by ``historyRevision``; honoring
+    /// the no-fetch contract keeps the idle-CPU and request-volume budgets intact.
     ///
     /// - Parameter id: The entity whose cached history is requested.
     /// - Returns: The cached series for the entity's default range, or `nil`.
@@ -1975,6 +2202,24 @@ public final class PerchHAPanelModel: ObservableObject {
         let range = snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).defaultHistoryRange
         let key = PerchHAHistoryCacheKey(entityID: id, range: range)
         return historyCache.peek(for: key, now: lastObservedInstant)
+    }
+
+    /// Inserts a series into the history cache and publishes an observable change.
+    ///
+    /// Every cache write (prefetch warm or hover load) flows through here so the
+    /// inline-preview read path, which depends on ``historyRevision``, re-renders
+    /// the affected rows immediately. The bump is a cheap counter; it carries no
+    /// series payload, so chart redraw throttling stays intact.
+    private func insertHistory(_ series: HistorySeries, for key: PerchHAHistoryCacheKey, now: PerchInstant) {
+        historyCache.insert(series, for: key, now: now, configuration: historyCacheConfiguration)
+        historyRevision &+= 1
+    }
+
+    /// Drops the entire history cache and publishes the eviction so previews that
+    /// were drawing a now-cleared series re-render empty.
+    private func evictAllHistory() {
+        historyCache = PerchHAHistoryCache()
+        historyRevision &+= 1
     }
 
     // MARK: - History prefetch coordinator
@@ -2073,8 +2318,9 @@ public final class PerchHAPanelModel: ObservableObject {
     /// Reports the entities currently visible in the panel, in display order.
     ///
     /// The view calls this as rows appear and disappear. The coordinator warms the
-    /// history cache for these entities plus the next ``PerchHAHistoryPrefetchConfiguration/lookahead``
-    /// entities in the panel's ordered list. Calls are coalesced: a prefetch pass
+    /// history cache for these entities first, then progressively walks the rest of
+    /// the panel's ordered list (bounded by ``PerchHAHistoryPrefetchConfiguration/lookahead``;
+    /// the default covers the whole list). Calls are coalesced: a prefetch pass
     /// runs only once visibility has stayed unchanged for the configured settle
     /// delay, so rapid updates while scrolling never fetch.
     ///
@@ -2125,19 +2371,37 @@ public final class PerchHAPanelModel: ObservableObject {
         prefetchWorkers = []
     }
 
-    /// Computes the prefetch target list: the visible entities plus the lookahead
-    /// window, in display order, de-duplicated.
+    /// Computes the ordered, de-duplicated prefetch target list.
+    ///
+    /// Priority order: the visible entities first (in display order), then the
+    /// entities after the last visible row (nearest-after), then the remainder of
+    /// the list. With an unbounded lookahead the whole list is covered
+    /// progressively; a finite lookahead caps the nearest-after window and drops
+    /// the remainder so behavior stays bounded for callers that opt out.
     private func prefetchTargets() -> [EntityID] {
         let ordered = displayedEntityIDs()
         let visible = Set(visibleEntityIDs)
         guard let lastVisibleIndex = ordered.lastIndex(where: { visible.contains($0) }) else {
             return visibleEntityIDs
         }
-        let lookaheadEnd = min(ordered.count, lastVisibleIndex + 1 + historyPrefetchConfiguration.lookahead)
-        let lookahead = ordered[(lastVisibleIndex + 1)..<lookaheadEnd]
+
+        let afterStart = lastVisibleIndex + 1
+        let nearestAfter: ArraySlice<EntityID>
+        let remainder: [EntityID]
+        if historyPrefetchConfiguration.isLookaheadUnbounded {
+            nearestAfter = ordered[afterStart...]
+            // Everything before the visible block, walked after the after-window so
+            // the whole list is eventually warmed while the panel stays open.
+            remainder = Array(ordered[..<afterStart]).filter { !visible.contains($0) }
+        } else {
+            let lookaheadEnd = min(ordered.count, afterStart + historyPrefetchConfiguration.lookahead)
+            nearestAfter = ordered[afterStart..<lookaheadEnd]
+            remainder = []
+        }
+
         var seen = Set<EntityID>()
         var targets: [EntityID] = []
-        for id in visibleEntityIDs + Array(lookahead) where seen.insert(id).inserted {
+        for id in visibleEntityIDs + Array(nearestAfter) + remainder where seen.insert(id).inserted {
             targets.append(id)
         }
         return targets
@@ -2233,7 +2497,7 @@ public final class PerchHAPanelModel: ObservableObject {
         let now = await clock.now()
         lastObservedInstant = now
         prefetchLastFetched[job.key] = now
-        historyCache.insert(series, for: job.key, now: now, configuration: historyCacheConfiguration)
+        insertHistory(series, for: job.key, now: now)
     }
 
     public func dismissHistoryPopover() {
@@ -3533,7 +3797,7 @@ public final class PerchHAPanelModel: ObservableObject {
         historyCloseTask = nil
         historyRequestGeneration += 1
         pendingControlChange = nil
-        historyCache = PerchHAHistoryCache()
+        evictAllHistory()
         cancelHistoryPrefetch()
         prefetchLastFetched = [:]
         visibleEntityIDs = []
@@ -3542,7 +3806,7 @@ public final class PerchHAPanelModel: ObservableObject {
 
         editableForm = PerchHAConnectionForm(
             urlString: editableForm.urlString,
-            fallbackURLString: editableForm.fallbackURLString,
+            addresses: editableForm.addresses,
             token: "",
             usesStoredAuthSession: false
         )
@@ -3716,7 +3980,7 @@ public final class PerchHAPanelModel: ObservableObject {
                 historyCloseTask?.cancel()
                 historyCloseTask = nil
                 historyRequestGeneration += 1
-                historyCache = PerchHAHistoryCache()
+                evictAllHistory()
                 cancelHistoryPrefetch()
                 prefetchLastFetched = [:]
                 pendingControlChange = nil
@@ -3835,7 +4099,7 @@ public final class PerchHAPanelModel: ObservableObject {
     private func nonSecretForm(_ form: PerchHAConnectionForm) -> PerchHAConnectionForm {
         PerchHAConnectionForm(
             urlString: form.urlString,
-            fallbackURLString: form.fallbackURLString,
+            addresses: form.addresses,
             token: "",
             usesStoredAuthSession: form.usesStoredAuthSession
         )
@@ -5543,12 +5807,24 @@ public struct PerchHAPanelView: View {
     /// accessibility label and the detail panel.
     @ViewBuilder
     private func inlineHistoryPreview(for entity: DiscoveredEntity, palette: PerchHATheme.DashboardPalette) -> some View {
-        if let series = model.cachedHistorySeries(for: entity.id) {
+        // Resolve the cached series through a helper that reads `historyRevision`
+        // so SwiftUI re-evaluates this row whenever a prefetch or hover load lands
+        // new history, even though `cachedHistorySeries` is itself a non-observable
+        // peek. Hover is never required for the inline sparkline to appear.
+        if let series = revisionedCachedHistorySeries(for: entity.id) {
             PerchHAInlineSparkline(series: series, color: palette.chartPrimary.opacity(0.85))
                 .frame(minWidth: 32, idealWidth: 100, maxWidth: 100)
                 .frame(height: 26)
                 .accessibilityHidden(true)
         }
+    }
+
+    /// Reads the cached inline series while establishing a SwiftUI dependency on
+    /// the model's history revision token, so the row re-renders the instant new
+    /// history is cached.
+    private func revisionedCachedHistorySeries(for id: EntityID) -> HistorySeries? {
+        _ = model.historyRevision
+        return model.cachedHistorySeries(for: id)
     }
 
 }

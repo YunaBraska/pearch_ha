@@ -87,6 +87,10 @@ public struct ValueThresholds: Codable, Equatable, Sendable {
 public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
     public let entityID: EntityID
     public let style: MenuBarDisplayStyle
+    /// The per-entity menu-bar appearance (icon / text / both), or `nil` to
+    /// inherit the global default appearance. A per-entity choice always wins
+    /// over the global default.
+    public let appearance: PerchHAMenuBarAppearance?
     public let showsLabel: Bool
     public let showsUnit: Bool
     public let maximumFractionDigits: Int
@@ -107,6 +111,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
     public init(
         entityID: EntityID,
         style: MenuBarDisplayStyle = .text,
+        appearance: PerchHAMenuBarAppearance? = nil,
         showsLabel: Bool = false,
         showsUnit: Bool = true,
         maximumFractionDigits: Int = 0,
@@ -121,6 +126,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
     ) {
         self.entityID = entityID
         self.style = style
+        self.appearance = appearance
         self.showsLabel = showsLabel
         self.showsUnit = showsUnit
         self.maximumFractionDigits = max(0, maximumFractionDigits)
@@ -151,6 +157,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         MenuBarItemConfiguration(
             entityID: entityID,
             style: style ?? self.style,
+            appearance: appearance,
             showsLabel: showsLabel ?? self.showsLabel,
             showsUnit: showsUnit ?? self.showsUnit,
             maximumFractionDigits: maximumFractionDigits ?? self.maximumFractionDigits,
@@ -165,6 +172,30 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         )
     }
 
+    /// Returns a copy with the per-entity menu-bar appearance replaced.
+    ///
+    /// - Parameter appearance: The appearance to apply, or `nil` to inherit the
+    ///   global default appearance.
+    /// - Returns: An updated configuration value.
+    public func settingAppearance(_ appearance: PerchHAMenuBarAppearance?) -> MenuBarItemConfiguration {
+        MenuBarItemConfiguration(
+            entityID: entityID,
+            style: style,
+            appearance: appearance,
+            showsLabel: showsLabel,
+            showsUnit: showsUnit,
+            maximumFractionDigits: maximumFractionDigits,
+            absoluteTotal: absoluteTotal,
+            totalEntityID: totalEntityID,
+            thresholds: thresholds,
+            defaultHistoryRange: defaultHistoryRange,
+            coverControlMode: coverControlMode,
+            displayUnit: displayUnit,
+            minValue: minValue,
+            maxValue: maxValue
+        )
+    }
+
     /// Returns a copy with the selected display unit replaced.
     ///
     /// - Parameter unit: The unit to apply, or `nil` to use the detected default.
@@ -173,6 +204,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         MenuBarItemConfiguration(
             entityID: entityID,
             style: style,
+            appearance: appearance,
             showsLabel: showsLabel,
             showsUnit: showsUnit,
             maximumFractionDigits: maximumFractionDigits,
@@ -197,6 +229,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         MenuBarItemConfiguration(
             entityID: entityID,
             style: style,
+            appearance: appearance,
             showsLabel: showsLabel,
             showsUnit: showsUnit,
             maximumFractionDigits: maximumFractionDigits,
@@ -215,6 +248,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         MenuBarItemConfiguration(
             entityID: entityID,
             style: style,
+            appearance: appearance,
             showsLabel: showsLabel,
             showsUnit: showsUnit,
             maximumFractionDigits: maximumFractionDigits,
@@ -233,6 +267,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         MenuBarItemConfiguration(
             entityID: entityID,
             style: style,
+            appearance: appearance,
             showsLabel: showsLabel,
             showsUnit: showsUnit,
             maximumFractionDigits: maximumFractionDigits,
@@ -269,6 +304,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         MenuBarItemConfiguration(
             entityID: entityID,
             style: style,
+            appearance: appearance,
             showsLabel: showsLabel,
             showsUnit: showsUnit,
             maximumFractionDigits: maximumFractionDigits,
@@ -286,6 +322,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case entityID
         case style
+        case appearance
         case showsLabel
         case showsUnit
         case maximumFractionDigits
@@ -304,6 +341,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         entityID = try container.decode(EntityID.self, forKey: .entityID)
         style = try container.decodeIfPresent(MenuBarDisplayStyle.self, forKey: .style) ?? .text
+        appearance = try container.decodeIfPresent(PerchHAMenuBarAppearance.self, forKey: .appearance)
         showsLabel = try container.decodeIfPresent(Bool.self, forKey: .showsLabel) ?? false
         showsUnit = try container.decodeIfPresent(Bool.self, forKey: .showsUnit) ?? true
         maximumFractionDigits = max(
@@ -324,6 +362,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(entityID, forKey: .entityID)
         try container.encode(style, forKey: .style)
+        try container.encodeIfPresent(appearance, forKey: .appearance)
         try container.encode(showsLabel, forKey: .showsLabel)
         try container.encode(showsUnit, forKey: .showsUnit)
         try container.encode(maximumFractionDigits, forKey: .maximumFractionDigits)

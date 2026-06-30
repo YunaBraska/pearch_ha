@@ -37,33 +37,7 @@ struct PerchHAConnectionFormFields: View {
 
             connectionStatusBanner
 
-            VStack(alignment: .leading, spacing: 4) {
-                PerchHANativeTextField(
-                    placeholder: "Home Assistant URL",
-                    text: urlBinding,
-                    contentType: {
-                        if #available(macOS 14.0, *) {
-                            return .URL
-                        }
-                        return nil
-                    }(),
-                    normalizeOnCommit: PerchHAConnectionForm.normalizedHomeAssistantURLString
-                )
-                PerchHANativeTextField(
-                    placeholder: "Fallback URL",
-                    text: fallbackURLBinding,
-                    contentType: {
-                        if #available(macOS 14.0, *) {
-                            return .URL
-                        }
-                        return nil
-                    }(),
-                    normalizeOnCommit: PerchHAConnectionForm.normalizedHomeAssistantURLString
-                )
-                Text("Optional remote or backup address.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            addressList
 
             VStack(alignment: .leading, spacing: 6) {
                 Button {
@@ -109,6 +83,108 @@ struct PerchHAConnectionFormFields: View {
                 .disabled(isConnectionBusy)
             }
 
+        }
+    }
+
+    /// The editable, ordered list of Home Assistant addresses.
+    ///
+    /// The primary address is first (the URL the connected state derives its host
+    /// from); each alternative carries an optional label plus URL with move/remove
+    /// controls, plus an "Add address" affordance. Invalid alternatives surface a
+    /// calm inline error so paste-and-fix stays low-friction.
+    private var addressList: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Primary address")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                PerchHANativeTextField(
+                    placeholder: "Home Assistant URL",
+                    text: urlBinding,
+                    contentType: {
+                        if #available(macOS 14.0, *) {
+                            return .URL
+                        }
+                        return nil
+                    }(),
+                    normalizeOnCommit: PerchHAConnectionForm.normalizedHomeAssistantURLString
+                )
+            }
+
+            ForEach(Array(model.snapshot.connectionForm.addresses.enumerated()), id: \.element.id) { index, address in
+                alternativeAddressRow(address, index: index)
+            }
+
+            Button {
+                model.addConnectionAddress()
+            } label: {
+                Label("Add address", systemImage: "plus.circle")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .accessibilityHint("Adds another Home Assistant address to try")
+
+            Text("Add internal, external, or VPN addresses. They are tried in order when an earlier one cannot be reached.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func alternativeAddressRow(_ address: PerchHAConnectionAddressField, index: Int) -> some View {
+        let count = model.snapshot.connectionForm.addresses.count
+        let invalid = !address.urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && address.validURL == nil
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                PerchHANativeTextField(
+                    placeholder: "Label (optional)",
+                    text: labelBinding(id: address.id),
+                    contentType: nil,
+                    normalizeOnCommit: { $0 }
+                )
+                .frame(width: 130)
+                PerchHANativeTextField(
+                    placeholder: "Alternative URL",
+                    text: addressURLBinding(id: address.id),
+                    contentType: {
+                        if #available(macOS 14.0, *) {
+                            return .URL
+                        }
+                        return nil
+                    }(),
+                    normalizeOnCommit: PerchHAConnectionForm.normalizedHomeAssistantURLString
+                )
+                Button {
+                    model.moveConnectionAddress(id: address.id, direction: .up)
+                } label: {
+                    Image(systemName: "chevron.up")
+                }
+                .buttonStyle(.borderless)
+                .disabled(index == 0)
+                .accessibilityLabel("Move address up")
+                Button {
+                    model.moveConnectionAddress(id: address.id, direction: .down)
+                } label: {
+                    Image(systemName: "chevron.down")
+                }
+                .buttonStyle(.borderless)
+                .disabled(index == count - 1)
+                .accessibilityLabel("Move address down")
+                Button(role: .destructive) {
+                    model.removeConnectionAddress(id: address.id)
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Remove address")
+            }
+            if invalid {
+                Text("Enter a valid http or https address.")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityLabel("Invalid alternative address")
+            }
         }
     }
 
@@ -159,12 +235,26 @@ struct PerchHAConnectionFormFields: View {
                 }
             }
 
-            Button("Sign out") {
-                model.signOut()
+            connectionStatusBanner
+
+            addressList
+
+            HStack(spacing: 8) {
+                Button("Update connection") {
+                    model.applyConnectionEdits()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(isConnectionBusy || !model.canApplyConnectionEdits)
+                .help("Reconnect using your saved session and the addresses above.")
+
+                Button("Sign out") {
+                    model.signOut()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .help("Disconnect and clear the stored session. The address is kept so you can reconnect.")
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .help("Disconnect and clear the stored session. The address is kept so you can reconnect.")
         }
     }
 
@@ -272,11 +362,20 @@ struct PerchHAConnectionFormFields: View {
         )
     }
 
-    private var fallbackURLBinding: Binding<String> {
+    private func labelBinding(id: PerchHAConnectionAddressField.ID) -> Binding<String> {
         Binding(
-            get: { model.snapshot.connectionForm.fallbackURLString },
+            get: { model.snapshot.connectionForm.addresses.first { $0.id == id }?.label ?? "" },
             set: { value in
-                model.updateConnectionForm(fallbackURLString: value)
+                model.updateConnectionAddress(id: id, label: value)
+            }
+        )
+    }
+
+    private func addressURLBinding(id: PerchHAConnectionAddressField.ID) -> Binding<String> {
+        Binding(
+            get: { model.snapshot.connectionForm.addresses.first { $0.id == id }?.urlString ?? "" },
+            set: { value in
+                model.updateConnectionAddress(id: id, urlString: value)
             }
         )
     }
@@ -573,28 +672,11 @@ public struct PerchHASettingsView: View {
 
     // MARK: General
 
-    /// General settings: theme override, accent color, and launch-at-login. The
-    /// theme/accent controls share their bindings (and therefore their single
-    /// persistence sink) with the Appearance section's preview.
+    /// General settings: the genuinely-global preferences that do not belong to a
+    /// more specific section. Appearance (theme/accent) lives in the Appearance
+    /// section, so it is intentionally not duplicated here.
     private var generalTab: some View {
         settingsPage(title: "General", systemImage: Tab.general.systemImage) {
-            settingsCard {
-                settingsSection(title: "Appearance", systemImage: "paintbrush") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        settingsControlRow("Theme") {
-                            themeModePicker
-                        }
-                        Text("Force light or dark, or follow the system setting.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        settingsControlRow("Accent") {
-                            accentMenuPicker
-                        }
-                        accentSwatchPreview
-                    }
-                }
-            }
             settingsCard {
                 settingsSection(title: "Startup", systemImage: "power") {
                     VStack(alignment: .leading, spacing: PerchHASpacing.sm - 2) {
@@ -620,26 +702,20 @@ public struct PerchHASettingsView: View {
 
     // MARK: Dashboard
 
-    /// Dashboard-facing display preferences: how the live menu-bar item presents
-    /// its promoted value and whether it keeps a stable width. These are the only
-    /// real dashboard-facing display preferences the model exposes; no new
-    /// settings are invented here.
+    /// Dashboard-facing menu-bar configuration: a per-entity editor where each
+    /// entity can be shown in the menu bar and given its own icon/text/both
+    /// appearance, plus the global stable-width preference. The per-entity
+    /// appearance overrides the global default for that entity.
     private var dashboardTab: some View {
         settingsPage(title: "Dashboard", systemImage: Tab.dashboard.systemImage) {
             settingsCard {
-                settingsSection(title: "Menu bar", systemImage: "menubar.rectangle") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        settingsControlRow("Show") {
-                            Picker("Show", selection: menuBarAppearanceBinding) {
-                                ForEach(PerchHAMenuBarAppearance.allCases, id: \.rawValue) { appearance in
-                                    Text(appearance.displayName).tag(appearance)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                            .fixedSize()
-                            .accessibilityLabel("Menu bar appearance")
-                        }
+                settingsSection(title: "Menu bar items", systemImage: "menubar.rectangle") {
+                    menuBarItemsEditor
+                }
+            }
+            settingsCard {
+                settingsSection(title: "Width", systemImage: "ruler") {
+                    VStack(alignment: .leading, spacing: 6) {
                         Toggle("Keep a stable width", isOn: stableMenuBarWidthBinding)
                             .toggleStyle(.checkbox)
                             .fixedSize()
@@ -652,6 +728,74 @@ public struct PerchHASettingsView: View {
                 }
             }
         }
+    }
+
+    /// The entities offered in the Dashboard menu-bar editor: promoted entities
+    /// first (in their menu-bar order), then the remaining available entities.
+    private var menuBarEditorEntities: [DiscoveredEntity] {
+        let entities = model.snapshot.availableRooms.flatMap(\.entities)
+        let byID = Dictionary(entities.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let promotedIDs = model.snapshot.menuBarDisplayConfiguration.promotedEntityIDs
+        let promoted = promotedIDs.compactMap { byID[$0] }
+        let promotedSet = Set(promotedIDs)
+        let remaining = entities.filter { !promotedSet.contains($0.id) }
+        return promoted + remaining
+    }
+
+    @ViewBuilder
+    private var menuBarItemsEditor: some View {
+        let entities = menuBarEditorEntities
+        if entities.isEmpty {
+            Text("Connect to Home Assistant to choose which entities appear in the menu bar.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Choose which entities appear in the menu bar and how each one looks.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(entities, id: \.id.rawValue) { entity in
+                    menuBarItemRow(for: entity)
+                    if entity.id != entities.last?.id {
+                        settingsSectionDivider
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func menuBarItemRow(for entity: DiscoveredEntity) -> some View {
+        let isPromoted = model.snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Toggle(entity.name, isOn: menuBarVisibilityBinding(for: entity.id))
+                    .toggleStyle(.checkbox)
+                    .fixedSize()
+                    .accessibilityLabel("Show \(entity.name) in menu bar")
+                Spacer(minLength: 0)
+                if isPromoted {
+                    menuBarMoveButtons(for: entity)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if isPromoted {
+                settingsControlRow("Show") {
+                    Picker("Show", selection: menuBarItemAppearanceBinding(for: entity.id)) {
+                        ForEach(PerchHAMenuBarAppearance.allCases, id: \.rawValue) { appearance in
+                            Text(appearance.displayName).tag(appearance)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                    .accessibilityLabel("\(entity.name) menu bar appearance")
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: Appearance
@@ -761,8 +905,9 @@ public struct PerchHASettingsView: View {
 
     /// Diagnostics: real connection status, entity health (the warning count and
     /// a deduped, capped list of affected entities), the last-updated timestamp,
-    /// a manual refresh, and the read-only history-prefetch reference. All values
-    /// come from the live snapshot; nothing is fabricated.
+    /// and the read-only history-prefetch reference. Refresh is automatic, so no
+    /// manual refresh control is offered. All values come from the live snapshot;
+    /// nothing is fabricated.
     private var diagnosticsTab: some View {
         let health = entityHealth
         return settingsPage(title: "Diagnostics", systemImage: Tab.diagnostics.systemImage) {
@@ -883,8 +1028,9 @@ public struct PerchHASettingsView: View {
         }
     }
 
-    /// The updates diagnostic: the last-updated description and a manual refresh
-    /// wired to the model's `startRefresh()`.
+    /// The updates diagnostic: a read-only last-updated description. Refresh is
+    /// automatic (on open, periodically while open, and via live WebSocket push),
+    /// so there is no manual refresh control here.
     private var diagnosticsUpdatesContent: some View {
         VStack(alignment: .leading, spacing: 8) {
             settingsControlRow("Last updated") {
@@ -893,20 +1039,10 @@ public struct PerchHASettingsView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            Text("Values update live while the panel is open. Refresh now to fetch the latest values immediately.")
+            Text("Values update live while the panel is open and refresh automatically in the background.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Button {
-                model.startRefresh()
-            } label: {
-                Label("Refresh now", systemImage: "arrow.clockwise")
-                    .labelStyle(.titleAndIcon)
-            }
-            .buttonStyle(PerchHAIconButtonStyle(prominentOnHover: true))
-            .disabled(!canRefreshNow)
-            .help(canRefreshNow ? "Fetch the latest values now" : "Connect to Home Assistant to refresh")
-            .accessibilityLabel("Refresh values now")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -928,12 +1064,6 @@ public struct PerchHASettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    /// Whether a manual refresh is meaningful: only when connected (or holding a
-    /// connection that can be retried). Avoids a no-op refresh on first run.
-    private var canRefreshNow: Bool {
-        model.snapshot.showsConnectedContent || model.snapshot.canRefresh
     }
 
     /// A resolved connection status for the Diagnostics pill, mapped from the
@@ -1024,13 +1154,6 @@ public struct PerchHASettingsView: View {
         displayPreferencesSink(preferences)
     }
 
-    private var menuBarAppearanceBinding: Binding<PerchHAMenuBarAppearance> {
-        Binding(
-            get: { displayPreferences.menuBarAppearance },
-            set: { updateDisplayPreferences(displayPreferences.with(menuBarAppearance: $0)) }
-        )
-    }
-
     private var stableMenuBarWidthBinding: Binding<Bool> {
         Binding(
             get: { displayPreferences.stableMenuBarWidth },
@@ -1074,26 +1197,133 @@ public struct PerchHASettingsView: View {
 
     private var aboutTab: some View {
         settingsPage(title: "About", systemImage: Tab.about.systemImage) {
-            settingsCard {
-                HStack(spacing: 10) {
-                    Image(systemName: "house.circle.fill")
-                        .font(.system(size: 30))
-                        .foregroundStyle(PerchHATheme.accent)
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("PearchHA")
-                            .font(.title3.weight(.semibold))
-                        Text("Version \(Self.applicationVersion)")
-                            .font(.callout)
+            aboutIdentityCard
+            aboutDetailsCard
+            aboutSupportCard
+        }
+    }
+
+    /// Identity card: the real application icon, the app name, version, and a
+    /// one-line description of what PearchHA is.
+    private var aboutIdentityCard: some View {
+        settingsCard {
+            HStack(alignment: .center, spacing: 14) {
+                aboutAppIcon
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("PearchHA")
+                        .font(.title2.weight(.semibold))
+                    Text("Version \(Self.applicationVersion)")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("PearchHA, version \(Self.applicationVersion)")
+            Text("A calm Home Assistant menu-bar companion for macOS.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// The real application icon at a tasteful size, falling back to an SF Symbol
+    /// glyph when no app icon is available (for example in non-bundle render
+    /// paths).
+    @ViewBuilder
+    private var aboutAppIcon: some View {
+        if let icon = Self.applicationIconImage {
+            Image(nsImage: icon)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 68, height: 68)
+                .accessibilityHidden(true)
+        } else {
+            Image(systemName: "house.circle.fill")
+                .font(.system(size: 64))
+                .foregroundStyle(PerchHATheme.accent)
+                .accessibilityHidden(true)
+        }
+    }
+
+    /// Details card: license, developer, and repository, with the license and
+    /// repository as browser links.
+    private var aboutDetailsCard: some View {
+        settingsCard {
+            settingsSection(title: "Details", systemImage: "info.circle") {
+                VStack(alignment: .leading, spacing: 8) {
+                    settingsControlRow("License") {
+                        Link("MIT License", destination: Self.licenseURL)
+                            .accessibilityLabel("MIT License, opens in browser")
+                    }
+                    settingsControlRow("Developer") {
+                        Text("YunaBraska")
                             .foregroundStyle(.secondary)
                     }
-                    Spacer(minLength: 0)
+                    settingsControlRow("Repository") {
+                        Link("github.com/YunaBraska/pearch_ha", destination: Self.repositoryURL)
+                            .accessibilityLabel("Repository on GitHub, opens in browser")
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                 }
-                Text("A quiet macOS menu-bar companion for Home Assistant: scan room values at a glance, drive switches and covers, and run saved service calls without opening a browser.")
-                    .font(.callout)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    /// Support card: optional appreciation links (repo star, sponsor/coffee/Ko-fi/
+    /// Liberapay) plus an issues/feedback link.
+    private var aboutSupportCard: some View {
+        settingsCard {
+            settingsSection(title: "Support", systemImage: "heart") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("If it earned a place on your menu bar, a star on the repo helps. If you want to fuel a coffee:")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 8) {
+                        aboutSupportLink("GitHub Sponsors", systemImage: "heart.fill", destination: Self.sponsorsURL)
+                        aboutSupportLink("Buy Me a Coffee", systemImage: "cup.and.saucer.fill", destination: Self.buyMeACoffeeURL)
+                    }
+                    HStack(spacing: 8) {
+                        aboutSupportLink("Ko-fi", systemImage: "mug.fill", destination: Self.koFiURL)
+                        aboutSupportLink("Liberapay", systemImage: "banknote", destination: Self.liberapayURL)
+                    }
+                    Link(destination: Self.issuesURL) {
+                        Label("Issues / feedback", systemImage: "exclamationmark.bubble")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(PerchHAIconButtonStyle())
+                    .accessibilityLabel("Issues and feedback on GitHub, opens in browser")
+                }
+            }
+        }
+    }
+
+    /// A single design-system styled support link with an SF Symbol and an
+    /// accessible name describing where it leads.
+    private func aboutSupportLink(_ title: String, systemImage: String, destination: URL) -> some View {
+        Link(destination: destination) {
+            Label(title, systemImage: systemImage)
+                .labelStyle(.titleAndIcon)
+                .lineLimit(1)
+        }
+        .buttonStyle(PerchHAIconButtonStyle(prominentOnHover: true))
+        .accessibilityLabel("\(title), opens in browser")
+    }
+
+    private static let repositoryURL = URL(string: "https://github.com/YunaBraska/pearch_ha")!
+    private static let licenseURL = URL(string: "https://github.com/YunaBraska/pearch_ha/blob/main/LICENSE")!
+    private static let issuesURL = URL(string: "https://github.com/YunaBraska/pearch_ha/issues")!
+    private static let sponsorsURL = URL(string: "https://github.com/sponsors/YunaBraska")!
+    private static let buyMeACoffeeURL = URL(string: "https://buymeacoffee.com/YunaBraska")!
+    private static let koFiURL = URL(string: "https://ko-fi.com/YunaBraska")!
+    private static let liberapayURL = URL(string: "https://liberapay.com/YunaBraska")!
+
+    /// The running application's icon, used in the About identity card. Resolves
+    /// from the live `NSApp` icon first, then the named application icon.
+    private static var applicationIconImage: NSImage? {
+        NSApp.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
     }
 
     private static let applicationVersion: String = {
@@ -2124,6 +2354,21 @@ public struct PerchHASettingsView: View {
             },
             set: { style in
                 model.setMenuBarDisplayStyle(id, style: style)
+            }
+        )
+    }
+
+    /// The per-entity menu-bar appearance binding. Reads the per-entity override
+    /// when set, otherwise the global default; writing always sets a per-entity
+    /// override so the choice wins over the global default for this entity.
+    private func menuBarItemAppearanceBinding(for id: EntityID) -> Binding<PerchHAMenuBarAppearance> {
+        Binding(
+            get: {
+                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).appearance
+                    ?? displayPreferences.menuBarAppearance
+            },
+            set: { appearance in
+                model.setMenuBarAppearance(id, appearance: appearance)
             }
         )
     }

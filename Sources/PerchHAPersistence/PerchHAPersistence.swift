@@ -135,16 +135,90 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
     }
 }
 
-public struct PerchHAConnectionProfile: Equatable, Codable, Sendable {
+/// A single Home Assistant address in an ordered connection profile.
+///
+/// Each address carries an optional human label (for example `Home` or `VPN`;
+/// may be empty) and a URL string. Both values are trimmed on construction.
+public struct PerchHAConnectionAddress: Equatable, Codable, Sendable {
+    public let label: String
     public let urlString: String
-    public let fallbackURLString: String
 
-    public init(
-        urlString: String,
-        fallbackURLString: String = ""
-    ) {
+    /// Creates a connection address.
+    ///
+    /// - Parameters:
+    ///   - label: An optional display label. Trimmed; may be empty.
+    ///   - urlString: The Home Assistant URL. Trimmed.
+    public init(label: String = "", urlString: String) {
+        self.label = label.trimmingCharacters(in: .whitespacesAndNewlines)
         self.urlString = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.fallbackURLString = fallbackURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// An ordered list of Home Assistant addresses to try in sequence.
+///
+/// The first address is the primary; any following addresses are alternatives
+/// (internal, external, VPN, and so on) that the client falls back to in order
+/// when an earlier one is unreachable. Strings are trimmed and blank addresses
+/// are dropped on construction.
+///
+/// Older configurations stored `urlString` plus a single `fallbackURLString`.
+/// Those decode transparently into an ordered ``addresses`` list, and the legacy
+/// ``urlString``/``fallbackURLString`` accessors keep existing call sites working.
+public struct PerchHAConnectionProfile: Equatable, Codable, Sendable {
+    public let addresses: [PerchHAConnectionAddress]
+
+    /// Creates a profile from an ordered list of addresses.
+    ///
+    /// - Parameter addresses: The ordered addresses. Entries with an empty URL
+    ///   string are dropped.
+    public init(addresses: [PerchHAConnectionAddress]) {
+        self.addresses = addresses.filter { !$0.urlString.isEmpty }
+    }
+
+    /// Creates a profile from a primary URL and an optional single fallback.
+    ///
+    /// Retained for back-compatibility with call sites and stored data that used
+    /// the primary/fallback shape. An empty fallback produces no extra address.
+    ///
+    /// - Parameters:
+    ///   - urlString: The primary Home Assistant URL. Trimmed.
+    ///   - fallbackURLString: An optional fallback URL. Trimmed; empty is ignored.
+    public init(urlString: String, fallbackURLString: String = "") {
+        let primary = PerchHAConnectionAddress(urlString: urlString)
+        let fallback = PerchHAConnectionAddress(urlString: fallbackURLString)
+        self.init(addresses: [primary, fallback])
+    }
+
+    /// The primary URL string (the first address), or `""` when empty.
+    public var urlString: String {
+        addresses.first?.urlString ?? ""
+    }
+
+    /// The first alternative URL string (the second address), or `""` when none.
+    public var fallbackURLString: String {
+        addresses.count > 1 ? addresses[1].urlString : ""
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case addresses
+        case urlString
+        case fallbackURLString
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let decodedAddresses = try container.decodeIfPresent([PerchHAConnectionAddress].self, forKey: .addresses) {
+            self.init(addresses: decodedAddresses)
+            return
+        }
+        let legacyURL = try container.decodeIfPresent(String.self, forKey: .urlString) ?? ""
+        let legacyFallback = try container.decodeIfPresent(String.self, forKey: .fallbackURLString) ?? ""
+        self.init(urlString: legacyURL, fallbackURLString: legacyFallback)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(addresses, forKey: .addresses)
     }
 }
 

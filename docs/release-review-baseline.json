@@ -3,7 +3,7 @@
     "name" : "review-contact-sheet.png",
     "pixelsHigh" : 1346,
     "pixelsWide" : 672,
-    "sampledHashHex" : "4675452180791e00",
+    "sampledHashHex" : "98ef88f9a260ce2f",
     "visiblePixelCount" : 904384
   },
   "schemaVersion" : 1,
@@ -68,7 +68,7 @@
       "name" : "first-run-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "965a055f39574bf4",
+      "sampledHashHex" : "43c3905d20e85059",
       "visiblePixelCount" : 604336
     },
     {
@@ -82,7 +82,7 @@
       "name" : "signing-in-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "75f77787ffbe5001",
+      "sampledHashHex" : "eab838d3e7435bd6",
       "visiblePixelCount" : 604336
     },
     {
@@ -110,7 +110,7 @@
       "name" : "error-dark.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "f0219b911ddcde64",
+      "sampledHashHex" : "1248231e42c194a1",
       "visiblePixelCount" : 604800
     }
   ]

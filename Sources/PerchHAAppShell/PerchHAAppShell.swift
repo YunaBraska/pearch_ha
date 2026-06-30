@@ -327,32 +327,31 @@ public struct PerchHAAuthorizedHomeAssistantGateway: Sendable {
         case let .failure(failure):
             return .failure(failure)
         case let .success(authorizedInput):
-            let primaryInput = authorizedInput.input(for: primaryURL)
-            let primary = await operation(primaryInput)
-            if case let .failure(failure) = primary,
-               shouldRetryOnFallback(failure),
-               let fallbackURL = form.fallbackURL() {
-                let fallbackInput = authorizedInput.input(for: fallbackURL)
-                return await resolveAuthenticationFailure(
-                    await operation(fallbackInput),
+            let urls = form.urls()
+            var lastResult: HAClientResult<Value> = .failure(.transport("no endpoint configured"))
+            for (index, baseURL) in urls.enumerated() {
+                let attemptInput = authorizedInput.input(for: baseURL)
+                let attempt = await resolveAuthenticationFailure(
+                    await operation(attemptInput),
                     authorizedInput: authorizedInput,
-                    attemptedInput: fallbackInput,
-                    refreshBaseURL: fallbackURL,
+                    attemptedInput: attemptInput,
+                    refreshBaseURL: baseURL,
                     operation: operation
                 )
+                lastResult = attempt
+                let isLast = index == urls.count - 1
+                if case let .failure(failure) = attempt, shouldRetryOnFallback(failure), !isLast {
+                    continue
+                }
+                return attempt
             }
-            return await resolveAuthenticationFailure(
-                primary,
-                authorizedInput: authorizedInput,
-                attemptedInput: primaryInput,
-                refreshBaseURL: primaryURL,
-                operation: operation
-            )
+            return lastResult
         }
     }
 
     private func resolveInput(form: PerchHAConnectionForm, primaryURL: URL) -> HAClientResult<PerchHAAuthorizedInput> {
-        let endpoint = HAEndpoint(primaryURL: primaryURL, fallbackURL: form.fallbackURL())
+        let urls = form.urls()
+        let endpoint = HAEndpoint(urls: urls.isEmpty ? [primaryURL] : urls)
         let serverTrustPolicy = HAServerTrustPolicy(trustsAllHosts: true)
         if !form.trimmedToken.isEmpty {
             return .success(
@@ -1162,12 +1161,14 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     public func updateConnectionForm(
         urlString: String? = nil,
         fallbackURLString: String? = nil,
+        addresses: [PerchHAConnectionAddressField]? = nil,
         token: String? = nil,
         usesStoredAuthSession: Bool? = nil
     ) {
         panelModel?.updateConnectionForm(
             urlString: urlString,
             fallbackURLString: fallbackURLString,
+            addresses: addresses,
             token: token,
             usesStoredAuthSession: usesStoredAuthSession
         )
@@ -1343,6 +1344,11 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     @discardableResult
     public func setMenuBarShowsLabel(_ id: EntityID, showsLabel: Bool) -> Bool {
         panelModel?.setMenuBarShowsLabel(id, showsLabel: showsLabel) ?? false
+    }
+
+    @discardableResult
+    public func setMenuBarAppearance(_ id: EntityID, appearance: PerchHAMenuBarAppearance?) -> Bool {
+        panelModel?.setMenuBarAppearance(id, appearance: appearance) ?? false
     }
 
     @discardableResult
@@ -1816,15 +1822,22 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         }
 
         // The fallback (fish-logo) item always keeps its glyph; only promoted
-        // value items honor the icon-only / text-only appearance preference.
-        let appearance = configuration.menuBarAppearance
+        // value items honor the resolved (per-entity, else global) icon-only /
+        // text-only appearance.
         if presentation != .fallback {
-            if !appearance.showsImage {
+            if !presentation.showsImage {
                 entry.imageCache = nil
                 image = nil
             }
-            if !appearance.showsTitle {
+            if !presentation.showsTitle {
                 title = ""
+            }
+            // Never let a promoted item collapse to a zero-width, invisible
+            // status item: if the resolved appearance left it with no image and
+            // no title, fall back to a short visible title (value text, entity
+            // name, or abbreviation) so every promoted entity stays visible.
+            if image == nil && title.isEmpty {
+                title = presentation.visibleFallbackTitle
             }
         }
 
@@ -1954,9 +1967,14 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         } else {
             usesStoredAuthSession = false
         }
+        let profileAddresses = profile?.addresses ?? []
+        let primaryURLString = profileAddresses.first?.urlString ?? ""
+        let alternativeFields = profileAddresses.dropFirst().map { address in
+            PerchHAConnectionAddressField(label: address.label, urlString: address.urlString)
+        }
         return PerchHAConnectionForm(
-            urlString: profile?.urlString ?? "",
-            fallbackURLString: profile?.fallbackURLString ?? "",
+            urlString: primaryURLString,
+            addresses: Array(alternativeFields),
             token: "",
             usesStoredAuthSession: usesStoredAuthSession
         )
@@ -1979,8 +1997,16 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             menuBarItemConfigurations: configuration.menuBarItemConfigurations,
             customActions: configuration.customActions,
             connectionProfile: PerchHAConnectionProfile(
-                urlString: PerchHAConnectionForm.normalizedHomeAssistantURLString(form.urlString),
-                fallbackURLString: PerchHAConnectionForm.normalizedHomeAssistantURLString(form.fallbackURLString)
+                addresses: [
+                    PerchHAConnectionAddress(
+                        urlString: PerchHAConnectionForm.normalizedHomeAssistantURLString(form.urlString)
+                    )
+                ] + form.addresses.map { address in
+                    PerchHAConnectionAddress(
+                        label: address.label,
+                        urlString: PerchHAConnectionForm.normalizedHomeAssistantURLString(address.urlString)
+                    )
+                }
             ),
             roomOrder: configuration.roomOrder,
             entityOrder: configuration.entityOrder,

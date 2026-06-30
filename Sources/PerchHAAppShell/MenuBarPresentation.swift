@@ -9,7 +9,10 @@ public struct PerchHAMenuBarPresentation: Equatable, Sendable {
         title: "PearchHA",
         statusItemTitle: "PearchHA",
         accessibilityLabel: "PearchHA",
-        renderedItem: nil
+        renderedItem: nil,
+        showsImage: true,
+        showsTitle: false,
+        visibleFallbackTitle: "PearchHA"
     )
 
     /// The promoted entity this item represents, or `nil` for the fallback
@@ -19,19 +22,33 @@ public struct PerchHAMenuBarPresentation: Equatable, Sendable {
     public let statusItemTitle: String
     public let accessibilityLabel: String
     public let renderedItem: RenderedMenuBarItem?
+    /// Whether this item's resolved appearance shows the status-item image.
+    public let showsImage: Bool
+    /// Whether this item's resolved appearance shows the status-item title.
+    public let showsTitle: Bool
+    /// A short, always non-empty title used to keep a promoted item visible when
+    /// the resolved appearance would otherwise leave it with no image and no
+    /// title (a zero-width, invisible status item).
+    public let visibleFallbackTitle: String
 
     public init(
         entityID: EntityID?,
         title: String,
         statusItemTitle: String,
         accessibilityLabel: String,
-        renderedItem: RenderedMenuBarItem?
+        renderedItem: RenderedMenuBarItem?,
+        showsImage: Bool,
+        showsTitle: Bool,
+        visibleFallbackTitle: String
     ) {
         self.entityID = entityID
         self.title = title
         self.statusItemTitle = statusItemTitle
         self.accessibilityLabel = accessibilityLabel
         self.renderedItem = renderedItem
+        self.showsImage = showsImage
+        self.showsTitle = showsTitle
+        self.visibleFallbackTitle = visibleFallbackTitle
     }
 }
 
@@ -96,21 +113,45 @@ public struct PerchHAMenuBarPresenter: Sendable {
             return [.fallback]
         }
         let availableEntities = panelSnapshot.availableRooms.flatMap(\.entities)
+        let globalAppearance = configuration.menuBarAppearance
         return entities.map { entity in
+            let itemConfiguration = displayConfiguration.itemConfiguration(for: entity.id)
             let rendered = renderer.render(
                 entity: entity,
-                configuration: displayConfiguration.itemConfiguration(for: entity.id),
+                configuration: itemConfiguration,
                 availableEntities: availableEntities,
                 locale: locale,
                 isStale: panelSnapshot.valuesAreStale
             )
+            // A per-entity appearance always wins over the global default.
+            let appearance = itemConfiguration.appearance ?? globalAppearance
             return PerchHAMenuBarPresentation(
                 entityID: entity.id,
                 title: rendered.title,
                 statusItemTitle: rendered.gauge == nil ? rendered.title : rendered.textTitle,
                 accessibilityLabel: rendered.accessibilityLabel,
-                renderedItem: rendered
+                renderedItem: rendered,
+                showsImage: appearance.showsImage,
+                showsTitle: appearance.showsTitle,
+                visibleFallbackTitle: Self.visibleFallbackTitle(for: entity, rendered: rendered)
             )
         }
+    }
+
+    /// A short, always non-empty title that keeps a promoted item visible when
+    /// the resolved appearance would otherwise leave it with no image and no
+    /// title. Prefers the rendered value text, then the entity name; finally a
+    /// single-letter abbreviation so the item never collapses to zero width.
+    private static func visibleFallbackTitle(for entity: DiscoveredEntity, rendered: RenderedMenuBarItem) -> String {
+        let value = rendered.value.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !value.isEmpty {
+            return value
+        }
+        let name = entity.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty {
+            return name
+        }
+        let identifier = entity.id.rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return identifier.isEmpty ? "•" : String(identifier.prefix(1)).uppercased()
     }
 }

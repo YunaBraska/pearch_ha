@@ -691,6 +691,85 @@ final class PerchHAPersistenceTests: XCTestCase {
         XCTAssertEqual(try secretStore.read(.oauthClientID), "old-client")
     }
 
+    func testLegacyConnectionProfileDecodesIntoOrderedAddresses() throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let json = """
+        {
+          "schemaVersion": 1,
+          "connectionProfile": {
+            "urlString": "https://home.local:8123",
+            "fallbackURLString": "https://remote.example/ha"
+          }
+        }
+        """
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data(json.utf8).write(to: url)
+
+        let configuration = try JSONConfigStore(fileURL: url).load()
+        let profile = try XCTUnwrap(configuration.connectionProfile)
+
+        XCTAssertEqual(
+            profile.addresses,
+            [
+                PerchHAConnectionAddress(urlString: "https://home.local:8123"),
+                PerchHAConnectionAddress(urlString: "https://remote.example/ha")
+            ]
+        )
+        XCTAssertEqual(profile.urlString, "https://home.local:8123")
+        XCTAssertEqual(profile.fallbackURLString, "https://remote.example/ha")
+    }
+
+    func testLegacyConnectionProfileWithEmptyFallbackDecodesToSingleAddress() throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let json = """
+        {
+          "schemaVersion": 1,
+          "connectionProfile": {
+            "urlString": "https://home.local:8123",
+            "fallbackURLString": ""
+          }
+        }
+        """
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data(json.utf8).write(to: url)
+
+        let configuration = try JSONConfigStore(fileURL: url).load()
+        let profile = try XCTUnwrap(configuration.connectionProfile)
+
+        XCTAssertEqual(profile.addresses, [PerchHAConnectionAddress(urlString: "https://home.local:8123")])
+        XCTAssertEqual(profile.fallbackURLString, "")
+    }
+
+    func testConnectionProfileWithMultipleAddressesRoundTrips() throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let configuration = PerchHAConfiguration(
+            connectionProfile: PerchHAConnectionProfile(addresses: [
+                PerchHAConnectionAddress(label: "Home", urlString: "https://home.local:8123"),
+                PerchHAConnectionAddress(label: "VPN", urlString: "https://vpn.example/ha"),
+                PerchHAConnectionAddress(label: "Remote", urlString: "https://remote.example")
+            ])
+        )
+        let store = JSONConfigStore(fileURL: url)
+
+        XCTAssertEqual(try store.save(configuration), configuration)
+        XCTAssertEqual(try store.load(), configuration)
+    }
+
     private func temporaryConfigURL() -> URL {
         URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("perchha-persistence-test-\(UUID().uuidString)", isDirectory: true)

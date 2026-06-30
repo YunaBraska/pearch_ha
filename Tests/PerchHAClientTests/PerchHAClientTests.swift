@@ -828,6 +828,82 @@ final class PerchHAClientTests: XCTestCase {
         XCTAssertEqual(requests.map { $0.url.host }, ["primary.local", "fallback.example"])
     }
 
+    func testConnectionTriesAddressesInOrderAndSucceedsOnThird() async throws {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .urlError(URLError(.cannotConnectToHost)),
+                .transportError("socket closed before response"),
+                .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(#"{"message":"API running."}"#.utf8)))
+            ]
+        )
+        let client = HomeAssistantClient(transport: transport)
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(urls: [
+                try XCTUnwrap(URL(string: "http://first.local:8123")),
+                try XCTUnwrap(URL(string: "http://second.local:8123")),
+                try XCTUnwrap(URL(string: "https://third.example"))
+            ]),
+            token: "secret-token"
+        )
+
+        let result = await client.checkRESTConnection(input)
+
+        XCTAssertEqual(result, .success(HARESTCheck(message: "API running.")))
+        let requests = await transport.requests
+        XCTAssertEqual(requests.map { $0.url.host }, ["first.local", "second.local", "third.example"])
+    }
+
+    func testConnectionStopsAtNonRetryableAuthFailureWithoutTryingLaterAddresses() async throws {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .urlError(URLError(.cannotConnectToHost)),
+                .success(HARESTResponse(statusCode: 401, headers: [:], body: Data())),
+                .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(#"{"message":"API running."}"#.utf8)))
+            ]
+        )
+        let client = HomeAssistantClient(transport: transport)
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(urls: [
+                try XCTUnwrap(URL(string: "http://first.local:8123")),
+                try XCTUnwrap(URL(string: "http://second.local:8123")),
+                try XCTUnwrap(URL(string: "https://third.example"))
+            ]),
+            token: "secret-token"
+        )
+
+        let result = await client.checkRESTConnection(input)
+
+        XCTAssertEqual(result, .failure(.authentication))
+        let requests = await transport.requests
+        XCTAssertEqual(requests.map { $0.url.host }, ["first.local", "second.local"])
+    }
+
+    func testConnectionReportsSanitizedFailureWhenAllAddressesFail() async throws {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .urlError(URLError(.cannotConnectToHost)),
+                .urlError(URLError(.cannotConnectToHost))
+            ]
+        )
+        let client = HomeAssistantClient(transport: transport)
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(urls: [
+                try XCTUnwrap(URL(string: "http://first.local:8123")),
+                try XCTUnwrap(URL(string: "https://second.example"))
+            ]),
+            token: "super-secret-token"
+        )
+
+        let result = await client.checkRESTConnection(input)
+
+        XCTAssertEqual(result, .failure(.unreachable(host: "second.example")))
+        if case let .failure(failure) = result {
+            XCTAssertFalse(failure.description.contains("super-secret-token"))
+        } else {
+            XCTFail("expected a failure when every address is unreachable")
+        }
+    }
+
     func testInvalidStatesPayloadIsTyped() async throws {
         let transport = RecordingHARESTTransport(
             responses: [

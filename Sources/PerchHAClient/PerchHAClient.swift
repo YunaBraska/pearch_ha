@@ -3,13 +3,45 @@ import PerchHACore
 import PerchHASupport
 import Security
 
+/// An ordered, non-empty list of Home Assistant base URLs.
+///
+/// The client tries the URLs in order: it advances to the next URL only on a
+/// retryable failure (unreachable / TLS-rejected / transport) and stops
+/// immediately on any other failure (authentication, invalid response, HTTP
+/// status, and so on). The first URL is the primary; the rest are alternatives
+/// (internal, external, VPN, ...).
 public struct HAEndpoint: Equatable, Sendable {
-    public let primaryURL: URL
-    public let fallbackURL: URL?
+    /// The ordered base URLs, guaranteed non-empty.
+    public let urls: [URL]
 
+    /// Creates an endpoint from an ordered list of URLs.
+    ///
+    /// - Parameter urls: The ordered base URLs. Must be non-empty.
+    /// - Precondition: `urls` is not empty.
+    public init(urls: [URL]) {
+        precondition(!urls.isEmpty, "HAEndpoint requires at least one URL")
+        self.urls = urls
+    }
+
+    /// Creates an endpoint from a primary URL and an optional single fallback.
+    ///
+    /// Retained so existing call sites compile unchanged.
+    ///
+    /// - Parameters:
+    ///   - primaryURL: The primary base URL.
+    ///   - fallbackURL: An optional fallback base URL.
     public init(primaryURL: URL, fallbackURL: URL?) {
-        self.primaryURL = primaryURL
-        self.fallbackURL = fallbackURL
+        self.init(urls: [primaryURL] + (fallbackURL.map { [$0] } ?? []))
+    }
+
+    /// The primary (first) URL.
+    public var primaryURL: URL {
+        urls[0]
+    }
+
+    /// The first alternative URL, or `nil` when only the primary is configured.
+    public var fallbackURL: URL? {
+        urls.count > 1 ? urls[1] : nil
     }
 }
 
@@ -835,34 +867,26 @@ public struct HomeAssistantClient: HAClient {
         input: HAConnectionInput,
         transform: @Sendable (HARESTResponse) -> HAClientResult<Value>
     ) async -> HAClientResult<Value> {
-        let primary = await sendGET(
-            path: path,
-            queryItems: queryItems,
-            baseURL: input.endpoint.primaryURL,
-            token: input.token,
-            serverTrustPolicy: input.serverTrustPolicy
-        )
-        switch primary {
-        case let .success(response):
-            return transform(response)
-        case let .failure(failure):
-            guard shouldRetryOnFallback(failure), let fallbackURL = input.endpoint.fallbackURL else {
-                return .failure(failure)
-            }
-            let fallback = await sendGET(
+        var lastFailure: HAClientFailure?
+        for baseURL in input.endpoint.urls {
+            let attempt = await sendGET(
                 path: path,
                 queryItems: queryItems,
-                baseURL: fallbackURL,
+                baseURL: baseURL,
                 token: input.token,
                 serverTrustPolicy: input.serverTrustPolicy
             )
-            switch fallback {
+            switch attempt {
             case let .success(response):
                 return transform(response)
             case let .failure(failure):
-                return .failure(failure)
+                guard shouldRetryOnFallback(failure) else {
+                    return .failure(failure)
+                }
+                lastFailure = failure
             }
         }
+        return .failure(lastFailure ?? .transport("no endpoint configured"))
     }
 
     private func sendGET(
@@ -1188,24 +1212,24 @@ public struct HomeAssistantClient: HAClient {
     }
 
     private func authenticateWebSocket(_ input: HAConnectionInput) async -> HAWebSocketAuthenticationResult {
-        let primary = await authenticateWebSocket(
-            baseURL: input.endpoint.primaryURL,
-            token: input.token,
-            serverTrustPolicy: input.serverTrustPolicy
-        )
-        switch primary {
-        case .success:
-            return primary
-        case let .failure(failure):
-            guard shouldRetryOnFallback(failure), let fallbackURL = input.endpoint.fallbackURL else {
-                return .failure(failure)
-            }
-            return await authenticateWebSocket(
-                baseURL: fallbackURL,
+        var lastFailure: HAClientFailure?
+        for baseURL in input.endpoint.urls {
+            let attempt = await authenticateWebSocket(
+                baseURL: baseURL,
                 token: input.token,
                 serverTrustPolicy: input.serverTrustPolicy
             )
+            switch attempt {
+            case .success:
+                return attempt
+            case let .failure(failure):
+                guard shouldRetryOnFallback(failure) else {
+                    return .failure(failure)
+                }
+                lastFailure = failure
+            }
         }
+        return .failure(lastFailure ?? .transport("no endpoint configured"))
     }
 
     private func authenticateWebSocket(

@@ -2247,10 +2247,10 @@ struct PerchHASmoke {
         )
         await invalidFallback.connect()
         try expect(
-            invalidFallback.snapshot.connectionState == .failed(.protocolError("invalid fallback URL")),
+            invalidFallback.snapshot.connectionState == .failed(.protocolError("invalid alternative address")),
             "panel model rejects invalid fallback URL"
         )
-        try expect(invalidFallback.snapshot.failureDescription == "invalid fallback URL", "panel model exposes fallback failure text")
+        try expect(invalidFallback.snapshot.failureDescription == "invalid alternative address", "panel model exposes fallback failure text")
 
         let recorder = ConnectionFormRecorder()
         let fallback = PerchHAPanelModel { form in

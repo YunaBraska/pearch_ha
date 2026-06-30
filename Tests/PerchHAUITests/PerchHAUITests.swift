@@ -1,5 +1,6 @@
 #if canImport(XCTest)
 import AppKit
+import Combine
 import Foundation
 import FakeHA
 import XCTest
@@ -494,8 +495,8 @@ final class PerchHAUITests: XCTestCase {
         )
         await model.connect()
 
-        XCTAssertEqual(model.snapshot.connectionState, .failed(.protocolError("invalid fallback URL")))
-        XCTAssertEqual(model.snapshot.failureDescription, "invalid fallback URL")
+        XCTAssertEqual(model.snapshot.connectionState, .failed(.protocolError("invalid alternative address")))
+        XCTAssertEqual(model.snapshot.failureDescription, "invalid alternative address")
         let _hoisted7 = await recorder.callCount()
         XCTAssertEqual(_hoisted7, 0)
     }
@@ -517,6 +518,81 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.connectionState, .connected)
         let _hoisted8 = await recorder.fallbackURLString()
         XCTAssertEqual(_hoisted8, "http://127.0.0.1:8124")
+    }
+
+    func testConnectBuildsEndpointWithAllAddressesInOrder() async throws {
+        let recorder = ConnectionFormRecorder()
+        let model = PerchHAPanelModel { form in
+            await recorder.record(form)
+            return .success(rooms: [])
+        }
+
+        model.updateConnectionForm(
+            urlString: "https://home.local:8123",
+            addresses: [
+                PerchHAConnectionAddressField(label: "VPN", urlString: "https://vpn.example/ha"),
+                PerchHAConnectionAddressField(label: "Remote", urlString: "https://remote.example")
+            ],
+            token: "fake-token"
+        )
+        await model.connect()
+
+        XCTAssertEqual(model.snapshot.connectionState, .connected)
+        let urlLists = await recorder.urlLists()
+        XCTAssertEqual(
+            urlLists.last,
+            ["https://home.local:8123", "https://vpn.example/ha", "https://remote.example"]
+        )
+    }
+
+    func testAddRemoveAndReorderConnectionAddressesMutateFormList() {
+        let model = PerchHAPanelModel()
+        model.updateConnectionForm(urlString: "https://home.local:8123")
+
+        model.addConnectionAddress()
+        model.addConnectionAddress()
+        XCTAssertEqual(model.snapshot.connectionForm.addresses.count, 2)
+
+        let first = model.snapshot.connectionForm.addresses[0].id
+        let second = model.snapshot.connectionForm.addresses[1].id
+        model.updateConnectionAddress(id: first, label: "VPN", urlString: "https://vpn.example")
+        model.updateConnectionAddress(id: second, label: "Remote", urlString: "https://remote.example")
+
+        XCTAssertTrue(model.moveConnectionAddress(id: second, direction: .up))
+        XCTAssertEqual(
+            model.snapshot.connectionForm.addresses.map(\.label),
+            ["Remote", "VPN"]
+        )
+        XCTAssertFalse(model.moveConnectionAddress(id: second, direction: .up))
+
+        model.removeConnectionAddress(id: first)
+        XCTAssertEqual(model.snapshot.connectionForm.addresses.map(\.label), ["Remote"])
+    }
+
+    func testEditingAddressesWhileConnectedReconnectsWithStoredTokenWithoutLosingIt() async throws {
+        let recorder = ConnectionFormRecorder()
+        let model = PerchHAPanelModel { form in
+            await recorder.record(form)
+            return .success(rooms: [])
+        }
+
+        model.updateConnectionForm(urlString: "https://home.local:8123", usesStoredAuthSession: true)
+        await model.connect()
+        XCTAssertEqual(model.snapshot.connectionState, .connected)
+
+        model.addConnectionAddress()
+        let alternative = try XCTUnwrap(model.snapshot.connectionForm.addresses.first)
+        model.updateConnectionAddress(id: alternative.id, urlString: "https://vpn.example")
+        XCTAssertTrue(model.canApplyConnectionEdits)
+
+        await model.connect()
+
+        XCTAssertEqual(model.snapshot.connectionState, .connected)
+        let sessions = await recorder.usesStoredAuthSessions()
+        XCTAssertEqual(sessions.last, true)
+        let urlLists = await recorder.urlLists()
+        XCTAssertEqual(urlLists.last, ["https://home.local:8123", "https://vpn.example"])
+        XCTAssertTrue(model.snapshot.connectionForm.usesStoredAuthSession)
     }
 
     func test_t_panel_model_connects_against_fakeha() async throws {
@@ -3821,13 +3897,17 @@ final class PerchHAUITests: XCTestCase {
         drainPanelRunLoop()
         panel.contentView?.layoutSubtreeIfNeeded()
 
+        model.addConnectionAddress()
+        drainPanelRunLoop()
+        panel.contentView?.layoutSubtreeIfNeeded()
+
         let textFields = editableTextFields(in: panel.contentView)
         let debugSummary = nativeControlDebugSummary(in: panel.contentView)
         guard let urlField = textFields.first(where: { $0.placeholderString == "Home Assistant URL" }) else {
             XCTFail(debugSummary)
             return
         }
-        guard let fallbackField = textFields.first(where: { $0.placeholderString == "Fallback URL" }) else {
+        guard let fallbackField = textFields.first(where: { $0.placeholderString == "Alternative URL" }) else {
             XCTFail(debugSummary)
             return
         }
@@ -4261,12 +4341,17 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
         XCTAssertFalse(application.snapshot.statusItemHasImage)
 
-        // Icon-only suppresses the value title for the promoted item.
+        // Icon-only drops the title only when there is an image to show. This
+        // entity has no glyph, so the item must not collapse to an invisible
+        // zero-width status item: it falls back to a visible value title.
         XCTAssertEqual(
             application.persist(displayPreferences: application.displayPreferences.with(menuBarAppearance: .iconOnly)),
             .saved
         )
-        XCTAssertEqual(application.snapshot.statusItemTitle, "")
+        let iconOnlyItem = application.snapshot.menuBarItems[0]
+        let iconOnlyHasContent = iconOnlyItem.hasImage || !(iconOnlyItem.title ?? "").isEmpty
+        XCTAssertTrue(iconOnlyHasContent, "glyph-less promoted item must stay visible under icon-only")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
 
         // Returning to icon-and-text restores the value title.
         XCTAssertEqual(
@@ -4399,6 +4484,127 @@ final class PerchHAUITests: XCTestCase {
         // The legacy single-item fields mirror the first promoted item.
         XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
         XCTAssertEqual(application.snapshot.statusItemAccessibilityLabel, "Office humidity, 44%")
+    }
+
+    func test_t_app_shell_icon_only_suppresses_title_when_glyph_present() async throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let store = JSONConfigStore(fileURL: url)
+        _ = try store.save(
+            PerchHAConfiguration(
+                selectedEntityIDs: ["sensor.office_humidity"],
+                menuBarEntityIDs: ["sensor.office_humidity"],
+                menuBarItemConfigurations: [
+                    MenuBarItemConfiguration(entityID: "sensor.office_humidity", style: .battery)
+                ],
+                isEntitySelectionExplicit: true
+            )
+        )
+        let application = PerchHAApplication(
+            configStore: store,
+            connector: { _ in .success(rooms: selectionRooms()) }
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+        application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await application.connect()
+        XCTAssertEqual(
+            application.persist(displayPreferences: application.displayPreferences.with(menuBarAppearance: .iconOnly)),
+            .saved
+        )
+
+        // A gauge-style item carries an image, so icon-only legitimately drops
+        // the title while the item stays visible via its rendered gauge image.
+        let item = application.snapshot.menuBarItems[0]
+        XCTAssertTrue(item.hasImage)
+        XCTAssertEqual(item.title, "")
+    }
+
+    func test_t_app_shell_promoted_items_stay_visible_under_icon_only_appearance() async throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let store = JSONConfigStore(fileURL: url)
+        _ = try store.save(
+            PerchHAConfiguration(
+                selectedEntityIDs: ["sensor.office_humidity", "switch.kitchen_light"],
+                isEntitySelectionExplicit: true,
+                menuBarAppearance: .iconOnly
+            )
+        )
+        let application = PerchHAApplication(
+            configStore: store,
+            connector: { _ in .success(rooms: selectionRooms()) }
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await application.connect()
+
+        // Promote two text-style entities through the real toggle path. Neither
+        // carries a gauge or icon glyph, so a global icon-only appearance would
+        // zero out their image *and* their title, producing invisible items.
+        XCTAssertTrue(application.setMenuBarEntity("sensor.office_humidity", isVisible: true))
+        XCTAssertTrue(application.setMenuBarEntity("switch.kitchen_light", isVisible: true))
+        XCTAssertEqual(
+            application.persist(displayPreferences: application.displayPreferences.with(menuBarAppearance: .iconOnly)),
+            .saved
+        )
+
+        let items = application.snapshot.menuBarItems
+        XCTAssertEqual(items.count, 2)
+        for item in items {
+            let hasTitle = !(item.title ?? "").isEmpty
+            XCTAssertTrue(
+                item.hasImage || hasTitle,
+                "promoted menu-bar item must remain visible (image or non-empty title), got title=\(item.title ?? "nil") hasImage=\(item.hasImage)"
+            )
+        }
+    }
+
+    func test_t_app_shell_per_entity_appearance_overrides_global() async throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let store = JSONConfigStore(fileURL: url)
+        _ = try store.save(
+            PerchHAConfiguration(
+                selectedEntityIDs: ["sensor.office_humidity", "sensor.office_temperature"],
+                menuBarEntityIDs: ["sensor.office_humidity", "sensor.office_temperature"],
+                isEntitySelectionExplicit: true,
+                menuBarAppearance: .iconOnly
+            )
+        )
+        let application = PerchHAApplication(
+            configStore: store,
+            connector: { _ in .success(rooms: selectionRooms()) }
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await application.connect()
+
+        // Global icon-only would drop every text title. A per-entity text-only
+        // choice must win, so humidity keeps its value text while temperature
+        // follows the global icon-only default (and stays visible via fallback).
+        XCTAssertTrue(application.setMenuBarAppearance("sensor.office_humidity", appearance: .textOnly))
+        let items = application.snapshot.menuBarItems
+        XCTAssertEqual(items.count, 2)
+        XCTAssertEqual(items[0].title, "44%")
+        let hasContent = items[1].hasImage || !(items[1].title ?? "").isEmpty
+        XCTAssertTrue(hasContent, "global icon-only item must remain visible")
     }
 
     func test_t_app_shell_menu_bar_item_count_tracks_promotion_changes() async throws {
@@ -6447,6 +6653,128 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(finalCount, 8)
     }
 
+    func test_t_prefetch_walks_full_list_beyond_old_lookahead() async {
+        // The default (unbounded) lookahead progressively warms the entire ordered
+        // list while the panel is open — entities far past the old 6-item window
+        // must eventually be fetched.
+        let clock = TestPerchClock()
+        let recorder = PrefetchHistoryRecorder()
+        let settleDelay = PerchDuration.milliseconds(250)
+        let model = await makeConnectedPrefetchModel(
+            recorder: recorder,
+            clock: clock,
+            rooms: prefetchRooms(count: 10),
+            prefetch: PerchHAHistoryPrefetchConfiguration(settleDelay: settleDelay)
+        )
+
+        model.setPanelActive(true)
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await runSettledPrefetchPass(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedCalls: 10)
+
+        let requested = Set(await recorder.requestedIDs())
+        XCTAssertEqual(requested, Set((0..<10).map { EntityID("sensor.prefetch_\($0)") }))
+        // Entities well beyond the historical 6-item lookahead were covered.
+        XCTAssertTrue(requested.contains("sensor.prefetch_9"))
+        XCTAssertTrue(requested.contains("sensor.prefetch_7"))
+        XCTAssertNotNil(model.cachedHistorySeries(for: "sensor.prefetch_9"))
+    }
+
+    func test_t_cache_insert_publishes_observable_revision() async {
+        // A prefetch insert must bump the published history revision and surface in
+        // cachedHistorySeries without any unrelated snapshot change, so inline rows
+        // can re-render the moment their data lands.
+        let clock = TestPerchClock()
+        let recorder = PrefetchHistoryRecorder()
+        let settleDelay = PerchDuration.milliseconds(250)
+        let model = await makeConnectedPrefetchModel(
+            recorder: recorder,
+            clock: clock,
+            rooms: prefetchRooms(count: 2),
+            prefetch: PerchHAHistoryPrefetchConfiguration(settleDelay: settleDelay)
+        )
+
+        let revisionBefore = model.historyRevision
+        var objectWillChangeFired = false
+        let cancellable = model.objectWillChange.sink { objectWillChangeFired = true }
+        defer { cancellable.cancel() }
+
+        XCTAssertNil(model.cachedHistorySeries(for: "sensor.prefetch_0"))
+        model.setPanelActive(true)
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await runSettledPrefetchPass(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedCalls: 2)
+
+        XCTAssertGreaterThan(model.historyRevision, revisionBefore)
+        XCTAssertTrue(objectWillChangeFired)
+        XCTAssertNotNil(model.cachedHistorySeries(for: "sensor.prefetch_0"))
+    }
+
+    func test_t_inline_history_available_without_hover() async {
+        // Driving only panel-active + visible entities (no startHistoryHover call)
+        // populates the inline cache purely from the auto-prefetch path.
+        let clock = TestPerchClock()
+        let recorder = PrefetchHistoryRecorder()
+        let settleDelay = PerchDuration.milliseconds(250)
+        let model = await makeConnectedPrefetchModel(
+            recorder: recorder,
+            clock: clock,
+            rooms: prefetchRooms(count: 3),
+            prefetch: PerchHAHistoryPrefetchConfiguration(settleDelay: settleDelay)
+        )
+
+        // No hover popover is open and none is requested.
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+        model.setPanelActive(true)
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await runSettledPrefetchPass(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedCalls: 3)
+
+        XCTAssertNotNil(model.cachedHistorySeries(for: "sensor.prefetch_0"))
+        XCTAssertNotNil(model.cachedHistorySeries(for: "sensor.prefetch_1"))
+        // Still no popover: hover was never involved.
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+    }
+
+    func test_t_inactive_panel_keeps_menu_bar_entities_fresh_without_prefetch() async {
+        // When the panel is closed, no history prefetch runs, yet a promoted
+        // menu-bar entity stays current via the panel-state-independent live push.
+        let clock = TestPerchClock()
+        let recorder = PrefetchHistoryRecorder()
+        let promoted = EntityID("sensor.prefetch_0")
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: prefetchRooms(count: 4)) },
+            historyProvider: { form, entityID, range in
+                await recorder.provide(form: form, entityID: entityID, range: range)
+            },
+            clock: clock,
+            historyPrefetchConfiguration: PerchHAHistoryPrefetchConfiguration(settleDelay: .milliseconds(250)),
+            periodicRefreshConfiguration: .disabled,
+            menuBarDisplayConfiguration: MenuBarDisplayConfiguration(promotedEntityIDs: [promoted])
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        // Panel stays closed: report visibility, which must not arm any prefetch.
+        model.updateVisibleEntities([promoted])
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        let closedSleepers = await clock.sleepingTaskCount()
+        let closedCalls = await recorder.callCount()
+        XCTAssertEqual(closedSleepers, 0)
+        XCTAssertEqual(closedCalls, 0)
+        XCTAssertNil(model.cachedHistorySeries(for: promoted))
+
+        // Live push updates the promoted entity while the panel is closed.
+        let didUpdate = model.applyLiveState(
+            EntityState(id: promoted, name: "Prefetch 0", state: "42.0", unit: "°C")
+        )
+        XCTAssertTrue(didUpdate)
+        let entity = model.snapshot.rooms.flatMap(\.entities).first { $0.id == promoted }
+        XCTAssertEqual(entity?.state, "42.0")
+        // No history prefetch was triggered by the closed panel.
+        let afterLiveCalls = await recorder.callCount()
+        XCTAssertEqual(afterLiveCalls, 0)
+    }
+
     func test_t_history_range_picker_offers_at_most_one_week() {
         // The dashboard and detail panel cap the offered history at one week.
         XCTAssertEqual(HistoryRange.uiSelectable, [.hour, .day, .week])
@@ -7014,6 +7342,7 @@ private actor ConnectionFormRecorder {
     private var recordedCallCount = 0
     private var recordedURLStrings: [String] = []
     private var recordedFallbackURLString: String?
+    private var recordedURLLists: [[String]] = []
     private var recordedTokens: [String] = []
     private var recordedUsesStoredAuthSessions: [Bool] = []
 
@@ -7021,8 +7350,13 @@ private actor ConnectionFormRecorder {
         recordedCallCount += 1
         recordedURLStrings.append(form.primaryURL()?.absoluteString ?? form.urlString)
         recordedFallbackURLString = form.fallbackURL()?.absoluteString
+        recordedURLLists.append(form.urls().map(\.absoluteString))
         recordedTokens.append(form.token)
         recordedUsesStoredAuthSessions.append(form.usesStoredAuthSession)
+    }
+
+    func urlLists() -> [[String]] {
+        recordedURLLists
     }
 
     func callCount() -> Int {
