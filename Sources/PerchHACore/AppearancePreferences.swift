@@ -148,7 +148,28 @@ public struct PerchHAAccentColor: Equatable, Codable, Sendable {
     }
 }
 
-/// The bundle of user display preferences surfaced in the General settings tab.
+/// The vertical density of dashboard telemetry rows.
+///
+/// ``comfortable`` is the historic, roomier row height; ``compact`` tightens the
+/// row so more values fit on screen at once. The choice is persisted and applied
+/// to every ``TelemetryRow`` in the dashboard.
+public enum PerchHADashboardRowDensity: String, CaseIterable, Codable, Equatable, Sendable {
+    case comfortable
+    case compact
+
+    /// The shipped default density.
+    public static let defaultDensity: PerchHADashboardRowDensity = .comfortable
+
+    /// The user-facing control label.
+    public var displayName: String {
+        switch self {
+        case .comfortable: "Comfortable"
+        case .compact: "Compact"
+        }
+    }
+}
+
+/// The bundle of user display preferences surfaced in the settings window.
 ///
 /// Carried as a single value so the Settings UI and the app shell exchange the
 /// whole set in one place. The ``Self/defaults`` value restores the shipped
@@ -162,17 +183,35 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
     public let themeMode: PerchHAThemeMode
     /// The accent color applied across the panel and settings.
     public let accentColor: PerchHAAccentColor
+    /// The vertical density of dashboard telemetry rows.
+    public let dashboardRowDensity: PerchHADashboardRowDensity
+    /// The default inline/detail history range used when an entity has no
+    /// per-entity override. Capped at a week in the UI.
+    public let defaultHistoryRange: HistoryRange
+    /// Whether the dashboard footer shows the "updated" timestamp caption.
+    public let showsFooterTimestamp: Bool
+    /// The room/module identifiers the user has hidden from the dashboard. An
+    /// empty set means every available module is shown.
+    public let hiddenModuleIDs: Set<String>
 
     public init(
         menuBarAppearance: PerchHAMenuBarAppearance = .defaultAppearance,
         stableMenuBarWidth: Bool = false,
         themeMode: PerchHAThemeMode = .defaultMode,
-        accentColor: PerchHAAccentColor = .homeAssistantBlue
+        accentColor: PerchHAAccentColor = .homeAssistantBlue,
+        dashboardRowDensity: PerchHADashboardRowDensity = .defaultDensity,
+        defaultHistoryRange: HistoryRange = .day,
+        showsFooterTimestamp: Bool = true,
+        hiddenModuleIDs: Set<String> = []
     ) {
         self.menuBarAppearance = menuBarAppearance
         self.stableMenuBarWidth = stableMenuBarWidth
         self.themeMode = themeMode
         self.accentColor = accentColor
+        self.dashboardRowDensity = dashboardRowDensity
+        self.defaultHistoryRange = defaultHistoryRange
+        self.showsFooterTimestamp = showsFooterTimestamp
+        self.hiddenModuleIDs = hiddenModuleIDs
     }
 
     /// The shipped default display preferences.
@@ -180,41 +219,63 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
 
     /// Returns a copy with the menu-bar appearance replaced.
     public func with(menuBarAppearance: PerchHAMenuBarAppearance) -> PerchHADisplayPreferences {
-        PerchHADisplayPreferences(
-            menuBarAppearance: menuBarAppearance,
-            stableMenuBarWidth: stableMenuBarWidth,
-            themeMode: themeMode,
-            accentColor: accentColor
-        )
+        copy(menuBarAppearance: menuBarAppearance)
     }
 
     /// Returns a copy with the stable-width flag replaced.
     public func with(stableMenuBarWidth: Bool) -> PerchHADisplayPreferences {
-        PerchHADisplayPreferences(
-            menuBarAppearance: menuBarAppearance,
-            stableMenuBarWidth: stableMenuBarWidth,
-            themeMode: themeMode,
-            accentColor: accentColor
-        )
+        copy(stableMenuBarWidth: stableMenuBarWidth)
     }
 
     /// Returns a copy with the theme mode replaced.
     public func with(themeMode: PerchHAThemeMode) -> PerchHADisplayPreferences {
-        PerchHADisplayPreferences(
-            menuBarAppearance: menuBarAppearance,
-            stableMenuBarWidth: stableMenuBarWidth,
-            themeMode: themeMode,
-            accentColor: accentColor
-        )
+        copy(themeMode: themeMode)
     }
 
     /// Returns a copy with the accent color replaced.
     public func with(accentColor: PerchHAAccentColor) -> PerchHADisplayPreferences {
+        copy(accentColor: accentColor)
+    }
+
+    /// Returns a copy with the dashboard row density replaced.
+    public func with(dashboardRowDensity: PerchHADashboardRowDensity) -> PerchHADisplayPreferences {
+        copy(dashboardRowDensity: dashboardRowDensity)
+    }
+
+    /// Returns a copy with the default history range replaced.
+    public func with(defaultHistoryRange: HistoryRange) -> PerchHADisplayPreferences {
+        copy(defaultHistoryRange: defaultHistoryRange)
+    }
+
+    /// Returns a copy with the footer-timestamp flag replaced.
+    public func with(showsFooterTimestamp: Bool) -> PerchHADisplayPreferences {
+        copy(showsFooterTimestamp: showsFooterTimestamp)
+    }
+
+    /// Returns a copy with the hidden-module set replaced.
+    public func with(hiddenModuleIDs: Set<String>) -> PerchHADisplayPreferences {
+        copy(hiddenModuleIDs: hiddenModuleIDs)
+    }
+
+    private func copy(
+        menuBarAppearance: PerchHAMenuBarAppearance? = nil,
+        stableMenuBarWidth: Bool? = nil,
+        themeMode: PerchHAThemeMode? = nil,
+        accentColor: PerchHAAccentColor? = nil,
+        dashboardRowDensity: PerchHADashboardRowDensity? = nil,
+        defaultHistoryRange: HistoryRange? = nil,
+        showsFooterTimestamp: Bool? = nil,
+        hiddenModuleIDs: Set<String>? = nil
+    ) -> PerchHADisplayPreferences {
         PerchHADisplayPreferences(
-            menuBarAppearance: menuBarAppearance,
-            stableMenuBarWidth: stableMenuBarWidth,
-            themeMode: themeMode,
-            accentColor: accentColor
+            menuBarAppearance: menuBarAppearance ?? self.menuBarAppearance,
+            stableMenuBarWidth: stableMenuBarWidth ?? self.stableMenuBarWidth,
+            themeMode: themeMode ?? self.themeMode,
+            accentColor: accentColor ?? self.accentColor,
+            dashboardRowDensity: dashboardRowDensity ?? self.dashboardRowDensity,
+            defaultHistoryRange: defaultHistoryRange ?? self.defaultHistoryRange,
+            showsFooterTimestamp: showsFooterTimestamp ?? self.showsFooterTimestamp,
+            hiddenModuleIDs: hiddenModuleIDs ?? self.hiddenModuleIDs
         )
     }
 }

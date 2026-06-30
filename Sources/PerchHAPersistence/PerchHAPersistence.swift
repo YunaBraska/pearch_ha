@@ -38,6 +38,10 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
     public let stableMenuBarWidth: Bool
     public let themeMode: PerchHAThemeMode
     public let accentColor: PerchHAAccentColor
+    public let dashboardRowDensity: PerchHADashboardRowDensity
+    public let dashboardDefaultHistoryRange: HistoryRange
+    public let dashboardShowsFooterTimestamp: Bool
+    public let dashboardHiddenModuleIDs: [String]
 
     public init(
         schemaVersion: Int = Self.currentSchemaVersion,
@@ -52,7 +56,11 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         menuBarAppearance: PerchHAMenuBarAppearance = .defaultAppearance,
         stableMenuBarWidth: Bool = false,
         themeMode: PerchHAThemeMode = .defaultMode,
-        accentColor: PerchHAAccentColor = .homeAssistantBlue
+        accentColor: PerchHAAccentColor = .homeAssistantBlue,
+        dashboardRowDensity: PerchHADashboardRowDensity = .defaultDensity,
+        dashboardDefaultHistoryRange: HistoryRange = .day,
+        dashboardShowsFooterTimestamp: Bool = true,
+        dashboardHiddenModuleIDs: [String] = []
     ) {
         self.schemaVersion = schemaVersion
         self.selectedEntityIDs = selectedEntityIDs
@@ -67,6 +75,10 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         self.stableMenuBarWidth = stableMenuBarWidth
         self.themeMode = themeMode
         self.accentColor = accentColor
+        self.dashboardRowDensity = dashboardRowDensity
+        self.dashboardDefaultHistoryRange = dashboardDefaultHistoryRange
+        self.dashboardShowsFooterTimestamp = dashboardShowsFooterTimestamp
+        self.dashboardHiddenModuleIDs = dashboardHiddenModuleIDs
     }
 
     public static var empty: PerchHAConfiguration {
@@ -107,6 +119,10 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         case stableMenuBarWidth
         case themeMode
         case accentColor
+        case dashboardRowDensity
+        case dashboardDefaultHistoryRange
+        case dashboardShowsFooterTimestamp
+        case dashboardHiddenModuleIDs
     }
 
     public init(from decoder: Decoder) throws {
@@ -132,6 +148,52 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         stableMenuBarWidth = try container.decodeIfPresent(Bool.self, forKey: .stableMenuBarWidth) ?? false
         themeMode = try container.decodeIfPresent(PerchHAThemeMode.self, forKey: .themeMode) ?? .defaultMode
         accentColor = try container.decodeIfPresent(PerchHAAccentColor.self, forKey: .accentColor) ?? .homeAssistantBlue
+        dashboardRowDensity = try container.decodeIfPresent(PerchHADashboardRowDensity.self, forKey: .dashboardRowDensity) ?? .defaultDensity
+        dashboardDefaultHistoryRange = try container.decodeIfPresent(HistoryRange.self, forKey: .dashboardDefaultHistoryRange) ?? .day
+        dashboardShowsFooterTimestamp = try container.decodeIfPresent(Bool.self, forKey: .dashboardShowsFooterTimestamp) ?? true
+        dashboardHiddenModuleIDs = try container.decodeIfPresent([String].self, forKey: .dashboardHiddenModuleIDs) ?? []
+    }
+
+    /// The display preferences embedded in this configuration.
+    ///
+    /// Surfaces the flat persisted appearance/dashboard fields as the bundled
+    /// ``PerchHADisplayPreferences`` value the UI and app shell exchange.
+    public var displayPreferences: PerchHADisplayPreferences {
+        PerchHADisplayPreferences(
+            menuBarAppearance: menuBarAppearance,
+            stableMenuBarWidth: stableMenuBarWidth,
+            themeMode: themeMode,
+            accentColor: accentColor,
+            dashboardRowDensity: dashboardRowDensity,
+            defaultHistoryRange: dashboardDefaultHistoryRange,
+            showsFooterTimestamp: dashboardShowsFooterTimestamp,
+            hiddenModuleIDs: Set(dashboardHiddenModuleIDs)
+        )
+    }
+
+    /// Returns a copy of this configuration with its display-preference fields
+    /// replaced by the supplied bundle, leaving selection/menu-bar/connection
+    /// state untouched.
+    public func applying(displayPreferences: PerchHADisplayPreferences) -> PerchHAConfiguration {
+        PerchHAConfiguration(
+            schemaVersion: schemaVersion,
+            selectedEntityIDs: selectedEntityIDs,
+            menuBarEntityIDs: menuBarEntityIDs,
+            menuBarItemConfigurations: menuBarItemConfigurations,
+            customActions: customActions,
+            connectionProfile: connectionProfile,
+            roomOrder: roomOrder,
+            entityOrder: entityOrder,
+            isEntitySelectionExplicit: isEntitySelectionExplicit,
+            menuBarAppearance: displayPreferences.menuBarAppearance,
+            stableMenuBarWidth: displayPreferences.stableMenuBarWidth,
+            themeMode: displayPreferences.themeMode,
+            accentColor: displayPreferences.accentColor,
+            dashboardRowDensity: displayPreferences.dashboardRowDensity,
+            dashboardDefaultHistoryRange: displayPreferences.defaultHistoryRange,
+            dashboardShowsFooterTimestamp: displayPreferences.showsFooterTimestamp,
+            dashboardHiddenModuleIDs: Array(displayPreferences.hiddenModuleIDs).sorted()
+        )
     }
 }
 

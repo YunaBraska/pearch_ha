@@ -133,6 +133,10 @@ final class PerchHAPersistenceTests: XCTestCase {
         XCTAssertFalse(configuration.stableMenuBarWidth)
         XCTAssertEqual(configuration.themeMode, .system)
         XCTAssertEqual(configuration.accentColor, .homeAssistantBlue)
+        XCTAssertEqual(configuration.dashboardRowDensity, .comfortable)
+        XCTAssertEqual(configuration.dashboardDefaultHistoryRange, .day)
+        XCTAssertTrue(configuration.dashboardShowsFooterTimestamp)
+        XCTAssertTrue(configuration.dashboardHiddenModuleIDs.isEmpty)
     }
 
     func testJSONConfigStoreRoundTripsDisplayPreferences() throws {
@@ -145,12 +149,55 @@ final class PerchHAPersistenceTests: XCTestCase {
             menuBarAppearance: .iconOnly,
             stableMenuBarWidth: true,
             themeMode: .dark,
-            accentColor: PerchHAAccentColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 0.9)
+            accentColor: PerchHAAccentColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 0.9),
+            dashboardRowDensity: .compact,
+            dashboardDefaultHistoryRange: .week,
+            dashboardShowsFooterTimestamp: false,
+            dashboardHiddenModuleIDs: ["room.office", "room.kitchen"]
         )
 
         try store.save(configuration)
 
         XCTAssertEqual(try store.load(), configuration)
+    }
+
+    func testConfigurationDisplayPreferencesBridgesDashboardFields() {
+        let configuration = PerchHAConfiguration(
+            dashboardRowDensity: .compact,
+            dashboardDefaultHistoryRange: .week,
+            dashboardShowsFooterTimestamp: false,
+            dashboardHiddenModuleIDs: ["room.office"]
+        )
+
+        let preferences = configuration.displayPreferences
+
+        XCTAssertEqual(preferences.dashboardRowDensity, .compact)
+        XCTAssertEqual(preferences.defaultHistoryRange, .week)
+        XCTAssertFalse(preferences.showsFooterTimestamp)
+        XCTAssertEqual(preferences.hiddenModuleIDs, ["room.office"])
+    }
+
+    func testConfigurationApplyingDisplayPreferencesReplacesOnlyDisplayFields() {
+        let base = PerchHAConfiguration(
+            selectedEntityIDs: ["sensor.office_temperature"],
+            menuBarEntityIDs: ["sensor.office_temperature"]
+        )
+        let preferences = PerchHADisplayPreferences.defaults
+            .with(dashboardRowDensity: .compact)
+            .with(defaultHistoryRange: .week)
+            .with(showsFooterTimestamp: false)
+            .with(hiddenModuleIDs: ["room.office"])
+
+        let applied = base.applying(displayPreferences: preferences)
+
+        // Display fields take the new values.
+        XCTAssertEqual(applied.dashboardRowDensity, .compact)
+        XCTAssertEqual(applied.dashboardDefaultHistoryRange, .week)
+        XCTAssertFalse(applied.dashboardShowsFooterTimestamp)
+        XCTAssertEqual(applied.dashboardHiddenModuleIDs, ["room.office"])
+        // Selection/menu-bar state is preserved untouched.
+        XCTAssertEqual(applied.selectedEntityIDs, ["sensor.office_temperature"])
+        XCTAssertEqual(applied.menuBarEntityIDs, ["sensor.office_temperature"])
     }
 
     func testJSONConfigStoreDefaultsMissingDisplayPreferencesForBackCompat() throws {
@@ -176,6 +223,12 @@ final class PerchHAPersistenceTests: XCTestCase {
         XCTAssertFalse(configuration.stableMenuBarWidth)
         XCTAssertEqual(configuration.themeMode, .system)
         XCTAssertEqual(configuration.accentColor, .homeAssistantBlue)
+        // New dashboard display fields decode to their shipped defaults when a
+        // pre-existing config file omits them.
+        XCTAssertEqual(configuration.dashboardRowDensity, .comfortable)
+        XCTAssertEqual(configuration.dashboardDefaultHistoryRange, .day)
+        XCTAssertTrue(configuration.dashboardShowsFooterTimestamp)
+        XCTAssertTrue(configuration.dashboardHiddenModuleIDs.isEmpty)
     }
 
     func testAccentColorClampsChannelsIntoUnitRange() {
@@ -202,8 +255,14 @@ final class PerchHAPersistenceTests: XCTestCase {
             base.with(accentColor: .homeAssistantBlue).accentColor,
             .homeAssistantBlue
         )
+        XCTAssertEqual(base.with(dashboardRowDensity: .compact).dashboardRowDensity, .compact)
+        XCTAssertEqual(base.with(defaultHistoryRange: .week).defaultHistoryRange, .week)
+        XCTAssertFalse(base.with(showsFooterTimestamp: false).showsFooterTimestamp)
+        XCTAssertEqual(base.with(hiddenModuleIDs: ["room.office"]).hiddenModuleIDs, ["room.office"])
         // Replacing one field leaves the rest at their defaults.
         XCTAssertEqual(base.with(themeMode: .light).menuBarAppearance, .iconAndText)
+        XCTAssertEqual(base.with(dashboardRowDensity: .compact).defaultHistoryRange, .day)
+        XCTAssertTrue(base.with(hiddenModuleIDs: ["room.office"]).showsFooterTimestamp)
     }
 
     func testJSONConfigStoreRejectsMalformedCustomActionsOnLoad() throws {

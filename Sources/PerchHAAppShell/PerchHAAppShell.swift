@@ -1066,6 +1066,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
                 self?.clearStoredAuthSession()
             }
         )
+        model.applyDisplayPreferences(configuration.displayPreferences)
         panelModel = model
         panel = Self.makePanel(model: model) { [weak self] in
             self?.openSettingsWindow()
@@ -1519,12 +1520,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
 
     /// The current display preferences exposed for the Settings UI bindings.
     public var displayPreferences: PerchHADisplayPreferences {
-        PerchHADisplayPreferences(
-            menuBarAppearance: configuration.menuBarAppearance,
-            stableMenuBarWidth: configuration.stableMenuBarWidth,
-            themeMode: configuration.themeMode,
-            accentColor: configuration.accentColor
-        )
+        configuration.displayPreferences
     }
 
     /// Persists updated display preferences, re-applies theme/accent, and
@@ -1543,27 +1539,14 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             return .failed("configuration load failed; save blocked: \(message)")
         }
 
-        let nextConfiguration = PerchHAConfiguration(
-            schemaVersion: configuration.schemaVersion,
-            selectedEntityIDs: configuration.selectedEntityIDs,
-            menuBarEntityIDs: configuration.menuBarEntityIDs,
-            menuBarItemConfigurations: configuration.menuBarItemConfigurations,
-            customActions: configuration.customActions,
-            connectionProfile: configuration.connectionProfile,
-            roomOrder: configuration.roomOrder,
-            entityOrder: configuration.entityOrder,
-            isEntitySelectionExplicit: configuration.isEntitySelectionExplicit,
-            menuBarAppearance: preferences.menuBarAppearance,
-            stableMenuBarWidth: preferences.stableMenuBarWidth,
-            themeMode: preferences.themeMode,
-            accentColor: preferences.accentColor
-        )
+        let nextConfiguration = configuration.applying(displayPreferences: preferences)
         do {
             configuration = try configStore.save(nextConfiguration)
             configurationPersistenceState = .ready
             applyAppearancePreferences()
             if let panelModel {
                 updateStatusItems(from: panelModel.snapshot)
+                panelModel.applyDisplayPreferences(preferences)
             }
             return .saved
         } catch {

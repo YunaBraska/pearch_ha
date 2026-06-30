@@ -4377,7 +4377,11 @@ final class PerchHAUITests: XCTestCase {
             menuBarAppearance: .iconOnly,
             stableMenuBarWidth: true,
             themeMode: .dark,
-            accentColor: PerchHAAccentColor(red: 0.1, green: 0.2, blue: 0.3)
+            accentColor: PerchHAAccentColor(red: 0.1, green: 0.2, blue: 0.3),
+            dashboardRowDensity: .compact,
+            defaultHistoryRange: .week,
+            showsFooterTimestamp: false,
+            hiddenModuleIDs: ["room.office"]
         )
         XCTAssertEqual(application.persist(displayPreferences: preferences), .saved)
         XCTAssertEqual(application.displayPreferences, preferences)
@@ -4388,6 +4392,20 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertTrue(reloaded.stableMenuBarWidth)
         XCTAssertEqual(reloaded.themeMode, .dark)
         XCTAssertEqual(reloaded.accentColor, PerchHAAccentColor(red: 0.1, green: 0.2, blue: 0.3))
+        // The new dashboard display preferences also round-trip.
+        XCTAssertEqual(reloaded.dashboardRowDensity, .compact)
+        XCTAssertEqual(reloaded.dashboardDefaultHistoryRange, .week)
+        XCTAssertFalse(reloaded.dashboardShowsFooterTimestamp)
+        XCTAssertEqual(reloaded.dashboardHiddenModuleIDs, ["room.office"])
+    }
+
+    func testPanelModelApplyDisplayPreferencesUpdatesHonoredValue() {
+        let model = PerchHAPanelModel()
+        XCTAssertEqual(model.displayPreferences, .defaults)
+
+        model.applyDisplayPreferences(.defaults.with(dashboardRowDensity: .compact))
+
+        XCTAssertEqual(model.displayPreferences.dashboardRowDensity, .compact)
     }
 
     func test_t_status_panel_escape_closes_and_command_comma_opens_settings() {
@@ -7201,6 +7219,58 @@ final class PerchHAUITests: XCTestCase {
             .appendingPathComponent("perchha-env-test-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory.appendingPathComponent(".env.local", isDirectory: false)
+    }
+
+    // MARK: Dashboard cockpit components
+
+    func testDashboardPaletteResolvesDistinctDesignedLightAndDarkSurfaces() {
+        let dark = PerchHATheme.Dashboard.palette(.dark)
+        let light = PerchHATheme.Dashboard.palette(.light)
+        XCTAssertEqual(dark, PerchHATheme.Dashboard.darkPalette)
+        XCTAssertEqual(light, PerchHATheme.Dashboard.lightPalette)
+        XCTAssertNotEqual(dark, light, "light and dark are designed, not identical")
+        XCTAssertNotEqual(
+            dark.surfaceRoot,
+            dark.surfacePanel,
+            "the dark root surface is deeper than the panel surface"
+        )
+        XCTAssertNotEqual(
+            dark.surfacePanel,
+            dark.surfacePanelElevated,
+            "the elevated panel is distinct from the standard panel"
+        )
+    }
+
+    func testDashboardPaletteCompatibilityAliasesTrackTheNewTokens() {
+        let palette = PerchHATheme.Dashboard.darkPalette
+        XCTAssertEqual(palette.popoverBackground, palette.surfaceRoot)
+        XCTAssertEqual(palette.cardBackground, palette.surfacePanel)
+        XCTAssertEqual(palette.cardBackgroundElevated, palette.surfacePanelElevated)
+        XCTAssertEqual(palette.separator, palette.separatorSubtle)
+        XCTAssertEqual(palette.chartTrack, palette.meterTrack)
+    }
+
+    func testDashboardPaletteSeverityColorMapsToSemanticTokens() {
+        let palette = PerchHATheme.Dashboard.darkPalette
+        XCTAssertEqual(palette.severityColor(.normal), palette.accentPrimary)
+        XCTAssertEqual(palette.severityColor(.warning), palette.warning)
+        XCTAssertEqual(palette.severityColor(.critical), palette.danger)
+    }
+
+    func testDashboardPaletteConnectionColorMapsConnectionStates() {
+        let palette = PerchHATheme.Dashboard.darkPalette
+        XCTAssertEqual(palette.connectionColor(.connected), palette.success)
+        XCTAssertEqual(palette.connectionColor(.connecting), palette.warning)
+        XCTAssertEqual(palette.connectionColor(.reconnecting(attempt: 1)), palette.warning)
+        XCTAssertEqual(palette.connectionColor(.failed(.authentication)), palette.danger)
+        XCTAssertEqual(palette.connectionColor(.disconnected), palette.textSecondary)
+    }
+
+    func testSummaryStripMetricEquatableDistinguishesValueAndCaption() {
+        let base = SummaryStripMetric(caption: "Humidity", value: "44%")
+        XCTAssertEqual(base, SummaryStripMetric(caption: "Humidity", value: "44%"))
+        XCTAssertNotEqual(base, SummaryStripMetric(caption: "Humidity", value: "45%"))
+        XCTAssertNotEqual(base, SummaryStripMetric(caption: "Temp", value: "44%"))
     }
 }
 

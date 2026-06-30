@@ -3,7 +3,7 @@
     "name" : "review-contact-sheet.png",
     "pixelsHigh" : 1346,
     "pixelsWide" : 672,
-    "sampledHashHex" : "98ef88f9a260ce2f",
+    "sampledHashHex" : "ecc8fd38767e86ea",
     "visiblePixelCount" : 904384
   },
   "schemaVersion" : 1,
@@ -12,105 +12,105 @@
       "name" : "connected-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "0fb90e56a86fcaf9",
+      "sampledHashHex" : "24db89e0326736b7",
       "visiblePixelCount" : 604336
     },
     {
       "name" : "connected-dark.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "b63c63f5659ea5c5",
+      "sampledHashHex" : "1a435346b4b96821",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "connected-dark-increased-contrast.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "0756a0d46587d967",
+      "sampledHashHex" : "8ddf95028203696f",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "connected-light-reduced-motion.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "0fb90e56a86fcaf9",
+      "sampledHashHex" : "24db89e0326736b7",
       "visiblePixelCount" : 604336
     },
     {
       "name" : "history-loaded-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "b288c85bd1b505b0",
+      "sampledHashHex" : "07971af6730a2645",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "history-loaded-light-increased-contrast.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "42627732718587d3",
+      "sampledHashHex" : "e7536a187f7fdf21",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "custom-action-editor-light.png",
       "pixelsHigh" : 1120,
       "pixelsWide" : 1040,
-      "sampledHashHex" : "43dd88b646957577",
+      "sampledHashHex" : "49902f924bcf736f",
       "visiblePixelCount" : 1164800
     },
     {
       "name" : "built-in-controls-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "406eff87e73e6fd1",
+      "sampledHashHex" : "bf2aede17d5d96c6",
       "visiblePixelCount" : 604336
     },
     {
       "name" : "first-run-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "43c3905d20e85059",
+      "sampledHashHex" : "4cc25bbc2d960954",
       "visiblePixelCount" : 604336
     },
     {
       "name" : "connecting-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "e98612a660d8e934",
+      "sampledHashHex" : "e160ca539d50e8c6",
       "visiblePixelCount" : 604336
     },
     {
       "name" : "signing-in-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "eab838d3e7435bd6",
+      "sampledHashHex" : "4b31518b25b8a132",
       "visiblePixelCount" : 604336
     },
     {
       "name" : "settings-selection-light.png",
       "pixelsHigh" : 1120,
       "pixelsWide" : 1040,
-      "sampledHashHex" : "325456320d1904e9",
+      "sampledHashHex" : "105ee9c4cf00fa65",
       "visiblePixelCount" : 1164800
     },
     {
       "name" : "reconnecting-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "d433ff58966f9815",
+      "sampledHashHex" : "9005fbaae4cf24c1",
       "visiblePixelCount" : 604336
     },
     {
       "name" : "empty-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "4e801ed5c662a87c",
+      "sampledHashHex" : "2f3d3afb7023302f",
       "visiblePixelCount" : 604336
     },
     {
       "name" : "error-dark.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "1248231e42c194a1",
+      "sampledHashHex" : "816677774d142743",
       "visiblePixelCount" : 604800
     }
   ]

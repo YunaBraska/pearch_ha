@@ -129,31 +129,72 @@ public enum PerchHATheme {
     /// the palette so a single `@Environment(\.colorScheme)` read fans out to all
     /// dashboard surfaces.
     public struct DashboardPalette: Equatable, Sendable {
-        public let appBackground: Color
-        public let popoverBackground: Color
-        public let cardBackground: Color
-        public let cardBackgroundElevated: Color
+        /// The deepest surface — the popover root behind everything.
+        public let surfaceRoot: Color
+        /// The standard module/panel surface that sits on the root.
+        public let surfacePanel: Color
+        /// A slightly lighter elevated panel surface (header strip, detail card).
+        public let surfacePanelElevated: Color
+        /// The fill of a compact inline control at rest (status capsule, switch).
+        public let surfaceControl: Color
+        /// The fill of a compact inline control when active/on.
+        public let surfaceControlActive: Color
+        /// A very-low-opacity hairline stroke for the outer surface only.
         public let borderSubtle: Color
-        public let borderEmphatic: Color
+        /// An almost-invisible separator between rows/modules.
+        public let separatorSubtle: Color
+        /// Near-white (dark) / dark-graphite (light) primary text.
         public let textPrimary: Color
+        /// Blue-gray secondary text for labels and captions.
         public let textSecondary: Color
+        /// The faintest tertiary text for units and disabled states.
         public let textTertiary: Color
-        public let accentSecondary: Color
-        public let chartTrack: Color
-        public let separator: Color
+        /// The secondary chart/series accent (violet/pink), shared by both schemes.
+        public let chartSecondaryColor: Color
+        /// The muted chart color used when no trend tint is appropriate.
+        public let chartMuted: Color
+        /// The track behind a micro meter / bar / ring.
+        public let meterTrack: Color
+        /// The soft drop-shadow color for the outer surface.
+        public let shadowSoft: Color
 
-        /// The primary accent (the calm Home Assistant blue, resolved live).
+        /// The calm blue/violet primary accent (the resolved Home Assistant blue).
         public var accentPrimary: Color { PerchHATheme.accent }
-        /// The warning accent (amber), aligned with ``PerchHATheme/warn``.
-        public var accentWarning: Color { PerchHATheme.warn }
-        /// The success accent (green), aligned with ``PerchHATheme/ok``.
-        public var accentSuccess: Color { PerchHATheme.ok }
-        /// The danger accent (red), aligned with ``PerchHATheme/critical``.
-        public var accentDanger: Color { PerchHATheme.critical }
+        /// The secondary accent (violet/pink), shared by both appearances.
+        public var accentSecondary: Color { chartSecondaryColor }
+        /// The success color (green), aligned with ``PerchHATheme/ok``.
+        public var success: Color { PerchHATheme.ok }
+        /// The warning color (amber), aligned with ``PerchHATheme/warn``.
+        public var warning: Color { PerchHATheme.warn }
+        /// The danger color (red), aligned with ``PerchHATheme/critical``.
+        public var danger: Color { PerchHATheme.critical }
         /// The primary chart stroke (the accent blue).
         public var chartPrimary: Color { PerchHATheme.accent }
         /// The secondary chart stroke (the violet/pink secondary accent).
-        public var chartSecondary: Color { accentSecondary }
+        public var chartSecondary: Color { chartSecondaryColor }
+
+        // MARK: Compatibility aliases
+
+        /// Compatibility alias for ``surfaceRoot``.
+        public var popoverBackground: Color { surfaceRoot }
+        /// Compatibility alias for ``surfaceRoot``.
+        public var appBackground: Color { surfaceRoot }
+        /// Compatibility alias for ``surfacePanel``.
+        public var cardBackground: Color { surfacePanel }
+        /// Compatibility alias for ``surfacePanelElevated``.
+        public var cardBackgroundElevated: Color { surfacePanelElevated }
+        /// Compatibility alias for ``borderSubtle``.
+        public var borderEmphatic: Color { borderSubtle }
+        /// Compatibility alias for ``separatorSubtle``.
+        public var separator: Color { separatorSubtle }
+        /// Compatibility alias for ``meterTrack``.
+        public var chartTrack: Color { meterTrack }
+        /// Compatibility alias for ``warning``.
+        public var accentWarning: Color { warning }
+        /// Compatibility alias for ``success``.
+        public var accentSuccess: Color { success }
+        /// Compatibility alias for ``danger``.
+        public var accentDanger: Color { danger }
 
         /// The semantic color for a connection state, used by the status pill and
         /// the header status dot.
@@ -165,13 +206,29 @@ public enum PerchHATheme {
         public func connectionColor(_ state: ConnectionState) -> Color {
             switch state {
             case .connected:
-                accentSuccess
+                success
             case .connecting, .reconnecting:
-                accentWarning
+                warning
             case .failed:
-                accentDanger
+                danger
             case .disconnected:
                 textSecondary
+            }
+        }
+
+        /// The semantic color for a value severity, resolved against this palette.
+        ///
+        /// - Parameter severity: The value severity.
+        /// - Returns: The primary accent for normal, warning for warning, danger
+        ///   for critical.
+        public func severityColor(_ severity: ValueSeverity) -> Color {
+            switch severity {
+            case .normal:
+                accentPrimary
+            case .warning:
+                warning
+            case .critical:
+                danger
             }
         }
     }
@@ -203,38 +260,45 @@ public enum PerchHATheme {
             scheme == .dark ? darkPalette : lightPalette
         }
 
-        /// The dark instrument-panel palette: deep graphite-blue surfaces and
-        /// near-white text.
+        /// The dark instrument-panel palette: deep graphite/navy root, a slightly
+        /// lighter panel, near-white primary text, blue-gray secondary, calm
+        /// blue/violet accents, and almost-invisible strokes/separators.
         public static let darkPalette = DashboardPalette(
-            appBackground: Color(red: 0.071, green: 0.078, blue: 0.094),
-            popoverBackground: Color(red: 0.071, green: 0.078, blue: 0.094),
-            cardBackground: Color(red: 0.110, green: 0.122, blue: 0.145),
-            cardBackgroundElevated: Color(red: 0.145, green: 0.161, blue: 0.188),
-            borderSubtle: Color.white.opacity(0.08),
-            borderEmphatic: Color.white.opacity(0.10),
+            surfaceRoot: Color(red: 0.055, green: 0.063, blue: 0.082),
+            surfacePanel: Color(red: 0.086, green: 0.098, blue: 0.122),
+            surfacePanelElevated: Color(red: 0.122, green: 0.137, blue: 0.165),
+            surfaceControl: Color.white.opacity(0.07),
+            surfaceControlActive: PerchHATheme.accent.opacity(0.22),
+            borderSubtle: Color.white.opacity(0.07),
+            separatorSubtle: Color.white.opacity(0.05),
             textPrimary: Color(red: 0.93, green: 0.95, blue: 0.97),
-            textSecondary: Color(red: 0.62, green: 0.66, blue: 0.73),
-            textTertiary: Color(red: 0.44, green: 0.48, blue: 0.55),
-            accentSecondary: accentSecondary,
-            chartTrack: Color.white.opacity(0.10),
-            separator: Color.white.opacity(0.08)
+            textSecondary: Color(red: 0.60, green: 0.65, blue: 0.74),
+            textTertiary: Color(red: 0.42, green: 0.47, blue: 0.55),
+            chartSecondaryColor: accentSecondary,
+            chartMuted: Color.white.opacity(0.22),
+            meterTrack: Color.white.opacity(0.10),
+            shadowSoft: Color.black.opacity(0.55)
         )
 
-        /// The light palette: a clean light *translucent graphite* (not pure
-        /// white) surface with dark, readable text and the same hierarchy as dark.
+        /// The light palette: a soft translucent light-graphite root (not pure
+        /// white), a slightly elevated off-white panel, dark-graphite text, and the
+        /// same calm hierarchy and accents as the dark palette — designed, not
+        /// mechanically inverted.
         public static let lightPalette = DashboardPalette(
-            appBackground: Color(red: 0.93, green: 0.94, blue: 0.96),
-            popoverBackground: Color(red: 0.93, green: 0.94, blue: 0.96),
-            cardBackground: Color(red: 0.99, green: 0.99, blue: 1.0),
-            cardBackgroundElevated: Color.white,
-            borderSubtle: Color.black.opacity(0.08),
-            borderEmphatic: Color.black.opacity(0.12),
-            textPrimary: Color(red: 0.10, green: 0.12, blue: 0.16),
-            textSecondary: Color(red: 0.36, green: 0.40, blue: 0.46),
-            textTertiary: Color(red: 0.56, green: 0.60, blue: 0.66),
-            accentSecondary: accentSecondary,
-            chartTrack: Color.black.opacity(0.08),
-            separator: Color.black.opacity(0.08)
+            surfaceRoot: Color(red: 0.90, green: 0.91, blue: 0.94),
+            surfacePanel: Color(red: 0.965, green: 0.970, blue: 0.985),
+            surfacePanelElevated: Color.white,
+            surfaceControl: Color.black.opacity(0.05),
+            surfaceControlActive: PerchHATheme.accent.opacity(0.16),
+            borderSubtle: Color.black.opacity(0.07),
+            separatorSubtle: Color.black.opacity(0.06),
+            textPrimary: Color(red: 0.11, green: 0.13, blue: 0.18),
+            textSecondary: Color(red: 0.34, green: 0.38, blue: 0.45),
+            textTertiary: Color(red: 0.54, green: 0.58, blue: 0.65),
+            chartSecondaryColor: accentSecondary,
+            chartMuted: Color.black.opacity(0.22),
+            meterTrack: Color.black.opacity(0.08),
+            shadowSoft: Color.black.opacity(0.18)
         )
     }
 
@@ -263,6 +327,10 @@ private struct DashboardPaletteKey: EnvironmentKey {
     static let defaultValue = PerchHATheme.Dashboard.darkPalette
 }
 
+private struct DashboardRowDensityKey: EnvironmentKey {
+    static let defaultValue = PerchHADashboardRowDensity.defaultDensity
+}
+
 public extension EnvironmentValues {
     /// The resolved dashboard palette for the current appearance.
     ///
@@ -272,6 +340,16 @@ public extension EnvironmentValues {
     var dashboardPalette: PerchHATheme.DashboardPalette {
         get { self[DashboardPaletteKey.self] }
         set { self[DashboardPaletteKey.self] = newValue }
+    }
+
+    /// The dashboard telemetry-row density.
+    ///
+    /// Injected once by the panel root from the user's display preferences;
+    /// ``TelemetryRow`` reads it to tighten or relax its vertical metrics so the
+    /// whole dashboard shares one density.
+    var dashboardRowDensity: PerchHADashboardRowDensity {
+        get { self[DashboardRowDensityKey.self] }
+        set { self[DashboardRowDensityKey.self] = newValue }
     }
 }
 

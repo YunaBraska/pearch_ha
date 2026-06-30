@@ -446,7 +446,9 @@ public struct PerchHASettingsView: View {
     private let launchAtLoginSink: (Bool) -> Bool
     @State private var draggedSelectionItem: SelectionDragItem?
     @State private var selectedTab: Tab
-    @State private var expandedEntityIDs: Set<EntityID>
+    /// The single entity whose inspector is open in the Entities tab, or `nil`
+    /// when every row is collapsed. Only one inspector is open at a time.
+    @State private var inspectedEntityID: EntityID?
     @State private var displayPreferences: PerchHADisplayPreferences
     @State private var launchAtLogin: Bool
     @State private var launchAtLoginPermissionDenied = false
@@ -484,7 +486,9 @@ public struct PerchHASettingsView: View {
         self.launchAtLoginProvider = launchAtLoginProvider
         self.launchAtLoginSink = launchAtLoginSink
         _selectedTab = State(initialValue: initialTab)
-        _expandedEntityIDs = State(initialValue: initiallyExpandedEntityIDs)
+        // Only one entity inspector is open at a time; seed it from the first
+        // requested expansion (used by snapshot/test render paths).
+        _inspectedEntityID = State(initialValue: initiallyExpandedEntityIDs.first)
         _displayPreferences = State(initialValue: displayPreferencesProvider())
         _launchAtLogin = State(initialValue: launchAtLoginProvider())
     }
@@ -494,14 +498,18 @@ public struct PerchHASettingsView: View {
             snapshot: model.snapshot,
             preferences: accessibilityPreferences
         )
-        HStack(spacing: 0) {
+        let palette = PerchHATheme.Dashboard.palette(colorScheme)
+        return HStack(spacing: 0) {
             sidebarRail
-            Divider()
+            Rectangle()
+                .fill(palette.separatorSubtle)
+                .frame(width: 1)
                 .accessibilityHidden(true)
             detailContent(for: selectedTab)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
+                .background(palette.surfaceRoot.ignoresSafeArea())
         }
+        .environment(\.dashboardPalette, palette)
         .frame(minWidth: 660, minHeight: 560)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .tint(PerchHATheme.accent)
@@ -544,6 +552,7 @@ public struct PerchHASettingsView: View {
     /// `Button`. The selected row fills with the accent and uses accent text;
     /// unselected rows use secondary text.
     private func sidebarRow(_ tab: Tab) -> some View {
+        let palette = PerchHATheme.Dashboard.palette(colorScheme)
         let isSelected = selectedTab == tab
         return Button {
             selectedTab = tab
@@ -552,19 +561,26 @@ public struct PerchHASettingsView: View {
                 Image(systemName: tab.systemImage)
                     .font(.system(size: 13, weight: .medium))
                     .frame(width: 20, alignment: .center)
+                    .foregroundStyle(isSelected ? palette.accentPrimary : palette.textSecondary)
                 Text(tab.title)
-                    .font(.body)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
                     .lineLimit(1)
+                    .foregroundStyle(isSelected ? palette.textPrimary : palette.textSecondary)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, PerchHASpacing.sm)
             .padding(.vertical, PerchHASpacing.sm - 1)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .foregroundStyle(isSelected ? PerchHATheme.accent : Color.secondary)
             .background(
                 RoundedRectangle(cornerRadius: PerchHACornerRadius.control, style: .continuous)
-                    .fill(isSelected ? PerchHATheme.accent.opacity(0.16) : Color.clear)
+                    .fill(isSelected ? palette.accentPrimary.opacity(colorScheme == .dark ? 0.22 : 0.14) : Color.clear)
             )
+            .overlay(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(isSelected ? palette.accentPrimary : Color.clear)
+                    .frame(width: 3, height: 16)
+                    .offset(x: -PerchHASpacing.xs)
+            }
             .contentShape(RoundedRectangle(cornerRadius: PerchHACornerRadius.control, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -572,10 +588,10 @@ public struct PerchHASettingsView: View {
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
     }
 
-    /// The rail's elevated surface fill, resolved against the current appearance
-    /// so it reads as a distinct rail in both light and dark.
+    /// The rail's surface fill, resolved against the current appearance so it
+    /// reads as a distinct rail that matches the dashboard panel in light/dark.
     private var railBackground: Color {
-        PerchHATheme.Dashboard.palette(colorScheme).cardBackgroundElevated
+        PerchHATheme.Dashboard.palette(colorScheme).surfacePanel
     }
 
     /// Routes a section to its detail content.
@@ -620,17 +636,71 @@ public struct PerchHASettingsView: View {
         }
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
+            .background(PerchHATheme.Dashboard.palette(colorScheme).surfaceRoot.ignoresSafeArea())
+            .environment(\.dashboardPalette, PerchHATheme.Dashboard.palette(colorScheme))
             .contrast(accessibilityPreferences.contrastPolicy == .increased ? 1.12 : 1)
     }
 
     private var connectionTab: some View {
         settingsPage(title: "Connection", systemImage: Tab.connection.systemImage) {
             settingsCard {
-                PerchHAConnectionFormFields(model: model)
-                    .textFieldStyle(.roundedBorder)
+                settingsSection(title: "Status", systemImage: "antenna.radiowaves.left.and.right") {
+                    connectionStatusContent
+                }
+            }
+            settingsCard {
+                settingsSection(title: "Addresses & access", systemImage: "network") {
+                    PerchHAConnectionFormFields(model: model)
+                        .textFieldStyle(.roundedBorder)
+                }
             }
         }
+    }
+
+    /// The connection status card content: a status pill, the connected host
+    /// (when known), and the last successful update — all derived from the live
+    /// snapshot. No stored secret is ever surfaced.
+    private var connectionStatusContent: some View {
+        let status = connectionDiagnostic
+        let host = connectionSummaryHost
+        return VStack(alignment: .leading, spacing: PerchHASpacing.sm) {
+            HStack(spacing: 8) {
+                StatusPill(
+                    status.label,
+                    systemImage: status.systemImage,
+                    color: status.color,
+                    accessibilityLabel: "Connection \(status.label)"
+                )
+                Spacer(minLength: 0)
+            }
+            if let host {
+                settingsControlRow("Server") {
+                    Text(host)
+                        .font(PerchHATypography.bodyValue())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            settingsControlRow("Last update") {
+                Text(model.snapshot.lastUpdateDescription)
+                    .font(PerchHATypography.bodyValue())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The connected server host shown in the Connection status card, derived
+    /// from the stored connection URL. Never exposes the access token.
+    private var connectionSummaryHost: String? {
+        let urlString = model.snapshot.connectionForm.urlString
+        if let host = URL(string: urlString)?.host, !host.isEmpty {
+            return host
+        }
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// A page scaffold shared by every section: a leading-aligned scroll view
@@ -642,10 +712,12 @@ public struct PerchHASettingsView: View {
         systemImage: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
+        let palette = PerchHATheme.Dashboard.palette(colorScheme)
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: PerchHASpacing.md + 2) {
                 Text(title)
-                    .font(.title2.weight(.semibold))
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(palette.textPrimary)
                     .accessibilityAddTraits(.isHeader)
                 content()
                 Spacer(minLength: 0)
@@ -658,16 +730,40 @@ public struct PerchHASettingsView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    /// A grouped settings card with consistent interior padding, so no raw
+    /// A grouped settings card styled with the dashboard palette: an elevated
+    /// surface fill with a subtle hairline border and consistent interior
+    /// padding, so settings share the dashboard's panel language and no raw
     /// ungrouped form rows are drawn anywhere.
     private func settingsCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        PerchHACard(cornerRadius: PerchHACornerRadius.card) {
-            VStack(alignment: .leading, spacing: PerchHASpacing.md) {
-                content()
-            }
-            .padding(PerchHASpacing.lg)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        let palette = PerchHATheme.Dashboard.palette(colorScheme)
+        return VStack(alignment: .leading, spacing: PerchHASpacing.md) {
+            content()
         }
+        .padding(PerchHASpacing.lg)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: PerchHACornerRadius.card, style: .continuous)
+                .fill(palette.surfacePanel)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: PerchHACornerRadius.card, style: .continuous)
+                .strokeBorder(palette.borderSubtle, lineWidth: 1)
+        )
+    }
+
+    /// A compact card variant used for inline inspectors and nested groups, with
+    /// the slightly more elevated surface so it reads as sitting above a card.
+    private func settingsInsetGroup<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        let palette = PerchHATheme.Dashboard.palette(colorScheme)
+        return VStack(alignment: .leading, spacing: PerchHASpacing.sm) {
+            content()
+        }
+        .padding(PerchHASpacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: PerchHACornerRadius.control, style: .continuous)
+                .fill(palette.surfacePanelElevated)
+        )
     }
 
     // MARK: General
@@ -697,30 +793,13 @@ public struct PerchHASettingsView: View {
                     }
                 }
             }
-        }
-    }
-
-    // MARK: Dashboard
-
-    /// Dashboard-facing menu-bar configuration: a per-entity editor where each
-    /// entity can be shown in the menu bar and given its own icon/text/both
-    /// appearance, plus the global stable-width preference. The per-entity
-    /// appearance overrides the global default for that entity.
-    private var dashboardTab: some View {
-        settingsPage(title: "Dashboard", systemImage: Tab.dashboard.systemImage) {
             settingsCard {
-                settingsSection(title: "Menu bar items", systemImage: "menubar.rectangle") {
-                    menuBarItemsEditor
-                }
-            }
-            settingsCard {
-                settingsSection(title: "Width", systemImage: "ruler") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Toggle("Keep a stable width", isOn: stableMenuBarWidthBinding)
-                            .toggleStyle(.checkbox)
-                            .fixedSize()
-                            .accessibilityLabel("Keep a stable menu bar width")
-                        Text("Uses monospaced digits so the value does not shift as it changes.")
+                settingsSection(title: "Keyboard", systemImage: "keyboard") {
+                    VStack(alignment: .leading, spacing: PerchHASpacing.sm) {
+                        shortcutRow(label: "Open settings", keys: "⌘ ,")
+                        settingsSectionDivider
+                        shortcutRow(label: "Quit PearchHA", keys: "⌘ Q")
+                        Text("These shortcuts are built in and cannot be changed.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -730,36 +809,130 @@ public struct PerchHASettingsView: View {
         }
     }
 
-    /// The entities offered in the Dashboard menu-bar editor: promoted entities
-    /// first (in their menu-bar order), then the remaining available entities.
-    private var menuBarEditorEntities: [DiscoveredEntity] {
-        let entities = model.snapshot.availableRooms.flatMap(\.entities)
-        let byID = Dictionary(entities.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let promotedIDs = model.snapshot.menuBarDisplayConfiguration.promotedEntityIDs
-        let promoted = promotedIDs.compactMap { byID[$0] }
-        let promotedSet = Set(promotedIDs)
-        let remaining = entities.filter { !promotedSet.contains($0.id) }
-        return promoted + remaining
+    /// A read-only row pairing a shortcut description with its key combination,
+    /// shown as a calm keycap so it reads as a fact rather than an editable
+    /// control (no editable shortcut binding exists today).
+    private func shortcutRow(label: String, keys: String) -> some View {
+        let palette = PerchHATheme.Dashboard.palette(colorScheme)
+        return HStack(spacing: PerchHASpacing.sm) {
+            Text(label)
+                .foregroundStyle(palette.textPrimary)
+            Spacer(minLength: 8)
+            Text(keys)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(palette.textSecondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(palette.surfaceControl)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(palette.borderSubtle, lineWidth: 1)
+                )
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label), shortcut \(keys)")
     }
 
+    // MARK: Dashboard
+
+    /// Dashboard display preferences that actually shape the live popover:
+    /// which room/module blocks appear, the telemetry-row density, the default
+    /// inline/detail history range, and whether the footer timestamp is shown.
+    /// Every control here is wired to a persisted preference the dashboard
+    /// honors; nothing here is decorative.
+    private var dashboardTab: some View {
+        settingsPage(title: "Dashboard", systemImage: Tab.dashboard.systemImage) {
+            settingsCard {
+                settingsSection(title: "Visible modules", systemImage: "rectangle.grid.1x2") {
+                    visibleModulesEditor
+                }
+            }
+            settingsCard {
+                settingsSection(title: "Layout", systemImage: "slider.horizontal.3") {
+                    VStack(alignment: .leading, spacing: PerchHASpacing.sm + 2) {
+                        settingsControlRow("Row density") {
+                            Picker("Row density", selection: rowDensityBinding) {
+                                ForEach(PerchHADashboardRowDensity.allCases, id: \.rawValue) { density in
+                                    Text(density.displayName).tag(density)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .fixedSize()
+                            .accessibilityLabel("Dashboard row density")
+                        }
+                        settingsControlRow("Default history range") {
+                            Picker("Default history range", selection: defaultHistoryRangeBinding) {
+                                ForEach(HistoryRange.uiSelectable, id: \.rawValue) { range in
+                                    Text(range.displayName).tag(range)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .fixedSize()
+                            .accessibilityLabel("Default history range")
+                        }
+                        Text("Used for inline charts and the history popover unless a value has its own range.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            settingsCard {
+                settingsSection(title: "Footer", systemImage: "clock") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle("Show updated timestamp", isOn: footerTimestampBinding)
+                            .toggleStyle(.checkbox)
+                            .fixedSize()
+                            .accessibilityLabel("Show the dashboard footer updated timestamp")
+                        Text("Hide the relative \u{201C}updated\u{201D} caption in the dashboard footer. Connection problems are always shown.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The visible-modules editor: one checkbox per available room/module, plus
+    /// show-all / hide-all shortcuts. Hiding every module is prevented at the
+    /// dashboard (it falls back to showing all) so the popover never goes blank.
     @ViewBuilder
-    private var menuBarItemsEditor: some View {
-        let entities = menuBarEditorEntities
-        if entities.isEmpty {
-            Text("Connect to Home Assistant to choose which entities appear in the menu bar.")
+    private var visibleModulesEditor: some View {
+        let rooms = model.snapshot.availableRooms
+        if rooms.isEmpty {
+            Text("Connect to Home Assistant to choose which room modules appear on the dashboard.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Choose which entities appear in the menu bar and how each one looks.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                ForEach(entities, id: \.id.rawValue) { entity in
-                    menuBarItemRow(for: entity)
-                    if entity.id != entities.last?.id {
-                        settingsSectionDivider
+            VStack(alignment: .leading, spacing: PerchHASpacing.sm) {
+                HStack(spacing: 8) {
+                    Text("Show these modules on the dashboard.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Button("Show all") { setAllModulesHidden(false) }
+                        .buttonStyle(PerchHAIconButtonStyle())
+                        .controlSize(.small)
+                        .disabled(displayPreferences.hiddenModuleIDs.isEmpty)
+                        .accessibilityLabel("Show all modules")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                settingsInsetGroup {
+                    ForEach(Array(rooms.enumerated()), id: \.element.id.rawValue) { index, room in
+                        Toggle(room.name, isOn: moduleVisibilityBinding(for: room.id.rawValue))
+                            .toggleStyle(.checkbox)
+                            .fixedSize()
+                            .accessibilityLabel("Show \(room.name) module on dashboard")
+                        if index < rooms.count - 1 {
+                            settingsSectionDivider
+                        }
                     }
                 }
             }
@@ -767,35 +940,9 @@ public struct PerchHASettingsView: View {
         }
     }
 
-    private func menuBarItemRow(for entity: DiscoveredEntity) -> some View {
-        let isPromoted = model.snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Toggle(entity.name, isOn: menuBarVisibilityBinding(for: entity.id))
-                    .toggleStyle(.checkbox)
-                    .fixedSize()
-                    .accessibilityLabel("Show \(entity.name) in menu bar")
-                Spacer(minLength: 0)
-                if isPromoted {
-                    menuBarMoveButtons(for: entity)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            if isPromoted {
-                settingsControlRow("Show") {
-                    Picker("Show", selection: menuBarItemAppearanceBinding(for: entity.id)) {
-                        ForEach(PerchHAMenuBarAppearance.allCases, id: \.rawValue) { appearance in
-                            Text(appearance.displayName).tag(appearance)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .fixedSize()
-                    .accessibilityLabel("\(entity.name) menu bar appearance")
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+    private func setAllModulesHidden(_ hidden: Bool) {
+        let ids = hidden ? Set(model.snapshot.availableRooms.map { $0.id.rawValue }) : Set<String>()
+        updateDisplayPreferences(displayPreferences.with(hiddenModuleIDs: ids))
     }
 
     // MARK: Appearance
@@ -807,7 +954,10 @@ public struct PerchHASettingsView: View {
         settingsPage(title: "Appearance", systemImage: Tab.appearance.systemImage) {
             settingsCard {
                 settingsSection(title: "Preview", systemImage: "eye") {
-                    PerchHAAppearancePreview(preferences: displayPreferences)
+                    VStack(alignment: .leading, spacing: PerchHASpacing.md) {
+                        PerchHAAppearancePreview(preferences: displayPreferences)
+                        appearanceDashboardSample
+                    }
                 }
             }
             settingsCard {
@@ -820,6 +970,35 @@ public struct PerchHASettingsView: View {
                             accentMenuPicker
                         }
                         accentSwatchPreview
+                    }
+                }
+            }
+            settingsCard {
+                settingsSection(title: "Menu bar", systemImage: "menubar.rectangle") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        settingsControlRow("Style") {
+                            Picker("Menu bar style", selection: menuBarAppearanceBinding) {
+                                ForEach(PerchHAMenuBarAppearance.allCases, id: \.rawValue) { appearance in
+                                    Text(appearance.displayName).tag(appearance)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .fixedSize()
+                            .accessibilityLabel("Global menu bar style")
+                        }
+                        Text("The default look for menu-bar values. Individual values can override this in Entities.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Toggle("Keep a stable width", isOn: stableMenuBarWidthBinding)
+                            .toggleStyle(.checkbox)
+                            .fixedSize()
+                            .accessibilityLabel("Keep a stable menu bar width")
+                        Text("Uses monospaced digits so the value does not shift as it changes.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -843,6 +1022,47 @@ public struct PerchHASettingsView: View {
                     }
                 }
             }
+        }
+    }
+
+    /// A sample dashboard telemetry row rendered on the dashboard surface using
+    /// the currently-chosen accent and density, so the Appearance preview shows
+    /// both a menu-bar item (from ``PerchHAAppearancePreview``) and a real
+    /// dashboard row reflecting the live theme/accent.
+    private var appearanceDashboardSample: some View {
+        let palette = PerchHATheme.Dashboard.palette(colorScheme)
+        let accent = color(for: displayPreferences.accentColor)
+        return VStack(alignment: .leading, spacing: 4) {
+            Text("Dashboard row")
+                .font(PerchHATypography.caption())
+                .foregroundStyle(palette.textTertiary)
+            TelemetryRow(
+                icon: "thermometer.medium",
+                iconActive: true,
+                label: "Living room",
+                subtitle: "Temperature",
+                middle: {
+                    MicroMeter(fraction: 0.62, color: accent, trackColor: palette.meterTrack)
+                        .frame(width: 54, height: 6)
+                },
+                trailing: {
+                    Text("21.4°")
+                        .font(PerchHATypography.bodyValue())
+                        .foregroundStyle(palette.textPrimary)
+                }
+            )
+            .background(
+                RoundedRectangle(cornerRadius: PerchHACornerRadius.control, style: .continuous)
+                    .fill(palette.surfaceRoot)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: PerchHACornerRadius.control, style: .continuous)
+                    .strokeBorder(palette.borderSubtle, lineWidth: 1)
+            )
+            .environment(\.dashboardPalette, palette)
+            .environment(\.dashboardRowDensity, displayPreferences.dashboardRowDensity)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Sample dashboard row, Living room temperature 21.4 degrees")
         }
     }
 
@@ -904,10 +1124,10 @@ public struct PerchHASettingsView: View {
     // MARK: Diagnostics
 
     /// Diagnostics: real connection status, entity health (the warning count and
-    /// a deduped, capped list of affected entities), the last-updated timestamp,
-    /// and the read-only history-prefetch reference. Refresh is automatic, so no
-    /// manual refresh control is offered. All values come from the live snapshot;
-    /// nothing is fabricated.
+    /// a deduped, capped list of affected entities), the last-updated timestamp
+    /// with a manual refresh action, and the read-only history-prefetch
+    /// reference. All values come from the live snapshot; nothing is fabricated.
+    /// This is the only place a manual refresh lives.
     private var diagnosticsTab: some View {
         let health = entityHealth
         return settingsPage(title: "Diagnostics", systemImage: Tab.diagnostics.systemImage) {
@@ -1028,9 +1248,9 @@ public struct PerchHASettingsView: View {
         }
     }
 
-    /// The updates diagnostic: a read-only last-updated description. Refresh is
-    /// automatic (on open, periodically while open, and via live WebSocket push),
-    /// so there is no manual refresh control here.
+    /// The updates diagnostic: the last-updated description plus a manual
+    /// "Refresh now" action. Refresh is otherwise automatic (on open,
+    /// periodically while open, and via live WebSocket push).
     private var diagnosticsUpdatesContent: some View {
         VStack(alignment: .leading, spacing: 8) {
             settingsControlRow("Last updated") {
@@ -1043,6 +1263,16 @@ public struct PerchHASettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            Button {
+                model.startRefresh()
+            } label: {
+                Label("Refresh now", systemImage: "arrow.clockwise")
+                    .labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(PerchHAIconButtonStyle())
+            .disabled(model.snapshot.connectionState != .connected)
+            .help("Fetch the latest values from Home Assistant now")
+            .accessibilityLabel("Refresh values now")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1158,6 +1388,51 @@ public struct PerchHASettingsView: View {
         Binding(
             get: { displayPreferences.stableMenuBarWidth },
             set: { updateDisplayPreferences(displayPreferences.with(stableMenuBarWidth: $0)) }
+        )
+    }
+
+    private var menuBarAppearanceBinding: Binding<PerchHAMenuBarAppearance> {
+        Binding(
+            get: { displayPreferences.menuBarAppearance },
+            set: { updateDisplayPreferences(displayPreferences.with(menuBarAppearance: $0)) }
+        )
+    }
+
+    private var rowDensityBinding: Binding<PerchHADashboardRowDensity> {
+        Binding(
+            get: { displayPreferences.dashboardRowDensity },
+            set: { updateDisplayPreferences(displayPreferences.with(dashboardRowDensity: $0)) }
+        )
+    }
+
+    private var defaultHistoryRangeBinding: Binding<HistoryRange> {
+        Binding(
+            get: { displayPreferences.defaultHistoryRange },
+            set: { updateDisplayPreferences(displayPreferences.with(defaultHistoryRange: $0)) }
+        )
+    }
+
+    private var footerTimestampBinding: Binding<Bool> {
+        Binding(
+            get: { displayPreferences.showsFooterTimestamp },
+            set: { updateDisplayPreferences(displayPreferences.with(showsFooterTimestamp: $0)) }
+        )
+    }
+
+    /// A per-module visibility binding. `true` means the module is shown; toggling
+    /// off inserts its identifier into the hidden set.
+    private func moduleVisibilityBinding(for moduleID: String) -> Binding<Bool> {
+        Binding(
+            get: { !displayPreferences.hiddenModuleIDs.contains(moduleID) },
+            set: { isVisible in
+                var hidden = displayPreferences.hiddenModuleIDs
+                if isVisible {
+                    hidden.remove(moduleID)
+                } else {
+                    hidden.insert(moduleID)
+                }
+                updateDisplayPreferences(displayPreferences.with(hiddenModuleIDs: hidden))
+            }
         )
     }
 
@@ -1343,19 +1618,9 @@ public struct PerchHASettingsView: View {
     }()
 
     private var entitiesTab: some View {
-        settingsView
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private var settingsView: some View {
-        ScrollView(.vertical) {
+        settingsPage(title: "Entities", systemImage: Tab.entities.systemImage) {
             settingsContent
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 14)
-                .padding(.leading, 14)
-                .padding(.trailing, 18)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var settingsContent: some View {
@@ -1487,34 +1752,57 @@ public struct PerchHASettingsView: View {
                 .padding(.horizontal, PerchHASpacing.xs),
                 item: .room(room.id)
             )
-            PerchHACard(cornerRadius: PerchHACornerRadius.card) {
-                VStack(spacing: 0) {
-                    ForEach(Array(room.entities.enumerated()), id: \.element.entity.id.rawValue) { index, selectable in
-                        selectionDragDrop(
-                            selectionEntityRow(
-                                selectable,
-                                canMoveUp: canReorderSelection && index > room.entities.startIndex,
-                                canMoveDown: canReorderSelection && index < room.entities.index(before: room.entities.endIndex)
-                            ),
-                            item: .entity(selectable.entity.id)
-                        )
-                        if index < room.entities.count - 1 {
-                            Divider()
-                                .padding(.leading, 34)
-                        }
-                    }
-                }
-            }
+            entitiesRoomCard(room)
         }
     }
 
+    /// A token-styled card holding the collapsed entity rows for one room,
+    /// matching the dashboard panel surface with hairline separators between
+    /// rows.
+    private func entitiesRoomCard(_ room: SelectableRoom) -> some View {
+        let palette = PerchHATheme.Dashboard.palette(colorScheme)
+        return VStack(spacing: 0) {
+            ForEach(Array(room.entities.enumerated()), id: \.element.entity.id.rawValue) { index, selectable in
+                selectionDragDrop(
+                    selectionEntityRow(
+                        selectable,
+                        canMoveUp: canReorderSelection && index > room.entities.startIndex,
+                        canMoveDown: canReorderSelection && index < room.entities.index(before: room.entities.endIndex)
+                    ),
+                    item: .entity(selectable.entity.id)
+                )
+                if index < room.entities.count - 1 {
+                    Rectangle()
+                        .fill(palette.separatorSubtle)
+                        .frame(height: 1)
+                        .padding(.leading, 34)
+                }
+            }
+        }
+        .padding(.vertical, PerchHASpacing.xs)
+        .background(
+            RoundedRectangle(cornerRadius: PerchHACornerRadius.card, style: .continuous)
+                .fill(palette.surfacePanel)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: PerchHACornerRadius.card, style: .continuous)
+                .strokeBorder(palette.borderSubtle, lineWidth: 1)
+        )
+    }
+
+    /// A compact, collapsed entity row: selection checkbox, domain icon, name,
+    /// a type/unit caption, a menu-bar-visible pill, reorder controls, and a
+    /// disclosure toggle that opens this entity's inspector. Clicking the row
+    /// (or the disclosure) opens the single inspector inline beneath the row;
+    /// only one inspector is open at a time.
     private func selectionEntityRow(
         _ selectable: SelectableEntity,
         canMoveUp: Bool,
         canMoveDown: Bool
     ) -> some View {
+        let palette = PerchHATheme.Dashboard.palette(colorScheme)
         let entity = selectable.entity
-        let isExpanded = expandedEntityIDs.contains(entity.id)
+        let isExpanded = inspectedEntityID == entity.id
         let isPromoted = model.snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
@@ -1525,16 +1813,20 @@ public struct PerchHASettingsView: View {
                 Image(systemName: perchHAEntityIconName(for: entity))
                     .font(.system(size: 14))
                     .frame(width: 22, alignment: .center)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isExpanded ? palette.accentPrimary : palette.textSecondary)
                     .accessibilityHidden(true)
-                Text(entity.name)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(entity.name)
+                        .foregroundStyle(palette.textPrimary)
+                        .lineLimit(1)
+                    Text(entityTypeCaption(for: entity))
+                        .font(PerchHATypography.caption().weight(.regular))
+                        .foregroundStyle(palette.textTertiary)
+                        .lineLimit(1)
+                }
                 Spacer(minLength: 8)
                 if isPromoted {
-                    Circle()
-                        .fill(PerchHATheme.accent)
-                        .frame(width: 6, height: 6)
-                        .accessibilityLabel("\(entity.name) shown in menu bar")
+                    menuBarVisiblePill
                 }
                 selectionMoveButtons(
                     up: {
@@ -1549,7 +1841,7 @@ public struct PerchHASettingsView: View {
                     canMoveDown: canMoveDown
                 )
                 Button {
-                    toggleEntityExpansion(entity.id)
+                    toggleEntityInspector(entity.id)
                 } label: {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 11, weight: .semibold))
@@ -1562,22 +1854,50 @@ public struct PerchHASettingsView: View {
                 .accessibilityLabel(isExpanded ? "Hide \(entity.name) settings" : "Show \(entity.name) settings")
             }
             .font(.body)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                toggleEntityInspector(entity.id)
+            }
             if isExpanded {
-                entityDetailSections(for: entity)
-                    .padding(.leading, 32)
+                settingsInsetGroup {
+                    entityDetailSections(for: entity)
+                }
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
-        .contentShape(Rectangle())
+        .background(
+            isExpanded
+                ? RoundedRectangle(cornerRadius: PerchHACornerRadius.control, style: .continuous)
+                    .fill(palette.accentPrimary.opacity(colorScheme == .dark ? 0.10 : 0.06))
+                : nil
+        )
     }
 
-    private func toggleEntityExpansion(_ id: EntityID) {
-        if expandedEntityIDs.contains(id) {
-            expandedEntityIDs.remove(id)
-        } else {
-            expandedEntityIDs.insert(id)
+    /// The compact "shown in menu bar" pill used on a collapsed entity row.
+    private var menuBarVisiblePill: some View {
+        StatusPill(
+            "Menu bar",
+            systemImage: "menubar.rectangle",
+            color: PerchHATheme.Dashboard.palette(colorScheme).accentPrimary,
+            accessibilityLabel: "Shown in menu bar"
+        )
+    }
+
+    /// A short type/unit caption for a collapsed entity row, e.g. "Sensor · °C".
+    private func entityTypeCaption(for entity: DiscoveredEntity) -> String {
+        let domain = entity.id.domain.replacingOccurrences(of: "_", with: " ").capitalized
+        let unit = entity.unit?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let unit, !unit.isEmpty {
+            return "\(domain) · \(unit)"
         }
+        return domain
+    }
+
+    /// Opens the inspector for `id`, collapsing any other open inspector so only
+    /// one is ever open; tapping the open row collapses it.
+    private func toggleEntityInspector(_ id: EntityID) {
+        inspectedEntityID = (inspectedEntityID == id) ? nil : id
     }
 
     /// The bespoke detail pane shown when an entity row is expanded: clearly
