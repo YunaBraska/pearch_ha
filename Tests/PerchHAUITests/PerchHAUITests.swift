@@ -6837,6 +6837,73 @@ final class PerchHAUITests: XCTestCase {
         model.setPanelActive(false)
     }
 
+    func test_t_same_connection_ignores_address_row_identity() {
+        let a = PerchHAConnectionForm(
+            urlString: "http://home:8123",
+            addresses: [PerchHAConnectionAddressField(label: "VPN", urlString: "http://vpn:8123")],
+            token: "tok"
+        )
+        let b = PerchHAConnectionForm(
+            urlString: "http://home:8123",
+            addresses: [PerchHAConnectionAddressField(label: "VPN", urlString: "http://vpn:8123")],
+            token: "tok"
+        )
+        // Plain equality differs on the per-row UUIDs — the hazard that wiped the
+        // cache; the connection identity must treat these as the same session.
+        XCTAssertNotEqual(a, b)
+        XCTAssertTrue(a.sameConnection(as: b))
+        XCTAssertFalse(a.sameConnection(as: nil))
+        XCTAssertFalse(a.sameConnection(as: PerchHAConnectionForm(urlString: "http://other:8123", token: "tok")))
+        XCTAssertFalse(a.sameConnection(as: PerchHAConnectionForm(
+            urlString: "http://home:8123",
+            addresses: [PerchHAConnectionAddressField(urlString: "http://vpn:8123")],
+            token: "different"
+        )))
+    }
+
+    func test_t_reapplying_equivalent_form_keeps_history_cache() async {
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, id, range in
+                .success(HistorySeries(
+                    entityID: id,
+                    range: range,
+                    samples: [HistorySample(
+                        timestamp: Date(timeIntervalSince1970: 1_789_999_200),
+                        state: "21.4",
+                        numericValue: 21.4
+                    )]
+                ))
+            },
+            historyDebounce: .milliseconds(0)
+        )
+        model.updateConnectionForm(
+            urlString: "http://127.0.0.1:8123",
+            addresses: [PerchHAConnectionAddressField(urlString: "http://10.0.0.2:8123")],
+            token: "fake-token"
+        )
+        await model.connect()
+        await model.loadHistory("sensor.office_temperature")
+        XCTAssertNotNil(
+            model.cachedHistorySeries(for: "sensor.office_temperature"),
+            "history is cached after the first load"
+        )
+
+        // Re-apply an EQUIVALENT form: same URLs + token, but the address row is
+        // rebuilt with a fresh UUID (mirrors restoring the form from the profile).
+        model.updateConnectionForm(
+            urlString: "http://127.0.0.1:8123",
+            addresses: [PerchHAConnectionAddressField(urlString: "http://10.0.0.2:8123")],
+            token: "fake-token"
+        )
+        await model.connect()
+
+        XCTAssertNotNil(
+            model.cachedHistorySeries(for: "sensor.office_temperature"),
+            "re-applying the same connection must not evict cached history (no off-forever blanking)"
+        )
+    }
+
     func test_t_prefetch_active_refresh_is_shorter_than_lookahead_ttl() async {
         let clock = TestPerchClock()
         let recorder = PrefetchHistoryRecorder()

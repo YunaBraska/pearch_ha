@@ -117,6 +117,23 @@ public struct PerchHAConnectionForm: Equatable, Sendable {
         return ordered
     }
 
+    /// Whether two forms describe the SAME connection — the ordered resolved URLs,
+    /// the token, and the stored-session flag — ignoring volatile UI identity such
+    /// as address-row `id`s and cosmetic labels.
+    ///
+    /// Used to decide whether re-applying a form is a real connection change (which
+    /// clears cached history) or the same session rebuilt from the stored profile.
+    /// Plain `==` would differ on the per-row `UUID`s, so a rebuilt-but-equivalent
+    /// form would wrongly wipe the history cache and leave previews blank.
+    public func sameConnection(as other: PerchHAConnectionForm?) -> Bool {
+        guard let other else {
+            return false
+        }
+        return urls() == other.urls()
+            && trimmedToken == other.trimmedToken
+            && usesStoredAuthSession == other.usesStoredAuthSession
+    }
+
     public var validationFailure: ConnectionFailure? {
         guard primaryURL() != nil else {
             return .protocolError("invalid Home Assistant URL")
@@ -4196,7 +4213,11 @@ public final class PerchHAPanelModel: ObservableObject {
     private func apply(result: PerchHAConnectionAttemptResult, form: PerchHAConnectionForm, refreshCount: Int) async {
         switch result {
         case let .success(rooms):
-            let connectionChanged = lastConnectedForm != form
+            // Compare on the stable connection identity (URLs + token), NOT plain
+            // form equality: the form's address rows carry volatile UUIDs, so a
+            // rebuilt-but-equivalent form would otherwise look "changed" and wipe
+            // the history cache on every reconnect, blanking previews permanently.
+            let connectionChanged = !form.sameConnection(as: lastConnectedForm)
             if connectionChanged {
                 historyTask?.cancel()
                 historyTask = nil
@@ -4233,6 +4254,12 @@ public final class PerchHAPanelModel: ObservableObject {
                 controlActionState: connectionChanged ? .idle : snapshot.controlActionState,
             serviceMetadata: connectionChanged ? [] : snapshot.serviceMetadata
             )
+            if connectionChanged {
+                // A genuine new connection cleared the cache and cancelled prefetch
+                // above; re-arm so the visible rows warm again instead of staying
+                // blank forever.
+                scheduleHistoryPrefetch()
+            }
             if diagnosticIsDegraded {
                 diagnosticIsDegraded = false
                 recordDiagnostic(.recovered, message: "Recovered, connection restored")
