@@ -142,3 +142,27 @@ public struct PerchHAEntityGauge: Equatable, Sendable {
         self.style = style
     }
 }
+
+/// Pure decisions for the dashboard inline-preview column, kept here so the view
+/// stays a thin renderer and the choices can be unit-tested.
+public enum PerchHADashboardPreview {
+    /// Whether a bounded-gauge row should draw its meter for a given value status.
+    ///
+    /// The meter renders the entity's last-known fraction, so it stays visible
+    /// while the value is momentarily ``EntityValueStatus/stale`` (a background
+    /// sync or a brief WebSocket gap) instead of collapsing to a placeholder and
+    /// flickering. Only a genuinely absent value (``EntityValueStatus/unavailable``
+    /// or ``EntityValueStatus/unknown``) hides the meter.
+    ///
+    /// - Parameter status: The entity's current value status.
+    /// - Returns: `true` to draw the meter, `false` to fall through to the cached
+    ///   sparkline or placeholder.
+    public static func meterShows(for status: EntityValueStatus) -> Bool {
+        switch status {
+        case .available, .stale:
+            return true
+        case .unavailable, .unknown:
+            return false
+        }
+    }
+}

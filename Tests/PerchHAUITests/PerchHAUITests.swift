@@ -6785,6 +6785,58 @@ final class PerchHAUITests: XCTestCase {
         )
     }
 
+    func test_t_gauge_meter_shows_for_available_and_stale_not_for_missing() {
+        XCTAssertTrue(PerchHADashboardPreview.meterShows(for: .available))
+        // Last-known fraction stays on screen through a background sync / WS gap.
+        XCTAssertTrue(PerchHADashboardPreview.meterShows(for: .stale))
+        XCTAssertFalse(PerchHADashboardPreview.meterShows(for: .unavailable))
+        XCTAssertFalse(PerchHADashboardPreview.meterShows(for: .unknown))
+    }
+
+    func test_t_background_periodic_refresh_keeps_session_connected_and_not_stale() async {
+        let entered = ConnectionGate()
+        let release = ConnectionGate()
+        let calls = CallCounter()
+        let model = PerchHAPanelModel(
+            connector: { _ in
+                let n = await calls.next()
+                // The initial connect is call 1; the immediate background periodic
+                // tick is call 2 — hold it in flight so the test can observe the UI
+                // state while a healthy session is syncing.
+                if n >= 2 {
+                    await entered.open()
+                    await release.wait()
+                }
+                return .success(rooms: selectionRooms())
+            },
+            historyProvider: { _, _, _ in .unavailable("no history") },
+            clock: TestPerchClock()
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        switch model.snapshot.phase {
+        case .connectedData, .connectedEmpty:
+            break
+        default:
+            XCTFail("expected a connected session after connect")
+        }
+
+        model.setPanelActive(true)
+        // Wait until the background sync is genuinely in flight (connector blocked).
+        await entered.wait()
+
+        XCTAssertFalse(
+            model.snapshot.valuesAreStale,
+            "a silent background sync must not mark values stale (which would flicker previews)"
+        )
+        if case .reconnecting = model.snapshot.phase {
+            XCTFail("background sync flipped the UI into a visible reconnecting state")
+        }
+
+        await release.open()
+        model.setPanelActive(false)
+    }
+
     func test_t_prefetch_active_refresh_is_shorter_than_lookahead_ttl() async {
         let clock = TestPerchClock()
         let recorder = PrefetchHistoryRecorder()

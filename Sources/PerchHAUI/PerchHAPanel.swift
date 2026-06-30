@@ -2492,7 +2492,10 @@ public final class PerchHAPanelModel: ObservableObject {
             return
         }
         isPeriodicRefreshInFlight = true
-        await refresh()
+        // Background sync is silent: a healthy session keeps its last-known values
+        // on screen and overrides them in place when the result lands, so previews
+        // never flicker through a reconnecting/stale blip every tick.
+        await performRefresh(silent: true)
         isPeriodicRefreshInFlight = false
         if case .failed = snapshot.connectionState {
             periodicRefreshFailureStreak += 1
@@ -4062,39 +4065,63 @@ public final class PerchHAPanelModel: ObservableObject {
     }
 
     public func refresh() async {
+        await performRefresh(silent: false)
+    }
+
+    /// Refreshes the session.
+    ///
+    /// - Parameter silent: When `true` and the session is already healthily
+    ///   connected, the in-flight refresh does NOT flip the UI into a visible
+    ///   `.reconnecting` state. That matters because `.reconnecting` marks values
+    ///   stale, which collapses bounded-gauge previews to placeholders and makes
+    ///   inline previews flicker on every background tick. A silent sync keeps the
+    ///   last-known values on screen and simply overrides them in place when the
+    ///   result lands; genuine failures still surface via ``applyFailure`` below.
+    ///   When the session is not currently healthy (recovering), `silent` has no
+    ///   effect so reconnection remains visible.
+    private func performRefresh(silent: Bool) async {
         guard let form = lastConnectedForm else {
             return
         }
         lastObservedInstant = await clock.now()
 
         let nextRefreshCount = snapshot.refreshCount + 1
-        // A reconnect attempt is only diagnostic when we are recovering from a
-        // failure; a routine healthy periodic/manual refresh is not noise-worthy.
-        if diagnosticIsDegraded {
-            recordDiagnostic(.reconnecting, message: "Reconnecting, attempt \(nextRefreshCount)")
+        let isHealthyConnected: Bool
+        switch snapshot.phase {
+        case .connectedData, .connectedEmpty:
+            isHealthyConnected = true
+        default:
+            isHealthyConnected = false
         }
-        snapshot = PerchHAPanelSnapshot(
-            connectionState: .reconnecting(attempt: nextRefreshCount),
-            phase: .reconnecting(attempt: nextRefreshCount),
-            rooms: snapshot.rooms,
-            availableRooms: snapshot.availableRooms,
-            selectionConfiguration: snapshot.selectionConfiguration,
-            menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
-            selectionQuery: snapshot.selectionQuery,
-            isSettingsPresented: snapshot.isSettingsPresented,
-            connectionForm: snapshot.connectionForm,
-            lastUpdateDescription: snapshot.lastUpdateDescription,
-            refreshCount: nextRefreshCount,
-            canRetry: false,
-            hasTokenInput: hasToken(in: form),
-            selectionPersistenceFailureDescription: snapshot.selectionPersistenceFailureDescription,
-            displayPersistenceFailureDescription: snapshot.displayPersistenceFailureDescription,
-            serviceMetadataFailureDescription: snapshot.serviceMetadataFailureDescription,
-            historyState: snapshot.historyState,
-            historyPresentationEntityID: snapshot.historyPresentationEntityID,
-            controlActionState: snapshot.controlActionState,
-            serviceMetadata: snapshot.serviceMetadata
-        )
+        if !(silent && isHealthyConnected) {
+            // A reconnect attempt is only diagnostic when we are recovering from a
+            // failure; a routine healthy periodic/manual refresh is not noise-worthy.
+            if diagnosticIsDegraded {
+                recordDiagnostic(.reconnecting, message: "Reconnecting, attempt \(nextRefreshCount)")
+            }
+            snapshot = PerchHAPanelSnapshot(
+                connectionState: .reconnecting(attempt: nextRefreshCount),
+                phase: .reconnecting(attempt: nextRefreshCount),
+                rooms: snapshot.rooms,
+                availableRooms: snapshot.availableRooms,
+                selectionConfiguration: snapshot.selectionConfiguration,
+                menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
+                selectionQuery: snapshot.selectionQuery,
+                isSettingsPresented: snapshot.isSettingsPresented,
+                connectionForm: snapshot.connectionForm,
+                lastUpdateDescription: snapshot.lastUpdateDescription,
+                refreshCount: nextRefreshCount,
+                canRetry: false,
+                hasTokenInput: hasToken(in: form),
+                selectionPersistenceFailureDescription: snapshot.selectionPersistenceFailureDescription,
+                displayPersistenceFailureDescription: snapshot.displayPersistenceFailureDescription,
+                serviceMetadataFailureDescription: snapshot.serviceMetadataFailureDescription,
+                historyState: snapshot.historyState,
+                historyPresentationEntityID: snapshot.historyPresentationEntityID,
+                controlActionState: snapshot.controlActionState,
+                serviceMetadata: snapshot.serviceMetadata
+            )
+        }
         let result = await connector(form)
         guard !Task.isCancelled else {
             return
@@ -5912,7 +5939,10 @@ public struct PerchHAPanelView: View {
         let palette = PerchHATheme.Dashboard.palette(colorScheme)
         if case let .gauge(gauge) = presentation,
            gauge.style != .ring,
-           entityValue(entity).status == .available {
+           PerchHADashboardPreview.meterShows(for: entityValue(entity).status) {
+            // The meter renders the last-known fraction even when the value is
+            // momentarily stale (a background sync or WS gap), so it never blinks
+            // out to a placeholder; only a genuinely absent value falls through.
             MicroMeter(
                 fraction: gauge.fraction,
                 color: palette.severityColor(gauge.severity),
