@@ -10,7 +10,7 @@ import SwiftUI
 
 private enum AppShellLayout {
     static let panelContentSize = NSSize(width: 360, height: 420)
-    static let settingsMinContentSize = NSSize(width: 520, height: 560)
+    static let settingsMinContentSize = NSSize(width: 660, height: 560)
 }
 
 public final class PerchHAStatusPanel: NSPanel {
@@ -24,12 +24,18 @@ public final class PerchHAStatusPanel: NSPanel {
     public convenience init() {
         self.init(
             contentRect: NSRect(origin: .zero, size: AppShellLayout.panelContentSize),
-            styleMask: [.nonactivatingPanel, .titled, .fullSizeContentView],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: true
         )
         isFloatingPanel = true
         hidesOnDeactivate = true
+        // The SwiftUI root paints the rounded dashboard surface and its shadow, so
+        // the window itself is a clear, chrome-free host: no titlebar, no traffic
+        // lights, no opaque background to bleed past the rounded corners.
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = false
     }
 
     public override var canBecomeKey: Bool {
@@ -1600,19 +1606,28 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     ) -> NSPanel {
         let panel = PerchHAStatusPanel(
             contentRect: NSRect(origin: .zero, size: AppShellLayout.panelContentSize),
-            styleMask: [.nonactivatingPanel, .titled, .fullSizeContentView],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: true
         )
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
+        // A borderless, transparent host: the SwiftUI root paints the rounded
+        // dashboard surface, clips to it, and provides the soft shadow, so the
+        // window contributes no titlebar, traffic lights, or opaque frame.
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = true
-        panel.contentViewController = NSHostingController(
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        let hostingController = NSHostingController(
             rootView: PerchHAPanelView(model: model, onOpenSettings: onOpenSettings)
         )
+        hostingController.view.wantsLayer = true
+        hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
+        panel.contentViewController = hostingController
         // Route the panel-local Cmd+, shortcut to the same open-settings path.
         panel.onOpenSettings = onOpenSettings
+        // Size to the fixed SwiftUI content so the borderless window matches the
+        // rounded surface exactly (no chrome inset). The root paints at this size.
         panel.setContentSize(AppShellLayout.panelContentSize)
         return panel
     }

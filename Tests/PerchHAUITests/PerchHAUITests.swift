@@ -542,7 +542,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.rooms.map(\.name), ["Office"])
         XCTAssertEqual(model.snapshot.rooms.first?.entities.first?.name, "Office temperature")
         XCTAssertEqual(model.snapshot.rooms.first?.entities.first?.state, "21.4")
-        XCTAssertEqual(model.snapshot.lastUpdateDescription, "Initial load complete")
+        XCTAssertEqual(model.snapshot.lastUpdateDescription, "Updated just now")
         XCTAssertNil(model.snapshot.problemDescription)
         XCTAssertEqual(model.snapshot.connectionForm.token, "")
         XCTAssertTrue(model.snapshot.hasTokenInput)
@@ -3678,7 +3678,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.connectionState, .connected)
         XCTAssertEqual(model.snapshot.rooms.first?.entities.first?.state, "22")
         XCTAssertEqual(model.snapshot.refreshCount, 1)
-        XCTAssertEqual(model.snapshot.lastUpdateDescription, "Refresh 1 complete")
+        XCTAssertEqual(model.snapshot.lastUpdateDescription, "Updated just now")
     }
 
     func testConnectedEmptyStateDoesNotShowFirstRunPhase() async {
@@ -3722,9 +3722,13 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertTrue(panel.canBecomeKey)
         XCTAssertTrue(panel.canBecomeMain)
         XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
-        XCTAssertTrue(panel.styleMask.contains(.fullSizeContentView))
-        XCTAssertEqual(panel.titleVisibility, .hidden)
-        XCTAssertTrue(panel.titlebarAppearsTransparent)
+        // The panel is borderless so the SwiftUI root paints the rounded
+        // dashboard surface itself: no titlebar, no window frame/background.
+        XCTAssertTrue(panel.styleMask.contains(.borderless))
+        XCTAssertFalse(panel.styleMask.contains(.titled))
+        XCTAssertFalse(panel.isOpaque)
+        XCTAssertEqual(panel.backgroundColor, .clear)
+        XCTAssertFalse(panel.hasShadow)
         XCTAssertTrue(panel.isFloatingPanel)
         XCTAssertTrue(panel.hidesOnDeactivate)
         XCTAssertNotNil(panel.contentViewController)
@@ -6216,7 +6220,10 @@ final class PerchHAUITests: XCTestCase {
             },
             clock: clock,
             historyCacheConfiguration: PerchHAHistoryCacheConfiguration(capacity: 64, ttl: cacheTTL),
-            historyPrefetchConfiguration: prefetch
+            historyPrefetchConfiguration: prefetch,
+            // Isolate prefetch behavior from the active-panel periodic refresh
+            // safety net so its clock sleeper count assertions stay exact.
+            periodicRefreshConfiguration: .disabled
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
@@ -6438,6 +6445,114 @@ final class PerchHAUITests: XCTestCase {
         }
         let finalCount = await recorder.callCount()
         XCTAssertEqual(finalCount, 8)
+    }
+
+    func test_t_history_range_picker_offers_at_most_one_week() {
+        // The dashboard and detail panel cap the offered history at one week.
+        XCTAssertEqual(HistoryRange.uiSelectable, [.hour, .day, .week])
+        XCTAssertFalse(HistoryRange.uiSelectable.contains(.month))
+    }
+
+    func test_t_inline_sparkline_geometry_downsamples_to_budget() {
+        // A dense series is downsampled to the inline mini-chart budget, preserving
+        // first and last samples, so the tiny preview never plots hundreds of
+        // points and the redraw cost stays bounded.
+        let base = Date(timeIntervalSince1970: 1_789_000_000)
+        let samples = (0..<400).map { index in
+            HistorySample(
+                timestamp: base.addingTimeInterval(Double(index) * 60),
+                state: "\(index)",
+                numericValue: Double(index)
+            )
+        }
+        let series = HistorySeries(entityID: "sensor.dense", range: .day, samples: samples)
+        let full = PerchHAHistorySparklineGeometry(series: series)
+        let capped = PerchHAHistorySparklineGeometry(series: series, maxSamples: 48)
+        XCTAssertEqual(full.points.count, 400)
+        XCTAssertLessThanOrEqual(capped.points.count, 48)
+        XCTAssertGreaterThan(capped.points.count, 1)
+        XCTAssertEqual(capped.points.first?.x ?? -1, 0, accuracy: 0.0001)
+        XCTAssertEqual(capped.points.last?.x ?? -1, 1, accuracy: 0.0001)
+    }
+
+    func test_t_periodic_refresh_runs_while_active_and_pauses_when_inactive() async {
+        let clock = TestPerchClock()
+        let interval = PerchDuration.seconds(45)
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: prefetchRooms(count: 1)) },
+            clock: clock,
+            periodicRefreshConfiguration: PerchHAPeriodicRefreshConfiguration(interval: interval)
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        XCTAssertEqual(model.snapshot.refreshCount, 0)
+
+        // Activating the panel refreshes immediately (safety net on open), then
+        // settles into the interval loop on the injected clock.
+        model.setPanelActive(true)
+        await spinUntil { model.snapshot.refreshCount == 1 }
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        XCTAssertEqual(model.snapshot.refreshCount, 1)
+
+        // Firing the interval performs one more refresh and re-arms the loop.
+        _ = await clock.advance(by: interval)
+        await spinUntil { model.snapshot.refreshCount == 2 }
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+
+        // Deactivating pauses the loop: advancing the clock performs no refresh.
+        model.setPanelActive(false)
+        await spinUntil { await clock.sleepingTaskCount() == 0 }
+        _ = await clock.advance(by: interval)
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        XCTAssertEqual(model.snapshot.refreshCount, 2)
+    }
+
+    func test_t_periodic_refresh_backs_off_after_failure() async {
+        let clock = TestPerchClock()
+        let interval = PerchDuration.seconds(45)
+        let outcomes = PeriodicConnectorOutcomes(
+            // First call (model.connect) succeeds; the immediate tick fails, so the
+            // next sleep must be a backed-off interval (2x the base), not the base.
+            results: [
+                .success(rooms: prefetchRooms(count: 1)),
+                .failure(.unreachable(host: "ha.local"))
+            ],
+            fallback: .success(rooms: prefetchRooms(count: 1))
+        )
+        let model = PerchHAPanelModel(
+            connector: { _ in await outcomes.next() },
+            clock: clock,
+            periodicRefreshConfiguration: PerchHAPeriodicRefreshConfiguration(
+                interval: interval,
+                maximumBackoff: .seconds(300)
+            )
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.setPanelActive(true)
+        // The immediate tick fails; the loop arms a backed-off sleep.
+        await spinUntil { if case .failed = model.snapshot.connectionState { return true } else { return false } }
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+
+        // The base interval is not yet enough to wake the backed-off sleep.
+        _ = await clock.advance(by: interval)
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        let beforeBackoff = model.snapshot.connectionState
+        if case .failed = beforeBackoff {} else {
+            XCTFail("expected the backed-off sleep to still be pending after one base interval")
+        }
+
+        // Advancing the remainder of the doubled backoff wakes it and recovers.
+        _ = await clock.advance(by: interval)
+        await spinUntil {
+            if case .connected = model.snapshot.connectionState { return true } else { return false }
+        }
     }
 
     private func spinUntil(_ condition: @escaping @MainActor () -> Bool) async {
@@ -7380,6 +7495,25 @@ func prefetchRooms(count: Int = 10) -> [Room] {
         )
     }
     return [Room(id: "prefetch", name: "Prefetch", entities: entities)]
+}
+
+/// A deterministic connector that returns a scripted sequence of results, then a
+/// fallback, used to drive the periodic-refresh backoff test.
+private actor PeriodicConnectorOutcomes {
+    private var results: [PerchHAConnectionAttemptResult]
+    private let fallback: PerchHAConnectionAttemptResult
+
+    init(results: [PerchHAConnectionAttemptResult], fallback: PerchHAConnectionAttemptResult) {
+        self.results = results
+        self.fallback = fallback
+    }
+
+    func next() -> PerchHAConnectionAttemptResult {
+        guard !results.isEmpty else {
+            return fallback
+        }
+        return results.removeFirst()
+    }
 }
 
 func controlRooms() -> [Room] {

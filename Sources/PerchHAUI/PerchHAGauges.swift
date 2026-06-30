@@ -148,8 +148,12 @@ public struct PerchHAInlineSparkline: View {
 private struct InlineSparklinePath: Shape {
     let series: HistorySeries
 
+    /// The fixed mini-chart sample budget for inline previews. Caps redraw cost
+    /// and keeps the tiny sparkline legible.
+    private static let inlineSampleBudget = 48
+
     func path(in rect: CGRect) -> Path {
-        let geometry = PerchHAHistorySparklineGeometry(series: series)
+        let geometry = PerchHAHistorySparklineGeometry(series: series, maxSamples: Self.inlineSampleBudget)
         return Path { path in
             for (index, point) in geometry.points.enumerated() {
                 let cgPoint = CGPoint(

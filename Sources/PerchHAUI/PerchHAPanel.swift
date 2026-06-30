@@ -469,8 +469,16 @@ public struct PerchHAHistorySparklinePoint: Equatable, Sendable {
 public struct PerchHAHistorySparklineGeometry: Equatable, Sendable {
     public let points: [PerchHAHistorySparklinePoint]
 
-    public init(series: HistorySeries) {
-        let samples = series.chronologicalNumericSamples
+    /// Builds the sparkline geometry for a series.
+    ///
+    /// - Parameters:
+    ///   - series: The numeric history series.
+    ///   - maxSamples: An optional cap on the number of plotted samples. When set
+    ///     (used by inline previews, ≈24–96), the series is evenly downsampled to
+    ///     this many points so the mini-chart redraw budget stays bounded; the
+    ///     first and last samples are always preserved. `nil` plots every sample.
+    public init(series: HistorySeries, maxSamples: Int? = nil) {
+        let samples = Self.downsample(series.chronologicalNumericSamples, to: maxSamples)
         guard samples.count > 1 else {
             points = Self.midline
             return
@@ -508,6 +516,30 @@ public struct PerchHAHistorySparklineGeometry: Equatable, Sendable {
         PerchHAHistorySparklinePoint(x: 0, y: 0.5),
         PerchHAHistorySparklinePoint(x: 1, y: 0.5)
     ]
+
+    /// Evenly downsamples samples to at most `maxSamples`, preserving the first
+    /// and last. Returns the input unchanged when no cap is set or the series is
+    /// already within budget.
+    private static func downsample(
+        _ samples: [PerchHAHistoryCursorSample],
+        to maxSamples: Int?
+    ) -> [PerchHAHistoryCursorSample] {
+        guard let maxSamples, maxSamples >= 2, samples.count > maxSamples else {
+            return samples
+        }
+        let lastIndex = samples.count - 1
+        var picked: [PerchHAHistoryCursorSample] = []
+        picked.reserveCapacity(maxSamples)
+        for step in 0..<maxSamples {
+            let position = Double(step) / Double(maxSamples - 1)
+            let index = Int((position * Double(lastIndex)).rounded())
+            let sample = samples[min(index, lastIndex)]
+            if picked.last?.timestamp != sample.timestamp {
+                picked.append(sample)
+            }
+        }
+        return picked
+    }
 }
 
 public enum PerchHAAccessibilityMotionPolicy: String, Equatable, Sendable {
@@ -671,6 +703,42 @@ public struct PerchHAHistoryPrefetchConfiguration: Equatable, Sendable {
         self.activeRefreshInterval = activeRefreshInterval
         self.maxConcurrentFetches = max(1, maxConcurrentFetches)
     }
+}
+
+/// Tuning for the active-panel periodic refresh safety net.
+///
+/// Live WebSocket push already updates values; this gentle periodic refresh only
+/// runs while the panel is open and coalesces with any in-flight refresh, so it
+/// never spams the request-volume budget. A failed refresh backs off
+/// exponentially up to a cap before resuming the base interval.
+public struct PerchHAPeriodicRefreshConfiguration: Equatable, Sendable {
+    /// The base interval between refreshes while the panel is active.
+    public let interval: PerchDuration
+    /// The maximum backoff interval applied after consecutive failures.
+    public let maximumBackoff: PerchDuration
+
+    /// Creates a periodic refresh configuration.
+    ///
+    /// - Parameters:
+    ///   - interval: The base refresh interval (default 45 s). A zero interval
+    ///     disables the periodic safety net entirely (no immediate tick, no loop),
+    ///     leaving live WebSocket push as the only update path.
+    ///   - maximumBackoff: The backoff ceiling after failures (default 5 min).
+    public init(
+        interval: PerchDuration = .seconds(45),
+        maximumBackoff: PerchDuration = .seconds(300)
+    ) {
+        self.interval = interval
+        self.maximumBackoff = maximumBackoff
+    }
+
+    /// Whether the periodic safety net runs. `false` when the interval is zero.
+    public var isEnabled: Bool {
+        interval.nanoseconds > 0
+    }
+
+    /// A configuration that disables the periodic safety net.
+    public static let disabled = PerchHAPeriodicRefreshConfiguration(interval: .seconds(0))
 }
 
 public struct PerchHAPanelSnapshot: Equatable, Sendable {
@@ -1267,6 +1335,7 @@ public final class PerchHAPanelModel: ObservableObject {
     private let historyHoverGrace: PerchDuration
     private let historyCacheConfiguration: PerchHAHistoryCacheConfiguration
     private let historyPrefetchConfiguration: PerchHAHistoryPrefetchConfiguration
+    private let periodicRefreshConfiguration: PerchHAPeriodicRefreshConfiguration
     private let selectionSink: SelectionConfigurationSink
     private let menuBarDisplaySink: MenuBarDisplayConfigurationSink
     private let customActionSink: CustomActionConfigurationSink
@@ -1291,6 +1360,8 @@ public final class PerchHAPanelModel: ObservableObject {
     private var prefetchQueue: [PrefetchJob] = []
     private var prefetchCursor = 0
     private var prefetchWorkers: [Task<Void, Never>] = []
+    private var periodicRefreshTask: Task<Void, Never>?
+    private var periodicRefreshFailureStreak = 0
 
     public init(
         snapshot: PerchHAPanelSnapshot = PerchHAPanelSnapshot(),
@@ -1304,6 +1375,7 @@ public final class PerchHAPanelModel: ObservableObject {
         historyHoverGrace: PerchDuration = .milliseconds(300),
         historyCacheConfiguration: PerchHAHistoryCacheConfiguration = PerchHAHistoryCacheConfiguration(),
         historyPrefetchConfiguration: PerchHAHistoryPrefetchConfiguration = PerchHAHistoryPrefetchConfiguration(),
+        periodicRefreshConfiguration: PerchHAPeriodicRefreshConfiguration = PerchHAPeriodicRefreshConfiguration(),
         selectionConfiguration: EntitySelectionConfiguration = EntitySelectionConfiguration(),
         menuBarDisplayConfiguration: MenuBarDisplayConfiguration = MenuBarDisplayConfiguration(),
         customActionConfiguration: CustomActionConfiguration = CustomActionConfiguration(),
@@ -1356,6 +1428,7 @@ public final class PerchHAPanelModel: ObservableObject {
         self.historyHoverGrace = historyHoverGrace
         self.historyCacheConfiguration = historyCacheConfiguration
         self.historyPrefetchConfiguration = historyPrefetchConfiguration
+        self.periodicRefreshConfiguration = periodicRefreshConfiguration
         self.selectionSink = selectionSink
         self.menuBarDisplaySink = menuBarDisplaySink
         self.customActionSink = customActionSink
@@ -1369,6 +1442,7 @@ public final class PerchHAPanelModel: ObservableObject {
         historyCloseTask?.cancel()
         prefetchTask?.cancel()
         prefetchWorkers.forEach { $0.cancel() }
+        periodicRefreshTask?.cancel()
     }
 
     public func updateConnectionForm(
@@ -1920,8 +1994,79 @@ public final class PerchHAPanelModel: ObservableObject {
         isPanelActive = active
         if active {
             scheduleHistoryPrefetch()
+            startPeriodicRefresh()
         } else {
             cancelHistoryPrefetch()
+            cancelPeriodicRefresh()
+        }
+    }
+
+    /// Starts the active-panel periodic refresh safety net.
+    ///
+    /// Refreshes once on open (a discovery/refresh when a session is connected),
+    /// then repeats on the injected clock at the configured interval while the
+    /// panel stays active. Refreshes coalesce with any in-flight action and never
+    /// fire while the panel is closed. A failed refresh backs off exponentially up
+    /// to the configured ceiling; a success resets the streak to the base
+    /// interval. Live WebSocket push remains the primary update path; this is a
+    /// gentle backstop that keeps the request-volume budget intact.
+    private func startPeriodicRefresh() {
+        periodicRefreshTask?.cancel()
+        guard periodicRefreshConfiguration.isEnabled, lastConnectedForm != nil else {
+            periodicRefreshTask = nil
+            return
+        }
+        periodicRefreshFailureStreak = 0
+        periodicRefreshTask = Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            // Refresh immediately on open, then settle into the interval loop.
+            await self.runPeriodicRefreshTick()
+            while !Task.isCancelled, self.isPanelActive {
+                let delay = self.periodicRefreshDelay()
+                do {
+                    _ = try await self.clock.sleep(for: delay)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled, self.isPanelActive, self.lastConnectedForm != nil else {
+                    return
+                }
+                await self.runPeriodicRefreshTick()
+            }
+        }
+    }
+
+    private func cancelPeriodicRefresh() {
+        periodicRefreshTask?.cancel()
+        periodicRefreshTask = nil
+    }
+
+    /// The current refresh delay, growing exponentially with the failure streak up
+    /// to the configured ceiling.
+    private func periodicRefreshDelay() -> PerchDuration {
+        guard periodicRefreshFailureStreak > 0 else {
+            return periodicRefreshConfiguration.interval
+        }
+        // First failure already doubles the base interval, then 4x, 8x, … capped.
+        let multiplier = Int64(1 << min(periodicRefreshFailureStreak, 8))
+        let scaled = periodicRefreshConfiguration.interval.nanoseconds.multipliedReportingOverflow(by: multiplier)
+        let capped = min(scaled.overflow ? Int64.max : scaled.partialValue, periodicRefreshConfiguration.maximumBackoff.nanoseconds)
+        return PerchDuration(nanoseconds: capped)
+    }
+
+    /// Runs one refresh and updates the backoff streak from the resulting
+    /// connection state. Skips when no session is connected.
+    private func runPeriodicRefreshTick() async {
+        guard lastConnectedForm != nil else {
+            return
+        }
+        await refresh()
+        if case .failed = snapshot.connectionState {
+            periodicRefreshFailureStreak += 1
+        } else {
+            periodicRefreshFailureStreak = 0
         }
     }
 
@@ -3589,7 +3734,7 @@ public final class PerchHAPanelModel: ObservableObject {
                 selectionQuery: snapshot.selectionQuery,
                 isSettingsPresented: snapshot.isSettingsPresented,
                 connectionForm: nonSecretForm(form),
-                lastUpdateDescription: refreshCount == 0 ? "Initial load complete" : "Refresh \(refreshCount) complete",
+                lastUpdateDescription: "Updated just now",
                 refreshCount: refreshCount,
                 canRetry: true,
                 hasTokenInput: hasToken(in: form),
@@ -4462,29 +4607,54 @@ public struct PerchHAHistoryPopoverContent: View {
         _selectedRange = selectedRange
     }
 
+    private var palette: PerchHATheme.DashboardPalette {
+        PerchHATheme.Dashboard.palette(colorScheme)
+    }
+
     public var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let shape = RoundedRectangle(cornerRadius: PerchHACornerRadius.card, style: .continuous)
+        return VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 Text(entityName)
-                    .font(.headline)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(palette.textPrimary)
                     .lineLimit(1)
                 Spacer()
                 Text(valueText)
-                    .monospacedDigit()
+                    .font(.system(size: 14, weight: .semibold).monospacedDigit())
                     .foregroundStyle(historyValueForegroundStyle)
             }
             Picker("Range", selection: $selectedRange) {
-                ForEach(HistoryRange.allCases, id: \.rawValue) { range in
+                ForEach(rangeOptions, id: \.rawValue) { range in
                     Text(range.displayName).tag(range)
                 }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .tint(palette.accentPrimary)
             .accessibilityLabel("\(entityName) history range")
             historyBody
         }
         .padding(12)
         .frame(width: 280)
+        .background {
+            shape
+                .fill(palette.cardBackground)
+                .overlay(shape.fill(.ultraThinMaterial).opacity(0.4))
+        }
+        .overlay(shape.strokeBorder(palette.borderSubtle, lineWidth: 1))
+        .clipShape(shape)
+    }
+
+    /// The ranges offered in the segmented selector. Capped at one week; the
+    /// currently-selected range is always included so a persisted `.month`
+    /// default still renders as a selected segment without offering Month.
+    private var rangeOptions: [HistoryRange] {
+        var options = HistoryRange.uiSelectable
+        if !options.contains(selectedRange) {
+            options.append(selectedRange)
+        }
+        return options
     }
 
     @ViewBuilder
@@ -4544,11 +4714,11 @@ public struct PerchHAHistoryPopoverContent: View {
     }
 
     private func interactiveChart(series: HistorySeries) -> some View {
-        let chartHeight: CGFloat = 46
+        let chartHeight: CGFloat = 72
         return GeometryReader { proxy in
             ZStack(alignment: .topLeading) {
                 HistorySparkline(series: series)
-                    .stroke(.primary, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                    .stroke(palette.chartPrimary, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
                 if let normalizedX = cursorNormalizedX {
                     let x = proxy.size.width * CGFloat(min(max(normalizedX, 0), 1))
                     Rectangle()
@@ -4649,16 +4819,16 @@ public struct PerchHAHistoryPopoverContent: View {
 
     private var historyLabelForegroundStyle: Color {
         if isIncreasedContrast {
-            return Color.primary
+            return palette.textPrimary
         }
-        return colorScheme == .dark ? Color.white.opacity(0.72) : Color.black.opacity(0.62)
+        return palette.textSecondary
     }
 
     private var historyValueForegroundStyle: Color {
         if isIncreasedContrast {
-            return Color.primary
+            return palette.textPrimary
         }
-        return colorScheme == .dark ? Color.white.opacity(0.9) : Color.black.opacity(0.78)
+        return palette.textPrimary
     }
 
     private var isIncreasedContrast: Bool {
@@ -4684,6 +4854,7 @@ public struct PerchHAPanelView: View {
     @State private var visibleEntityIDs: Set<EntityID> = []
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.colorScheme) private var colorScheme
 
     public init(
         model: PerchHAPanelModel,
@@ -4708,7 +4879,9 @@ public struct PerchHAPanelView: View {
             snapshot: model.snapshot,
             preferences: accessibilityPreferences
         )
-        VStack(alignment: .leading, spacing: 0) {
+        let palette = PerchHATheme.Dashboard.palette(colorScheme)
+        let shape = RoundedRectangle(cornerRadius: PerchHATheme.Dashboard.panelCornerRadius, style: .continuous)
+        return VStack(alignment: .leading, spacing: 0) {
             topBar
             dashboardDivider
             content
@@ -4716,17 +4889,18 @@ public struct PerchHAPanelView: View {
             footer
         }
         .frame(width: 360, height: 420, alignment: .top)
-        .background(dashboardBackground)
-        .environment(\.colorScheme, .dark)
+        .environment(\.dashboardPalette, palette)
+        .background(dashboardBackground(palette))
+        .clipShape(shape)
         .overlay {
-            RoundedRectangle(cornerRadius: PerchHATheme.Dashboard.panelCornerRadius, style: .continuous)
-                .strokeBorder(
-                    accessibility.contrastPolicy == .increased
-                        ? Color.white.opacity(0.32)
-                        : PerchHATheme.Dashboard.borderEmphatic,
-                    lineWidth: 1
-                )
+            shape.strokeBorder(
+                accessibility.contrastPolicy == .increased
+                    ? (colorScheme == .dark ? Color.white.opacity(0.32) : Color.black.opacity(0.40))
+                    : palette.borderEmphatic,
+                lineWidth: 1
+            )
         }
+        .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.45 : 0.22), radius: 18, x: 0, y: 8)
         .contrast(accessibility.contrastPolicy == .increased ? 1.12 : 1)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibility.label)
@@ -4790,18 +4964,19 @@ public struct PerchHAPanelView: View {
         )
     }
 
-    /// The opaque dark base fill plus a thin translucent material, painted
-    /// edge-to-edge so the popover reads as a dark instrument panel and never
-    /// shows a transparent seam. The runtime window provides the rounded corners
-    /// and shadow; the base fill keeps every edge opaque.
-    private var dashboardBackground: some View {
-        PerchHATheme.Dashboard.panelBackground
+    /// The appearance-aware base fill plus a thin translucent material, painted
+    /// edge-to-edge so the popover reads as a designed instrument panel (graphite
+    /// in dark, light translucent graphite in light) and never shows a transparent
+    /// seam. The SwiftUI root clips the rounded corners and provides the shadow;
+    /// the base fill keeps every edge opaque against the borderless window.
+    private func dashboardBackground(_ palette: PerchHATheme.DashboardPalette) -> some View {
+        palette.popoverBackground
             .overlay(Rectangle().fill(.ultraThinMaterial).opacity(0.5))
     }
 
     private var dashboardDivider: some View {
         Rectangle()
-            .fill(PerchHATheme.Dashboard.borderSubtle)
+            .fill(PerchHATheme.Dashboard.palette(colorScheme).separator)
             .frame(height: 1)
     }
 
@@ -4813,47 +4988,31 @@ public struct PerchHAPanelView: View {
     private var topBar: some View {
         switch model.snapshot.phase {
         case .connectedData, .reconnecting, .failedStale:
-            DashboardHeader(
-                summary: model.snapshot.dashboardSummary(),
-                canRefresh: model.snapshot.canRefresh,
-                onRefresh: { model.startRefresh() }
-            )
+            DashboardHeader(summary: model.snapshot.dashboardSummary())
         case .firstRun, .connecting, .connectedEmpty, .failed:
             statusBar
         }
     }
 
     private var statusBar: some View {
-        HStack(spacing: PerchHASpacing.sm - 2) {
+        let palette = PerchHATheme.Dashboard.palette(colorScheme)
+        return HStack(spacing: PerchHASpacing.sm - 2) {
             Circle()
                 .fill(connectionStatusColor)
                 .frame(width: 7, height: 7)
                 .accessibilityHidden(true)
             Text("PearchHA")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(PerchHATheme.Dashboard.textPrimary)
+                .foregroundStyle(palette.textPrimary)
             Spacer(minLength: 0)
-            refreshButton
         }
         .padding(.horizontal, PerchHASpacing.md)
         .padding(.top, PerchHASpacing.md)
         .padding(.bottom, PerchHASpacing.sm)
     }
 
-    private var refreshButton: some View {
-        Button {
-            model.startRefresh()
-        } label: {
-            Image(systemName: "arrow.clockwise")
-        }
-        .buttonStyle(PerchHAIconButtonStyle())
-        .disabled(!model.snapshot.canRefresh)
-        .help("Refresh")
-        .accessibilityLabel("Refresh")
-    }
-
     private var connectionStatusColor: Color {
-        PerchHATheme.Dashboard.connectionColor(model.snapshot.connectionState)
+        PerchHATheme.Dashboard.palette(colorScheme).connectionColor(model.snapshot.connectionState)
     }
 
     @ViewBuilder
@@ -4921,58 +5080,59 @@ public struct PerchHAPanelView: View {
         }
     }
 
-    /// A graph-forward, iStat-Menus-style entity block.
+    /// A compact, inline iStat-Menus-style entity row.
     ///
-    /// The top line carries the domain icon and muted entity name on the left and
-    /// the hero value (plus its gauge or state pill) and any controls on the
-    /// right. Beneath it, spanning the full row width, a history graph is drawn
-    /// **only** from already-cached series (``PerchHAPanelModel/cachedHistorySeries(for:)``):
-    /// numeric series become a taller line sparkline, non-numeric series a colored
-    /// state-timeline band. When nothing is cached the graph area collapses to
-    /// nothing — the row never fetches on render or while scrolling, so
-    /// control-only rooms stay compact. Generous vertical padding gives the calm,
-    /// spacious rhythm between rows.
+    /// One line: the domain icon and entity name (plus an optional unit subtitle)
+    /// on the left; a tiny inline history *preview* (≈100×26) drawn only from
+    /// already-cached series; and the right-aligned hero value (or status pill /
+    /// compact control). The large chart no longer lives in the row — it appears
+    /// only in the hover/detail panel. The inline preview is drawn **only** from
+    /// the already-warmed cache (``PerchHAPanelModel/cachedHistorySeries(for:)``):
+    /// when nothing is cached the preview is omitted (no empty box) and the row
+    /// never fetches on render or while scrolling. A cover slider, when enabled,
+    /// drops onto a compact second line.
     private func entityRow(_ entity: DiscoveredEntity) -> some View {
         let value = entityValue(entity)
         let presentation = rowPresentation(for: entity)
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
+        let palette = PerchHATheme.Dashboard.palette(colorScheme)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
                 Image(systemName: entityIconName(for: entity))
-                    .font(.system(size: 13))
+                    .font(.system(size: 14))
                     .frame(width: 18, alignment: .center)
-                    .foregroundStyle(value.status == .available ? PerchHATheme.Dashboard.accentPrimary : PerchHATheme.Dashboard.textTertiary)
+                    .foregroundStyle(value.status == .available ? palette.accentPrimary : palette.textTertiary)
                     .accessibilityHidden(true)
-                Text(entity.name)
-                    .font(.callout)
-                    .foregroundStyle(PerchHATheme.Dashboard.textSecondary)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(entity.name)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(palette.textPrimary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                    if let subtitle = rowSubtitle(for: entity, value: value) {
+                        Text(subtitle)
+                            .font(.system(size: 11))
+                            .foregroundStyle(palette.textTertiary)
+                            .lineLimit(1)
+                    }
+                }
+                .layoutPriority(1)
                 Spacer(minLength: 8)
+                inlineHistoryPreview(for: entity, palette: palette)
                 rowTopLineTrailing(entity: entity, value: value, presentation: presentation)
             }
-            if let coverControl = model.snapshot.coverControl(for: entity),
-               model.coverControlMode(for: entity).showsSlider,
-               let position = coverControl.position {
-                PerchHACoverPositionSlider(
-                    position: position,
-                    disabled: coverControl.isRunning,
-                    accessibilityName: "\(entity.name) position"
-                ) { position in
-                    model.startCoverPositionChange(entity.id, position: position)
-                }
-                .frame(maxWidth: .infinity)
-            }
-            historyGraph(for: entity)
+            coverControlLine(for: entity)
             if let failureMessage = model.snapshot.controlActionState.failureMessage(for: entity.id) {
                 Text(failureMessage)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(palette.accentDanger)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("\(entity.name) control failed: \(failureMessage)")
             }
         }
         .font(.body)
         .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.vertical, 9)
+        .frame(minHeight: 44)
         .contentShape(Rectangle())
         .onAppear {
             markEntityVisible(entity.id, isVisible: true)
@@ -5165,15 +5325,14 @@ public struct PerchHAPanelView: View {
     }
 
     /// The quiet anchored footer. Shows a short problem message when present,
-    /// otherwise the calm relative "updated" caption, plus the refresh, settings,
-    /// and quit controls.
+    /// otherwise the calm "updated" caption, plus the settings and quit controls.
+    /// The manual refresh control is intentionally absent: values auto-update
+    /// while the panel is open.
     private var footer: some View {
         DashboardFooter(
             connectionColor: connectionStatusColor,
             updatedText: model.snapshot.problemDescription ?? model.snapshot.lastUpdateDescription,
-            canRefresh: model.snapshot.canRefresh,
             settingsDisabled: model.snapshot.availableRooms.isEmpty,
-            onRefresh: { model.startRefresh() },
             onSettings: { openSettings() },
             onQuit: { NSApplication.shared.terminate(nil) }
         )
@@ -5244,15 +5403,20 @@ public struct PerchHAPanelView: View {
             .fontWeight(.medium)
             .monospacedDigit()
             .lineLimit(1)
-            .minimumScaleFactor(0.7)
-            .foregroundStyle(value.status == .available ? heroSeverityColor(presentation) : PerchHATheme.Dashboard.textTertiary)
+            .fixedSize(horizontal: true, vertical: false)
+            .layoutPriority(1)
+            .foregroundStyle(value.status == .available ? heroSeverityColor(presentation) : PerchHATheme.Dashboard.palette(colorScheme).textTertiary)
             .accessibilityHidden(true)
     }
 
     /// The gauge that sits beside the hero value for fraction-resolvable rows.
     ///
-    /// Ring gauges are compact squares; bar and battery gauges are fixed widths.
-    /// Nothing is drawn for value/pill rows or unavailable values.
+    /// Bar and battery gauges are fixed-width inline indicators. The ring gauge is
+    /// intentionally *not* drawn on the row: the right edge keeps value-first
+    /// priority (the formatted number, then at most one compact control) and the
+    /// ring belongs to the header summary strip and the hover/detail panel, not
+    /// every row. Nothing is drawn for ring-style, value/pill rows, or unavailable
+    /// values.
     @ViewBuilder
     private func heroGauge(
         value: FormattedEntityValue,
@@ -5261,8 +5425,7 @@ public struct PerchHAPanelView: View {
         if case let .gauge(gauge) = presentation, value.status == .available {
             switch gauge.style {
             case .ring:
-                PerchHAEntityGaugeView(gauge: gauge)
-                    .frame(width: 22, height: 22)
+                EmptyView()
             case .bar:
                 PerchHAEntityGaugeView(gauge: gauge)
                     .frame(width: 64, height: 10)
@@ -5274,13 +5437,14 @@ public struct PerchHAPanelView: View {
     }
 
     private func heroSeverityColor(_ presentation: PerchHAEntityRowPresentation) -> Color {
+        let textPrimary = PerchHATheme.Dashboard.palette(colorScheme).textPrimary
         switch presentation {
         case let .gauge(gauge):
-            gauge.severity == .normal ? PerchHATheme.Dashboard.textPrimary : PerchHATheme.color(for: gauge.severity)
+            return gauge.severity == .normal ? textPrimary : PerchHATheme.color(for: gauge.severity)
         case let .value(severity):
-            severity == .normal ? PerchHATheme.Dashboard.textPrimary : PerchHATheme.color(for: severity)
+            return severity == .normal ? textPrimary : PerchHATheme.color(for: severity)
         case .statePill:
-            PerchHATheme.Dashboard.textPrimary
+            return textPrimary
         }
     }
 
@@ -5300,9 +5464,11 @@ public struct PerchHAPanelView: View {
             .accessibilityHidden(true)
     }
 
-    /// The controls a row exposes on its top line: a switch toggle, cover
-    /// buttons, and any configured custom-action buttons. Drawn in entity order;
-    /// each keeps its own accessibility label and hint.
+    /// The compact controls a row exposes on its top line: a single switch toggle
+    /// or custom-action buttons. Cover buttons are intentionally absent here — they
+    /// drop onto the row's second line with the position slider so the top line
+    /// keeps value-first priority. Each control keeps its own accessibility label
+    /// and hint.
     @ViewBuilder
     private func rowControls(for entity: DiscoveredEntity) -> some View {
         if let control = model.snapshot.control(for: entity) {
@@ -5316,31 +5482,71 @@ public struct PerchHAPanelView: View {
                 .accessibilityLabel("\(control.isOn ? "Turn off" : "Turn on") \(entity.name)")
                 .accessibilityHint(entityControlHelp(for: entity, control: control))
         }
-        if let coverControl = model.snapshot.coverControl(for: entity),
-           model.coverControlMode(for: entity).showsButtons {
-            coverButtons(for: entity, control: coverControl)
-        }
         ForEach(model.customActions(for: entity), id: \.id.rawValue) { action in
             customActionButton(action)
         }
     }
 
-    /// The full-width history graph drawn beneath a row's top line.
+    /// The cover controls on the row's compact second line: the up/stop/down
+    /// buttons (when enabled) and the position slider (when enabled). Kept off the
+    /// top line so the cover row reads as a normal named row whose top line is
+    /// `[icon] name [band/sparkline] [state]`. Returns nothing when neither the
+    /// buttons nor the slider are configured.
+    @ViewBuilder
+    private func coverControlLine(for entity: DiscoveredEntity) -> some View {
+        if let coverControl = model.snapshot.coverControl(for: entity) {
+            let mode = model.coverControlMode(for: entity)
+            HStack(spacing: 8) {
+                if mode.showsButtons {
+                    coverButtons(for: entity, control: coverControl)
+                }
+                if mode.showsSlider, let position = coverControl.position {
+                    PerchHACoverPositionSlider(
+                        position: position,
+                        disabled: coverControl.isRunning,
+                        accessibilityName: "\(entity.name) position"
+                    ) { position in
+                        model.startCoverPositionChange(entity.id, position: position)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+        }
+    }
+
+    /// An optional muted subtitle for the row's name column.
+    ///
+    /// Shows the entity's unit (for example `°C`, `W`) when the value carries a
+    /// numeric reading and the unit is not already embedded in the value text, so
+    /// the right-aligned hero value can stay a bare number. Returns `nil` for
+    /// state-pill rows and unit-less values so no empty line is drawn.
+    private func rowSubtitle(for entity: DiscoveredEntity, value: FormattedEntityValue) -> String? {
+        guard value.status == .available, Double(entity.state) != nil else {
+            return nil
+        }
+        let unit = (entity.unit ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !unit.isEmpty, !value.text.contains(unit) else {
+            return nil
+        }
+        return unit
+    }
+
+    /// The tiny inline history preview (≈100×26) drawn at the trailing edge of the
+    /// row's name column.
     ///
     /// Reads only the already-warmed prefetch cache via
     /// ``PerchHAPanelModel/cachedHistorySeries(for:)`` — it never fetches on render
-    /// or while scrolling. Numeric series render as a taller line sparkline;
-    /// non-numeric series render as the compact colored state-timeline band. When
-    /// no series is cached (a control-only entity, or one not yet warmed) the area
-    /// collapses to nothing so the row stays compact. The graph is purely visual;
-    /// the value is carried by the row's accessibility label.
+    /// or while scrolling. Numeric series render as a slim line sparkline;
+    /// non-numeric series render as a slim state band. When no series is cached (a
+    /// control-only entity, or one not yet warmed) nothing is drawn — no empty box.
+    /// The preview is purely visual; the value is carried by the row's
+    /// accessibility label and the detail panel.
     @ViewBuilder
-    private func historyGraph(for entity: DiscoveredEntity) -> some View {
+    private func inlineHistoryPreview(for entity: DiscoveredEntity, palette: PerchHATheme.DashboardPalette) -> some View {
         if let series = model.cachedHistorySeries(for: entity.id) {
-            let isNumeric = PerchHAHistoryCursor.numericSamples(of: series).count > 1
-            PerchHAInlineSparkline(series: series, color: PerchHATheme.accent.opacity(0.85))
-                .frame(maxWidth: .infinity)
-                .frame(height: isNumeric ? 32 : 14)
+            PerchHAInlineSparkline(series: series, color: palette.chartPrimary.opacity(0.85))
+                .frame(minWidth: 32, idealWidth: 100, maxWidth: 100)
+                .frame(height: 26)
                 .accessibilityHidden(true)
         }
     }
@@ -5743,6 +5949,14 @@ extension HistoryRange {
             "Month"
         }
     }
+
+    /// The history ranges the UI offers, capped at one week.
+    ///
+    /// ``HistoryRange/month`` is retained in the enum (the client routes month
+    /// recorder statistics and persistence round-trips it), but the dashboard and
+    /// the detail panel never offer it: the inline preview and hover detail cap at
+    /// a week so cache and request volume stay bounded.
+    static let uiSelectable: [HistoryRange] = [.hour, .day, .week]
 }
 
 extension PerchHAPanelModel {

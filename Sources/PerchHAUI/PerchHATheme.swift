@@ -113,62 +113,47 @@ public enum PerchHATheme {
         scheme == .dark ? Color.clear : Color.black.opacity(0.06)
     }
 
-    /// The fixed dark palette for the menu-bar dashboard popover.
+    /// The appearance-aware palette for the menu-bar dashboard popover.
     ///
-    /// Unlike the rest of ``PerchHATheme``, these values do **not** adapt to the
-    /// system appearance: the dashboard renders dark in both light and dark mode
-    /// (a deliberate, iStat-Menus-class "instrument panel" look). The numbers are
-    /// graphite/blue-leaning so the calm Home Assistant ``accent`` blue and the
-    /// semantic trio read cleanly against them. The Settings window keeps the
-    /// adaptive palette above and never uses these.
-    public enum Dashboard {
-        /// The opaque base fill of the panel, behind the translucent material.
-        ///
-        /// A deep graphite-blue. Painted edge-to-edge so the popover never shows a
-        /// transparent seam and the material has something dark to sample.
-        public static let panelBackground = Color(red: 0.071, green: 0.078, blue: 0.094)
-
-        /// The room/metric card fill — a hair lighter than the panel.
-        public static let cardBackground = Color(red: 0.110, green: 0.122, blue: 0.145)
-
-        /// An elevated card fill for the header summary strip and hovered surfaces.
-        public static let cardBackgroundElevated = Color(red: 0.145, green: 0.161, blue: 0.188)
-
-        /// The hairline border drawn around cards and the panel (white ≈ 0.08).
-        public static let borderSubtle = Color.white.opacity(0.08)
-
-        /// A slightly stronger hairline for the outer panel edge (white ≈ 0.10).
-        public static let borderEmphatic = Color.white.opacity(0.10)
-
-        /// The near-white primary text color for values and titles.
-        public static let textPrimary = Color(red: 0.93, green: 0.95, blue: 0.97)
-
-        /// The muted blue-gray secondary text color for labels and captions.
-        public static let textSecondary = Color(red: 0.62, green: 0.66, blue: 0.73)
-
-        /// The faint tertiary text color for de-emphasized hints.
-        public static let textTertiary = Color(red: 0.44, green: 0.48, blue: 0.55)
+    /// The dashboard is designed to look intentional in **both** appearances: a
+    /// graphite/dark-blue instrument panel in dark mode, and a clean light
+    /// *translucent graphite* surface (not pure white) with dark, readable text in
+    /// light mode. The same visual hierarchy, accents, and semantic trio carry
+    /// across both; the light tokens are designed rather than mechanically
+    /// inverted. Tokens are resolved against the supplied ``ColorScheme`` so the
+    /// popover follows the resolved theme (system/light/dark). The Settings window
+    /// keeps the separate adaptive palette above and never uses these.
+    ///
+    /// A ``DashboardPalette`` value-type carries the resolved colors; the
+    /// ``palette(_:)`` factory builds it for an appearance. Views read tokens from
+    /// the palette so a single `@Environment(\.colorScheme)` read fans out to all
+    /// dashboard surfaces.
+    public struct DashboardPalette: Equatable, Sendable {
+        public let appBackground: Color
+        public let popoverBackground: Color
+        public let cardBackground: Color
+        public let cardBackgroundElevated: Color
+        public let borderSubtle: Color
+        public let borderEmphatic: Color
+        public let textPrimary: Color
+        public let textSecondary: Color
+        public let textTertiary: Color
+        public let accentSecondary: Color
+        public let chartTrack: Color
+        public let separator: Color
 
         /// The primary accent (the calm Home Assistant blue, resolved live).
-        public static var accentPrimary: Color { PerchHATheme.accent }
-
-        /// A violet/pink secondary-series accent for secondary data.
-        public static let accentSecondary = Color(red: 0.71, green: 0.55, blue: 0.93)
-
+        public var accentPrimary: Color { PerchHATheme.accent }
         /// The warning accent (amber), aligned with ``PerchHATheme/warn``.
-        public static let accentWarning = PerchHATheme.warn
-
+        public var accentWarning: Color { PerchHATheme.warn }
         /// The success accent (green), aligned with ``PerchHATheme/ok``.
-        public static let accentSuccess = PerchHATheme.ok
-
+        public var accentSuccess: Color { PerchHATheme.ok }
         /// The danger accent (red), aligned with ``PerchHATheme/critical``.
-        public static let accentDanger = PerchHATheme.critical
-
-        /// The muted gray-blue track behind gauges and bars.
-        public static let trackColor = Color.white.opacity(0.10)
-
-        /// The outer corner radius of the dashboard panel surface.
-        public static let panelCornerRadius: CGFloat = 20
+        public var accentDanger: Color { PerchHATheme.critical }
+        /// The primary chart stroke (the accent blue).
+        public var chartPrimary: Color { PerchHATheme.accent }
+        /// The secondary chart stroke (the violet/pink secondary accent).
+        public var chartSecondary: Color { accentSecondary }
 
         /// The semantic color for a connection state, used by the status pill and
         /// the header status dot.
@@ -177,7 +162,7 @@ public enum PerchHATheme {
         /// - Returns: Success for connected, warning while connecting/reconnecting,
         ///   danger for failed, and the muted secondary text color when
         ///   disconnected.
-        public static func connectionColor(_ state: ConnectionState) -> Color {
+        public func connectionColor(_ state: ConnectionState) -> Color {
             switch state {
             case .connected:
                 accentSuccess
@@ -189,6 +174,68 @@ public enum PerchHATheme {
                 textSecondary
             }
         }
+    }
+
+    public enum Dashboard {
+        /// A violet/pink secondary-series accent, shared by both appearances.
+        public static let accentSecondary = Color(red: 0.71, green: 0.55, blue: 0.93)
+
+        /// The warning accent (amber), aligned with ``PerchHATheme/warn``.
+        public static let accentWarning = PerchHATheme.warn
+
+        /// The success accent (green), aligned with ``PerchHATheme/ok``.
+        public static let accentSuccess = PerchHATheme.ok
+
+        /// The danger accent (red), aligned with ``PerchHATheme/critical``.
+        public static let accentDanger = PerchHATheme.critical
+
+        /// The primary accent (the calm Home Assistant blue, resolved live).
+        public static var accentPrimary: Color { PerchHATheme.accent }
+
+        /// The outer corner radius of the dashboard panel surface.
+        public static let panelCornerRadius: CGFloat = 20
+
+        /// Builds the resolved dashboard palette for an appearance.
+        ///
+        /// - Parameter scheme: The resolved color scheme.
+        /// - Returns: A ``DashboardPalette`` with designed light or dark tokens.
+        public static func palette(_ scheme: ColorScheme) -> DashboardPalette {
+            scheme == .dark ? darkPalette : lightPalette
+        }
+
+        /// The dark instrument-panel palette: deep graphite-blue surfaces and
+        /// near-white text.
+        public static let darkPalette = DashboardPalette(
+            appBackground: Color(red: 0.071, green: 0.078, blue: 0.094),
+            popoverBackground: Color(red: 0.071, green: 0.078, blue: 0.094),
+            cardBackground: Color(red: 0.110, green: 0.122, blue: 0.145),
+            cardBackgroundElevated: Color(red: 0.145, green: 0.161, blue: 0.188),
+            borderSubtle: Color.white.opacity(0.08),
+            borderEmphatic: Color.white.opacity(0.10),
+            textPrimary: Color(red: 0.93, green: 0.95, blue: 0.97),
+            textSecondary: Color(red: 0.62, green: 0.66, blue: 0.73),
+            textTertiary: Color(red: 0.44, green: 0.48, blue: 0.55),
+            accentSecondary: accentSecondary,
+            chartTrack: Color.white.opacity(0.10),
+            separator: Color.white.opacity(0.08)
+        )
+
+        /// The light palette: a clean light *translucent graphite* (not pure
+        /// white) surface with dark, readable text and the same hierarchy as dark.
+        public static let lightPalette = DashboardPalette(
+            appBackground: Color(red: 0.93, green: 0.94, blue: 0.96),
+            popoverBackground: Color(red: 0.93, green: 0.94, blue: 0.96),
+            cardBackground: Color(red: 0.99, green: 0.99, blue: 1.0),
+            cardBackgroundElevated: Color.white,
+            borderSubtle: Color.black.opacity(0.08),
+            borderEmphatic: Color.black.opacity(0.12),
+            textPrimary: Color(red: 0.10, green: 0.12, blue: 0.16),
+            textSecondary: Color(red: 0.36, green: 0.40, blue: 0.46),
+            textTertiary: Color(red: 0.56, green: 0.60, blue: 0.66),
+            accentSecondary: accentSecondary,
+            chartTrack: Color.black.opacity(0.08),
+            separator: Color.black.opacity(0.08)
+        )
     }
 
     /// The subtle fill of an inset capsule control (search field, footer bar).
@@ -209,6 +256,22 @@ public enum PerchHATheme {
         scheme == .dark
             ? Color.white.opacity(0.08)
             : Color.black.opacity(0.07)
+    }
+}
+
+private struct DashboardPaletteKey: EnvironmentKey {
+    static let defaultValue = PerchHATheme.Dashboard.darkPalette
+}
+
+public extension EnvironmentValues {
+    /// The resolved dashboard palette for the current appearance.
+    ///
+    /// The panel root resolves this once from `@Environment(\.colorScheme)` and
+    /// injects it; dashboard surfaces read it instead of resolving the scheme
+    /// themselves, so the whole popover shares one designed light/dark palette.
+    var dashboardPalette: PerchHATheme.DashboardPalette {
+        get { self[DashboardPaletteKey.self] }
+        set { self[DashboardPaletteKey.self] = newValue }
     }
 }
 

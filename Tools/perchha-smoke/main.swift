@@ -2961,9 +2961,11 @@ struct PerchHASmoke {
         try expect(panel.canBecomeKey, "app shell panel accepts first-run text focus")
         try expect(panel.canBecomeMain, "app shell panel can become main while open")
         try expect(panel.styleMask.contains(.nonactivatingPanel), "app shell panel is nonactivating")
-        try expect(panel.styleMask.contains(.fullSizeContentView), "app shell panel uses full-size content")
-        try expect(panel.titleVisibility == .hidden, "app shell hides the title")
-        try expect(panel.titlebarAppearsTransparent, "app shell uses a transparent titlebar")
+        try expect(panel.styleMask.contains(.borderless), "app shell panel is borderless (SwiftUI paints the rounded surface)")
+        try expect(!panel.styleMask.contains(.titled), "app shell panel has no titled window chrome")
+        try expect(!panel.isOpaque, "app shell panel is transparent so the rounded corners show")
+        try expect(panel.backgroundColor == .clear, "app shell panel clears its window background")
+        try expect(!panel.hasShadow, "app shell panel defers its shadow to the SwiftUI root")
         try expect(panel.isFloatingPanel, "app shell panel floats above normal windows")
         try expect(panel.hidesOnDeactivate, "app shell panel hides on deactivate")
         try expect(panel.contentViewController != nil, "app shell hosts SwiftUI content")
@@ -3850,8 +3852,8 @@ struct PerchHASmoke {
         }
 
         try expect(
-            connectedLight.sampledHash == connectedDark.sampledHash,
-            "dashboard popover renders identically in light and dark system appearance (it is always dark)"
+            connectedLight.sampledHash != connectedDark.sampledHash,
+            "dashboard popover renders a designed light and a designed dark appearance (it follows the resolved theme)"
         )
         try expect(
             connectedDark.sampledHash != increasedContrast.sampledHash,

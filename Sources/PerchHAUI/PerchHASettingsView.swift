@@ -298,14 +298,45 @@ struct PerchHAConnectionFormFields: View {
 /// Entities tree, matching the documented UX. This view hosts the settings-only
 /// controls relocated out of the cramped menu-bar panel.
 public struct PerchHASettingsView: View {
-    /// Selectable tabs of the Settings window.
-    public enum Tab: Hashable, Sendable {
+    /// Selectable sections of the Settings window, shown in the sidebar rail in
+    /// declaration order.
+    public enum Tab: Hashable, Sendable, CaseIterable {
         case general
         case connection
+        case dashboard
         case entities
-        case advanced
+        case appearance
+        case diagnostics
         case privacy
         case about
+
+        /// The sidebar rail label.
+        var title: String {
+            switch self {
+            case .general: "General"
+            case .connection: "Connection"
+            case .dashboard: "Dashboard"
+            case .entities: "Entities"
+            case .appearance: "Appearance"
+            case .diagnostics: "Diagnostics"
+            case .privacy: "Privacy"
+            case .about: "About"
+            }
+        }
+
+        /// The sidebar rail SF Symbol.
+        var systemImage: String {
+            switch self {
+            case .general: "gearshape"
+            case .connection: "network"
+            case .dashboard: "rectangle.grid.1x2"
+            case .entities: "square.grid.2x2"
+            case .appearance: "paintbrush"
+            case .diagnostics: "stethoscope"
+            case .privacy: "lock"
+            case .about: "info.circle"
+            }
+        }
     }
 
     @ObservedObject private var model: PerchHAPanelModel
@@ -322,6 +353,7 @@ public struct PerchHASettingsView: View {
     @State private var launchAtLoginPermissionDenied = false
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    @Environment(\.colorScheme) private var colorScheme
 
     /// Creates the Settings window content.
     ///
@@ -363,41 +395,17 @@ public struct PerchHASettingsView: View {
             snapshot: model.snapshot,
             preferences: accessibilityPreferences
         )
-        TabView(selection: $selectedTab) {
-            generalTab
-                .tabItem {
-                    Label("General", systemImage: "gearshape")
-                }
-                .tag(Tab.general)
-            connectionTab
-                .tabItem {
-                    Label("Connection", systemImage: "network")
-                }
-                .tag(Tab.connection)
-            entitiesTab
-                .tabItem {
-                    Label("Entities", systemImage: "square.grid.2x2")
-                }
-                .tag(Tab.entities)
-            advancedTab
-                .tabItem {
-                    Label("Advanced", systemImage: "gearshape.2")
-                }
-                .tag(Tab.advanced)
-            privacyTab
-                .tabItem {
-                    Label("Privacy", systemImage: "lock")
-                }
-                .tag(Tab.privacy)
-            aboutTab
-                .tabItem {
-                    Label("About", systemImage: "info.circle")
-                }
-                .tag(Tab.about)
+        HStack(spacing: 0) {
+            sidebarRail
+            Divider()
+                .accessibilityHidden(true)
+            detailContent(for: selectedTab)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
         }
-        .frame(minWidth: 520, minHeight: 560)
+        .frame(minWidth: 660, minHeight: 560)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
+        .tint(PerchHATheme.accent)
         .contrast(accessibility.contrastPolicy == .increased ? 1.12 : 1)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibility.label)
@@ -405,6 +413,84 @@ public struct PerchHASettingsView: View {
             if accessibility.motionPolicy == .reduced {
                 transaction.animation = nil
             }
+        }
+    }
+
+    /// The deterministic left sidebar rail: a fixed-width vertical stack of one
+    /// selectable row per ``Tab`` case, in declaration order. Unlike
+    /// `NavigationSplitView`, this plain `HStack` rail always renders and never
+    /// auto-collapses in the fixed-size Settings window. Each row is a focusable
+    /// `Button` carrying a spoken accessibility name; the selected row is
+    /// highlighted with the palette accent (filled rounded background, accent
+    /// text) and marked with the selected trait. The rail sits on the palette's
+    /// elevated surface so it reads as a rail in both light and dark.
+    private var sidebarRail: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Tab.allCases, id: \.self) { tab in
+                    sidebarRow(tab)
+                }
+            }
+            .padding(.horizontal, PerchHASpacing.sm)
+            .padding(.vertical, PerchHASpacing.md)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(width: 198)
+        .frame(maxHeight: .infinity)
+        .background(railBackground.ignoresSafeArea())
+        .accessibilityLabel("Settings sections")
+    }
+
+    /// A single selectable rail row: SF Symbol + label in a full-width tappable
+    /// `Button`. The selected row fills with the accent and uses accent text;
+    /// unselected rows use secondary text.
+    private func sidebarRow(_ tab: Tab) -> some View {
+        let isSelected = selectedTab == tab
+        return Button {
+            selectedTab = tab
+        } label: {
+            HStack(spacing: PerchHASpacing.sm) {
+                Image(systemName: tab.systemImage)
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 20, alignment: .center)
+                Text(tab.title)
+                    .font(.body)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, PerchHASpacing.sm)
+            .padding(.vertical, PerchHASpacing.sm - 1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .foregroundStyle(isSelected ? PerchHATheme.accent : Color.secondary)
+            .background(
+                RoundedRectangle(cornerRadius: PerchHACornerRadius.control, style: .continuous)
+                    .fill(isSelected ? PerchHATheme.accent.opacity(0.16) : Color.clear)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: PerchHACornerRadius.control, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(tab.title)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
+    }
+
+    /// The rail's elevated surface fill, resolved against the current appearance
+    /// so it reads as a distinct rail in both light and dark.
+    private var railBackground: Color {
+        PerchHATheme.Dashboard.palette(colorScheme).cardBackgroundElevated
+    }
+
+    /// Routes a section to its detail content.
+    @ViewBuilder
+    private func detailContent(for tab: Tab) -> some View {
+        switch tab {
+        case .general: generalTab
+        case .connection: connectionTab
+        case .dashboard: dashboardTab
+        case .entities: entitiesTab
+        case .appearance: appearanceTab
+        case .diagnostics: diagnosticsTab
+        case .privacy: privacyTab
+        case .about: aboutTab
         }
     }
 
@@ -426,8 +512,10 @@ public struct PerchHASettingsView: View {
         let content: AnyView = switch tab {
         case .general: AnyView(generalTab)
         case .connection: AnyView(connectionTab)
+        case .dashboard: AnyView(dashboardTab)
         case .entities: AnyView(entitiesTab)
-        case .advanced: AnyView(advancedTab)
+        case .appearance: AnyView(appearanceTab)
+        case .diagnostics: AnyView(diagnosticsTab)
         case .privacy: AnyView(privacyTab)
         case .about: AnyView(aboutTab)
         }
@@ -438,127 +526,204 @@ public struct PerchHASettingsView: View {
     }
 
     private var connectionTab: some View {
-        ScrollView(.vertical) {
-            PerchHACard(cornerRadius: PerchHACornerRadius.card) {
+        settingsPage(title: "Connection", systemImage: Tab.connection.systemImage) {
+            settingsCard {
                 PerchHAConnectionFormFields(model: model)
                     .textFieldStyle(.roundedBorder)
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .tint(PerchHATheme.accent)
-            .padding(.vertical, 14)
-            .padding(.leading, 14)
-            .padding(.trailing, 18)
+        }
+    }
+
+    /// A page scaffold shared by every section: a leading-aligned scroll view
+    /// hosting a section title and a vertical stack of grouped cards on the
+    /// window background, with consistent design-token insets.
+    @ViewBuilder
+    private func settingsPage<Content: View>(
+        title: String,
+        systemImage: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: PerchHASpacing.md + 2) {
+                Text(title)
+                    .font(.title2.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
+                content()
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, PerchHASpacing.lg)
+            .padding(.horizontal, PerchHASpacing.lg + 2)
+        }
+        .tint(PerchHATheme.accent)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// A grouped settings card with consistent interior padding, so no raw
+    /// ungrouped form rows are drawn anywhere.
+    private func settingsCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        PerchHACard(cornerRadius: PerchHACornerRadius.card) {
+            VStack(alignment: .leading, spacing: PerchHASpacing.md) {
+                content()
+            }
+            .padding(PerchHASpacing.lg)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     // MARK: General
 
-    /// General settings: menu-bar appearance mode, stable-width toggle, theme
-    /// override, accent color, and launch-at-login.
+    /// General settings: theme override, accent color, and launch-at-login. The
+    /// theme/accent controls share their bindings (and therefore their single
+    /// persistence sink) with the Appearance section's preview.
     private var generalTab: some View {
-        ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 14) {
-                PerchHACard(cornerRadius: PerchHACornerRadius.card) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        settingsSection(title: "Menu bar", systemImage: "menubar.rectangle") {
-                            VStack(alignment: .leading, spacing: 10) {
-                                settingsControlRow("Show") {
-                                    Picker("Show", selection: menuBarAppearanceBinding) {
-                                        ForEach(PerchHAMenuBarAppearance.allCases, id: \.rawValue) { appearance in
-                                            Text(appearance.displayName).tag(appearance)
-                                        }
-                                    }
-                                    .pickerStyle(.segmented)
-                                    .labelsHidden()
-                                    .fixedSize()
-                                    .accessibilityLabel("Menu bar appearance")
-                                }
-                                Toggle("Keep a stable width", isOn: stableMenuBarWidthBinding)
-                                    .toggleStyle(.checkbox)
-                                    .fixedSize()
-                                    .accessibilityLabel("Keep a stable menu bar width")
-                                Text("Uses monospaced digits so the value does not shift as it changes.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
+        settingsPage(title: "General", systemImage: Tab.general.systemImage) {
+            settingsCard {
+                settingsSection(title: "Appearance", systemImage: "paintbrush") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        settingsControlRow("Theme") {
+                            themeModePicker
                         }
-                    }
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                PerchHACard(cornerRadius: PerchHACornerRadius.card) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        settingsSection(title: "Appearance", systemImage: "paintbrush") {
-                            VStack(alignment: .leading, spacing: 10) {
-                                settingsControlRow("Theme") {
-                                    Picker("Theme", selection: themeModeBinding) {
-                                        ForEach(PerchHAThemeMode.allCases, id: \.rawValue) { mode in
-                                            Text(mode.displayName).tag(mode)
-                                        }
-                                    }
-                                    .pickerStyle(.segmented)
-                                    .labelsHidden()
-                                    .fixedSize()
-                                    .accessibilityLabel("Theme")
-                                }
-                                settingsControlRow("Accent") {
-                                    Picker("Accent", selection: accentSwatchBinding) {
-                                        ForEach(PerchHAAccentColor.swatches) { swatch in
-                                            Text(swatch.name).tag(swatch.id)
-                                        }
-                                    }
-                                    .labelsHidden()
-                                    .frame(width: 160)
-                                    .perchHACompactControl()
-                                    .accessibilityLabel("Accent color")
-                                }
-                                accentSwatchPreview
-                                settingsSectionDivider
-                                PerchHASectionHeader("Preview", systemImage: "eye")
-                                PerchHAAppearancePreview(preferences: displayPreferences)
-                            }
+                        Text("Force light or dark, or follow the system setting.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        settingsControlRow("Accent") {
+                            accentMenuPicker
                         }
+                        accentSwatchPreview
                     }
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                PerchHACard(cornerRadius: PerchHACornerRadius.card) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        settingsSection(title: "Startup", systemImage: "power") {
-                            VStack(alignment: .leading, spacing: PerchHASpacing.sm - 2) {
-                                Toggle("Launch at login", isOn: launchAtLoginBinding)
-                                    .toggleStyle(.checkbox)
-                                    .fixedSize()
-                                    .accessibilityLabel("Launch PearchHA at login")
-                                Text("Start PearchHA automatically when you sign in to this Mac.")
-                                    .font(PerchHATypography.caption().weight(.regular))
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                if launchAtLoginPermissionDenied {
-                                    PerchHAPermissionState(
-                                        title: "Couldn't enable launch at login",
-                                        message: "Open System Settings > General > Login Items and allow PearchHA."
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                Spacer(minLength: 0)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 14)
-            .padding(.leading, 14)
-            .padding(.trailing, 18)
+            settingsCard {
+                settingsSection(title: "Startup", systemImage: "power") {
+                    VStack(alignment: .leading, spacing: PerchHASpacing.sm - 2) {
+                        Toggle("Launch at login", isOn: launchAtLoginBinding)
+                            .toggleStyle(.checkbox)
+                            .fixedSize()
+                            .accessibilityLabel("Launch PearchHA at login")
+                        Text("Start PearchHA automatically when you sign in to this Mac.")
+                            .font(PerchHATypography.caption().weight(.regular))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if launchAtLoginPermissionDenied {
+                            PerchHAPermissionState(
+                                title: "Couldn't enable launch at login",
+                                message: "Open System Settings > General > Login Items and allow PearchHA."
+                            )
+                        }
+                    }
+                }
+            }
         }
-        .tint(PerchHATheme.accent)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    // MARK: Dashboard
+
+    /// Dashboard-facing display preferences: how the live menu-bar item presents
+    /// its promoted value and whether it keeps a stable width. These are the only
+    /// real dashboard-facing display preferences the model exposes; no new
+    /// settings are invented here.
+    private var dashboardTab: some View {
+        settingsPage(title: "Dashboard", systemImage: Tab.dashboard.systemImage) {
+            settingsCard {
+                settingsSection(title: "Menu bar", systemImage: "menubar.rectangle") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        settingsControlRow("Show") {
+                            Picker("Show", selection: menuBarAppearanceBinding) {
+                                ForEach(PerchHAMenuBarAppearance.allCases, id: \.rawValue) { appearance in
+                                    Text(appearance.displayName).tag(appearance)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .fixedSize()
+                            .accessibilityLabel("Menu bar appearance")
+                        }
+                        Toggle("Keep a stable width", isOn: stableMenuBarWidthBinding)
+                            .toggleStyle(.checkbox)
+                            .fixedSize()
+                            .accessibilityLabel("Keep a stable menu bar width")
+                        Text("Uses monospaced digits so the value does not shift as it changes.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Appearance
+
+    /// Appearance: the live preview plus the theme/accent controls, which share
+    /// their bindings (and persistence) with the General section, and a reset to
+    /// the shipped display-preference defaults.
+    private var appearanceTab: some View {
+        settingsPage(title: "Appearance", systemImage: Tab.appearance.systemImage) {
+            settingsCard {
+                settingsSection(title: "Preview", systemImage: "eye") {
+                    PerchHAAppearancePreview(preferences: displayPreferences)
+                }
+            }
+            settingsCard {
+                settingsSection(title: "Theme & accent", systemImage: "paintbrush") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        settingsControlRow("Theme") {
+                            themeModePicker
+                        }
+                        settingsControlRow("Accent") {
+                            accentMenuPicker
+                        }
+                        accentSwatchPreview
+                    }
+                }
+            }
+            settingsCard {
+                settingsSection(title: "Reset", systemImage: "arrow.counterclockwise") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Restore the display preferences (menu-bar appearance, theme, and accent) to their defaults. Your connection and entities are not changed.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button {
+                            updateDisplayPreferences(.defaults)
+                        } label: {
+                            Label("Reset display preferences", systemImage: "arrow.counterclockwise")
+                                .labelStyle(.titleAndIcon)
+                        }
+                        .buttonStyle(PerchHAIconButtonStyle())
+                        .disabled(displayPreferences == .defaults)
+                        .help("Reset menu-bar appearance, theme, and accent to defaults")
+                        .accessibilityLabel("Reset display preferences to defaults")
+                    }
+                }
+            }
+        }
+    }
+
+    private var themeModePicker: some View {
+        Picker("Theme", selection: themeModeBinding) {
+            ForEach(PerchHAThemeMode.allCases, id: \.rawValue) { mode in
+                Text(mode.displayName).tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
+        .accessibilityLabel("Theme")
+    }
+
+    private var accentMenuPicker: some View {
+        Picker("Accent", selection: accentSwatchBinding) {
+            ForEach(PerchHAAccentColor.swatches) { swatch in
+                Text(swatch.name).tag(swatch.id)
+            }
+        }
+        .labelsHidden()
+        .frame(width: 160)
+        .perchHACompactControl()
+        .accessibilityLabel("Accent color")
     }
 
     private var accentSwatchPreview: some View {
@@ -592,69 +757,236 @@ public struct PerchHASettingsView: View {
         Color(.sRGB, red: accent.red, green: accent.green, blue: accent.blue, opacity: accent.alpha)
     }
 
-    // MARK: Advanced
+    // MARK: Diagnostics
 
-    /// Advanced settings: read-only history-prefetch diagnostics and a "reset
-    /// display preferences" affordance. No risky knobs are exposed.
-    private var advancedTab: some View {
-        ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 14) {
-                PerchHACard(cornerRadius: PerchHACornerRadius.card) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        settingsSection(title: "History prefetch", systemImage: "chart.line.uptrend.xyaxis") {
-                            VStack(alignment: .leading, spacing: 6) {
-                                let prefetch = PerchHAHistoryPrefetchConfiguration()
-                                settingsControlRow("Lookahead") {
-                                    Text("\(prefetch.lookahead) values")
-                                        .foregroundStyle(.secondary)
-                                }
-                                settingsControlRow("Settle delay") {
-                                    Text("\(prefetch.settleDelay.nanoseconds / 1_000_000) ms")
-                                        .foregroundStyle(.secondary)
-                                }
-                                Text("How far ahead PearchHA warms inline charts when the panel is open. These are tuned defaults shown for reference.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                    }
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+    /// Diagnostics: real connection status, entity health (the warning count and
+    /// a deduped, capped list of affected entities), the last-updated timestamp,
+    /// a manual refresh, and the read-only history-prefetch reference. All values
+    /// come from the live snapshot; nothing is fabricated.
+    private var diagnosticsTab: some View {
+        let health = entityHealth
+        return settingsPage(title: "Diagnostics", systemImage: Tab.diagnostics.systemImage) {
+            settingsCard {
+                settingsSection(title: "Connection", systemImage: "antenna.radiowaves.left.and.right") {
+                    diagnosticsConnectionContent
                 }
-                PerchHACard(cornerRadius: PerchHACornerRadius.card) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        settingsSection(title: "Reset", systemImage: "arrow.counterclockwise") {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text("Restore the General display preferences (menu-bar appearance, theme, and accent) to their defaults. Your connection and entities are not changed.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                Button {
-                                    updateDisplayPreferences(.defaults)
-                                } label: {
-                                    Label("Reset display preferences", systemImage: "arrow.counterclockwise")
-                                        .labelStyle(.titleAndIcon)
-                                }
-                                .buttonStyle(PerchHAIconButtonStyle())
-                                .disabled(displayPreferences == .defaults)
-                                .help("Reset menu-bar appearance, theme, and accent to defaults")
-                                .accessibilityLabel("Reset display preferences to defaults")
-                            }
-                        }
-                    }
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            settingsCard {
+                settingsSection(title: "Entity health", systemImage: "heart.text.square") {
+                    diagnosticsHealthContent(health)
                 }
+            }
+            settingsCard {
+                settingsSection(title: "Updates", systemImage: "clock.arrow.circlepath") {
+                    diagnosticsUpdatesContent
+                }
+            }
+            settingsCard {
+                settingsSection(title: "History prefetch", systemImage: "chart.line.uptrend.xyaxis") {
+                    diagnosticsPrefetchContent
+                }
+            }
+        }
+    }
+
+    /// The connection diagnostic: a status pill carrying its own text plus the
+    /// last error message when the snapshot reports one.
+    private var diagnosticsConnectionContent: some View {
+        let status = connectionDiagnostic
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                StatusPill(
+                    status.label,
+                    systemImage: status.systemImage,
+                    color: status.color,
+                    accessibilityLabel: "Connection \(status.label)"
+                )
                 Spacer(minLength: 0)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 14)
-            .padding(.leading, 14)
-            .padding(.trailing, 18)
+            if let detail = model.snapshot.failureDescription {
+                PerchHAErrorState(
+                    title: "Last error",
+                    message: detail,
+                    style: .inline,
+                    accessibilityPrefix: "Connection error"
+                )
+            } else {
+                Text(status.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
-        .tint(PerchHATheme.accent)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The entity-health diagnostic: the warning count and a deduped, capped
+    /// summary of affected entities, or a calm "all healthy" / "no values" state.
+    @ViewBuilder
+    private func diagnosticsHealthContent(_ health: EntityHealthReport) -> some View {
+        if health.totalVisible == 0 {
+            PerchHAStateView(
+                systemImage: "tray",
+                title: "No values yet",
+                message: "Connect and select some values to see their health here.",
+                emphasis: .inline
+            )
+        } else if health.warningCount == 0 {
+            PerchHAStateView(
+                systemImage: "checkmark.seal",
+                symbolTint: PerchHATheme.ok,
+                title: "All values healthy",
+                message: "\(health.totalVisible) visible \(health.totalVisible == 1 ? "value is" : "values are") reporting normally.",
+                emphasis: .inline
+            )
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    StatusPill(
+                        health.warningCount == 1 ? "1 needs attention" : "\(health.warningCount) need attention",
+                        systemImage: "exclamationmark.triangle.fill",
+                        color: PerchHATheme.warn,
+                        accessibilityLabel: "\(health.warningCount) of \(health.totalVisible) values need attention"
+                    )
+                    Spacer(minLength: 0)
+                }
+                VStack(spacing: 0) {
+                    ForEach(Array(health.visibleGroups.enumerated()), id: \.offset) { index, group in
+                        HStack(spacing: 8) {
+                            Image(systemName: group.systemImage)
+                                .font(.caption)
+                                .foregroundStyle(PerchHATheme.warn)
+                                .frame(width: 18)
+                                .accessibilityHidden(true)
+                            Text(group.label)
+                                .font(.callout)
+                            Spacer(minLength: 8)
+                            Text("\(group.count)")
+                                .font(PerchHATypography.bodyValue())
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 5)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("\(group.label), \(group.count)")
+                        if index < health.visibleGroups.count - 1 {
+                            Divider().accessibilityHidden(true)
+                        }
+                    }
+                }
+                if health.hiddenCount > 0 {
+                    Text("and \(health.hiddenCount) more")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// The updates diagnostic: the last-updated description and a manual refresh
+    /// wired to the model's `startRefresh()`.
+    private var diagnosticsUpdatesContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            settingsControlRow("Last updated") {
+                Text(model.snapshot.lastUpdateDescription)
+                    .font(PerchHATypography.bodyValue())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Text("Values update live while the panel is open. Refresh now to fetch the latest values immediately.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button {
+                model.startRefresh()
+            } label: {
+                Label("Refresh now", systemImage: "arrow.clockwise")
+                    .labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(PerchHAIconButtonStyle(prominentOnHover: true))
+            .disabled(!canRefreshNow)
+            .help(canRefreshNow ? "Fetch the latest values now" : "Connect to Home Assistant to refresh")
+            .accessibilityLabel("Refresh values now")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var diagnosticsPrefetchContent: some View {
+        let prefetch = PerchHAHistoryPrefetchConfiguration()
+        return VStack(alignment: .leading, spacing: 6) {
+            settingsControlRow("Lookahead") {
+                Text("\(prefetch.lookahead) values")
+                    .foregroundStyle(.secondary)
+            }
+            settingsControlRow("Settle delay") {
+                Text("\(prefetch.settleDelay.nanoseconds / 1_000_000) ms")
+                    .foregroundStyle(.secondary)
+            }
+            Text("How far ahead PearchHA warms inline charts when the panel is open. These are tuned defaults shown for reference.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Whether a manual refresh is meaningful: only when connected (or holding a
+    /// connection that can be retried). Avoids a no-op refresh on first run.
+    private var canRefreshNow: Bool {
+        model.snapshot.showsConnectedContent || model.snapshot.canRefresh
+    }
+
+    /// A resolved connection status for the Diagnostics pill, mapped from the
+    /// real snapshot connection state.
+    private var connectionDiagnostic: (label: String, detail: String, systemImage: String, color: Color) {
+        switch model.snapshot.connectionState {
+        case .connected:
+            return ("Connected", "Live updates are flowing from Home Assistant.", "checkmark.circle.fill", PerchHATheme.ok)
+        case .connecting:
+            return ("Connecting", "Establishing a connection to Home Assistant.", "hourglass", PerchHATheme.warn)
+        case let .reconnecting(attempt):
+            return ("Reconnecting", "Attempt \(attempt). Showing the last known values.", "arrow.triangle.2.circlepath", PerchHATheme.warn)
+        case .disconnected:
+            return ("Disconnected", "Not connected to Home Assistant.", "bolt.horizontal.circle", .secondary)
+        case let .failed(failure):
+            switch failure {
+            case .authentication:
+                return ("Permission", "Sign in again or check your access token.", "lock.circle.fill", PerchHATheme.critical)
+            case .unreachable, .tlsRejected, .unsupportedCommand, .protocolError:
+                return ("Error", "Connection failed. See the last error below.", "exclamationmark.circle.fill", PerchHATheme.critical)
+            }
+        }
+    }
+
+    /// A deduped, capped report of unhealthy entities, built from the same
+    /// visible rooms the dashboard warning count uses. Identical statuses are
+    /// grouped with a count; the visible list is capped so a large fleet does not
+    /// dump hundreds of rows.
+    private var entityHealth: EntityHealthReport {
+        let visible = model.snapshot.rooms.flatMap(\.entities)
+        var unavailable = 0
+        var unknown = 0
+        var stale = 0
+        for entity in visible {
+            switch model.snapshot.formattedValue(for: entity).status {
+            case .unavailable: unavailable += 1
+            case .unknown: unknown += 1
+            case .stale: stale += 1
+            case .available: break
+            }
+        }
+        let groups: [EntityHealthGroup] = [
+            EntityHealthGroup(label: "Unavailable", count: unavailable, systemImage: "wifi.slash"),
+            EntityHealthGroup(label: "Unknown", count: unknown, systemImage: "questionmark.circle"),
+            EntityHealthGroup(label: "Stale", count: stale, systemImage: "clock.badge.exclamationmark")
+        ].filter { $0.count > 0 }
+        let cap = 3
+        return EntityHealthReport(
+            totalVisible: visible.count,
+            warningCount: unavailable + unknown + stale,
+            visibleGroups: Array(groups.prefix(cap)),
+            hiddenCount: groups.dropFirst(cap).reduce(0) { $0 + $1.count }
+        )
     }
 
     // MARK: Privacy
@@ -662,38 +994,27 @@ public struct PerchHASettingsView: View {
     /// Privacy statement: a static, honest summary of what PearchHA reads, where
     /// credentials live, and the absence of analytics or third-party calls.
     private var privacyTab: some View {
-        ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 14) {
-                PerchHACard(cornerRadius: PerchHACornerRadius.card) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        settingsSection(title: "What PearchHA reads", systemImage: "doc.text.magnifyingglass") {
-                            Text("PearchHA talks only to the Home Assistant server you configure. It reads your Home Assistant address and the access token (or browser sign-in) you provide, plus the entity states needed to show your values.")
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        settingsSectionDivider
-                        settingsSection(title: "Where credentials live", systemImage: "key") {
-                            Text("Your access and refresh tokens are stored in the macOS Keychain on this Mac. They are never written to the configuration file and never shown in this window.")
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        settingsSectionDivider
-                        settingsSection(title: "No tracking", systemImage: "hand.raised") {
-                            Text("PearchHA makes no analytics, telemetry, or third-party network calls. Nothing is sent anywhere except your own Home Assistant server.")
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        settingsPage(title: "Privacy", systemImage: Tab.privacy.systemImage) {
+            settingsCard {
+                settingsSection(title: "What PearchHA reads", systemImage: "doc.text.magnifyingglass") {
+                    Text("PearchHA talks only to the Home Assistant server you configure. It reads your Home Assistant address and the access token (or browser sign-in) you provide, plus the entity states needed to show your values.")
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer(minLength: 0)
+                settingsSectionDivider
+                settingsSection(title: "Where credentials live", systemImage: "key") {
+                    Text("Your access and refresh tokens are stored in the macOS Keychain on this Mac. They are never written to the configuration file and never shown in this window.")
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                settingsSectionDivider
+                settingsSection(title: "No tracking", systemImage: "hand.raised") {
+                    Text("PearchHA makes no analytics, telemetry, or third-party network calls. Nothing is sent anywhere except your own Home Assistant server.")
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
-            .font(.callout)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 14)
-            .padding(.leading, 14)
-            .padding(.trailing, 18)
         }
-        .tint(PerchHATheme.accent)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     // MARK: General bindings
@@ -752,33 +1073,27 @@ public struct PerchHASettingsView: View {
     }
 
     private var aboutTab: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            PerchHACard(cornerRadius: PerchHACornerRadius.card) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 10) {
-                        Image(systemName: "house.circle.fill")
-                            .font(.system(size: 30))
-                            .foregroundStyle(PerchHATheme.accent)
-                            .accessibilityHidden(true)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("PearchHA")
-                                .font(.title2.weight(.semibold))
-                            Text("Version \(Self.applicationVersion)")
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
-                        }
+        settingsPage(title: "About", systemImage: Tab.about.systemImage) {
+            settingsCard {
+                HStack(spacing: 10) {
+                    Image(systemName: "house.circle.fill")
+                        .font(.system(size: 30))
+                        .foregroundStyle(PerchHATheme.accent)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("PearchHA")
+                            .font(.title3.weight(.semibold))
+                        Text("Version \(Self.applicationVersion)")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
                     }
-                    Text("A quiet macOS menu-bar companion for Home Assistant: scan room values at a glance, drive switches and covers, and run saved service calls without opening a browser.")
-                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(14)
+                Text("A quiet macOS menu-bar companion for Home Assistant: scan room values at a glance, drive switches and covers, and run saved service calls without opening a browser.")
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: 0)
         }
-        .tint(PerchHATheme.accent)
-        .padding(14)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private static let applicationVersion: String = {
@@ -2072,6 +2387,27 @@ public struct PerchHASettingsView: View {
         return trimmed
     }
 
+}
+
+/// A grouped count of entities sharing one unhealthy status, for the
+/// Diagnostics entity-health summary.
+private struct EntityHealthGroup {
+    let label: String
+    let count: Int
+    let systemImage: String
+}
+
+/// A deduped, capped report of unhealthy visible entities for Diagnostics.
+///
+/// `warningCount` matches the dashboard summary's count of
+/// unavailable/unknown/stale values. `visibleGroups` is capped so a large fleet
+/// shows a short summary; `hiddenCount` carries the remainder behind an "and N
+/// more" affordance.
+private struct EntityHealthReport {
+    let totalVisible: Int
+    let warningCount: Int
+    let visibleGroups: [EntityHealthGroup]
+    let hiddenCount: Int
 }
 
 /// Locale-independent parsing and display for the per-entity min/max bound
