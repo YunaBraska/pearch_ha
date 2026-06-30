@@ -42,6 +42,7 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
     public let dashboardDefaultHistoryRange: HistoryRange
     public let dashboardShowsFooterTimestamp: Bool
     public let dashboardHiddenModuleIDs: [String]
+    public let dashboardSummaryMetricEntityIDs: [EntityID]
 
     public init(
         schemaVersion: Int = Self.currentSchemaVersion,
@@ -60,7 +61,8 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         dashboardRowDensity: PerchHADashboardRowDensity = .defaultDensity,
         dashboardDefaultHistoryRange: HistoryRange = .day,
         dashboardShowsFooterTimestamp: Bool = true,
-        dashboardHiddenModuleIDs: [String] = []
+        dashboardHiddenModuleIDs: [String] = [],
+        dashboardSummaryMetricEntityIDs: [EntityID] = []
     ) {
         self.schemaVersion = schemaVersion
         self.selectedEntityIDs = selectedEntityIDs
@@ -79,6 +81,7 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         self.dashboardDefaultHistoryRange = dashboardDefaultHistoryRange
         self.dashboardShowsFooterTimestamp = dashboardShowsFooterTimestamp
         self.dashboardHiddenModuleIDs = dashboardHiddenModuleIDs
+        self.dashboardSummaryMetricEntityIDs = PerchHADisplayPreferences.cappedSummaryMetricEntityIDs(dashboardSummaryMetricEntityIDs)
     }
 
     public static var empty: PerchHAConfiguration {
@@ -123,6 +126,7 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         case dashboardDefaultHistoryRange
         case dashboardShowsFooterTimestamp
         case dashboardHiddenModuleIDs
+        case dashboardSummaryMetricEntityIDs
     }
 
     public init(from decoder: Decoder) throws {
@@ -152,6 +156,9 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         dashboardDefaultHistoryRange = try container.decodeIfPresent(HistoryRange.self, forKey: .dashboardDefaultHistoryRange) ?? .day
         dashboardShowsFooterTimestamp = try container.decodeIfPresent(Bool.self, forKey: .dashboardShowsFooterTimestamp) ?? true
         dashboardHiddenModuleIDs = try container.decodeIfPresent([String].self, forKey: .dashboardHiddenModuleIDs) ?? []
+        dashboardSummaryMetricEntityIDs = PerchHADisplayPreferences.cappedSummaryMetricEntityIDs(
+            try container.decodeIfPresent([EntityID].self, forKey: .dashboardSummaryMetricEntityIDs) ?? []
+        )
     }
 
     /// The display preferences embedded in this configuration.
@@ -167,7 +174,8 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
             dashboardRowDensity: dashboardRowDensity,
             defaultHistoryRange: dashboardDefaultHistoryRange,
             showsFooterTimestamp: dashboardShowsFooterTimestamp,
-            hiddenModuleIDs: Set(dashboardHiddenModuleIDs)
+            hiddenModuleIDs: Set(dashboardHiddenModuleIDs),
+            summaryMetricEntityIDs: dashboardSummaryMetricEntityIDs
         )
     }
 
@@ -192,7 +200,8 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
             dashboardRowDensity: displayPreferences.dashboardRowDensity,
             dashboardDefaultHistoryRange: displayPreferences.defaultHistoryRange,
             dashboardShowsFooterTimestamp: displayPreferences.showsFooterTimestamp,
-            dashboardHiddenModuleIDs: Array(displayPreferences.hiddenModuleIDs).sorted()
+            dashboardHiddenModuleIDs: Array(displayPreferences.hiddenModuleIDs).sorted(),
+            dashboardSummaryMetricEntityIDs: displayPreferences.summaryMetricEntityIDs
         )
     }
 }

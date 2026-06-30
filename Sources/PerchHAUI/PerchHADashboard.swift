@@ -246,6 +246,22 @@ public struct DashboardHeader: View {
                 tint: palette.connectionColor(summary.connectionState)
             )
         ]
+        // When the user has chosen explicit summary metrics, render those in
+        // order (with muted placeholders for unavailable entities) instead of the
+        // auto-derived primary metric and alert count. The status pill above is
+        // kept regardless of the selection.
+        if !summary.selectedMetrics.isEmpty {
+            for metric in summary.selectedMetrics {
+                result.append(
+                    SummaryStripMetric(
+                        caption: metric.name,
+                        value: metric.valueText,
+                        tint: metric.isAvailable ? nil : palette.textTertiary
+                    )
+                )
+            }
+            return result
+        }
         if let metric = summary.primaryMetric {
             result.append(
                 SummaryStripMetric(

@@ -7272,6 +7272,291 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertNotEqual(base, SummaryStripMetric(caption: "Humidity", value: "45%"))
         XCTAssertNotEqual(base, SummaryStripMetric(caption: "Temp", value: "44%"))
     }
+
+    // MARK: - Dashboard summary selected metrics
+
+    private func connectedDashboardSnapshot() -> PerchHAPanelSnapshot {
+        let rooms = selectionRooms()
+        return PerchHAPanelSnapshot(
+            connectionState: .connected,
+            phase: .connectedData,
+            rooms: rooms,
+            availableRooms: rooms
+        )
+    }
+
+    func testDashboardSummaryEmptySelectionKeepsAutomaticBehavior() {
+        let snapshot = connectedDashboardSnapshot()
+
+        let auto = snapshot.dashboardSummary()
+        let explicitEmpty = snapshot.dashboardSummary(selectedMetricIDs: [])
+
+        XCTAssertTrue(auto.selectedMetrics.isEmpty)
+        XCTAssertTrue(explicitEmpty.selectedMetrics.isEmpty)
+        // The automatic primary metric is still derived (the first numeric value).
+        XCTAssertNotNil(auto.primaryMetric)
+        XCTAssertEqual(auto.primaryMetric?.entityID, "sensor.office_temperature")
+    }
+
+    func testDashboardSummaryUsesSelectedEntitiesInOrder() {
+        let snapshot = connectedDashboardSnapshot()
+
+        let summary = snapshot.dashboardSummary(
+            selectedMetricIDs: ["sensor.office_humidity", "sensor.office_temperature"]
+        )
+
+        XCTAssertEqual(summary.selectedMetrics.map(\.entityID), ["sensor.office_humidity", "sensor.office_temperature"])
+        XCTAssertEqual(summary.selectedMetrics.first?.name, "Office humidity")
+        XCTAssertTrue(summary.selectedMetrics.allSatisfy(\.isAvailable))
+        XCTAssertTrue(summary.selectedMetrics[0].valueText.contains("44"))
+    }
+
+    func testDashboardSummaryCapsSelectionAtThree() {
+        let snapshot = connectedDashboardSnapshot()
+
+        let summary = snapshot.dashboardSummary(
+            selectedMetricIDs: [
+                "sensor.office_temperature",
+                "sensor.office_humidity",
+                "switch.kitchen_light",
+                "sensor.does_not_exist"
+            ]
+        )
+
+        XCTAssertEqual(summary.selectedMetrics.count, 3)
+        XCTAssertEqual(
+            summary.selectedMetrics.map(\.entityID),
+            ["sensor.office_temperature", "sensor.office_humidity", "switch.kitchen_light"]
+        )
+    }
+
+    func testDashboardSummaryShowsMutedPlaceholderForMissingSelectedEntity() {
+        let snapshot = connectedDashboardSnapshot()
+
+        let summary = snapshot.dashboardSummary(
+            selectedMetricIDs: ["sensor.office_temperature", "sensor.vanished"]
+        )
+
+        XCTAssertEqual(summary.selectedMetrics.count, 2)
+        let missing = summary.selectedMetrics[1]
+        XCTAssertEqual(missing.entityID, "sensor.vanished")
+        XCTAssertFalse(missing.isAvailable)
+        XCTAssertEqual(missing.valueText, "—")
+        // The available metric is untouched.
+        XCTAssertTrue(summary.selectedMetrics[0].isAvailable)
+    }
+
+    func testPanelModelApplyDisplayPreferencesExposesSummaryMetricSelection() {
+        let model = PerchHAPanelModel()
+        XCTAssertTrue(model.displayPreferences.summaryMetricEntityIDs.isEmpty)
+
+        model.applyDisplayPreferences(
+            .defaults.with(summaryMetricEntityIDs: ["sensor.office_humidity"])
+        )
+
+        XCTAssertEqual(model.displayPreferences.summaryMetricEntityIDs, ["sensor.office_humidity"])
+    }
+
+    // MARK: - Diagnostics event ring buffer
+
+    func test_t_diagnostics_records_connection_failure_event() async {
+        let model = PerchHAPanelModel(
+            connector: { _ in .failure(.unreachable(host: "ha.local")) },
+            clock: TestPerchClock()
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+
+        await model.connect()
+
+        XCTAssertEqual(model.diagnosticEvents.count, 1)
+        let event = model.diagnosticEvents.first
+        XCTAssertEqual(event?.kind, .connectionFailed)
+        XCTAssertEqual(event?.count, 1)
+        XCTAssertTrue(event?.message.contains("ha.local") ?? false)
+    }
+
+    func test_t_diagnostics_dedupes_repeated_identical_failure_and_bumps_count() async {
+        let clock = TestPerchClock()
+        let model = PerchHAPanelModel(
+            connector: { _ in .failure(.unreachable(host: "ha.local")) },
+            clock: clock
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+
+        await model.connect()
+        let firstSeen = model.diagnosticEvents.first?.firstSeen
+        _ = await clock.advance(by: .seconds(30))
+        await model.connect()
+
+        XCTAssertEqual(model.diagnosticEvents.count, 1, "identical consecutive failures must dedupe")
+        let event = model.diagnosticEvents.first
+        XCTAssertEqual(event?.count, 2)
+        XCTAssertEqual(event?.firstSeen, firstSeen, "firstSeen is preserved on dedup")
+        XCTAssertNotEqual(event?.lastSeen, firstSeen, "lastSeen advances on dedup")
+    }
+
+    func test_t_diagnostics_records_recovered_event_when_connection_returns() async {
+        let outcomes = PeriodicConnectorOutcomes(
+            results: [
+                .failure(.unreachable(host: "ha.local")),
+                .success(rooms: prefetchRooms(count: 1))
+            ],
+            fallback: .success(rooms: prefetchRooms(count: 1))
+        )
+        let model = PerchHAPanelModel(
+            connector: { _ in await outcomes.next() },
+            clock: TestPerchClock()
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+
+        await model.connect()
+        XCTAssertEqual(model.diagnosticEvents.first?.kind, .connectionFailed)
+
+        await model.connect()
+
+        XCTAssertEqual(model.diagnosticEvents.first?.kind, .recovered)
+        if case .connected = model.snapshot.connectionState {} else {
+            XCTFail("expected connected after recovery")
+        }
+    }
+
+    func test_t_diagnostics_does_not_record_recovery_for_routine_healthy_connect() async {
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: prefetchRooms(count: 1)) },
+            clock: TestPerchClock()
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+
+        await model.connect()
+
+        XCTAssertTrue(model.diagnosticEvents.isEmpty, "a clean first connect records nothing")
+    }
+
+    func test_t_diagnostics_ring_buffer_evicts_oldest_beyond_capacity() async {
+        let clock = TestPerchClock()
+        let host = HostSequence(start: 0)
+        let model = PerchHAPanelModel(
+            connector: { _ in .failure(.unreachable(host: await host.next())) },
+            clock: clock
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+
+        // Record more distinct failures than the 50-event cap.
+        for _ in 0..<55 {
+            _ = await clock.advance(by: .seconds(1))
+            await model.connect()
+        }
+
+        XCTAssertEqual(model.diagnosticEvents.count, PerchHADiagnosticLog.defaultCapacity)
+        // The very first host must have been evicted; the newest must be present.
+        XCTAssertFalse(model.diagnosticEvents.contains { $0.message.hasSuffix("host-0") })
+        XCTAssertTrue(model.diagnosticEvents.first?.message.hasSuffix("host-54") ?? false)
+    }
+
+    func test_t_diagnostics_clear_empties_the_ring_buffer() async {
+        let model = PerchHAPanelModel(
+            connector: { _ in .failure(.unreachable(host: "ha.local")) },
+            clock: TestPerchClock()
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        XCTAssertFalse(model.diagnosticEvents.isEmpty)
+
+        model.clearDiagnostics()
+
+        XCTAssertTrue(model.diagnosticEvents.isEmpty)
+    }
+
+    func test_t_diagnostics_retry_backoff_state_reflects_periodic_backoff() async {
+        let clock = TestPerchClock()
+        let interval = PerchDuration.seconds(45)
+        let outcomes = PeriodicConnectorOutcomes(
+            results: [
+                .success(rooms: prefetchRooms(count: 1)),
+                .failure(.unreachable(host: "ha.local"))
+            ],
+            fallback: .failure(.unreachable(host: "ha.local"))
+        )
+        let model = PerchHAPanelModel(
+            connector: { _ in await outcomes.next() },
+            clock: clock,
+            periodicRefreshConfiguration: PerchHAPeriodicRefreshConfiguration(interval: interval, maximumBackoff: .seconds(300))
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        XCTAssertEqual(model.retryBackoffState, .connected)
+
+        model.setPanelActive(true)
+        await spinUntil {
+            if case .backingOff = model.retryBackoffState { return true } else { return false }
+        }
+        if case let .backingOff(failureStreak, nextRetrySeconds) = model.retryBackoffState {
+            XCTAssertEqual(failureStreak, 1)
+            XCTAssertGreaterThan(nextRetrySeconds, 0)
+        } else {
+            XCTFail("expected backing off after a periodic refresh failure")
+        }
+    }
+
+    func test_t_diagnostics_records_reconnecting_event_when_recovering_via_refresh() async {
+        // connect succeeds; the periodic tick fails (degraded); the next tick is a
+        // reconnect-while-degraded that must record a `.reconnecting` event.
+        let clock = TestPerchClock()
+        let interval = PerchDuration.seconds(45)
+        let outcomes = PeriodicConnectorOutcomes(
+            results: [
+                .success(rooms: prefetchRooms(count: 1)),
+                .failure(.unreachable(host: "ha.local")),
+                .success(rooms: prefetchRooms(count: 1))
+            ],
+            fallback: .success(rooms: prefetchRooms(count: 1))
+        )
+        let model = PerchHAPanelModel(
+            connector: { _ in await outcomes.next() },
+            clock: clock,
+            periodicRefreshConfiguration: PerchHAPeriodicRefreshConfiguration(interval: interval, maximumBackoff: .seconds(300))
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.setPanelActive(true)
+        await spinUntil { model.diagnosticEvents.contains { $0.kind == .refreshFailed } }
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+
+        // Wake the backed-off sleep (failure doubled the base interval).
+        _ = await clock.advance(by: interval)
+        _ = await clock.advance(by: interval)
+        await spinUntil { model.diagnosticEvents.contains { $0.kind == .recovered } }
+
+        XCTAssertTrue(model.diagnosticEvents.contains { $0.kind == .reconnecting })
+        XCTAssertTrue(model.diagnosticEvents.contains { $0.kind == .recovered })
+    }
+
+    func test_t_diagnostics_never_leak_token_into_event_messages() async {
+        let secret = "supersecret-token-DO-NOT-LEAK-12345"
+        let outcomes = PeriodicConnectorOutcomes(
+            results: [
+                .failure(.authentication),
+                .failure(.protocolError("handshake rejected")),
+                .success(rooms: prefetchRooms(count: 1))
+            ],
+            fallback: .success(rooms: prefetchRooms(count: 1))
+        )
+        let model = PerchHAPanelModel(
+            connector: { _ in await outcomes.next() },
+            clock: TestPerchClock()
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: secret)
+
+        await model.connect()
+        await model.connect()
+        await model.connect()
+
+        XCTAssertFalse(model.diagnosticEvents.isEmpty)
+        for event in model.diagnosticEvents {
+            XCTAssertFalse(event.message.contains(secret), "token must never appear in a diagnostic message")
+        }
+    }
 }
 
 private struct OAuthRefreshRequest: Equatable, Sendable {
@@ -7903,6 +8188,19 @@ func prefetchRooms(count: Int = 10) -> [Room] {
 
 /// A deterministic connector that returns a scripted sequence of results, then a
 /// fallback, used to drive the periodic-refresh backoff test.
+private actor HostSequence {
+    private var current: Int
+
+    init(start: Int) {
+        current = start
+    }
+
+    func next() -> String {
+        defer { current += 1 }
+        return "host-\(current)"
+    }
+}
+
 private actor PeriodicConnectorOutcomes {
     private var results: [PerchHAConnectionAttemptResult]
     private let fallback: PerchHAConnectionAttemptResult

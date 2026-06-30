@@ -193,6 +193,14 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
     /// The room/module identifiers the user has hidden from the dashboard. An
     /// empty set means every available module is shown.
     public let hiddenModuleIDs: Set<String>
+    /// The ordered entity identifiers the user has chosen to surface in the
+    /// dashboard header summary strip, capped at ``maxSummaryMetricEntityIDs``.
+    /// An empty array means "automatic" — the header derives its own metrics.
+    public let summaryMetricEntityIDs: [EntityID]
+
+    /// The maximum number of user-selected summary-strip entities honored. The
+    /// header shows at most this many; extra selections are truncated.
+    public static let maxSummaryMetricEntityIDs = 3
 
     public init(
         menuBarAppearance: PerchHAMenuBarAppearance = .defaultAppearance,
@@ -202,7 +210,8 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
         dashboardRowDensity: PerchHADashboardRowDensity = .defaultDensity,
         defaultHistoryRange: HistoryRange = .day,
         showsFooterTimestamp: Bool = true,
-        hiddenModuleIDs: Set<String> = []
+        hiddenModuleIDs: Set<String> = [],
+        summaryMetricEntityIDs: [EntityID] = []
     ) {
         self.menuBarAppearance = menuBarAppearance
         self.stableMenuBarWidth = stableMenuBarWidth
@@ -212,6 +221,22 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
         self.defaultHistoryRange = defaultHistoryRange
         self.showsFooterTimestamp = showsFooterTimestamp
         self.hiddenModuleIDs = hiddenModuleIDs
+        self.summaryMetricEntityIDs = PerchHADisplayPreferences.cappedSummaryMetricEntityIDs(summaryMetricEntityIDs)
+    }
+
+    /// De-duplicates (keeping first occurrence) and truncates a requested
+    /// summary-metric selection to the supported cap, so the stored preference
+    /// can never exceed ``maxSummaryMetricEntityIDs`` ordered, distinct entries.
+    public static func cappedSummaryMetricEntityIDs(_ requested: [EntityID]) -> [EntityID] {
+        var seen = Set<EntityID>()
+        var result: [EntityID] = []
+        for id in requested where seen.insert(id).inserted {
+            result.append(id)
+            if result.count == maxSummaryMetricEntityIDs {
+                break
+            }
+        }
+        return result
     }
 
     /// The shipped default display preferences.
@@ -257,6 +282,12 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
         copy(hiddenModuleIDs: hiddenModuleIDs)
     }
 
+    /// Returns a copy with the summary-metric selection replaced. The supplied
+    /// list is de-duplicated and capped at ``maxSummaryMetricEntityIDs``.
+    public func with(summaryMetricEntityIDs: [EntityID]) -> PerchHADisplayPreferences {
+        copy(summaryMetricEntityIDs: PerchHADisplayPreferences.cappedSummaryMetricEntityIDs(summaryMetricEntityIDs))
+    }
+
     private func copy(
         menuBarAppearance: PerchHAMenuBarAppearance? = nil,
         stableMenuBarWidth: Bool? = nil,
@@ -265,7 +296,8 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
         dashboardRowDensity: PerchHADashboardRowDensity? = nil,
         defaultHistoryRange: HistoryRange? = nil,
         showsFooterTimestamp: Bool? = nil,
-        hiddenModuleIDs: Set<String>? = nil
+        hiddenModuleIDs: Set<String>? = nil,
+        summaryMetricEntityIDs: [EntityID]? = nil
     ) -> PerchHADisplayPreferences {
         PerchHADisplayPreferences(
             menuBarAppearance: menuBarAppearance ?? self.menuBarAppearance,
@@ -275,7 +307,8 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
             dashboardRowDensity: dashboardRowDensity ?? self.dashboardRowDensity,
             defaultHistoryRange: defaultHistoryRange ?? self.defaultHistoryRange,
             showsFooterTimestamp: showsFooterTimestamp ?? self.showsFooterTimestamp,
-            hiddenModuleIDs: hiddenModuleIDs ?? self.hiddenModuleIDs
+            hiddenModuleIDs: hiddenModuleIDs ?? self.hiddenModuleIDs,
+            summaryMetricEntityIDs: summaryMetricEntityIDs ?? self.summaryMetricEntityIDs
         )
     }
 }

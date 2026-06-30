@@ -851,6 +851,11 @@ public struct PerchHASettingsView: View {
                 }
             }
             settingsCard {
+                settingsSection(title: "Summary metrics", systemImage: "gauge.with.dots.needle.bottom.50percent") {
+                    summaryMetricsEditor
+                }
+            }
+            settingsCard {
                 settingsSection(title: "Layout", systemImage: "slider.horizontal.3") {
                     VStack(alignment: .leading, spacing: PerchHASpacing.sm + 2) {
                         settingsControlRow("Row density") {
@@ -943,6 +948,65 @@ public struct PerchHASettingsView: View {
     private func setAllModulesHidden(_ hidden: Bool) {
         let ids = hidden ? Set(model.snapshot.availableRooms.map { $0.id.rawValue }) : Set<String>()
         updateDisplayPreferences(displayPreferences.with(hiddenModuleIDs: ids))
+    }
+
+    /// The available entities (flattened across rooms, in room/entity order) the
+    /// user can promote into the dashboard header summary strip.
+    private var summaryMetricCandidates: [DiscoveredEntity] {
+        model.snapshot.availableRooms.flatMap(\.entities)
+    }
+
+    /// The summary-metrics editor: a hint plus one checkbox per available entity,
+    /// capped at three selections. Already-selected entities stay enabled so they
+    /// can be cleared; unselected entities disable once the cap is reached. Leaving
+    /// everything unchecked restores the automatic header behavior.
+    @ViewBuilder
+    private var summaryMetricsEditor: some View {
+        let candidates = summaryMetricCandidates
+        let selected = displayPreferences.summaryMetricEntityIDs
+        if candidates.isEmpty {
+            Text("Connect to Home Assistant to choose which values appear in the dashboard header.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            VStack(alignment: .leading, spacing: PerchHASpacing.sm) {
+                HStack(spacing: 8) {
+                    Text("Up to \(PerchHADisplayPreferences.maxSummaryMetricEntityIDs) values shown in the dashboard header. Leave empty for automatic.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 8)
+                    Button("Clear") { updateDisplayPreferences(displayPreferences.with(summaryMetricEntityIDs: [])) }
+                        .buttonStyle(PerchHAIconButtonStyle())
+                        .controlSize(.small)
+                        .disabled(selected.isEmpty)
+                        .accessibilityLabel("Clear selected summary metrics")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                settingsInsetGroup {
+                    ForEach(Array(candidates.enumerated()), id: \.element.id.rawValue) { index, entity in
+                        Toggle(entity.name, isOn: summaryMetricBinding(for: entity.id))
+                            .toggleStyle(.checkbox)
+                            .fixedSize()
+                            .disabled(summaryMetricToggleDisabled(for: entity.id))
+                            .accessibilityLabel("Show \(entity.name) in dashboard header summary")
+                        if index < candidates.count - 1 {
+                            settingsSectionDivider
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// Whether an unselected summary-metric checkbox should be disabled because
+    /// the selection cap is already reached. Selected entries stay enabled so the
+    /// user can always deselect.
+    private func summaryMetricToggleDisabled(for id: EntityID) -> Bool {
+        let selected = displayPreferences.summaryMetricEntityIDs
+        return !selected.contains(id) && selected.count >= PerchHADisplayPreferences.maxSummaryMetricEntityIDs
     }
 
     // MARK: Appearance
@@ -1137,6 +1201,16 @@ public struct PerchHASettingsView: View {
                 }
             }
             settingsCard {
+                settingsSection(title: "Retry & backoff", systemImage: "arrow.triangle.2.circlepath") {
+                    diagnosticsRetryContent
+                }
+            }
+            settingsCard {
+                settingsSection(title: "Recent issues", systemImage: "list.bullet.rectangle") {
+                    diagnosticsRecentIssuesContent
+                }
+            }
+            settingsCard {
                 settingsSection(title: "Entity health", systemImage: "heart.text.square") {
                     diagnosticsHealthContent(health)
                 }
@@ -1183,6 +1257,121 @@ public struct PerchHASettingsView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The retry/backoff diagnostic: a single calm line derived from the live
+    /// connection state and the periodic-refresh backoff posture. No secret.
+    private var diagnosticsRetryContent: some View {
+        let state = model.retryBackoffState
+        let isHealthy: Bool = {
+            switch state {
+            case .connected: return true
+            case .connecting, .reconnecting, .backingOff, .disconnected: return false
+            }
+        }()
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                StatusPill(
+                    state.summary,
+                    systemImage: isHealthy ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath",
+                    color: isHealthy ? PerchHATheme.ok : PerchHATheme.warn,
+                    accessibilityLabel: "Retry state: \(state.summary)"
+                )
+                Spacer(minLength: 0)
+            }
+            Text("Background refresh backs off automatically after repeated failures and resumes once the connection recovers.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The recent-issues diagnostic: the deduped diagnostic ring buffer, newest
+    /// first, capped to a sensible visible number with the remainder summarized,
+    /// plus a "Clear diagnostics" action. A calm empty state when nothing is
+    /// recorded. Messages come straight from the sanitized event log; no secret
+    /// is ever shown.
+    @ViewBuilder
+    private var diagnosticsRecentIssuesContent: some View {
+        let events = model.diagnosticEvents
+        let visibleCap = 8
+        if events.isEmpty {
+            PerchHAStateView(
+                systemImage: "checkmark.seal",
+                symbolTint: PerchHATheme.ok,
+                title: "No recent issues",
+                message: "Connection problems, reconnects, and recoveries will appear here.",
+                emphasis: .inline
+            )
+        } else {
+            let visible = Array(events.prefix(visibleCap))
+            let hidden = events.count - visible.count
+            VStack(alignment: .leading, spacing: 8) {
+                VStack(spacing: 0) {
+                    ForEach(Array(visible.enumerated()), id: \.element.id) { index, event in
+                        diagnosticEventRow(event)
+                        if index < visible.count - 1 {
+                            Divider().accessibilityHidden(true)
+                        }
+                    }
+                }
+                if hidden > 0 {
+                    Text("and \(hidden) more \(hidden == 1 ? "event" : "events")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Spacer(minLength: 0)
+                    Button {
+                        model.clearDiagnostics()
+                    } label: {
+                        Label("Clear diagnostics", systemImage: "trash")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(PerchHAIconButtonStyle())
+                    .help("Remove all recorded diagnostic events")
+                    .accessibilityLabel("Clear diagnostics")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// A single recorded diagnostic event row: kind icon + message + relative age,
+    /// with a "×N" badge when the event was deduplicated more than once.
+    private func diagnosticEventRow(_ event: PerchHADiagnosticEvent) -> some View {
+        let tint: Color = {
+            switch event.kind {
+            case .recovered: return PerchHATheme.ok
+            case .reconnecting: return PerchHATheme.warn
+            case .connectionFailed, .refreshFailed: return PerchHATheme.critical
+            }
+        }()
+        let countSuffix = event.count > 1 ? " ×\(event.count)" : ""
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: event.kind.systemImage)
+                .font(.caption)
+                .foregroundStyle(tint)
+                .frame(width: 18)
+                .accessibilityHidden(true)
+            Text(event.message)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            if event.count > 1 {
+                Text("×\(event.count)")
+                    .font(PerchHATypography.caption().weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            Text(model.relativeAgeDescription(for: event))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .padding(.vertical, 5)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(event.message)\(countSuffix), \(model.relativeAgeDescription(for: event))")
     }
 
     /// The entity-health diagnostic: the warning count and a deduped, capped
@@ -1432,6 +1621,28 @@ public struct PerchHASettingsView: View {
                     hidden.insert(moduleID)
                 }
                 updateDisplayPreferences(displayPreferences.with(hiddenModuleIDs: hidden))
+            }
+        )
+    }
+
+    /// A per-entity summary-metric binding. `true` means the entity is in the
+    /// header summary strip. Selecting appends in click order (capped at three);
+    /// deselecting removes the entry while preserving the order of the rest.
+    private func summaryMetricBinding(for id: EntityID) -> Binding<Bool> {
+        Binding(
+            get: { displayPreferences.summaryMetricEntityIDs.contains(id) },
+            set: { isSelected in
+                var ids = displayPreferences.summaryMetricEntityIDs
+                if isSelected {
+                    guard !ids.contains(id),
+                          ids.count < PerchHADisplayPreferences.maxSummaryMetricEntityIDs else {
+                        return
+                    }
+                    ids.append(id)
+                } else {
+                    ids.removeAll { $0 == id }
+                }
+                updateDisplayPreferences(displayPreferences.with(summaryMetricEntityIDs: ids))
             }
         )
     }

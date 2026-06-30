@@ -229,6 +229,74 @@ final class PerchHAPersistenceTests: XCTestCase {
         XCTAssertEqual(configuration.dashboardDefaultHistoryRange, .day)
         XCTAssertTrue(configuration.dashboardShowsFooterTimestamp)
         XCTAssertTrue(configuration.dashboardHiddenModuleIDs.isEmpty)
+        // Absent summary-metric selection decodes to empty, i.e. automatic.
+        XCTAssertTrue(configuration.dashboardSummaryMetricEntityIDs.isEmpty)
+    }
+
+    func testConfigurationDefaultsSummaryMetricEntityIDsToEmpty() {
+        XCTAssertTrue(PerchHAConfiguration.empty.dashboardSummaryMetricEntityIDs.isEmpty)
+        XCTAssertTrue(PerchHAConfiguration.empty.displayPreferences.summaryMetricEntityIDs.isEmpty)
+    }
+
+    func testJSONConfigStoreRoundTripsSummaryMetricEntityIDs() throws {
+        let url = temporaryConfigURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let store = JSONConfigStore(fileURL: url)
+        let configuration = PerchHAConfiguration(
+            dashboardSummaryMetricEntityIDs: ["sensor.office_temperature", "sensor.office_humidity"]
+        )
+
+        try store.save(configuration)
+
+        let reloaded = try store.load()
+        XCTAssertEqual(reloaded, configuration)
+        XCTAssertEqual(
+            reloaded.dashboardSummaryMetricEntityIDs,
+            ["sensor.office_temperature", "sensor.office_humidity"]
+        )
+        XCTAssertEqual(
+            reloaded.displayPreferences.summaryMetricEntityIDs,
+            ["sensor.office_temperature", "sensor.office_humidity"]
+        )
+    }
+
+    func testSummaryMetricEntityIDsCappedAtThreeOnStore() throws {
+        let url = temporaryConfigURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let store = JSONConfigStore(fileURL: url)
+        let configuration = PerchHAConfiguration(
+            dashboardSummaryMetricEntityIDs: ["sensor.a", "sensor.b", "sensor.c", "sensor.d"]
+        )
+
+        // The init itself caps the selection to three ordered entries.
+        XCTAssertEqual(
+            configuration.dashboardSummaryMetricEntityIDs,
+            ["sensor.a", "sensor.b", "sensor.c"]
+        )
+
+        try store.save(configuration)
+        XCTAssertEqual(try store.load().dashboardSummaryMetricEntityIDs, ["sensor.a", "sensor.b", "sensor.c"])
+    }
+
+    func testApplyingDisplayPreferencesCarriesSummaryMetricEntityIDs() {
+        let base = PerchHAConfiguration(selectedEntityIDs: ["sensor.office_temperature"])
+        let preferences = PerchHADisplayPreferences.defaults
+            .with(summaryMetricEntityIDs: ["sensor.office_humidity"])
+
+        let applied = base.applying(displayPreferences: preferences)
+
+        XCTAssertEqual(applied.dashboardSummaryMetricEntityIDs, ["sensor.office_humidity"])
+        // Selection state is preserved untouched.
+        XCTAssertEqual(applied.selectedEntityIDs, ["sensor.office_temperature"])
+        // And round-trips back to the bundle.
+        XCTAssertEqual(applied.displayPreferences.summaryMetricEntityIDs, ["sensor.office_humidity"])
+    }
+
+    func testDisplayPreferencesCapsAndDeduplicatesSummaryMetricEntityIDs() {
+        let prefs = PerchHADisplayPreferences.defaults
+            .with(summaryMetricEntityIDs: ["sensor.a", "sensor.a", "sensor.b", "sensor.c", "sensor.d"])
+
+        XCTAssertEqual(prefs.summaryMetricEntityIDs, ["sensor.a", "sensor.b", "sensor.c"])
     }
 
     func testAccentColorClampsChannelsIntoUnitRange() {

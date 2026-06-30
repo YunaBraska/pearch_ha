@@ -45,6 +45,31 @@ public struct PerchHADashboardSummary: Equatable, Sendable {
         }
     }
 
+    /// A user-selected summary readout resolved from a chosen entity.
+    ///
+    /// Unlike ``PrimaryMetric``, a selected metric is shown verbatim in the order
+    /// the user picked it and is never tinted by gauge severity — it is a plain
+    /// label/value pair. When the chosen entity is missing or its value cannot be
+    /// read, ``isAvailable`` is `false` and ``valueText`` carries a muted
+    /// placeholder so the metric stays visible rather than vanishing.
+    public struct SelectedMetric: Equatable, Sendable {
+        /// The chosen entity identifier (retained even when unresolved).
+        public let entityID: EntityID
+        /// The entity's display name, or the raw identifier when unresolved.
+        public let name: String
+        /// The formatted value text, or a placeholder when unavailable.
+        public let valueText: String
+        /// Whether the entity resolved to a real, readable value.
+        public let isAvailable: Bool
+
+        public init(entityID: EntityID, name: String, valueText: String, isAvailable: Bool) {
+            self.entityID = entityID
+            self.name = name
+            self.valueText = valueText
+            self.isAvailable = isAvailable
+        }
+    }
+
     /// The connection state, driving the status pill text and color.
     public let connectionState: ConnectionState
     /// A short connection label (for example `"Connected"`).
@@ -54,16 +79,21 @@ public struct PerchHADashboardSummary: Equatable, Sendable {
     /// The number of unavailable/unknown/stale entities, or `nil` when there are
     /// no visible entities at all (so no count chip is drawn).
     public let warningCount: Int?
+    /// The user-selected, ordered summary metrics. Empty means "automatic": the
+    /// header derives its own metrics from ``primaryMetric``/``warningCount``.
+    public let selectedMetrics: [SelectedMetric]
 
     public init(
         connectionState: ConnectionState,
         connectionLabel: String,
         primaryMetric: PrimaryMetric?,
-        warningCount: Int?
+        warningCount: Int?,
+        selectedMetrics: [SelectedMetric] = []
     ) {
         self.connectionState = connectionState
         self.connectionLabel = connectionLabel
         self.primaryMetric = primaryMetric
         self.warningCount = warningCount
+        self.selectedMetrics = selectedMetrics
     }
 }

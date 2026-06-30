@@ -1015,9 +1015,17 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
     /// unavailable, unknown, or stale — `nil` when there are no visible entities so
     /// the chip is omitted rather than fabricated.
     ///
-    /// - Parameter locale: The locale used to format the primary metric value.
+    /// - Parameters:
+    ///   - selectedMetricIDs: The user's ordered summary-strip entity selection.
+    ///     When empty (the default), the header keeps its automatic behavior;
+    ///     when non-empty, each id is resolved to a ``SelectedMetric`` in order,
+    ///     with a muted placeholder for entities that are missing or unreadable.
+    ///   - locale: The locale used to format metric values.
     /// - Returns: A pure ``PerchHADashboardSummary`` for the header.
-    public func dashboardSummary(locale: Locale = .current) -> PerchHADashboardSummary {
+    public func dashboardSummary(
+        selectedMetricIDs: [EntityID] = [],
+        locale: Locale = .current
+    ) -> PerchHADashboardSummary {
         let allEntities = rooms.flatMap(\.entities)
         let primary = resolvePrimaryMetric(allEntities: allEntities, locale: locale)
         let warningCount: Int? = allEntities.isEmpty
@@ -1030,12 +1038,48 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
                     count
                 }
             }
+        let selectedMetrics = resolveSelectedMetrics(
+            selectedMetricIDs: selectedMetricIDs,
+            allEntities: allEntities,
+            locale: locale
+        )
         return PerchHADashboardSummary(
             connectionState: connectionState,
             connectionLabel: connectionSummary,
             primaryMetric: primary,
-            warningCount: warningCount
+            warningCount: warningCount,
+            selectedMetrics: selectedMetrics
         )
+    }
+
+    /// Resolves the user's ordered summary-strip selection into displayable
+    /// metrics. Each requested id keeps its slot: a resolvable entity yields its
+    /// name and formatted value; a missing entity or one whose value is not
+    /// available yields a muted placeholder so the readout never disappears.
+    private func resolveSelectedMetrics(
+        selectedMetricIDs: [EntityID],
+        allEntities: [DiscoveredEntity],
+        locale: Locale
+    ) -> [PerchHADashboardSummary.SelectedMetric] {
+        let capped = PerchHADisplayPreferences.cappedSummaryMetricEntityIDs(selectedMetricIDs)
+        return capped.map { id in
+            guard let entity = allEntities.first(where: { $0.id == id }) else {
+                return PerchHADashboardSummary.SelectedMetric(
+                    entityID: id,
+                    name: id.rawValue,
+                    valueText: "—",
+                    isAvailable: false
+                )
+            }
+            let value = formattedValue(for: entity, locale: locale)
+            let available = value.status == .available
+            return PerchHADashboardSummary.SelectedMetric(
+                entityID: id,
+                name: entity.name,
+                valueText: available ? value.text : "—",
+                isAvailable: available
+            )
+        }
     }
 
     private func resolvePrimaryMetric(
@@ -1412,6 +1456,7 @@ public final class PerchHAPanelModel: ObservableObject {
     @Published public private(set) var snapshot: PerchHAPanelSnapshot {
         didSet {
             snapshotSink(snapshot)
+            refreshRetryBackoffState()
         }
     }
     @Published public private(set) var customActionConfiguration: CustomActionConfiguration
@@ -1436,6 +1481,25 @@ public final class PerchHAPanelModel: ObservableObject {
     /// than waiting for an unrelated snapshot change. The token is a cheap counter,
     /// not the series data, so the existing chart redraw throttling is unaffected.
     @Published public private(set) var historyRevision = 0
+
+    /// The deduplicated ring buffer of real diagnostic events (connection
+    /// failures, reconnect attempts, recoveries, and periodic-refresh failures),
+    /// recorded at the points where those transitions actually occur.
+    ///
+    /// Capped and consecutive-deduplicated, so it stays cheap and never floods.
+    /// Messages are always sanitized failure/transition descriptions — no token
+    /// or secret is ever recorded. Surfaced read-only in Settings → Diagnostics.
+    @Published public private(set) var diagnosticEvents: [PerchHADiagnosticEvent] = []
+
+    /// The current retry/backoff posture derived purely from the live connection
+    /// state and the periodic-refresh backoff streak. Drives the Diagnostics
+    /// "retry / backoff" line. Never carries a secret.
+    @Published public private(set) var retryBackoffState: PerchHARetryBackoffState = .disconnected
+
+    /// The most recent instant observed from the injected clock, used by the
+    /// Diagnostics view to render each event's age relative to "now" without
+    /// reaching for wall-clock time.
+    @Published public private(set) var diagnosticsReferenceInstant = PerchInstant(nanosecondsSinceStart: 0)
 
     private let connector: Connector
     private let historyProvider: HistoryProvider
@@ -1474,6 +1538,15 @@ public final class PerchHAPanelModel: ObservableObject {
     private var prefetchWorkers: [Task<Void, Never>] = []
     private var periodicRefreshTask: Task<Void, Never>?
     private var periodicRefreshFailureStreak = 0
+    private var diagnosticLog = PerchHADiagnosticLog()
+    /// Whether a connection/refresh failure has been recorded since the last
+    /// successful connection. Gates the `.recovered` event so a routine
+    /// successful refresh does not masquerade as a recovery.
+    private var diagnosticIsDegraded = false
+    /// True only while a background periodic-refresh tick is running, so a
+    /// failure surfaced during it is recorded as `.refreshFailed` (with the
+    /// backoff posture) rather than a fresh `.connectionFailed`.
+    private var isPeriodicRefreshInFlight = false
 
     public init(
         snapshot: PerchHAPanelSnapshot = PerchHAPanelSnapshot(),
@@ -2308,6 +2381,79 @@ public final class PerchHAPanelModel: ObservableObject {
         periodicRefreshTask = nil
     }
 
+    // MARK: - Diagnostics ring buffer
+
+    /// Records a real diagnostic event into the deduplicating ring buffer using
+    /// the model's injected clock instant, then republishes the events and the
+    /// derived retry/backoff posture so the Diagnostics view re-renders.
+    ///
+    /// - Parameters:
+    ///   - kind: The event category for a transition that actually happened.
+    ///   - message: The sanitized, secret-free message. Callers must pass only
+    ///     redacted failure/transition text (never a token).
+    private func recordDiagnostic(_ kind: PerchHADiagnosticEventKind, message: String) {
+        diagnosticLog.record(kind: kind, message: message, now: lastObservedInstant)
+        diagnosticEvents = diagnosticLog.newestFirst
+        diagnosticsReferenceInstant = lastObservedInstant
+        refreshRetryBackoffState()
+    }
+
+    /// A short, relative age label for a diagnostic event ("just now", "2m ago"),
+    /// computed from the monotonic gap between the event and the latest observed
+    /// clock instant. Pure; carries no secret.
+    public func relativeAgeDescription(for event: PerchHADiagnosticEvent) -> String {
+        let elapsedNanos = max(0, diagnosticsReferenceInstant.nanosecondsSinceStart - event.lastSeen.nanosecondsSinceStart)
+        let seconds = elapsedNanos / 1_000_000_000
+        if seconds < 5 {
+            return "just now"
+        }
+        if seconds < 60 {
+            return "\(seconds)s ago"
+        }
+        let minutes = seconds / 60
+        if minutes < 60 {
+            return "\(minutes)m ago"
+        }
+        let hours = minutes / 60
+        return "\(hours)h ago"
+    }
+
+    /// Recomputes the published retry/backoff posture from the live connection
+    /// state and the periodic-refresh backoff streak. Pure derivation; no I/O.
+    private func refreshRetryBackoffState() {
+        let next: PerchHARetryBackoffState
+        switch snapshot.connectionState {
+        case .connected:
+            next = .connected
+        case .connecting:
+            next = lastConnectedForm == nil ? .connecting : .reconnecting(attempt: snapshot.refreshCount)
+        case let .reconnecting(attempt):
+            next = .reconnecting(attempt: attempt)
+        case .disconnected:
+            next = .disconnected
+        case .failed:
+            if periodicRefreshFailureStreak > 0 {
+                let seconds = Int(periodicRefreshDelay().nanoseconds / 1_000_000_000)
+                next = .backingOff(failureStreak: periodicRefreshFailureStreak, nextRetrySeconds: max(0, seconds))
+            } else {
+                next = .disconnected
+            }
+        }
+        if retryBackoffState != next {
+            retryBackoffState = next
+        }
+    }
+
+    /// Empties the diagnostic ring buffer.
+    ///
+    /// Wired to the Diagnostics "Clear diagnostics" action. Clears only the
+    /// recorded event history; the live connection, backoff streak, and values
+    /// are untouched.
+    public func clearDiagnostics() {
+        diagnosticLog.clear()
+        diagnosticEvents = []
+    }
+
     /// The current refresh delay, growing exponentially with the failure streak up
     /// to the configured ceiling.
     private func periodicRefreshDelay() -> PerchDuration {
@@ -2327,12 +2473,17 @@ public final class PerchHAPanelModel: ObservableObject {
         guard lastConnectedForm != nil else {
             return
         }
+        isPeriodicRefreshInFlight = true
         await refresh()
+        isPeriodicRefreshInFlight = false
         if case .failed = snapshot.connectionState {
             periodicRefreshFailureStreak += 1
         } else {
             periodicRefreshFailureStreak = 0
         }
+        // Republish the backoff posture now that the streak reflects this tick's
+        // outcome (the failure event recorded the pre-increment posture).
+        refreshRetryBackoffState()
     }
 
     /// Reports the entities currently visible in the panel, in display order.
@@ -3856,6 +4007,7 @@ public final class PerchHAPanelModel: ObservableObject {
     }
 
     public func connect() async {
+        lastObservedInstant = await clock.now()
         let form = editableForm
         if let failure = form.validationFailure {
             applyFailure(failure, refreshCount: snapshot.refreshCount, canRetry: false)
@@ -3895,8 +4047,14 @@ public final class PerchHAPanelModel: ObservableObject {
         guard let form = lastConnectedForm else {
             return
         }
+        lastObservedInstant = await clock.now()
 
         let nextRefreshCount = snapshot.refreshCount + 1
+        // A reconnect attempt is only diagnostic when we are recovering from a
+        // failure; a routine healthy periodic/manual refresh is not noise-worthy.
+        if diagnosticIsDegraded {
+            recordDiagnostic(.reconnecting, message: "Reconnecting, attempt \(nextRefreshCount)")
+        }
         snapshot = PerchHAPanelSnapshot(
             connectionState: .reconnecting(attempt: nextRefreshCount),
             phase: .reconnecting(attempt: nextRefreshCount),
@@ -4030,6 +4188,12 @@ public final class PerchHAPanelModel: ObservableObject {
                 controlActionState: connectionChanged ? .idle : snapshot.controlActionState,
             serviceMetadata: connectionChanged ? [] : snapshot.serviceMetadata
             )
+            if diagnosticIsDegraded {
+                diagnosticIsDegraded = false
+                recordDiagnostic(.recovered, message: "Recovered, connection restored")
+            } else {
+                refreshRetryBackoffState()
+            }
             await refreshServiceMetadata(form: form)
         case let .failure(failure):
             applyFailure(failure, refreshCount: refreshCount, canRetry: lastConnectedForm != nil)
@@ -4104,6 +4268,13 @@ public final class PerchHAPanelModel: ObservableObject {
             controlActionState: snapshot.controlActionState,
             serviceMetadata: snapshot.serviceMetadata
         )
+        diagnosticIsDegraded = true
+        let detail = PerchHAPanelSnapshot.describe(failure)
+        if isPeriodicRefreshInFlight {
+            recordDiagnostic(.refreshFailed, message: "Refresh failed: \(detail)")
+        } else {
+            recordDiagnostic(.connectionFailed, message: "Connection failed: \(detail)")
+        }
     }
 
     private func startAction(_ operation: @escaping @MainActor @Sendable () async -> Void) {
@@ -5285,7 +5456,11 @@ public struct PerchHAPanelView: View {
     private var topBar: some View {
         switch model.snapshot.phase {
         case .connectedData, .reconnecting, .failedStale:
-            DashboardHeader(summary: model.snapshot.dashboardSummary())
+            DashboardHeader(
+                summary: model.snapshot.dashboardSummary(
+                    selectedMetricIDs: model.displayPreferences.summaryMetricEntityIDs
+                )
+            )
         case .firstRun, .connecting, .connectedEmpty, .failed:
             statusBar
         }
