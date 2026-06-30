@@ -6716,6 +6716,42 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(afterExpiryCount, 2)
     }
 
+    func test_t_prefetch_does_not_evict_displayed_entities_beyond_base_capacity() async {
+        let clock = TestPerchClock()
+        let recorder = PrefetchHistoryRecorder()
+        let settleDelay = PerchDuration.milliseconds(250)
+        // 40 displayed entities with the default cache: the prefetch warms the whole
+        // list (unbounded lookahead), so a too-small cache would evict the
+        // first-fetched (on-screen) rows as the back of the list is fetched,
+        // flickering their previews. The default capacity must hold the whole
+        // displayed working set. (Default TTL is fine — one pass, no clock advance.)
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: prefetchRooms(count: 40)) },
+            historyProvider: { form, entityID, range in
+                await recorder.provide(form: form, entityID: entityID, range: range)
+            },
+            clock: clock,
+            historyPrefetchConfiguration: PerchHAHistoryPrefetchConfiguration(settleDelay: settleDelay),
+            periodicRefreshConfiguration: .disabled
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.setPanelActive(true)
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await runSettledPrefetchPass(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedCalls: 40)
+        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_39") != nil }
+
+        XCTAssertNotNil(
+            model.cachedHistorySeries(for: "sensor.prefetch_0"),
+            "the first displayed entity stays cached after the whole list is prefetched (no eviction churn)"
+        )
+        XCTAssertNotNil(
+            model.cachedHistorySeries(for: "sensor.prefetch_5"),
+            "a mid-list displayed entity stays cached after the whole list is prefetched"
+        )
+    }
+
     func test_t_inline_history_survives_ttl_expiry_for_display() async {
         let clock = TestPerchClock()
         let recorder = PrefetchHistoryRecorder()

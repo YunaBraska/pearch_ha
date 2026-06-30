@@ -736,7 +736,12 @@ public struct PerchHAHistoryCacheConfiguration: Equatable, Sendable {
     public let capacity: Int
     public let ttl: PerchDuration
 
-    public init(capacity: Int = 32, ttl: PerchDuration = .seconds(60)) {
+    /// - Parameter capacity: The default holds the whole displayed working set —
+    ///   the prefetch warms the entire displayed list (unbounded lookahead), so a
+    ///   small cache would evict on-screen rows as the back of the list is fetched,
+    ///   flickering their previews on and off. 256 comfortably covers a curated
+    ///   menu-bar dashboard while staying cheap (downsampled inline series).
+    public init(capacity: Int = 256, ttl: PerchDuration = .seconds(60)) {
         self.capacity = max(1, capacity)
         self.ttl = ttl
     }
