@@ -6555,6 +6555,39 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(afterExpiryCount, 2)
     }
 
+    func test_t_inline_history_survives_ttl_expiry_for_display() async {
+        let clock = TestPerchClock()
+        let recorder = PrefetchHistoryRecorder()
+        let settleDelay = PerchDuration.milliseconds(250)
+        let model = await makeConnectedPrefetchModel(
+            recorder: recorder,
+            clock: clock,
+            rooms: prefetchRooms(count: 4),
+            prefetch: PerchHAHistoryPrefetchConfiguration(lookahead: 0, settleDelay: settleDelay),
+            cacheTTL: .seconds(60)
+        )
+
+        model.setPanelActive(true)
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await runSettledPrefetchPass(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedCalls: 1)
+        // The recorder counts at fetch start; wait for the insert to land in cache.
+        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0") != nil }
+
+        // Let _0's cache TTL lapse and move the observed clock past it by fetching a
+        // different entity (mirrors a live state push advancing "now" beyond the
+        // entry's TTL). The already-fetched inline sparkline must keep showing its
+        // last-known data for display instead of flickering out.
+        _ = await clock.advance(by: .seconds(90))
+        model.updateVisibleEntities([])
+        model.updateVisibleEntities(["sensor.prefetch_1"])
+        await runSettledPrefetchPass(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedCalls: 2)
+
+        XCTAssertNotNil(
+            model.cachedHistorySeries(for: "sensor.prefetch_0"),
+            "expired-but-cached history stays visible for display (no flicker)"
+        )
+    }
+
     func test_t_prefetch_active_refresh_is_shorter_than_lookahead_ttl() async {
         let clock = TestPerchClock()
         let recorder = PrefetchHistoryRecorder()

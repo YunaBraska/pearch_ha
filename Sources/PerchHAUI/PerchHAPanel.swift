@@ -1388,14 +1388,24 @@ private struct PerchHAHistoryCache {
         return entry.series
     }
 
-    /// Reads a cached series without touching recency or evicting expired
-    /// entries, so views can opportunistically render an already-cached
-    /// sparkline without mutating cache state or triggering any fetch.
+    /// Reads a *fresh* cached series without touching recency or evicting expired
+    /// entries. Returns `nil` once the entry has crossed its TTL, so the prefetch
+    /// freshness check (``shouldPrefetch``) treats an expired entry as needing a
+    /// refetch. This is the refetch-decision peek, not the display peek.
     func peek(for key: PerchHAHistoryCacheKey, now: PerchInstant) -> HistorySeries? {
         guard let entry = entries[key], entry.expiresAt > now else {
             return nil
         }
         return entry.series
+    }
+
+    /// Reads a cached series for DISPLAY regardless of TTL expiry, so an
+    /// already-fetched inline sparkline keeps rendering its last-known data
+    /// instead of blinking out the moment the entry crosses its refresh TTL.
+    /// Freshness (whether to refetch) is decided separately by ``peek(for:now:)``;
+    /// an entry only disappears here once it is truly evicted by capacity.
+    func peekAllowingStale(for key: PerchHAHistoryCacheKey) -> HistorySeries? {
+        entries[key]?.series
     }
 
     mutating func insert(
@@ -2294,7 +2304,10 @@ public final class PerchHAPanelModel: ObservableObject {
     public func cachedHistorySeries(for id: EntityID) -> HistorySeries? {
         let range = snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).defaultHistoryRange
         let key = PerchHAHistoryCacheKey(entityID: id, range: range)
-        return historyCache.peek(for: key, now: lastObservedInstant)
+        // Display uses the stale-tolerant peek so the inline sparkline keeps
+        // showing its last-known data instead of flickering out when the entry
+        // crosses its TTL; the prefetch loop refreshes it underneath.
+        return historyCache.peekAllowingStale(for: key)
     }
 
     /// Inserts a series into the history cache and publishes an observable change.
