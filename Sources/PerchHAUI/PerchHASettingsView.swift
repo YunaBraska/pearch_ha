@@ -309,16 +309,25 @@ struct PerchHAConnectionFormFields: View {
 public struct PerchHASettingsView: View {
     /// Selectable tabs of the Settings window.
     public enum Tab: Hashable, Sendable {
+        case general
         case connection
         case entities
+        case advanced
+        case privacy
         case about
     }
 
     @ObservedObject private var model: PerchHAPanelModel
     private let accessibilityPreferencesOverride: PerchHAAccessibilityPreferences?
+    private let displayPreferencesProvider: () -> PerchHADisplayPreferences
+    private let displayPreferencesSink: (PerchHADisplayPreferences) -> Void
+    private let launchAtLoginProvider: () -> Bool
+    private let launchAtLoginSink: (Bool) -> Bool
     @State private var draggedSelectionItem: SelectionDragItem?
     @State private var selectedTab: Tab
     @State private var expandedEntityIDs: Set<EntityID>
+    @State private var displayPreferences: PerchHADisplayPreferences
+    @State private var launchAtLogin: Bool
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
@@ -339,12 +348,22 @@ public struct PerchHASettingsView: View {
         model: PerchHAPanelModel,
         accessibilityPreferencesOverride: PerchHAAccessibilityPreferences? = nil,
         initialTab: Tab = .connection,
-        initiallyExpandedEntityIDs: Set<EntityID> = []
+        initiallyExpandedEntityIDs: Set<EntityID> = [],
+        displayPreferencesProvider: @escaping () -> PerchHADisplayPreferences = { .defaults },
+        displayPreferencesSink: @escaping (PerchHADisplayPreferences) -> Void = { _ in },
+        launchAtLoginProvider: @escaping () -> Bool = { false },
+        launchAtLoginSink: @escaping (Bool) -> Bool = { _ in false }
     ) {
         self.model = model
         self.accessibilityPreferencesOverride = accessibilityPreferencesOverride
+        self.displayPreferencesProvider = displayPreferencesProvider
+        self.displayPreferencesSink = displayPreferencesSink
+        self.launchAtLoginProvider = launchAtLoginProvider
+        self.launchAtLoginSink = launchAtLoginSink
         _selectedTab = State(initialValue: initialTab)
         _expandedEntityIDs = State(initialValue: initiallyExpandedEntityIDs)
+        _displayPreferences = State(initialValue: displayPreferencesProvider())
+        _launchAtLogin = State(initialValue: launchAtLoginProvider())
     }
 
     public var body: some View {
@@ -353,6 +372,11 @@ public struct PerchHASettingsView: View {
             preferences: accessibilityPreferences
         )
         TabView(selection: $selectedTab) {
+            generalTab
+                .tabItem {
+                    Label("General", systemImage: "gearshape")
+                }
+                .tag(Tab.general)
             connectionTab
                 .tabItem {
                     Label("Connection", systemImage: "network")
@@ -363,6 +387,16 @@ public struct PerchHASettingsView: View {
                     Label("Entities", systemImage: "square.grid.2x2")
                 }
                 .tag(Tab.entities)
+            advancedTab
+                .tabItem {
+                    Label("Advanced", systemImage: "gearshape.2")
+                }
+                .tag(Tab.advanced)
+            privacyTab
+                .tabItem {
+                    Label("Privacy", systemImage: "lock")
+                }
+                .tag(Tab.privacy)
             aboutTab
                 .tabItem {
                     Label("About", systemImage: "info.circle")
@@ -398,8 +432,11 @@ public struct PerchHASettingsView: View {
     @ViewBuilder
     public func tabContentForSnapshot(_ tab: Tab) -> some View {
         let content: AnyView = switch tab {
+        case .general: AnyView(generalTab)
         case .connection: AnyView(connectionTab)
         case .entities: AnyView(entitiesTab)
+        case .advanced: AnyView(advancedTab)
+        case .privacy: AnyView(privacyTab)
         case .about: AnyView(aboutTab)
         }
         content
@@ -423,6 +460,291 @@ public struct PerchHASettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    // MARK: General
+
+    /// General settings: menu-bar appearance mode, stable-width toggle, theme
+    /// override, accent color, and launch-at-login.
+    private var generalTab: some View {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 14) {
+                PerchHACard(cornerRadius: 12) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        settingsSection(title: "Menu bar", systemImage: "menubar.rectangle") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                settingsControlRow("Show") {
+                                    Picker("Show", selection: menuBarAppearanceBinding) {
+                                        ForEach(PerchHAMenuBarAppearance.allCases, id: \.rawValue) { appearance in
+                                            Text(appearance.displayName).tag(appearance)
+                                        }
+                                    }
+                                    .pickerStyle(.segmented)
+                                    .labelsHidden()
+                                    .fixedSize()
+                                    .accessibilityLabel("Menu bar appearance")
+                                }
+                                Toggle("Keep a stable width", isOn: stableMenuBarWidthBinding)
+                                    .toggleStyle(.checkbox)
+                                    .fixedSize()
+                                    .accessibilityLabel("Keep a stable menu bar width")
+                                Text("Uses monospaced digits so the value does not shift as it changes.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                PerchHACard(cornerRadius: 12) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        settingsSection(title: "Appearance", systemImage: "paintbrush") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                settingsControlRow("Theme") {
+                                    Picker("Theme", selection: themeModeBinding) {
+                                        ForEach(PerchHAThemeMode.allCases, id: \.rawValue) { mode in
+                                            Text(mode.displayName).tag(mode)
+                                        }
+                                    }
+                                    .pickerStyle(.segmented)
+                                    .labelsHidden()
+                                    .fixedSize()
+                                    .accessibilityLabel("Theme")
+                                }
+                                settingsControlRow("Accent") {
+                                    Picker("Accent", selection: accentSwatchBinding) {
+                                        ForEach(PerchHAAccentColor.swatches) { swatch in
+                                            Text(swatch.name).tag(swatch.id)
+                                        }
+                                    }
+                                    .labelsHidden()
+                                    .frame(width: 160)
+                                    .perchHACompactControl()
+                                    .accessibilityLabel("Accent color")
+                                }
+                                accentSwatchPreview
+                            }
+                        }
+                    }
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                PerchHACard(cornerRadius: 12) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        settingsSection(title: "Startup", systemImage: "power") {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Toggle("Launch at login", isOn: launchAtLoginBinding)
+                                    .toggleStyle(.checkbox)
+                                    .fixedSize()
+                                    .accessibilityLabel("Launch PearchHA at login")
+                                Text("Start PearchHA automatically when you sign in to this Mac.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 14)
+            .padding(.leading, 14)
+            .padding(.trailing, 18)
+        }
+        .tint(PerchHATheme.accent)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var accentSwatchPreview: some View {
+        HStack(spacing: 8) {
+            ForEach(PerchHAAccentColor.swatches) { swatch in
+                let isSelected = displayPreferences.accentColor == swatch.color
+                Button {
+                    updateDisplayPreferences(displayPreferences.with(accentColor: swatch.color))
+                } label: {
+                    Circle()
+                        .fill(color(for: swatch.color))
+                        .frame(width: 18, height: 18)
+                        .overlay(
+                            Circle().strokeBorder(
+                                isSelected ? Color.primary.opacity(0.75) : Color.primary.opacity(0.12),
+                                lineWidth: isSelected ? 2 : 1
+                            )
+                        )
+                }
+                .buttonStyle(.plain)
+                .help(swatch.name)
+                .accessibilityLabel(swatch.name)
+                .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func color(for accent: PerchHAAccentColor) -> Color {
+        Color(.sRGB, red: accent.red, green: accent.green, blue: accent.blue, opacity: accent.alpha)
+    }
+
+    // MARK: Advanced
+
+    /// Advanced settings: read-only history-prefetch diagnostics and a "reset
+    /// display preferences" affordance. No risky knobs are exposed.
+    private var advancedTab: some View {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 14) {
+                PerchHACard(cornerRadius: 12) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        settingsSection(title: "History prefetch", systemImage: "chart.line.uptrend.xyaxis") {
+                            VStack(alignment: .leading, spacing: 6) {
+                                let prefetch = PerchHAHistoryPrefetchConfiguration()
+                                settingsControlRow("Lookahead") {
+                                    Text("\(prefetch.lookahead) values")
+                                        .foregroundStyle(.secondary)
+                                }
+                                settingsControlRow("Settle delay") {
+                                    Text("\(prefetch.settleDelay.nanoseconds / 1_000_000) ms")
+                                        .foregroundStyle(.secondary)
+                                }
+                                Text("How far ahead PearchHA warms inline charts when the panel is open. These are tuned defaults shown for reference.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                PerchHACard(cornerRadius: 12) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        settingsSection(title: "Reset", systemImage: "arrow.counterclockwise") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Restore the General display preferences (menu-bar appearance, theme, and accent) to their defaults. Your connection and entities are not changed.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Button {
+                                    updateDisplayPreferences(.defaults)
+                                } label: {
+                                    Label("Reset display preferences", systemImage: "arrow.counterclockwise")
+                                        .labelStyle(.titleAndIcon)
+                                }
+                                .buttonStyle(PerchHAIconButtonStyle())
+                                .disabled(displayPreferences == .defaults)
+                                .help("Reset menu-bar appearance, theme, and accent to defaults")
+                                .accessibilityLabel("Reset display preferences to defaults")
+                            }
+                        }
+                    }
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 14)
+            .padding(.leading, 14)
+            .padding(.trailing, 18)
+        }
+        .tint(PerchHATheme.accent)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    // MARK: Privacy
+
+    /// Privacy statement: a static, honest summary of what PearchHA reads, where
+    /// credentials live, and the absence of analytics or third-party calls.
+    private var privacyTab: some View {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 14) {
+                PerchHACard(cornerRadius: 12) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        settingsSection(title: "What PearchHA reads", systemImage: "doc.text.magnifyingglass") {
+                            Text("PearchHA talks only to the Home Assistant server you configure. It reads your Home Assistant address and the access token (or browser sign-in) you provide, plus the entity states needed to show your values.")
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        settingsSectionDivider
+                        settingsSection(title: "Where credentials live", systemImage: "key") {
+                            Text("Your access and refresh tokens are stored in the macOS Keychain on this Mac. They are never written to the configuration file and never shown in this window.")
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        settingsSectionDivider
+                        settingsSection(title: "No tracking", systemImage: "hand.raised") {
+                            Text("PearchHA makes no analytics, telemetry, or third-party network calls. Nothing is sent anywhere except your own Home Assistant server.")
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                Spacer(minLength: 0)
+            }
+            .font(.callout)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 14)
+            .padding(.leading, 14)
+            .padding(.trailing, 18)
+        }
+        .tint(PerchHATheme.accent)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    // MARK: General bindings
+
+    private func updateDisplayPreferences(_ preferences: PerchHADisplayPreferences) {
+        displayPreferences = preferences
+        displayPreferencesSink(preferences)
+    }
+
+    private var menuBarAppearanceBinding: Binding<PerchHAMenuBarAppearance> {
+        Binding(
+            get: { displayPreferences.menuBarAppearance },
+            set: { updateDisplayPreferences(displayPreferences.with(menuBarAppearance: $0)) }
+        )
+    }
+
+    private var stableMenuBarWidthBinding: Binding<Bool> {
+        Binding(
+            get: { displayPreferences.stableMenuBarWidth },
+            set: { updateDisplayPreferences(displayPreferences.with(stableMenuBarWidth: $0)) }
+        )
+    }
+
+    private var themeModeBinding: Binding<PerchHAThemeMode> {
+        Binding(
+            get: { displayPreferences.themeMode },
+            set: { updateDisplayPreferences(displayPreferences.with(themeMode: $0)) }
+        )
+    }
+
+    private var accentSwatchBinding: Binding<String> {
+        Binding(
+            get: { displayPreferences.accentColor.matchingSwatchID ?? PerchHAAccentColor.swatches.first?.id ?? "ha-blue" },
+            set: { id in
+                guard let swatch = PerchHAAccentColor.swatches.first(where: { $0.id == id }) else {
+                    return
+                }
+                updateDisplayPreferences(displayPreferences.with(accentColor: swatch.color))
+            }
+        )
+    }
+
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { launchAtLogin },
+            set: { requested in
+                // Reflect the real resulting login-item state: if the service
+                // call fails, the toggle snaps back instead of lying.
+                let applied = launchAtLoginSink(requested)
+                launchAtLogin = applied ? requested : launchAtLoginProvider()
+            }
+        )
     }
 
     private var aboutTab: some View {

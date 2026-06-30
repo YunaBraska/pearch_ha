@@ -5,6 +5,7 @@ import PerchHAClient
 import PerchHAPersistence
 import PerchHAUI
 import Security
+import ServiceManagement
 import SwiftUI
 
 private enum AppShellLayout {
@@ -12,21 +13,60 @@ private enum AppShellLayout {
     static let settingsMinContentSize = NSSize(width: 520, height: 560)
 }
 
-final class PerchHAStatusPanel: NSPanel {
-    override var canBecomeKey: Bool {
+public final class PerchHAStatusPanel: NSPanel {
+    /// Invoked when the user presses Cmd+, inside the panel, routing to the
+    /// app shell's open-settings path. Set by the owning ``PerchHAApplication``.
+    public var onOpenSettings: (() -> Void)?
+
+    /// Creates a status panel with the menu-bar drop-down style mask used by the
+    /// app shell. Exposed so the interaction behavior (Escape to close, Cmd+, to
+    /// open settings) can be exercised directly.
+    public convenience init() {
+        self.init(
+            contentRect: NSRect(origin: .zero, size: AppShellLayout.panelContentSize),
+            styleMask: [.nonactivatingPanel, .titled, .fullSizeContentView],
+            backing: .buffered,
+            defer: true
+        )
+        isFloatingPanel = true
+        hidesOnDeactivate = true
+    }
+
+    public override var canBecomeKey: Bool {
         true
     }
 
-    override var canBecomeMain: Bool {
+    public override var canBecomeMain: Bool {
         true
     }
 
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+    /// Closes the panel when Escape is pressed, matching macOS popover behavior.
+    public override func cancelOperation(_ sender: Any?) {
+        orderOut(sender)
+    }
+
+    public override func keyDown(with event: NSEvent) {
+        // Escape (key code 53) closes the panel even when no field has claimed
+        // the event as a cancel operation.
+        if event.keyCode == 53 {
+            orderOut(self)
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    public override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard event.type == .keyDown,
               event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command),
               let characters = event.charactersIgnoringModifiers?.lowercased()
         else {
             return super.performKeyEquivalent(with: event)
+        }
+
+        // Cmd+, opens Settings, mirroring the standard macOS Preferences shortcut.
+        if characters == ",", let onOpenSettings {
+            onOpenSettings()
+            return true
         }
 
         let action: Selector?
@@ -977,6 +1017,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     public func applicationDidFinishLaunching(_ notification: Notification) {
         releaseShell()
         configuration = loadConfiguration()
+        applyAppearancePreferences()
         let rememberedForm = restoredConnectionForm()
 
         let model = PerchHAPanelModel(
@@ -1444,6 +1485,115 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Applies the persisted appearance preferences (theme override and accent
+    /// color) to the running application and shared theme. Called at launch and
+    /// after a display-preference change so the panel and settings reflect the
+    /// choice immediately.
+    private func applyAppearancePreferences() {
+        NSApplication.shared.appearance = appearance(for: configuration.themeMode)
+        PerchHATheme.apply(accentColor: configuration.accentColor)
+    }
+
+    private func appearance(for themeMode: PerchHAThemeMode) -> NSAppearance? {
+        switch themeMode {
+        case .system:
+            nil
+        case .light:
+            NSAppearance(named: .aqua)
+        case .dark:
+            NSAppearance(named: .darkAqua)
+        }
+    }
+
+    /// The current display preferences exposed for the Settings UI bindings.
+    public var displayPreferences: PerchHADisplayPreferences {
+        PerchHADisplayPreferences(
+            menuBarAppearance: configuration.menuBarAppearance,
+            stableMenuBarWidth: configuration.stableMenuBarWidth,
+            themeMode: configuration.themeMode,
+            accentColor: configuration.accentColor
+        )
+    }
+
+    /// Persists updated display preferences, re-applies theme/accent, and
+    /// re-renders the live menu-bar items so appearance changes take effect at
+    /// once.
+    ///
+    /// - Parameter preferences: The new display preferences.
+    /// - Returns: The persistence outcome (`.saved`, `.failed`, or unavailable).
+    @discardableResult
+    public func persist(displayPreferences preferences: PerchHADisplayPreferences) -> SelectionPersistenceResult {
+        guard let configStore else {
+            configurationPersistenceState = .unavailable
+            return .failed("configuration store unavailable")
+        }
+        if case let .loadFailed(message) = configurationPersistenceState {
+            return .failed("configuration load failed; save blocked: \(message)")
+        }
+
+        let nextConfiguration = PerchHAConfiguration(
+            schemaVersion: configuration.schemaVersion,
+            selectedEntityIDs: configuration.selectedEntityIDs,
+            menuBarEntityIDs: configuration.menuBarEntityIDs,
+            menuBarItemConfigurations: configuration.menuBarItemConfigurations,
+            customActions: configuration.customActions,
+            connectionProfile: configuration.connectionProfile,
+            roomOrder: configuration.roomOrder,
+            entityOrder: configuration.entityOrder,
+            isEntitySelectionExplicit: configuration.isEntitySelectionExplicit,
+            menuBarAppearance: preferences.menuBarAppearance,
+            stableMenuBarWidth: preferences.stableMenuBarWidth,
+            themeMode: preferences.themeMode,
+            accentColor: preferences.accentColor
+        )
+        do {
+            configuration = try configStore.save(nextConfiguration)
+            configurationPersistenceState = .ready
+            applyAppearancePreferences()
+            if let panelModel {
+                updateStatusItems(from: panelModel.snapshot)
+            }
+            return .saved
+        } catch {
+            let message = String(describing: error)
+            configurationPersistenceState = .saveFailed(message)
+            return .failed(message)
+        }
+    }
+
+    /// Whether the app is currently registered to launch at login.
+    ///
+    /// Returns `false` when the login-item service is unavailable or in any
+    /// non-enabled status, so the toggle reflects the live `SMAppService` state.
+    public var launchesAtLogin: Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    /// Registers or unregisters the app as a login item via `SMAppService`.
+    ///
+    /// - Parameter enabled: `true` to register the app to launch at login,
+    ///   `false` to unregister it.
+    /// - Returns: `true` when the requested state was reached (or already in
+    ///   effect), `false` when the service threw or the resulting status did not
+    ///   match the request. Never crashes on failure.
+    @discardableResult
+    public func setLaunchAtLogin(_ enabled: Bool) -> Bool {
+        do {
+            if enabled {
+                if SMAppService.mainApp.status != .enabled {
+                    try SMAppService.mainApp.register()
+                }
+            } else {
+                if SMAppService.mainApp.status == .enabled {
+                    try SMAppService.mainApp.unregister()
+                }
+            }
+            return launchesAtLogin == enabled
+        } catch {
+            return false
+        }
+    }
+
     public static func makePanel(
         model: PerchHAPanelModel,
         onOpenSettings: (() -> Void)? = nil
@@ -1461,6 +1611,8 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         panel.contentViewController = NSHostingController(
             rootView: PerchHAPanelView(model: model, onOpenSettings: onOpenSettings)
         )
+        // Route the panel-local Cmd+, shortcut to the same open-settings path.
+        panel.onOpenSettings = onOpenSettings
         panel.setContentSize(AppShellLayout.panelContentSize)
         return panel
     }
@@ -1477,7 +1629,11 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     public static func makeSettingsWindow(
         model: PerchHAPanelModel,
         initialTab: PerchHASettingsView.Tab = .connection,
-        initiallyExpandedEntityIDs: Set<EntityID> = []
+        initiallyExpandedEntityIDs: Set<EntityID> = [],
+        displayPreferencesProvider: @escaping () -> PerchHADisplayPreferences = { .defaults },
+        displayPreferencesSink: @escaping (PerchHADisplayPreferences) -> Void = { _ in },
+        launchAtLoginProvider: @escaping () -> Bool = { false },
+        launchAtLoginSink: @escaping (Bool) -> Bool = { _ in false }
     ) -> NSWindow {
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: AppShellLayout.settingsMinContentSize),
@@ -1495,7 +1651,11 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             rootView: PerchHASettingsView(
                 model: model,
                 initialTab: initialTab,
-                initiallyExpandedEntityIDs: initiallyExpandedEntityIDs
+                initiallyExpandedEntityIDs: initiallyExpandedEntityIDs,
+                displayPreferencesProvider: displayPreferencesProvider,
+                displayPreferencesSink: displayPreferencesSink,
+                launchAtLoginProvider: launchAtLoginProvider,
+                launchAtLoginSink: launchAtLoginSink
             )
         )
         window.setContentSize(AppShellLayout.settingsMinContentSize)
@@ -1510,7 +1670,21 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         // not overlap.
         panel?.orderOut(nil)
         panelModel.setPanelActive(false)
-        let window = settingsWindow ?? Self.makeSettingsWindow(model: panelModel)
+        let window = settingsWindow ?? Self.makeSettingsWindow(
+            model: panelModel,
+            displayPreferencesProvider: { [weak self] in
+                self?.displayPreferences ?? .defaults
+            },
+            displayPreferencesSink: { [weak self] preferences in
+                self?.persist(displayPreferences: preferences)
+            },
+            launchAtLoginProvider: { [weak self] in
+                self?.launchesAtLogin ?? false
+            },
+            launchAtLoginSink: { [weak self] enabled in
+                self?.setLaunchAtLogin(enabled) ?? false
+            }
+        )
         settingsWindow = window
         if !window.isVisible {
             window.center()
@@ -1519,6 +1693,15 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    // TODO: A system-wide global hotkey to toggle the panel from any app is
+    // intentionally not implemented. Doing so cleanly requires either Carbon's
+    // `RegisterEventHotKey` (a deprecated, low-level C API that is fiddly to
+    // unregister safely) or the Accessibility/Input-Monitoring permission with a
+    // `CGEventTap` (which prompts the user for a sensitive system permission and
+    // is overkill for a menu-bar utility). A third-party dependency
+    // (e.g. KeyboardShortcuts) would also solve it but is disallowed here. Until
+    // one of those trade-offs is accepted, only the panel-local Cmd+, and Escape
+    // shortcuts are supported; the status-item click below toggles the panel.
     @objc private func togglePanel(_ sender: NSStatusBarButton) {
         guard let panel else {
             return
@@ -1599,8 +1782,8 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     }
 
     private func apply(_ presentation: PerchHAMenuBarPresentation, to entry: inout PerchHAStatusItemEntry) {
-        let image: NSImage?
-        let title: String
+        var image: NSImage?
+        var title: String
         if let renderedItem = presentation.renderedItem,
            renderedItem.gauge != nil || renderedItem.value.iconSymbolName != nil {
             image = cachedStatusItemImage(for: renderedItem, in: &entry)
@@ -1616,13 +1799,53 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             image = nil
             title = presentation.statusItemTitle
         }
+
+        // The fallback (fish-logo) item always keeps its glyph; only promoted
+        // value items honor the icon-only / text-only appearance preference.
+        let appearance = configuration.menuBarAppearance
+        if presentation != .fallback {
+            if !appearance.showsImage {
+                entry.imageCache = nil
+                image = nil
+            }
+            if !appearance.showsTitle {
+                title = ""
+            }
+        }
+
         entry.presentation = presentation
         let button = entry.item.button
         button?.image = image
         button?.imagePosition = image == nil ? .noImage : .imageLeading
-        button?.title = title
+        applyTitle(title, to: button, stableWidth: configuration.stableMenuBarWidth)
         button?.toolTip = presentation.accessibilityLabel
         button?.setAccessibilityLabel(presentation.accessibilityLabel)
+    }
+
+    /// Sets the status-item button title, optionally as a monospaced-digit
+    /// attributed title so the value does not jitter horizontally as it changes.
+    ///
+    /// When `stableWidth` is on, the title is rendered with the menu-bar font at a
+    /// monospaced-digit variant; otherwise the plain title is used, matching the
+    /// historic behavior.
+    private func applyTitle(_ title: String, to button: NSStatusBarButton?, stableWidth: Bool) {
+        guard let button else {
+            return
+        }
+        guard stableWidth, !title.isEmpty else {
+            button.attributedTitle = NSAttributedString(string: "")
+            button.title = title
+            return
+        }
+        let baseFont = button.font ?? NSFont.menuBarFont(ofSize: 0)
+        let monospacedFont = NSFont.monospacedDigitSystemFont(
+            ofSize: baseFont.pointSize,
+            weight: .regular
+        )
+        button.attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [.font: monospacedFont]
+        )
     }
 
     private func cachedStatusItemImage(for item: RenderedMenuBarItem, in entry: inout PerchHAStatusItemEntry) -> NSImage? {

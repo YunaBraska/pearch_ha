@@ -4181,6 +4181,110 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertFalse(application.snapshot.statusItemHasImage)
     }
 
+    func test_t_app_shell_menu_bar_appearance_mode_suppresses_text_or_image() async throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let store = JSONConfigStore(fileURL: url)
+        _ = try store.save(
+            PerchHAConfiguration(
+                selectedEntityIDs: ["sensor.office_humidity"],
+                menuBarEntityIDs: ["sensor.office_humidity"],
+                isEntitySelectionExplicit: true,
+                menuBarAppearance: .textOnly
+            )
+        )
+        let application = PerchHAApplication(
+            configStore: store,
+            connector: { _ in .success(rooms: selectionRooms()) }
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+        application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await application.connect()
+
+        // Text-only keeps the value text and drops any image.
+        XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
+        XCTAssertFalse(application.snapshot.statusItemHasImage)
+
+        // Icon-only suppresses the value title for the promoted item.
+        XCTAssertEqual(
+            application.persist(displayPreferences: application.displayPreferences.with(menuBarAppearance: .iconOnly)),
+            .saved
+        )
+        XCTAssertEqual(application.snapshot.statusItemTitle, "")
+
+        // Returning to icon-and-text restores the value title.
+        XCTAssertEqual(
+            application.persist(displayPreferences: application.displayPreferences.with(menuBarAppearance: .iconAndText)),
+            .saved
+        )
+        XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
+    }
+
+    func test_t_app_shell_persists_and_reloads_display_preferences() async throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let store = JSONConfigStore(fileURL: url)
+        let application = PerchHAApplication(
+            configStore: store,
+            connector: { _ in .success(rooms: selectionRooms()) }
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+
+        let preferences = PerchHADisplayPreferences(
+            menuBarAppearance: .iconOnly,
+            stableMenuBarWidth: true,
+            themeMode: .dark,
+            accentColor: PerchHAAccentColor(red: 0.1, green: 0.2, blue: 0.3)
+        )
+        XCTAssertEqual(application.persist(displayPreferences: preferences), .saved)
+        XCTAssertEqual(application.displayPreferences, preferences)
+        application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+
+        let reloaded = try store.load()
+        XCTAssertEqual(reloaded.menuBarAppearance, .iconOnly)
+        XCTAssertTrue(reloaded.stableMenuBarWidth)
+        XCTAssertEqual(reloaded.themeMode, .dark)
+        XCTAssertEqual(reloaded.accentColor, PerchHAAccentColor(red: 0.1, green: 0.2, blue: 0.3))
+    }
+
+    func test_t_status_panel_escape_closes_and_command_comma_opens_settings() {
+        var openedSettings = 0
+        let panel = PerchHAStatusPanel()
+        panel.onOpenSettings = {
+            openedSettings += 1
+        }
+        panel.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(panel.isVisible)
+
+        panel.cancelOperation(nil)
+        XCTAssertFalse(panel.isVisible, "Escape (cancelOperation) closes the panel")
+
+        let commaEvent = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .command,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: ",",
+            charactersIgnoringModifiers: ",",
+            isARepeat: false,
+            keyCode: 43
+        )
+        XCTAssertNotNil(commaEvent)
+        if let commaEvent {
+            XCTAssertTrue(panel.performKeyEquivalent(with: commaEvent), "Cmd+, is handled by the panel")
+        }
+        XCTAssertEqual(openedSettings, 1, "Cmd+, routes to the open-settings path")
+    }
+
     func test_t_menu_bar_presenter_reads_promotions_from_live_snapshot() {
         let presenter = PerchHAMenuBarPresenter()
         let rooms = selectionRooms()

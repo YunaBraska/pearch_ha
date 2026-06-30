@@ -126,6 +126,86 @@ final class PerchHAPersistenceTests: XCTestCase {
         XCTAssertEqual(configuration.customActionConfiguration, CustomActionConfiguration())
     }
 
+    func testConfigurationDefaultsDisplayPreferences() {
+        let configuration = PerchHAConfiguration.empty
+
+        XCTAssertEqual(configuration.menuBarAppearance, .iconAndText)
+        XCTAssertFalse(configuration.stableMenuBarWidth)
+        XCTAssertEqual(configuration.themeMode, .system)
+        XCTAssertEqual(configuration.accentColor, .homeAssistantBlue)
+    }
+
+    func testJSONConfigStoreRoundTripsDisplayPreferences() throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let store = JSONConfigStore(fileURL: url)
+        let configuration = PerchHAConfiguration(
+            menuBarAppearance: .iconOnly,
+            stableMenuBarWidth: true,
+            themeMode: .dark,
+            accentColor: PerchHAAccentColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 0.9)
+        )
+
+        try store.save(configuration)
+
+        XCTAssertEqual(try store.load(), configuration)
+    }
+
+    func testJSONConfigStoreDefaultsMissingDisplayPreferencesForBackCompat() throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let json = """
+        {
+          "schemaVersion": 1,
+          "selectedEntityIDs": ["sensor.office_temperature"]
+        }
+        """
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data(json.utf8).write(to: url)
+
+        let configuration = try JSONConfigStore(fileURL: url).load()
+
+        XCTAssertEqual(configuration.menuBarAppearance, .iconAndText)
+        XCTAssertFalse(configuration.stableMenuBarWidth)
+        XCTAssertEqual(configuration.themeMode, .system)
+        XCTAssertEqual(configuration.accentColor, .homeAssistantBlue)
+    }
+
+    func testAccentColorClampsChannelsIntoUnitRange() {
+        let accent = PerchHAAccentColor(red: -0.5, green: 2, blue: 0.3, alpha: 5)
+
+        XCTAssertEqual(accent.red, 0)
+        XCTAssertEqual(accent.green, 1)
+        XCTAssertEqual(accent.blue, 0.3)
+        XCTAssertEqual(accent.alpha, 1)
+    }
+
+    func testAccentColorMatchesNamedSwatch() {
+        XCTAssertEqual(PerchHAAccentColor.homeAssistantBlue.matchingSwatchID, "ha-blue")
+        XCTAssertNil(PerchHAAccentColor(red: 0.123, green: 0.456, blue: 0.789).matchingSwatchID)
+    }
+
+    func testDisplayPreferencesWithReplacesSingleField() {
+        let base = PerchHADisplayPreferences.defaults
+
+        XCTAssertEqual(base.with(menuBarAppearance: .textOnly).menuBarAppearance, .textOnly)
+        XCTAssertTrue(base.with(stableMenuBarWidth: true).stableMenuBarWidth)
+        XCTAssertEqual(base.with(themeMode: .light).themeMode, .light)
+        XCTAssertEqual(
+            base.with(accentColor: .homeAssistantBlue).accentColor,
+            .homeAssistantBlue
+        )
+        // Replacing one field leaves the rest at their defaults.
+        XCTAssertEqual(base.with(themeMode: .light).menuBarAppearance, .iconAndText)
+    }
+
     func testJSONConfigStoreRejectsMalformedCustomActionsOnLoad() throws {
         let cases: [(name: String, json: String, expectedMessage: String)] = [
             (

@@ -8,8 +8,33 @@ import PerchHACore
 /// light and dark appearances. The accent is a Home Assistant blue; the semantic
 /// trio (`ok`/`warn`/`critical`) drives gauges, pills, and the timeline.
 public enum PerchHATheme {
-    /// The Home Assistant accent blue (≈ `#03A9F4`).
-    public static let accent = Color(red: 0x03 / 255, green: 0xA9 / 255, blue: 0xF4 / 255)
+    /// The user-selected accent color, defaulting to the Home Assistant blue
+    /// (≈ `#03A9F4`).
+    ///
+    /// The accent is a process-wide source of truth read by both the panel and
+    /// the settings window so a change is reflected everywhere immediately. It is
+    /// only mutated on the main thread (via ``apply(accentColor:)``) and only read
+    /// from main-thread SwiftUI/AppKit render passes, so no cross-thread
+    /// coordination is required.
+    public static var accent: Color {
+        Color(
+            .sRGB,
+            red: accentColor.red,
+            green: accentColor.green,
+            blue: accentColor.blue,
+            opacity: accentColor.alpha
+        )
+    }
+
+    nonisolated(unsafe) private static var accentColor: PerchHAAccentColor = .homeAssistantBlue
+
+    /// Applies the persisted accent color so the panel and settings reflect it.
+    ///
+    /// - Parameter accentColor: The accent color to use process-wide.
+    @MainActor
+    public static func apply(accentColor: PerchHAAccentColor) {
+        Self.accentColor = accentColor
+    }
 
     /// A healthy/normal severity color.
     public static let ok = Color(red: 0x2E / 255, green: 0xCC / 255, blue: 0x71 / 255)

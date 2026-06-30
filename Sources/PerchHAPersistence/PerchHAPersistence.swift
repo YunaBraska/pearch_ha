@@ -34,6 +34,10 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
     public let roomOrder: [RoomID]
     public let entityOrder: [EntityID]
     public let isEntitySelectionExplicit: Bool
+    public let menuBarAppearance: PerchHAMenuBarAppearance
+    public let stableMenuBarWidth: Bool
+    public let themeMode: PerchHAThemeMode
+    public let accentColor: PerchHAAccentColor
 
     public init(
         schemaVersion: Int = Self.currentSchemaVersion,
@@ -44,7 +48,11 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         connectionProfile: PerchHAConnectionProfile? = nil,
         roomOrder: [RoomID] = [],
         entityOrder: [EntityID] = [],
-        isEntitySelectionExplicit: Bool = false
+        isEntitySelectionExplicit: Bool = false,
+        menuBarAppearance: PerchHAMenuBarAppearance = .defaultAppearance,
+        stableMenuBarWidth: Bool = false,
+        themeMode: PerchHAThemeMode = .defaultMode,
+        accentColor: PerchHAAccentColor = .homeAssistantBlue
     ) {
         self.schemaVersion = schemaVersion
         self.selectedEntityIDs = selectedEntityIDs
@@ -55,6 +63,10 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         self.roomOrder = roomOrder
         self.entityOrder = entityOrder
         self.isEntitySelectionExplicit = isEntitySelectionExplicit
+        self.menuBarAppearance = menuBarAppearance
+        self.stableMenuBarWidth = stableMenuBarWidth
+        self.themeMode = themeMode
+        self.accentColor = accentColor
     }
 
     public static var empty: PerchHAConfiguration {
@@ -91,6 +103,10 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         case roomOrder
         case entityOrder
         case isEntitySelectionExplicit
+        case menuBarAppearance
+        case stableMenuBarWidth
+        case themeMode
+        case accentColor
     }
 
     public init(from decoder: Decoder) throws {
@@ -112,6 +128,10 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         roomOrder = try container.decodeIfPresent([RoomID].self, forKey: .roomOrder) ?? []
         entityOrder = try container.decodeIfPresent([EntityID].self, forKey: .entityOrder) ?? []
         isEntitySelectionExplicit = try container.decodeIfPresent(Bool.self, forKey: .isEntitySelectionExplicit) ?? false
+        menuBarAppearance = try container.decodeIfPresent(PerchHAMenuBarAppearance.self, forKey: .menuBarAppearance) ?? .defaultAppearance
+        stableMenuBarWidth = try container.decodeIfPresent(Bool.self, forKey: .stableMenuBarWidth) ?? false
+        themeMode = try container.decodeIfPresent(PerchHAThemeMode.self, forKey: .themeMode) ?? .defaultMode
+        accentColor = try container.decodeIfPresent(PerchHAAccentColor.self, forKey: .accentColor) ?? .homeAssistantBlue
     }
 }
 
