@@ -4232,4 +4232,205 @@ extension PerchHAClientTests {
         XCTAssertEqual(requests.map { requestPercentEncodedPath($0.url) }, ["/api/states"])
     }
 }
+
+extension PerchHAClientTests {
+    private func writeTemporaryEnvironmentFile(_ contents: Data) throws -> String {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("perchha-env-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent(".env.test")
+        try contents.write(to: file)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        return file.path
+    }
+
+    private func missingEnvironmentFilePath() -> String {
+        URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("perchha-env-test-missing-\(UUID().uuidString)")
+            .appendingPathComponent(".env.test")
+            .path
+    }
+
+    func testMirrorEnvironmentErrorDescriptionsStayCalmAndSecretFree() {
+        XCTAssertEqual(HAMirrorEnvironmentError.invalidLine(3).description, "invalid .env line 3")
+        XCTAssertEqual(
+            HAMirrorEnvironmentError.missingFile("/tmp/none.env").description,
+            "environment file does not exist: /tmp/none.env"
+        )
+        XCTAssertEqual(
+            HAMirrorEnvironmentError.unreadableFile("/tmp/binary.env").description,
+            "environment file is unreadable: /tmp/binary.env"
+        )
+        XCTAssertEqual(HAMirrorEnvironmentError.missingURL.description, "missing url in environment file")
+        XCTAssertEqual(HAMirrorEnvironmentError.invalidURL("ftp://x").description, "invalid URL: ftp://x")
+        XCTAssertEqual(
+            HAMirrorEnvironmentError.missingOAuthClientID.description,
+            "missing PERCHHA_OAUTH_CLIENT_ID in environment file"
+        )
+        XCTAssertEqual(
+            HAMirrorEnvironmentError.missingOAuthRedirectURI.description,
+            "missing PERCHHA_OAUTH_REDIRECT_URI in environment file"
+        )
+    }
+
+    func testMirrorEnvironmentLoadsFieldsCommentsAndShortValuesFromFile() throws {
+        let contents = """
+        # capture credentials
+        url=http://homeassistant.local:8123
+
+        token="secret-token"
+        user=u
+        """
+        let path = try writeTemporaryEnvironmentFile(Data(contents.utf8))
+
+        let environment = try HAMirrorEnvironment.load(from: path)
+
+        XCTAssertEqual(environment.primaryURL, URL(string: "http://homeassistant.local:8123"))
+        XCTAssertNil(environment.fallbackURL)
+        XCTAssertEqual(environment.token, "secret-token")
+        XCTAssertEqual(environment.user, "u")
+        XCTAssertNil(environment.password)
+    }
+
+    func testMirrorEnvironmentFromEnvironmentRequiresAURL() throws {
+        let path = try writeTemporaryEnvironmentFile(Data("token=x\n".utf8))
+
+        XCTAssertThrowsError(
+            try HAMirrorEnvironment.fromEnvironment([:], environmentFilePath: path)
+        ) { error in
+            XCTAssertEqual(error as? HAMirrorEnvironmentError, .missingURL)
+        }
+    }
+
+    func testMirrorEnvironmentFromEnvironmentRejectsInvalidPrimaryURL() {
+        XCTAssertThrowsError(
+            try HAMirrorEnvironment.fromEnvironment(
+                ["PERCHHA_HA_URL": "ftp://homeassistant.local"],
+                environmentFilePath: missingEnvironmentFilePath()
+            )
+        ) { error in
+            XCTAssertEqual(error as? HAMirrorEnvironmentError, .invalidURL("ftp://homeassistant.local"))
+        }
+    }
+
+    func testMirrorEnvironmentFromEnvironmentRejectsInvalidFallbackURL() {
+        XCTAssertThrowsError(
+            try HAMirrorEnvironment.fromEnvironment(
+                [
+                    "PERCHHA_HA_URL": "http://homeassistant.local:8123",
+                    "PERCHHA_HA_FALLBACK_URL": "ftp://fallback.local"
+                ],
+                environmentFilePath: missingEnvironmentFilePath()
+            )
+        ) { error in
+            XCTAssertEqual(error as? HAMirrorEnvironmentError, .invalidURL("ftp://fallback.local"))
+        }
+    }
+
+    func testMirrorEnvironmentFromEnvironmentToleratesUnreadableFileWhenURLIsExported() throws {
+        let path = try writeTemporaryEnvironmentFile(Data([0xFF, 0xFE, 0xFD]))
+
+        let environment = try HAMirrorEnvironment.fromEnvironment(
+            [
+                "PERCHHA_HA_URL": "http://homeassistant.local:8123",
+                "PERCHHA_HA_TOKEN": "env-token"
+            ],
+            environmentFilePath: path
+        )
+
+        XCTAssertEqual(environment.primaryURL, URL(string: "http://homeassistant.local:8123"))
+        XCTAssertEqual(environment.token, "env-token")
+    }
+
+    func testMirrorEnvironmentFromEnvironmentRejectsUnreadableFileWithoutExportedURL() throws {
+        let path = try writeTemporaryEnvironmentFile(Data([0xFF, 0xFE, 0xFD]))
+
+        XCTAssertThrowsError(
+            try HAMirrorEnvironment.fromEnvironment([:], environmentFilePath: path)
+        ) { error in
+            XCTAssertEqual(error as? HAMirrorEnvironmentError, .unreadableFile(path))
+        }
+    }
+
+    func testMirrorEnvironmentParseRequiresAURL() {
+        XCTAssertThrowsError(try HAMirrorEnvironment.parse("token=x\n")) { error in
+            XCTAssertEqual(error as? HAMirrorEnvironmentError, .missingURL)
+        }
+    }
+
+    func testMirrorEnvironmentParseRejectsInvalidFallbackURL() {
+        XCTAssertThrowsError(
+            try HAMirrorEnvironment.parse("url=http://homeassistant.local:8123\nurl2=ftp://fallback.local\n")
+        ) { error in
+            XCTAssertEqual(error as? HAMirrorEnvironmentError, .invalidURL("ftp://fallback.local"))
+        }
+    }
+
+    func testMirrorEnvironmentParseRejectsHostlessURL() {
+        XCTAssertThrowsError(try HAMirrorEnvironment.parse("url=http:///dashboard\n")) { error in
+            XCTAssertEqual(error as? HAMirrorEnvironmentError, .invalidURL("http:///dashboard"))
+        }
+    }
+
+    func testMirrorEnvironmentResolvedFilePathPrefersOverride() {
+        XCTAssertEqual(
+            HAMirrorEnvironment.resolvedEnvironmentFilePath(
+                environment: ["PERCHHA_ENV_FILE": "from-env.env"],
+                overridePath: "override.env"
+            ),
+            "override.env"
+        )
+    }
+
+    func testReadinessReportDefaultNextStepsUseFilePlaceholder() {
+        let report = HAMirrorEnvironmentReadinessReport(
+            hasFallbackURL: false,
+            hasToken: false,
+            hasUser: true,
+            hasPassword: false,
+            hasOAuthClientID: false,
+            hasOAuthRedirectURI: false
+        )
+
+        XCTAssertEqual(report.nextSteps, report.nextSteps(envPath: "<file>"))
+        XCTAssertTrue(report.nextSteps.allSatisfy { !$0.isEmpty })
+        XCTAssertTrue(report.nextSteps.contains { $0.contains("<file>") })
+    }
+
+    func testReadinessReportBlockingMessagesCombineIssuesAndNextSteps() {
+        let report = HAMirrorEnvironmentReadinessReport(
+            hasFallbackURL: false,
+            hasToken: false,
+            hasUser: true,
+            hasPassword: false,
+            hasOAuthClientID: true,
+            hasOAuthRedirectURI: false
+        )
+
+        XCTAssertEqual(
+            report.blockingMessages,
+            report.issues.map(\.description) + report.nextSteps
+        )
+        XCTAssertEqual(
+            report.blockingMessages(envPath: "custom.env"),
+            report.issues.map(\.description) + report.nextSteps(envPath: "custom.env")
+        )
+        XCTAssertFalse(report.blockingMessages.isEmpty)
+    }
+
+    func testOAuthClientWebsiteEnvironmentLoadsFromFile() throws {
+        let contents = """
+        perchha_oauth_client_id=https://perchha.dev/app
+        perchha_oauth_redirect_uri=perchha://auth
+        """
+        let path = try writeTemporaryEnvironmentFile(Data(contents.utf8))
+
+        let environment = try HAOAuthClientWebsiteEnvironment.load(from: path)
+
+        XCTAssertEqual(environment.clientID, "https://perchha.dev/app")
+        XCTAssertEqual(environment.redirectURI, "perchha://auth")
+    }
+}
 #endif
