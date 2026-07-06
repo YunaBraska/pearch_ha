@@ -7584,16 +7584,19 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.refreshCount, 0)
 
         // Activating the panel refreshes immediately (safety net on open), then
-        // settles into the interval loop on the injected clock.
+        // settles into the interval loop on the injected clock. Activation also
+        // arms the bulk history sync loop on the same clock, so wait for BOTH
+        // sleepers before advancing — advancing after only one is armed can
+        // wake just the bulk loop and leave the refresh loop sleeping forever.
         model.setPanelActive(true)
         await spinUntil { model.snapshot.refreshCount == 1 }
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        await spinUntil { await clock.sleepingTaskCount() == 2 }
         XCTAssertEqual(model.snapshot.refreshCount, 1)
 
         // Firing the interval performs one more refresh and re-arms the loop.
         _ = await clock.advance(by: interval)
         await spinUntil { model.snapshot.refreshCount == 2 }
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        await spinUntil { await clock.sleepingTaskCount() == 2 }
 
         // Deactivating pauses the loop: advancing the clock performs no refresh.
         model.setPanelActive(false)
