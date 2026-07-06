@@ -11,3 +11,4 @@ xcuserdata/
 Fixtures/private/
 *.log
 test-list.txt
+*.profraw
