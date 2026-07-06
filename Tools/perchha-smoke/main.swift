@@ -3557,7 +3557,8 @@ struct PerchHASmoke {
         }
         let reviewBaseline = SmokePanelReviewBaseline(
             variants: baselineVariants,
-            contactSheet: contactSheetEntry
+            contactSheet: contactSheetEntry,
+            renderEnvironment: SmokePanelReviewBaseline.currentRenderEnvironment()
         )
         if let exportDirectory {
             let storedBaseline = options.updatesReviewBaseline
@@ -3595,14 +3596,24 @@ struct PerchHASmoke {
             )
         } else {
             let storedBaseline = try loadPanelReviewBaseline(from: options.reviewBaselineURL)
-            try expect(
-                storedBaseline == reviewBaseline,
-                reviewBaselineMismatchMessage(
-                    expected: storedBaseline,
-                    actual: reviewBaseline,
-                    baselineURL: options.reviewBaselineURL
+            // Pixel hashes only match on the OS/arch that recorded them; on any
+            // other environment the per-variant structural checks above remain
+            // the gate and the pixel comparison is skipped with a notice.
+            if storedBaseline.renderEnvironment == reviewBaseline.renderEnvironment {
+                try expect(
+                    storedBaseline == reviewBaseline,
+                    reviewBaselineMismatchMessage(
+                        expected: storedBaseline,
+                        actual: reviewBaseline,
+                        baselineURL: options.reviewBaselineURL
+                    )
                 )
-            )
+            } else {
+                print(
+                    "perchha-smoke: review baseline recorded on \(storedBaseline.renderEnvironment ?? "an unrecorded environment"), "
+                        + "running on \(reviewBaseline.renderEnvironment ?? "unknown"); skipping pixel comparison"
+                )
+            }
         }
 
         guard let connectedLight = signatures[.connectedLight],
@@ -5546,11 +5557,28 @@ private struct SmokePanelReviewBaseline: Codable, Equatable {
     let schemaVersion: Int
     let variants: [Entry]
     let contactSheet: Entry
+    /// The OS/arch that rendered the recorded hashes. Text rasterization
+    /// differs between macOS releases, so pixel comparison is only meaningful
+    /// on the environment that recorded the baseline; baselines written
+    /// before this field decode as `nil`.
+    let renderEnvironment: String?
 
-    init(variants: [Entry], contactSheet: Entry) {
+    init(variants: [Entry], contactSheet: Entry, renderEnvironment: String?) {
         self.schemaVersion = 1
         self.variants = variants
         self.contactSheet = contactSheet
+        self.renderEnvironment = renderEnvironment
+    }
+
+    /// The current render environment, e.g. `macos-26.5.1-arm64`.
+    static func currentRenderEnvironment() -> String {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        #if arch(arm64)
+            let architecture = "arm64"
+        #else
+            let architecture = "x86_64"
+        #endif
+        return "macos-\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)-\(architecture)"
     }
 }
 

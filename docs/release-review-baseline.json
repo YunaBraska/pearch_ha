@@ -6,6 +6,7 @@
     "sampledHashHex" : "713e081a361682fa",
     "visiblePixelCount" : 904496
   },
+  "renderEnvironment" : "macos-26.5.1-arm64",
   "schemaVersion" : 1,
   "variants" : [
     {
