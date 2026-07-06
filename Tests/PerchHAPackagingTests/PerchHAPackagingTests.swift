@@ -658,10 +658,13 @@ final class PerchHAPackagingTests: XCTestCase {
         if diagnostic.nativeVerification == .ready {
             XCTAssertTrue(diagnostic.issues.isEmpty)
             XCTAssertEqual(diagnostic.projectListing, .ready)
+            // The discovered Xcode path varies by machine (CI runners install
+            // version-suffixed bundles), so assert the command's shape.
             XCTAssertTrue(
-                diagnostic.suggestedCommands.contains(
-                    "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --disable-swift-testing --enable-xctest list"
-                )
+                diagnostic.suggestedCommands.contains { command in
+                    command.hasPrefix("DEVELOPER_DIR=")
+                        && command.hasSuffix(" swift test --disable-swift-testing --enable-xctest list")
+                }
             )
         } else {
             XCTAssertEqual(diagnostic.projectListing, .blocked)

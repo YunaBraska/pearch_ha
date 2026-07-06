@@ -7740,9 +7740,15 @@ final class PerchHAUITests: XCTestCase {
         }
     }
 
+    /// Spins until `condition` holds. Yields for the fast path, then falls
+    /// back to short real sleeps so loaded CI runners still converge; total
+    /// budget stays bounded (~2 s) so a genuinely stuck condition fails fast.
     private func spinUntil(_ condition: @escaping @MainActor () -> Bool) async {
         for _ in 0..<100 where !condition() {
             await Task.yield()
+        }
+        for _ in 0..<2_000 where !condition() {
+            try? await Task.sleep(nanoseconds: 1_000_000)
         }
     }
 
@@ -7752,6 +7758,12 @@ final class PerchHAUITests: XCTestCase {
                 return
             }
             await Task.yield()
+        }
+        for _ in 0..<2_000 {
+            if await condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000)
         }
     }
 

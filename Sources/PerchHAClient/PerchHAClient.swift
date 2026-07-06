@@ -225,13 +225,20 @@ private final class HAServerTrustPolicyURLSessionDelegate: NSObject, URLSessionD
     }
 
     private static func isAllowedSelfSignedTrust(_ trust: SecTrust, host: String) -> Bool {
+        SecTrustSetPolicies(trust, SecPolicyCreateSSL(true, host as CFString))
+        // Run one evaluation pass before reading the chain: on some macOS
+        // versions the chain accessor returns nothing until the trust object
+        // has been evaluated at least once. The result is irrelevant here — an
+        // unknown self-signed certificate is expected to fail this pass.
+        _ = SecTrustEvaluateWithError(trust, nil)
         guard let certificateChain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
               certificateChain.count == 1,
               isSelfIssued(certificateChain[0])
         else {
             return false
         }
-        SecTrustSetPolicies(trust, SecPolicyCreateSSL(true, host as CFString))
+        // Pin the anchor to exactly the presented leaf; changing the anchors
+        // resets the cached evaluation, so this second pass is authoritative.
         SecTrustSetAnchorCertificates(trust, certificateChain as CFArray)
         SecTrustSetAnchorCertificatesOnly(trust, true)
         return SecTrustEvaluateWithError(trust, nil)
