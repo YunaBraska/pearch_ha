@@ -470,7 +470,7 @@ Implemented in the first M11 local slice:
 - Custom action `serviceData` no longer stores secret scalar values in plaintext JSON; protected values persist as opaque references and are resolved only at execution time.
 - `HomeAssistantClient.services` fetches Home Assistant WebSocket `get_services` metadata and FakeHA replays service metadata fixtures.
 - App shell persists custom actions and exposes run/set/remove entrypoints.
-- Command Line Tools smoke exports `custom-action-editor-light.png` from the real settings editor with service metadata, confirmation, target entity, and nested object/list service data visible.
+- The in-app custom-action editor UI was removed by user decision; custom actions remain a persisted, tested engine (rows still render configured buttons) without a creation UI.
 
 Remaining before M11 is complete:
 

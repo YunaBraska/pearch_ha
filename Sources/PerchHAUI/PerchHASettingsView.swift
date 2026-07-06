@@ -9,9 +9,9 @@ import PerchHASupport
 /// the Settings window's Connection tab.
 ///
 /// The shared fields cover the Home Assistant URL, fallback URL, access token,
-/// the failure/progress banners, and the sign-in/connect buttons, mirroring the
-/// current first-run design. The app always trusts the entered Home Assistant
-/// host, so there is no certificate-trust control.
+/// the failure/progress banners, the sign-in/connect buttons, and an explicit
+/// self-signed certificate opt-in scoped to the entered HTTPS hosts.
+/// Certificate validation stays strict unless the user opts in.
 struct PerchHAConnectionFormFields: View {
     @ObservedObject var model: PerchHAPanelModel
 
@@ -128,7 +128,30 @@ struct PerchHAConnectionFormFields: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            selfSignedCertificateOptIn
         }
+    }
+
+    /// The self-signed certificate switch. Always visible and editable so the
+    /// trust posture can be changed at any time, connected or not.
+    private var selfSignedCertificateOptIn: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(
+                "Trust self-signed certificates for these addresses",
+                isOn: Binding(
+                    get: { model.snapshot.connectionForm.allowsSelfSignedCertificates },
+                    set: { model.updateConnectionForm(allowsSelfSignedCertificates: $0) }
+                )
+            )
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            Text("Applies only to the HTTPS addresses listed above — never to other hosts. Turn off for strict certificate validation.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityHint("Allows self-signed TLS certificates for the Home Assistant addresses in this form only")
     }
 
     private func alternativeAddressRow(_ address: PerchHAConnectionAddressField, index: Int) -> some View {
@@ -402,7 +425,6 @@ public struct PerchHASettingsView: View {
     public enum Tab: Hashable, Sendable, CaseIterable {
         case general
         case connection
-        case dashboard
         case entities
         case appearance
         case diagnostics
@@ -414,7 +436,6 @@ public struct PerchHASettingsView: View {
             switch self {
             case .general: "General"
             case .connection: "Connection"
-            case .dashboard: "Dashboard"
             case .entities: "Entities"
             case .appearance: "Appearance"
             case .diagnostics: "Diagnostics"
@@ -428,7 +449,6 @@ public struct PerchHASettingsView: View {
             switch self {
             case .general: "gearshape"
             case .connection: "network"
-            case .dashboard: "rectangle.grid.1x2"
             case .entities: "square.grid.2x2"
             case .appearance: "paintbrush"
             case .diagnostics: "stethoscope"
@@ -456,6 +476,10 @@ public struct PerchHASettingsView: View {
     /// search restores the prior collapsed state.
     @State private var collapsedRooms: Set<String> = []
     @State private var displayPreferences: PerchHADisplayPreferences
+    /// View-local echo of the Entities search field; pushed to the model after
+    /// a short debounce so typing never rebuilds the whole app state per key.
+    @State private var entitySearchText: String = ""
+    @State private var searchDebounceTask: Task<Void, Never>?
     @State private var launchAtLogin: Bool
     @State private var launchAtLoginPermissionDenied = false
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
@@ -606,7 +630,6 @@ public struct PerchHASettingsView: View {
         switch tab {
         case .general: generalTab
         case .connection: connectionTab
-        case .dashboard: dashboardTab
         case .entities: entitiesTab
         case .appearance: appearanceTab
         case .diagnostics: diagnosticsTab
@@ -633,7 +656,6 @@ public struct PerchHASettingsView: View {
         let content: AnyView = switch tab {
         case .general: AnyView(generalTab)
         case .connection: AnyView(connectionTab)
-        case .dashboard: AnyView(dashboardTab)
         case .entities: AnyView(entitiesTab)
         case .appearance: AnyView(appearanceTab)
         case .diagnostics: AnyView(diagnosticsTab)
@@ -732,6 +754,7 @@ public struct PerchHASettingsView: View {
             .padding(.vertical, PerchHASpacing.lg)
             .padding(.horizontal, PerchHASpacing.lg + 2)
         }
+        .toggleStyle(PerchHASwitchToggleStyle())
         .tint(PerchHATheme.accent)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -783,7 +806,6 @@ public struct PerchHASettingsView: View {
                 settingsSection(title: "Startup", systemImage: "power") {
                     VStack(alignment: .leading, spacing: PerchHASpacing.sm - 2) {
                         Toggle("Launch at login", isOn: launchAtLoginBinding)
-                            .toggleStyle(.checkbox)
                             .fixedSize()
                             .accessibilityLabel("Launch PearchHA at login")
                         Text("Start PearchHA automatically when you sign in to this Mac.")
@@ -842,179 +864,6 @@ public struct PerchHASettingsView: View {
         .accessibilityLabel("\(label), shortcut \(keys)")
     }
 
-    // MARK: Dashboard
-
-    /// Dashboard display preferences that actually shape the live popover:
-    /// which room/module blocks appear, the telemetry-row density, the default
-    /// inline/detail history range, and whether the footer timestamp is shown.
-    /// Every control here is wired to a persisted preference the dashboard
-    /// honors; nothing here is decorative.
-    private var dashboardTab: some View {
-        settingsPage(title: "Dashboard", systemImage: Tab.dashboard.systemImage) {
-            settingsCard {
-                settingsSection(title: "Visible modules", systemImage: "rectangle.grid.1x2") {
-                    visibleModulesEditor
-                }
-            }
-            settingsCard {
-                settingsSection(title: "Summary metrics", systemImage: "gauge.with.dots.needle.bottom.50percent") {
-                    summaryMetricsEditor
-                }
-            }
-            settingsCard {
-                settingsSection(title: "Layout", systemImage: "slider.horizontal.3") {
-                    VStack(alignment: .leading, spacing: PerchHASpacing.sm + 2) {
-                        settingsControlRow("Row density") {
-                            Picker("Row density", selection: rowDensityBinding) {
-                                ForEach(PerchHADashboardRowDensity.allCases, id: \.rawValue) { density in
-                                    Text(density.displayName).tag(density)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                            .fixedSize()
-                            .accessibilityLabel("Dashboard row density")
-                        }
-                        settingsControlRow("Default history range") {
-                            Picker("Default history range", selection: defaultHistoryRangeBinding) {
-                                ForEach(HistoryRange.uiSelectable, id: \.rawValue) { range in
-                                    Text(range.displayName).tag(range)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                            .fixedSize()
-                            .accessibilityLabel("Default history range")
-                        }
-                        Text("Used for inline charts and the history popover unless a value has its own range.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-            settingsCard {
-                settingsSection(title: "Footer", systemImage: "clock") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Toggle("Show updated timestamp", isOn: footerTimestampBinding)
-                            .toggleStyle(.checkbox)
-                            .fixedSize()
-                            .accessibilityLabel("Show the dashboard footer updated timestamp")
-                        Text("Hide the relative \u{201C}updated\u{201D} caption in the dashboard footer. Connection problems are always shown.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-        }
-    }
-
-    /// The visible-modules editor: one checkbox per available room/module, plus
-    /// show-all / hide-all shortcuts. Hiding every module is prevented at the
-    /// dashboard (it falls back to showing all) so the popover never goes blank.
-    @ViewBuilder
-    private var visibleModulesEditor: some View {
-        let rooms = model.snapshot.availableRooms
-        if rooms.isEmpty {
-            Text("Connect to Home Assistant to choose which room modules appear on the dashboard.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        } else {
-            VStack(alignment: .leading, spacing: PerchHASpacing.sm) {
-                HStack(spacing: 8) {
-                    Text("Show these modules on the dashboard.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                    Button("Show all") { setAllModulesHidden(false) }
-                        .buttonStyle(PerchHAIconButtonStyle())
-                        .controlSize(.small)
-                        .disabled(displayPreferences.hiddenModuleIDs.isEmpty)
-                        .accessibilityLabel("Show all modules")
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                settingsInsetGroup {
-                    ForEach(Array(rooms.enumerated()), id: \.element.id.rawValue) { index, room in
-                        Toggle(room.name, isOn: moduleVisibilityBinding(for: room.id.rawValue))
-                            .toggleStyle(.checkbox)
-                            .fixedSize()
-                            .accessibilityLabel("Show \(room.name) module on dashboard")
-                        if index < rooms.count - 1 {
-                            settingsSectionDivider
-                        }
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private func setAllModulesHidden(_ hidden: Bool) {
-        let ids = hidden ? Set(model.snapshot.availableRooms.map { $0.id.rawValue }) : Set<String>()
-        updateDisplayPreferences(displayPreferences.with(hiddenModuleIDs: ids))
-    }
-
-    /// The available entities (flattened across rooms, in room/entity order) the
-    /// user can promote into the dashboard header summary strip.
-    private var summaryMetricCandidates: [DiscoveredEntity] {
-        model.snapshot.availableRooms.flatMap(\.entities)
-    }
-
-    /// The summary-metrics editor: a hint plus one checkbox per available entity,
-    /// capped at three selections. Already-selected entities stay enabled so they
-    /// can be cleared; unselected entities disable once the cap is reached. Leaving
-    /// everything unchecked restores the automatic header behavior.
-    @ViewBuilder
-    private var summaryMetricsEditor: some View {
-        let candidates = summaryMetricCandidates
-        let selected = displayPreferences.summaryMetricEntityIDs
-        if candidates.isEmpty {
-            Text("Connect to Home Assistant to choose which values appear in the dashboard header.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        } else {
-            VStack(alignment: .leading, spacing: PerchHASpacing.sm) {
-                HStack(spacing: 8) {
-                    Text("Up to \(PerchHADisplayPreferences.maxSummaryMetricEntityIDs) values shown in the dashboard header. Leave empty for automatic.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 8)
-                    Button("Clear") { updateDisplayPreferences(displayPreferences.with(summaryMetricEntityIDs: [])) }
-                        .buttonStyle(PerchHAIconButtonStyle())
-                        .controlSize(.small)
-                        .disabled(selected.isEmpty)
-                        .accessibilityLabel("Clear selected summary metrics")
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                settingsInsetGroup {
-                    ForEach(Array(candidates.enumerated()), id: \.element.id.rawValue) { index, entity in
-                        Toggle(entity.name, isOn: summaryMetricBinding(for: entity.id))
-                            .toggleStyle(.checkbox)
-                            .fixedSize()
-                            .disabled(summaryMetricToggleDisabled(for: entity.id))
-                            .accessibilityLabel("Show \(entity.name) in dashboard header summary")
-                        if index < candidates.count - 1 {
-                            settingsSectionDivider
-                        }
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    /// Whether an unselected summary-metric checkbox should be disabled because
-    /// the selection cap is already reached. Selected entries stay enabled so the
-    /// user can always deselect.
-    private func summaryMetricToggleDisabled(for id: EntityID) -> Bool {
-        let selected = displayPreferences.summaryMetricEntityIDs
-        return !selected.contains(id) && selected.count >= PerchHADisplayPreferences.maxSummaryMetricEntityIDs
-    }
-
     // MARK: Appearance
 
     /// Appearance: the live preview plus the theme/accent controls, which share
@@ -1062,13 +911,47 @@ public struct PerchHASettingsView: View {
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         Toggle("Keep a stable width", isOn: stableMenuBarWidthBinding)
-                            .toggleStyle(.checkbox)
                             .fixedSize()
                             .accessibilityLabel("Keep a stable menu bar width")
                         Text("Uses monospaced digits so the value does not shift as it changes.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            settingsCard {
+                settingsSection(title: "Dashboard", systemImage: "rectangle.grid.1x2") {
+                    VStack(alignment: .leading, spacing: PerchHASpacing.sm + 2) {
+                        settingsControlRow("Row density") {
+                            Picker("Row density", selection: rowDensityBinding) {
+                                ForEach(PerchHADashboardRowDensity.allCases, id: \.rawValue) { density in
+                                    Text(density.displayName).tag(density)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .fixedSize()
+                            .accessibilityLabel("Dashboard row density")
+                        }
+                        settingsControlRow("Default history range") {
+                            Picker("Default history range", selection: defaultHistoryRangeBinding) {
+                                ForEach(HistoryRange.uiSelectable, id: \.rawValue) { range in
+                                    Text(range.displayName).tag(range)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .fixedSize()
+                            .accessibilityLabel("Default history range")
+                        }
+                        Text("Used for inline charts and the history popover unless a value has its own range.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Toggle("Show updated timestamp in the footer", isOn: footerTimestampBinding)
+                            .fixedSize()
+                            .accessibilityLabel("Show the dashboard footer updated timestamp")
                     }
                 }
             }
@@ -1228,8 +1111,8 @@ public struct PerchHASettingsView: View {
                 }
             }
             settingsCard {
-                settingsSection(title: "History prefetch", systemImage: "chart.line.uptrend.xyaxis") {
-                    diagnosticsPrefetchContent
+                settingsSection(title: "History sync", systemImage: "chart.line.uptrend.xyaxis") {
+                    diagnosticsHistorySyncContent
                 }
             }
         }
@@ -1351,7 +1234,7 @@ public struct PerchHASettingsView: View {
         let tint: Color = {
             switch event.kind {
             case .recovered: return PerchHATheme.ok
-            case .reconnecting: return PerchHATheme.warn
+            case .reconnecting, .liveUpdatesInterrupted: return PerchHATheme.warn
             case .connectionFailed, .refreshFailed: return PerchHATheme.critical
             }
         }()
@@ -1473,18 +1356,22 @@ public struct PerchHASettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var diagnosticsPrefetchContent: some View {
-        let prefetch = PerchHAHistoryPrefetchConfiguration()
+    private var diagnosticsHistorySyncContent: some View {
+        let sync = PerchHAHistoryBulkSyncConfiguration()
         return VStack(alignment: .leading, spacing: 6) {
-            settingsControlRow("Lookahead") {
-                Text("\(prefetch.lookahead) values")
+            settingsControlRow("Cycle interval") {
+                Text("\(sync.interval.nanoseconds / 1_000_000_000) s")
                     .foregroundStyle(.secondary)
             }
             settingsControlRow("Settle delay") {
-                Text("\(prefetch.settleDelay.nanoseconds / 1_000_000) ms")
+                Text("\(sync.settleDelay.nanoseconds / 1_000_000) ms")
                     .foregroundStyle(.secondary)
             }
-            Text("How far ahead PearchHA warms inline charts when the panel is open. These are tuned defaults shown for reference.")
+            settingsControlRow("Batch size") {
+                Text("\(sync.batchSize) values per request")
+                    .foregroundStyle(.secondary)
+            }
+            Text("While the panel is open, inline charts refresh in bulk on this cadence — visible rows every cycle, the rest periodically. These are tuned defaults shown for reference.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1615,42 +1502,10 @@ public struct PerchHASettingsView: View {
         )
     }
 
-    /// A per-module visibility binding. `true` means the module is shown; toggling
-    /// off inserts its identifier into the hidden set.
-    private func moduleVisibilityBinding(for moduleID: String) -> Binding<Bool> {
+    private func entityIconVisibilityBinding(for id: EntityID) -> Binding<Bool> {
         Binding(
-            get: { !displayPreferences.hiddenModuleIDs.contains(moduleID) },
-            set: { isVisible in
-                var hidden = displayPreferences.hiddenModuleIDs
-                if isVisible {
-                    hidden.remove(moduleID)
-                } else {
-                    hidden.insert(moduleID)
-                }
-                updateDisplayPreferences(displayPreferences.with(hiddenModuleIDs: hidden))
-            }
-        )
-    }
-
-    /// A per-entity summary-metric binding. `true` means the entity is in the
-    /// header summary strip. Selecting appends in click order (capped at three);
-    /// deselecting removes the entry while preserving the order of the rest.
-    private func summaryMetricBinding(for id: EntityID) -> Binding<Bool> {
-        Binding(
-            get: { displayPreferences.summaryMetricEntityIDs.contains(id) },
-            set: { isSelected in
-                var ids = displayPreferences.summaryMetricEntityIDs
-                if isSelected {
-                    guard !ids.contains(id),
-                          ids.count < PerchHADisplayPreferences.maxSummaryMetricEntityIDs else {
-                        return
-                    }
-                    ids.append(id)
-                } else {
-                    ids.removeAll { $0 == id }
-                }
-                updateDisplayPreferences(displayPreferences.with(summaryMetricEntityIDs: ids))
-            }
+            get: { model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).showsEntityIcon },
+            set: { model.setShowsEntityIcon(id, showsEntityIcon: $0) }
         )
     }
 
@@ -1897,19 +1752,27 @@ public struct PerchHASettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("Action settings error: \(customActionPersistenceFailure)")
             }
+            if let shellPersistenceFailure = model.shellPersistenceFailureDescription {
+                Text(shellPersistenceFailure)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel("Storage error: \(shellPersistenceFailure)")
+            }
             if !model.orphanedCustomActions.isEmpty {
                 orphanedCustomActionControls
             }
-            if model.snapshot.selectionTree.isEmpty {
+            if settingsTree.isEmpty {
                 Text("No matching values.")
                     .foregroundStyle(.secondary)
             } else {
+                let tree = settingsTree
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(Array(settingsTree.enumerated()), id: \.element.id.rawValue) { index, room in
+                    ForEach(Array(tree.enumerated()), id: \.element.id.rawValue) { index, room in
                         selectionRoom(
                             room,
-                            canMoveUp: canReorderSelection && index > settingsTree.startIndex,
-                            canMoveDown: canReorderSelection && index < settingsTree.index(before: settingsTree.endIndex)
+                            canMoveUp: canReorderSelection && index > tree.startIndex,
+                            canMoveDown: canReorderSelection && index < tree.index(before: tree.endIndex)
                         )
                     }
                 }
@@ -1944,7 +1807,7 @@ public struct PerchHASettingsView: View {
     }
 
     private var settingsTree: [SelectableRoom] {
-        model.snapshot.selectionTree
+        model.settingsSelectionTree
     }
 
     private var canReorderSelection: Bool {
@@ -2029,12 +1892,13 @@ public struct PerchHASettingsView: View {
     /// Runs `body` inside a calm expand/collapse animation, or with no animation
     /// when the resolved accessibility preference asks for reduced motion.
     private func withSelectionAnimation(_ body: () -> Void) {
-        if accessibilityPreferences.motionPolicy == .reduced {
+        let reduceMotion = accessibilityPreferences.motionPolicy == .reduced
+        if let animation = PerchHAMotion.animation(reduceMotion: reduceMotion) {
+            withAnimation(animation, body)
+        } else {
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction, body)
-        } else {
-            withAnimation(.easeInOut(duration: 0.18), body)
         }
     }
 
@@ -2123,7 +1987,9 @@ public struct PerchHASettingsView: View {
     /// rows.
     private func entitiesRoomCard(_ room: SelectableRoom) -> some View {
         let palette = PerchHATheme.Dashboard.palette(colorScheme)
-        return VStack(spacing: 0) {
+        // Lazy rows: an expanded room with hundreds of entities materializes
+        // only what scrolls into view instead of building every row up front.
+        return LazyVStack(spacing: 0) {
             ForEach(Array(room.entities.enumerated()), id: \.element.entity.id.rawValue) { index, selectable in
                 selectionDragDrop(
                     selectionEntityRow(
@@ -2169,7 +2035,6 @@ public struct PerchHASettingsView: View {
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 Toggle("", isOn: selectionBinding(for: entity.id))
-                    .toggleStyle(.checkbox)
                     .labelsHidden()
                     .accessibilityLabel("Show \(entity.name) in panel")
                 Image(systemName: perchHAEntityIconName(for: entity))
@@ -2278,13 +2143,9 @@ public struct PerchHASettingsView: View {
             }
             if isPromoted {
                 settingsSectionDivider
-                settingsSection(title: "Alerts", systemImage: "bell.badge") {
+                settingsSection(title: "Thresholds", systemImage: "bell.badge") {
                     menuBarThresholdControls(for: entity, configuration: configuration)
                 }
-            }
-            settingsSectionDivider
-            settingsSection(title: "Buttons", systemImage: "hand.tap") {
-                customActionControls(for: entity)
             }
         }
         .font(.caption)
@@ -2352,39 +2213,34 @@ public struct PerchHASettingsView: View {
 
             unitDisplayControls(for: entity, configuration: configuration)
 
-            if isPromoted {
-                HStack(spacing: 12) {
-                    Toggle("Show label", isOn: menuBarLabelBinding(for: entity.id))
-                        .toggleStyle(.checkbox)
-                        .fixedSize()
-                        .accessibilityLabel("Show \(entity.name) label in menu bar")
-                    Toggle("Show unit", isOn: menuBarUnitBinding(for: entity.id))
-                        .toggleStyle(.checkbox)
-                        .fixedSize()
-                        .accessibilityLabel("Show \(entity.name) unit in menu bar")
-                    Spacer(minLength: 0)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            settingsControlRow("Icon") {
+                entityIconPicker(for: entity, configuration: configuration)
+            }
 
-                HStack(spacing: 8) {
-                    Stepper(
-                        "Decimals \(configuration.maximumFractionDigits)",
-                        value: menuBarDecimalsBinding(for: entity.id),
-                        in: 0...3
-                    )
-                    .fixedSize()
-                    .accessibilityLabel("\(entity.name) decimals")
-                    Picker("History", selection: menuBarHistoryRangeBinding(for: entity.id)) {
-                        ForEach(HistoryRange.allCases, id: \.rawValue) { range in
-                            Text(range.displayName).tag(range)
+            settingsControlRow("Chart range") {
+                Picker("Chart range", selection: menuBarHistoryRangeBinding(for: entity.id)) {
+                    Text("Auto").tag(HistoryRange?.none)
+                    ForEach(HistoryRange.allCases, id: \.rawValue) { range in
+                        Text(range.displayName).tag(HistoryRange?.some(range))
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 96)
+                .accessibilityLabel("\(entity.name) chart range")
+            }
+
+            if isPromoted {
+                settingsControlRow("Decimals") {
+                    Picker("Decimals", selection: menuBarDecimalsBinding(for: entity.id)) {
+                        ForEach(0...3, id: \.self) { digits in
+                            Text("\(digits)").tag(digits)
                         }
                     }
+                    .pickerStyle(.segmented)
                     .labelsHidden()
-                    .frame(width: 86)
-                    .accessibilityLabel("\(entity.name) default history range")
-                    Spacer(minLength: 0)
+                    .fixedSize()
+                    .accessibilityLabel("\(entity.name) decimals")
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
                 if configuration.style != .text && menuBarCanUseGaugeTotal(for: entity) {
                     menuBarTotalControls(for: entity, configuration: configuration)
                 }
@@ -2393,18 +2249,70 @@ public struct PerchHASettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// The entity's icon picker: the custom SF Symbol used everywhere this
+    /// value appears (dashboard row and menu bar), or Automatic for the
+    /// domain-derived symbol.
+    private func entityIconPicker(
+        for entity: DiscoveredEntity,
+        configuration: MenuBarItemConfiguration
+    ) -> some View {
+        Menu {
+            Button {
+                model.setCustomEntityIcon(entity.id, symbolName: nil)
+            } label: {
+                Label("Automatic", systemImage: perchHAEntityIconName(for: entity))
+            }
+            ForEach(PerchHAEntityIconCatalog.sections, id: \.title) { section in
+                Section(section.title) {
+                    ForEach(section.symbols, id: \.self) { symbol in
+                        Button {
+                            model.setCustomEntityIcon(entity.id, symbolName: symbol)
+                        } label: {
+                            Label(symbol, systemImage: symbol)
+                        }
+                    }
+                }
+            }
+        } label: {
+            Label(
+                configuration.customIconName ?? "Automatic",
+                systemImage: configuration.customIconName ?? perchHAEntityIconName(for: entity)
+            )
+        }
+        .fixedSize()
+        .accessibilityLabel("\(entity.name) icon, currently \(configuration.customIconName ?? "automatic")")
+    }
+
     /// Menu bar section: whether the entity is shown in the menu bar and its
     /// position there.
     private func menuBarSectionControls(for entity: DiscoveredEntity, isPromoted: Bool) -> some View {
-        HStack(spacing: 8) {
-            Toggle("Show in menu bar", isOn: menuBarVisibilityBinding(for: entity.id))
-                .toggleStyle(.checkbox)
-                .fixedSize()
-                .accessibilityLabel("Show \(entity.name) in menu bar")
-            if isPromoted {
-                menuBarMoveButtons(for: entity)
+        let configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entity.id)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Toggle("Show in menu bar", isOn: menuBarVisibilityBinding(for: entity.id))
+                    .fixedSize()
+                    .accessibilityLabel("Show \(entity.name) in menu bar")
+                if isPromoted {
+                    menuBarMoveButtons(for: entity)
+                }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if isPromoted {
+                HStack(spacing: 12) {
+                    Toggle("Show icon", isOn: entityIconVisibilityBinding(for: entity.id))
+                        .fixedSize()
+                        .accessibilityLabel("Show \(entity.name) icon in the menu bar")
+                    Toggle("Show label", isOn: menuBarLabelBinding(for: entity.id))
+                        .fixedSize()
+                        .accessibilityLabel("Show \(entity.name) label in menu bar")
+                    Toggle("Show unit", isOn: menuBarUnitBinding(for: entity.id))
+                        .fixedSize()
+                        .accessibilityLabel("Show \(entity.name) unit in menu bar")
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -2470,336 +2378,6 @@ public struct PerchHASettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Guided, jargon-free Buttons editor for an entity.
-    ///
-    /// Each button exposes only a Name field, a "What it does" picker (friendly
-    /// service labels grouped by domain), an optional Target picker, an "Ask
-    /// before running" toggle, reorder controls, and delete. When no service
-    /// metadata is available the picker and Add button are disabled with a short
-    /// hint, so the editor never falls back to raw Home Assistant fields.
-    private func customActionControls(for entity: DiscoveredEntity) -> some View {
-        let actions = model.customActions(for: entity)
-        let hasMetadata = !model.snapshot.serviceMetadata.isEmpty
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Text("One-tap buttons attached to this value.")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 8)
-                Button {
-                    addCustomAction(for: entity)
-                } label: {
-                    Label("Add button", systemImage: "plus.circle.fill")
-                        .labelStyle(.titleAndIcon)
-                        .lineLimit(1)
-                }
-                .buttonStyle(PerchHAIconButtonStyle(prominentOnHover: true))
-                .disabled(!hasMetadata)
-                .help(hasMetadata ? "Add button" : "Connect to Home Assistant to add a button")
-                .accessibilityLabel("Add button for \(entity.name)")
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            if !hasMetadata && actions.isEmpty {
-                Text("Connect to Home Assistant to add a button.")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            ForEach(Array(actions.enumerated()), id: \.element.id.rawValue) { index, action in
-                customActionEditor(
-                    action,
-                    entity: entity,
-                    hasMetadata: hasMetadata,
-                    canMoveUp: canReorderSelection && index > actions.startIndex,
-                    canMoveDown: canReorderSelection && index < actions.index(before: actions.endIndex)
-                )
-            }
-        }
-        .font(.caption)
-        .controlSize(.small)
-    }
-
-    private func customActionEditor(
-        _ action: EntityCustomAction,
-        entity: DiscoveredEntity,
-        hasMetadata: Bool,
-        canMoveUp: Bool,
-        canMoveDown: Bool
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                TextField("Name", text: customActionTitleBinding(for: action.id))
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("\(entity.name) button name")
-                customActionMoveButtons(
-                    for: action,
-                    entityName: entity.name,
-                    canMoveUp: canMoveUp,
-                    canMoveDown: canMoveDown
-                )
-                Button {
-                    model.removeCustomAction(action.id)
-                } label: {
-                    Image(systemName: "trash")
-                        .frame(width: 18, height: 18)
-                }
-                .buttonStyle(PerchHACircularIconButtonStyle())
-                .controlSize(.small)
-                .help("Delete button")
-                .accessibilityLabel("Delete \(action.title)")
-            }
-
-            settingsControlRow("What it does") {
-                customActionServicePicker(action, hasMetadata: hasMetadata)
-            }
-
-            settingsControlRow("Target") {
-                customActionTargetPicker(action)
-            }
-
-            Toggle("Ask before running", isOn: customActionConfirmationBinding(for: action.id))
-                .toggleStyle(.checkbox)
-                .fixedSize()
-                .accessibilityLabel("\(action.title) ask before running")
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    /// The "What it does" picker: friendly service labels grouped by domain, or
-    /// a single disabled placeholder when no metadata is available.
-    @ViewBuilder
-    private func customActionServicePicker(_ action: EntityCustomAction, hasMetadata: Bool) -> some View {
-        if hasMetadata {
-            Picker("What it does", selection: customActionServiceSelectionBinding(for: action.id)) {
-                let current = ServiceSelection(domain: action.action.domain, service: action.action.service)
-                if !metadataContains(current) {
-                    Text(PerchHAServiceLabel.friendlyLabel(domain: current.domain, service: current.service))
-                        .tag(current)
-                }
-                ForEach(metadataDomains, id: \.self) { domain in
-                    Section(PerchHAServiceLabel.domainTitle(domain)) {
-                        ForEach(metadataServices(for: domain), id: \.service) { metadata in
-                            Text(PerchHAServiceLabel.friendlyLabel(domain: domain, service: metadata.service))
-                                .tag(ServiceSelection(domain: domain, service: metadata.service))
-                        }
-                    }
-                }
-            }
-            .labelsHidden()
-            .frame(width: 200)
-            .accessibilityLabel("\(action.title) what it does")
-        } else {
-            Picker("What it does", selection: .constant(0)) {
-                Text("Connect to Home Assistant to choose…").tag(0)
-            }
-            .labelsHidden()
-            .frame(width: 200)
-            .disabled(true)
-            .accessibilityLabel("\(action.title) what it does")
-        }
-    }
-
-    /// The optional Target picker: discovered entities by friendly name, plus a
-    /// "None" choice.
-    private func customActionTargetPicker(_ action: EntityCustomAction) -> some View {
-        let entities = discoveredEntitiesForTarget
-        return Picker("Target", selection: customActionTargetSelectionBinding(for: action.id)) {
-            Text("None").tag(EntityID?.none)
-            if let current = action.action.targetEntityID,
-               !entities.contains(where: { $0.id == current }) {
-                Text(current.rawValue).tag(EntityID?.some(current))
-            }
-            ForEach(entities, id: \.id.rawValue) { entity in
-                Text(entity.name).tag(EntityID?.some(entity.id))
-            }
-        }
-        .labelsHidden()
-        .frame(width: 200)
-        .accessibilityLabel("\(action.title) target")
-    }
-
-    private var discoveredEntitiesForTarget: [DiscoveredEntity] {
-        model.snapshot.availableRooms.flatMap(\.entities)
-    }
-
-    private func metadataContains(_ selection: ServiceSelection) -> Bool {
-        model.snapshot.serviceMetadata.contains {
-            $0.domain == selection.domain && $0.service == selection.service
-        }
-    }
-
-    /// A combined domain+service choice for the "What it does" picker, so a
-    /// single selection sets both the action's `domain` and `service`.
-    private struct ServiceSelection: Hashable {
-        let domain: String
-        let service: String
-    }
-
-    private func customActionServiceSelectionBinding(for id: CustomActionID) -> Binding<ServiceSelection> {
-        Binding(
-            get: {
-                let action = model.customAction(id: id)
-                return ServiceSelection(
-                    domain: action?.action.domain ?? "",
-                    service: action?.action.service ?? ""
-                )
-            },
-            set: { selection in
-                model.setCustomActionService(id, domain: selection.domain, service: selection.service)
-            }
-        )
-    }
-
-    private func customActionTargetSelectionBinding(for id: CustomActionID) -> Binding<EntityID?> {
-        Binding(
-            get: {
-                model.customAction(id: id)?.action.targetEntityID
-            },
-            set: { targetEntityID in
-                updateCustomAction(id) { action in
-                    EntityCustomAction(
-                        id: action.id,
-                        entityID: action.entityID,
-                        title: action.title,
-                        action: ActionSpec(
-                            domain: action.action.domain,
-                            service: action.action.service,
-                            targetEntityID: targetEntityID,
-                            serviceData: action.action.serviceData
-                        ),
-                        requiresConfirmation: action.requiresConfirmation
-                    )
-                }
-            }
-        )
-    }
-
-    private func customActionMoveButtons(
-        for action: EntityCustomAction,
-        entityName: String,
-        canMoveUp: Bool,
-        canMoveDown: Bool
-    ) -> some View {
-        HStack(spacing: 2) {
-            Button {
-                model.moveCustomAction(action.id, direction: .up)
-            } label: {
-                Image(systemName: "chevron.up")
-                    .frame(width: 18, height: 18)
-            }
-            .buttonStyle(PerchHACircularIconButtonStyle())
-            .controlSize(.small)
-            .disabled(!canMoveUp)
-            .help(moveControlHelp(canMove: canMoveUp, boundaryReason: "Already first"))
-            .accessibilityLabel("Move \(action.title) earlier for \(entityName)")
-            .accessibilityHint(moveControlHelp(canMove: canMoveUp, boundaryReason: "Already first"))
-
-            Button {
-                model.moveCustomAction(action.id, direction: .down)
-            } label: {
-                Image(systemName: "chevron.down")
-                    .frame(width: 18, height: 18)
-            }
-            .buttonStyle(PerchHACircularIconButtonStyle())
-            .controlSize(.small)
-            .disabled(!canMoveDown)
-            .help(moveControlHelp(canMove: canMoveDown, boundaryReason: "Already last"))
-            .accessibilityLabel("Move \(action.title) later for \(entityName)")
-            .accessibilityHint(moveControlHelp(canMove: canMoveDown, boundaryReason: "Already last"))
-        }
-    }
-
-    private func addCustomAction(for entity: DiscoveredEntity) {
-        guard let firstDomain = metadataDomains.first,
-              let firstService = metadataServices(for: firstDomain).first else {
-            return
-        }
-        let action = EntityCustomAction(
-            id: nextCustomActionID(for: entity.id),
-            entityID: entity.id,
-            title: PerchHAServiceLabel.serviceTitle(firstService.service),
-            action: ActionSpec(
-                domain: firstDomain,
-                service: firstService.service,
-                targetEntityID: nil
-            )
-        )
-        model.setCustomAction(action)
-    }
-
-
-    private var metadataDomains: [String] {
-        Array(Set(model.snapshot.serviceMetadata.map(\.domain))).sorted()
-    }
-
-    private func metadataServices(for domain: String) -> [HAServiceMetadata] {
-        model.snapshot.serviceMetadata
-            .filter { $0.domain == domain }
-            .sorted { lhs, rhs in lhs.service < rhs.service }
-    }
-
-
-
-    private func nextCustomActionID(for entityID: EntityID) -> CustomActionID {
-        let base = "action-\(entityID.rawValue.replacingOccurrences(of: ".", with: "-"))"
-        var index = 1
-        var id = CustomActionID("\(base)-\(index)")
-        while model.customAction(id: id) != nil {
-            index += 1
-            id = CustomActionID("\(base)-\(index)")
-        }
-        return id
-    }
-
-    private func customActionTitleBinding(for id: CustomActionID) -> Binding<String> {
-        Binding(
-            get: {
-                model.customAction(id: id)?.title ?? ""
-            },
-            set: { title in
-                updateCustomAction(id) { action in
-                    EntityCustomAction(
-                        id: action.id,
-                        entityID: action.entityID,
-                        title: title,
-                        action: action.action,
-                        requiresConfirmation: action.requiresConfirmation
-                    )
-                }
-            }
-        )
-    }
-
-    private func customActionConfirmationBinding(for id: CustomActionID) -> Binding<Bool> {
-        Binding(
-            get: {
-                model.customAction(id: id)?.requiresConfirmation ?? false
-            },
-            set: { requiresConfirmation in
-                updateCustomAction(id) { action in
-                    EntityCustomAction(
-                        id: action.id,
-                        entityID: action.entityID,
-                        title: action.title,
-                        action: action.action,
-                        requiresConfirmation: requiresConfirmation
-                    )
-                }
-            }
-        )
-    }
-
-    private func updateCustomAction(
-        _ id: CustomActionID,
-        transform: (EntityCustomAction) -> EntityCustomAction
-    ) {
-        guard let action = model.customAction(id: id) else {
-            return
-        }
-        model.setCustomAction(transform(action))
-    }
-
     private func menuBarTotalControls(
         for entity: DiscoveredEntity,
         configuration: MenuBarItemConfiguration
@@ -2835,48 +2413,159 @@ public struct PerchHASettingsView: View {
         for entity: DiscoveredEntity,
         configuration: MenuBarItemConfiguration
     ) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let thresholds = configuration.thresholds
+        let steps = thresholds.steps.sorted { $0.value > $1.value }
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Toggle("Warning", isOn: menuBarWarningEnabledBinding(for: entity.id))
-                    .toggleStyle(.checkbox)
-                    .accessibilityLabel("\(entity.name) warning threshold")
-                if configuration.thresholds.warning != nil {
-                    Picker("Warning", selection: menuBarWarningDirectionBinding(for: entity.id)) {
-                        Text(ValueThresholdDirection.aboveOrEqual.displayName).tag(ValueThresholdDirection.aboveOrEqual)
-                        Text(ValueThresholdDirection.belowOrEqual.displayName).tag(ValueThresholdDirection.belowOrEqual)
+                Text("From each step's value upward the value wears the step's color; Base applies below every step.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button {
+                    let highest = steps.first?.value ?? 0
+                    var next = thresholds.steps
+                    next.append(ThresholdStep(value: highest + 10, color: ValueThresholds.criticalColor))
+                    model.setThresholds(entity.id, thresholds: ValueThresholds(steps: next, baseColor: thresholds.baseColor))
+                } label: {
+                    Label("Add threshold", systemImage: "plus.circle.fill")
+                        .labelStyle(.titleAndIcon)
+                        .lineLimit(1)
+                }
+                .buttonStyle(PerchHAIconButtonStyle(prominentOnHover: true))
+                .accessibilityLabel("Add threshold for \(entity.name)")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                thresholdStepRow(entity: entity, thresholds: thresholds, step: step, index: index)
+            }
+
+            // The Base row: the color below every step, like Grafana's Base.
+            HStack(spacing: 8) {
+                ColorPicker(
+                    "Base color",
+                    selection: thresholdBaseColorBinding(for: entity.id, thresholds: thresholds),
+                    supportsOpacity: false
+                )
+                .labelsHidden()
+                .frame(width: 34)
+                .accessibilityLabel("\(entity.name) base threshold color")
+                Text("Base")
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                if thresholds.baseColor != nil {
+                    Button {
+                        model.setThresholds(entity.id, thresholds: ValueThresholds(steps: thresholds.steps, baseColor: nil))
+                    } label: {
+                        Image(systemName: "arrow.counterclockwise")
+                            .frame(width: 18, height: 18)
                     }
-                    .frame(width: 68)
-                    .accessibilityLabel("\(entity.name) warning threshold direction")
-                    Stepper(
-                        "Warning \(menuBarNumberLabel(configuration.thresholds.warning?.value))",
-                        value: menuBarWarningValueBinding(for: entity.id),
-                        in: -100_000...100_000,
-                        step: 1
-                    )
-                    .accessibilityLabel("\(entity.name) warning threshold value")
+                    .buttonStyle(PerchHACircularIconButtonStyle())
+                    .controlSize(.small)
+                    .help("Reset base to the default tint")
+                    .accessibilityLabel("Reset \(entity.name) base threshold color")
                 }
             }
-            HStack(spacing: 8) {
-                Toggle("Critical", isOn: menuBarCriticalEnabledBinding(for: entity.id))
-                    .toggleStyle(.checkbox)
-                    .accessibilityLabel("\(entity.name) critical threshold")
-                if configuration.thresholds.critical != nil {
-                    Picker("Critical", selection: menuBarCriticalDirectionBinding(for: entity.id)) {
-                        Text(ValueThresholdDirection.aboveOrEqual.displayName).tag(ValueThresholdDirection.aboveOrEqual)
-                        Text(ValueThresholdDirection.belowOrEqual.displayName).tag(ValueThresholdDirection.belowOrEqual)
-                    }
-                    .frame(width: 68)
-                    .accessibilityLabel("\(entity.name) critical threshold direction")
-                    Stepper(
-                        "Critical \(menuBarNumberLabel(configuration.thresholds.critical?.value))",
-                        value: menuBarCriticalValueBinding(for: entity.id),
-                        in: -100_000...100_000,
-                        step: 1
-                    )
-                    .accessibilityLabel("\(entity.name) critical threshold value")
-                }
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// One threshold step row, Grafana style: `[color well] >= [value] [delete]`.
+    private func thresholdStepRow(
+        entity: DiscoveredEntity,
+        thresholds: ValueThresholds,
+        step: ThresholdStep,
+        index: Int
+    ) -> some View {
+        HStack(spacing: 8) {
+            ColorPicker(
+                "Threshold color",
+                selection: thresholdStepColorBinding(for: entity.id, thresholds: thresholds, step: step),
+                supportsOpacity: false
+            )
+            .labelsHidden()
+            .frame(width: 34)
+            .accessibilityLabel("\(entity.name) threshold \(index + 1) color")
+
+            Text("\u{2265}")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+
+            ThresholdBoundField(
+                placeholder: "value",
+                value: step.value,
+                onCommit: { newValue in
+                    guard let newValue else {
+                        return
+                    }
+                    var next = thresholds.steps
+                    if let position = next.firstIndex(of: step) {
+                        next[position] = ThresholdStep(value: newValue, color: step.color)
+                    }
+                    model.setThresholds(entity.id, thresholds: ValueThresholds(steps: next, baseColor: thresholds.baseColor))
+                }
+            )
+            .frame(width: 72)
+            .accessibilityLabel("\(entity.name) threshold \(index + 1) value")
+
+            Spacer(minLength: 0)
+
+            Button {
+                var next = thresholds.steps
+                if let position = next.firstIndex(of: step) {
+                    next.remove(at: position)
+                }
+                model.setThresholds(entity.id, thresholds: ValueThresholds(steps: next, baseColor: thresholds.baseColor))
+            } label: {
+                Image(systemName: "trash")
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(PerchHACircularIconButtonStyle())
+            .controlSize(.small)
+            .help("Delete threshold")
+            .accessibilityLabel("Delete \(entity.name) threshold \(index + 1)")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func thresholdStepColorBinding(
+        for id: EntityID,
+        thresholds: ValueThresholds,
+        step: ThresholdStep
+    ) -> Binding<Color> {
+        Binding(
+            get: {
+                PerchHATheme.color(for: step.color)
+            },
+            set: { newColor in
+                guard let accent = PerchHAAccentColor(newColor) else {
+                    return
+                }
+                var next = thresholds.steps
+                if let position = next.firstIndex(of: step) {
+                    next[position] = ThresholdStep(value: step.value, color: accent)
+                }
+                model.setThresholds(id, thresholds: ValueThresholds(steps: next, baseColor: thresholds.baseColor))
+            }
+        )
+    }
+
+    private func thresholdBaseColorBinding(
+        for id: EntityID,
+        thresholds: ValueThresholds
+    ) -> Binding<Color> {
+        Binding(
+            get: {
+                thresholds.baseColor.map(PerchHATheme.color(for:)) ?? PerchHATheme.accent
+            },
+            set: { newColor in
+                guard let accent = PerchHAAccentColor(newColor) else {
+                    return
+                }
+                model.setThresholds(id, thresholds: ValueThresholds(steps: thresholds.steps, baseColor: accent))
+            }
+        )
     }
 
     private func menuBarMoveButtons(for entity: DiscoveredEntity) -> some View {
@@ -2993,13 +2682,25 @@ public struct PerchHASettingsView: View {
         model.snapshot.selectionReorderAccessibilityHint(canMove: canMove, boundaryReason: boundaryReason)
     }
 
+    /// The Entities search binding. The field edits view-local state so every
+    /// keystroke stays instant; the model (whose query change rebuilds the whole
+    /// snapshot and re-renders every subscriber, including the open panel) is
+    /// updated after a short debounce instead of per keypress.
     private var selectionSearchBinding: Binding<String> {
         Binding(
             get: {
-                model.snapshot.selectionQuery
+                entitySearchText
             },
             set: { value in
-                model.updateSelectionQuery(value)
+                entitySearchText = value
+                searchDebounceTask?.cancel()
+                searchDebounceTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    guard !Task.isCancelled else {
+                        return
+                    }
+                    model.updateSelectionQuery(value)
+                }
             }
         )
     }
@@ -3136,7 +2837,7 @@ public struct PerchHASettingsView: View {
         )
     }
 
-    private func menuBarHistoryRangeBinding(for id: EntityID) -> Binding<HistoryRange> {
+    private func menuBarHistoryRangeBinding(for id: EntityID) -> Binding<HistoryRange?> {
         Binding(
             get: {
                 model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).defaultHistoryRange
@@ -3180,102 +2881,6 @@ public struct PerchHASettingsView: View {
             },
             set: { total in
                 model.setMenuBarAbsoluteTotal(id, total: max(1, total))
-            }
-        )
-    }
-
-    private func menuBarWarningEnabledBinding(for id: EntityID) -> Binding<Bool> {
-        Binding(
-            get: {
-                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).thresholds.warning != nil
-            },
-            set: { isEnabled in
-                let current = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).thresholds.warning
-                model.setMenuBarWarningThreshold(
-                    id,
-                    threshold: isEnabled
-                        ? ValueThreshold(value: current?.value ?? 80, direction: current?.direction ?? .aboveOrEqual)
-                        : nil
-                )
-            }
-        )
-    }
-
-    private func menuBarWarningValueBinding(for id: EntityID) -> Binding<Double> {
-        Binding(
-            get: {
-                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).thresholds.warning?.value ?? 80
-            },
-            set: { value in
-                let current = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).thresholds.warning
-                model.setMenuBarWarningThreshold(
-                    id,
-                    threshold: ValueThreshold(value: value, direction: current?.direction ?? .aboveOrEqual)
-                )
-            }
-        )
-    }
-
-    private func menuBarWarningDirectionBinding(for id: EntityID) -> Binding<ValueThresholdDirection> {
-        Binding(
-            get: {
-                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).thresholds.warning?.direction
-                    ?? .aboveOrEqual
-            },
-            set: { direction in
-                let current = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).thresholds.warning
-                model.setMenuBarWarningThreshold(
-                    id,
-                    threshold: ValueThreshold(value: current?.value ?? 80, direction: direction)
-                )
-            }
-        )
-    }
-
-    private func menuBarCriticalEnabledBinding(for id: EntityID) -> Binding<Bool> {
-        Binding(
-            get: {
-                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).thresholds.critical != nil
-            },
-            set: { isEnabled in
-                let current = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).thresholds.critical
-                model.setMenuBarCriticalThreshold(
-                    id,
-                    threshold: isEnabled
-                        ? ValueThreshold(value: current?.value ?? 90, direction: current?.direction ?? .aboveOrEqual)
-                        : nil
-                )
-            }
-        )
-    }
-
-    private func menuBarCriticalValueBinding(for id: EntityID) -> Binding<Double> {
-        Binding(
-            get: {
-                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).thresholds.critical?.value ?? 90
-            },
-            set: { value in
-                let current = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).thresholds.critical
-                model.setMenuBarCriticalThreshold(
-                    id,
-                    threshold: ValueThreshold(value: value, direction: current?.direction ?? .aboveOrEqual)
-                )
-            }
-        )
-    }
-
-    private func menuBarCriticalDirectionBinding(for id: EntityID) -> Binding<ValueThresholdDirection> {
-        Binding(
-            get: {
-                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).thresholds.critical?.direction
-                    ?? .aboveOrEqual
-            },
-            set: { direction in
-                let current = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).thresholds.critical
-                model.setMenuBarCriticalThreshold(
-                    id,
-                    threshold: ValueThreshold(value: current?.value ?? 90, direction: direction)
-                )
             }
         )
     }
@@ -3350,5 +2955,122 @@ private enum PerchHABoundsField {
 
     static func text(for value: Double) -> String {
         value == value.rounded() ? String(Int(value)) : String(value)
+    }
+}
+
+/// The curated SF Symbol catalog offered by the per-entity dashboard icon
+/// picker, grouped by home-automation theme. Symbols are limited to names
+/// available on macOS 13 so a picked icon always renders.
+public enum PerchHAEntityIconCatalog {
+    /// One themed group of the picker.
+    public struct Section: Sendable {
+        public let title: String
+        public let symbols: [String]
+    }
+
+    /// The picker's sections, in display order.
+    public static let sections: [Section] = [
+        Section(title: "Climate", symbols: [
+            "thermometer.medium", "thermometer.sun", "thermometer.snowflake", "humidity",
+            "wind", "snowflake", "flame", "drop", "drop.degreesign", "sun.max", "moon", "cloud.rain"
+        ]),
+        Section(title: "Energy & power", symbols: [
+            "bolt", "bolt.fill", "bolt.circle", "bolt.slash", "battery.100", "battery.50",
+            "battery.25", "powerplug", "poweroutlet.type.f", "gauge.with.dots.needle.67percent", "leaf", "ev.charger"
+        ]),
+        Section(title: "Lights & switches", symbols: [
+            "lightbulb", "lightbulb.fill", "lightbulb.2", "lamp.desk", "lamp.floor",
+            "lamp.ceiling", "light.recessed", "switch.2", "togglepower", "dial.low", "dial.high"
+        ]),
+        Section(title: "Security & access", symbols: [
+            "lock", "lock.open", "lock.shield", "key", "shield", "shield.checkered",
+            "eye", "video", "bell", "bell.badge", "exclamationmark.triangle", "hand.raised"
+        ]),
+        Section(title: "Doors, windows & covers", symbols: [
+            "door.left.hand.closed", "door.left.hand.open", "door.garage.closed", "door.garage.open",
+            "window.vertical.closed", "window.vertical.open", "blinds.vertical.closed", "blinds.horizontal.closed",
+            "curtains.closed", "curtains.open"
+        ]),
+        Section(title: "Rooms & appliances", symbols: [
+            "sofa", "bed.double", "bathtub", "shower", "toilet", "refrigerator", "oven",
+            "microwave", "dishwasher", "washer", "dryer", "stove", "sink", "chair.lounge"
+        ]),
+        Section(title: "Media & network", symbols: [
+            "tv", "hifispeaker", "homepod", "music.note", "speaker.wave.2", "wifi",
+            "wifi.router", "antenna.radiowaves.left.and.right", "network", "server.rack", "externaldrive", "printer"
+        ]),
+        Section(title: "Motion & presence", symbols: [
+            "figure.walk", "figure.run", "person", "person.2", "person.3", "pawprint",
+            "car", "bicycle", "location", "map", "house", "building.2"
+        ]),
+        Section(title: "Measurements", symbols: [
+            "gauge.medium", "speedometer", "chart.line.uptrend.xyaxis", "chart.bar", "waveform.path.ecg",
+            "timer", "clock", "calendar", "number", "percent", "ruler", "scalemass"
+        ]),
+        Section(title: "General", symbols: [
+            "sensor.tag.radiowaves.forward", "dot.radiowaves.left.and.right", "cpu", "memorychip",
+            "fanblades", "sparkles", "star", "heart", "checkmark.circle", "xmark.circle", "questionmark.circle", "info.circle"
+        ])
+    ]
+
+    /// Every symbol in the catalog, flattened in section order.
+    public static var allSymbols: [String] {
+        sections.flatMap(\.symbols)
+    }
+}
+
+/// A numeric threshold bound editor: commits on Return or focus loss, an empty
+/// field means an open bound, and non-numeric input restores the prior value.
+struct ThresholdBoundField: View {
+    let placeholder: String
+    let value: Double?
+    let onCommit: (Double?) -> Void
+
+    @State private var text: String = ""
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        TextField(placeholder, text: $text)
+            .textFieldStyle(.roundedBorder)
+            .multilineTextAlignment(.trailing)
+            .focused($isFocused)
+            .onAppear {
+                text = Self.label(for: value)
+            }
+            .onChange(of: value) { newValue in
+                if !isFocused {
+                    text = Self.label(for: newValue)
+                }
+            }
+            .onSubmit(commit)
+            .onChange(of: isFocused) { focused in
+                if !focused {
+                    commit()
+                }
+            }
+    }
+
+    private func commit() {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            onCommit(nil)
+            return
+        }
+        let normalized = trimmed.replacingOccurrences(of: ",", with: ".")
+        if let parsed = Double(normalized) {
+            onCommit(parsed)
+        } else {
+            text = Self.label(for: value)
+        }
+    }
+
+    private static func label(for value: Double?) -> String {
+        guard let value else {
+            return ""
+        }
+        if value == value.rounded() && abs(value) < 1_000_000_000 {
+            return String(Int(value))
+        }
+        return String(value)
     }
 }

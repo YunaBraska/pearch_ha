@@ -586,11 +586,10 @@ final class PerchHACoreTests: XCTestCase {
             .settingCriticalThreshold(nil)
         XCTAssertNil(cleared.absoluteTotal)
         XCTAssertNil(cleared.totalEntityID)
-        XCTAssertNil(cleared.thresholds.warning)
-        XCTAssertNil(cleared.thresholds.critical)
+        XCTAssertTrue(cleared.thresholds.steps.isEmpty)
         XCTAssertEqual(cleared.defaultHistoryRange, .day)
 
-        XCTAssertEqual(cleared.updating(defaultHistoryRange: .month).defaultHistoryRange, .month)
+        XCTAssertEqual(cleared.settingDefaultHistoryRange(.month).defaultHistoryRange, .month)
     }
 
     private func selectionRooms() -> [Room] {
@@ -1285,7 +1284,7 @@ final class PerchHACoreTests: XCTestCase {
             entity: entity("sensor.cpu", state: "95", unit: "%"),
             configuration: MenuBarItemConfiguration(
                 entityID: "sensor.cpu",
-                thresholds: ValueThresholds(critical: ValueThreshold(value: 90, direction: .aboveOrEqual))
+                thresholds: ValueThresholds(warning: nil, critical: ValueThreshold(value: 90, direction: .aboveOrEqual))
             )
         )
         guard case let .gauge(gauge) = presentation else {
@@ -1336,3 +1335,58 @@ final class PerchHACoreTests: XCTestCase {
     }
 }
 #endif
+
+extension PerchHACoreTests {
+    func test_t_threshold_steps_apply_highest_step_at_or_below_the_value() {
+        let thresholds = ValueThresholds(
+            steps: [
+                ThresholdStep(value: 90, color: ValueThresholds.criticalColor),
+                ThresholdStep(value: 70, color: ValueThresholds.warningColor)
+            ],
+            baseColor: ValueThresholds.okColor
+        )
+
+        XCTAssertEqual(thresholds.color(for: 95), ValueThresholds.criticalColor)
+        XCTAssertEqual(thresholds.color(for: 90), ValueThresholds.criticalColor, "steps are inclusive at their edge")
+        XCTAssertEqual(thresholds.color(for: 89), ValueThresholds.warningColor)
+        XCTAssertEqual(thresholds.color(for: 10), ValueThresholds.okColor, "below every step the base applies")
+
+        XCTAssertEqual(thresholds.severity(for: 95), .critical)
+        XCTAssertEqual(thresholds.severity(for: 89), .warning)
+        XCTAssertEqual(thresholds.severity(for: 10), .normal)
+    }
+
+    func test_t_threshold_without_base_or_matching_step_is_normal() {
+        let thresholds = ValueThresholds(steps: [ThresholdStep(value: 50, color: ValueThresholds.criticalColor)])
+        XCTAssertNil(thresholds.color(for: 10))
+        XCTAssertEqual(thresholds.severity(for: 10), .normal)
+    }
+
+    func test_t_threshold_severity_heuristic_classifies_custom_colors() {
+        XCTAssertEqual(ValueThresholds.severity(of: PerchHAAccentColor(red: 0.9, green: 0.1, blue: 0.1, alpha: 1)), .critical)
+        XCTAssertEqual(ValueThresholds.severity(of: PerchHAAccentColor(red: 0.95, green: 0.75, blue: 0.1, alpha: 1)), .warning)
+        XCTAssertEqual(ValueThresholds.severity(of: PerchHAAccentColor(red: 0.2, green: 0.6, blue: 0.9, alpha: 1)), .normal)
+    }
+
+    func test_t_legacy_warning_critical_thresholds_decode_into_steps() throws {
+        let json = #"{"warning":{"value":70,"direction":"aboveOrEqual"},"critical":{"value":90,"direction":"aboveOrEqual"}}"#
+        let thresholds = try JSONDecoder().decode(ValueThresholds.self, from: Data(json.utf8))
+
+        XCTAssertEqual(thresholds.severity(for: 95), .critical)
+        XCTAssertEqual(thresholds.severity(for: 75), .warning)
+        XCTAssertEqual(thresholds.severity(for: 10), .normal)
+
+        // Round trip through the new shape preserves the semantics.
+        let reencoded = try JSONDecoder().decode(ValueThresholds.self, from: JSONEncoder().encode(thresholds))
+        XCTAssertEqual(reencoded, thresholds)
+    }
+
+    func test_t_legacy_below_or_equal_threshold_becomes_base_color() throws {
+        let json = #"{"critical":{"value":15,"direction":"belowOrEqual"}}"#
+        let thresholds = try JSONDecoder().decode(ValueThresholds.self, from: Data(json.utf8))
+
+        XCTAssertEqual(thresholds.severity(for: 10), .critical, "at or below the legacy edge stays critical")
+        XCTAssertEqual(thresholds.severity(for: 15), .critical)
+        XCTAssertEqual(thresholds.severity(for: 50), .normal)
+    }
+}

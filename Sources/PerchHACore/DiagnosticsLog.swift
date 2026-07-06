@@ -16,6 +16,9 @@ public enum PerchHADiagnosticEventKind: String, Equatable, Sendable, CaseIterabl
     case recovered
     /// A background periodic refresh failed and the model backed off.
     case refreshFailed
+    /// The live WebSocket update stream ended and the model is reconnecting it
+    /// in the background with backoff.
+    case liveUpdatesInterrupted
 
     /// An SF Symbol name suitable for the Diagnostics list.
     public var systemImage: String {
@@ -24,6 +27,7 @@ public enum PerchHADiagnosticEventKind: String, Equatable, Sendable, CaseIterabl
         case .reconnecting: "arrow.triangle.2.circlepath"
         case .recovered: "checkmark.circle.fill"
         case .refreshFailed: "arrow.clockwise.circle"
+        case .liveUpdatesInterrupted: "dot.radiowaves.left.and.right"
         }
     }
 }

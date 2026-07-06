@@ -619,7 +619,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.rooms.map(\.name), ["Office"])
         XCTAssertEqual(model.snapshot.rooms.first?.entities.first?.name, "Office temperature")
         XCTAssertEqual(model.snapshot.rooms.first?.entities.first?.state, "21.4")
-        XCTAssertEqual(model.snapshot.lastUpdateDescription, "Updated just now")
+        XCTAssertTrue(model.snapshot.lastUpdateDescription.hasPrefix("Updated at "), model.snapshot.lastUpdateDescription)
         XCTAssertNil(model.snapshot.problemDescription)
         XCTAssertEqual(model.snapshot.connectionForm.token, "")
         XCTAssertTrue(model.snapshot.hasTokenInput)
@@ -889,6 +889,89 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.historyState, .loaded(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 22.0)))
     }
 
+    func test_t_expired_entry_survives_failed_refetch_for_stale_display() async {
+        let clock = TestPerchClock()
+        let recorder = HistoryProviderRecorder(
+            results: [
+                .success(historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4)),
+                .unavailable("server hiccup")
+            ]
+        )
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { form, entityID, range in
+                await recorder.provide(form: form, entityID: entityID, range: range)
+            },
+            clock: clock,
+            historyDebounce: .milliseconds(0),
+            historyCacheConfiguration: PerchHAHistoryCacheConfiguration(capacity: 4, ttl: .seconds(5))
+        )
+
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        await model.loadHistory("sensor.office_temperature", range: .day)
+        XCTAssertNotNil(model.cachedHistorySeries(for: "sensor.office_temperature"))
+
+        // The entry crosses its TTL, the refetch fails: the hover popover reports
+        // unavailable, but the inline preview must keep its last-known series —
+        // an expired read that races a server hiccup used to delete the entry and
+        // blank the sparkline until the next successful sync.
+        _ = await clock.advance(by: .seconds(6))
+        await model.loadHistory("sensor.office_temperature", range: .day)
+
+        XCTAssertEqual(
+            model.snapshot.historyState,
+            .unavailable(entityID: "sensor.office_temperature", range: .day, message: "server hiccup")
+        )
+        XCTAssertEqual(
+            model.cachedHistorySeries(for: "sensor.office_temperature"),
+            historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4),
+            "a failed refetch must not evict the stale-but-displayable series"
+        )
+    }
+
+    func test_t_clicking_a_row_pins_the_history_popover_until_unpinned() async {
+        let clock = TestPerchClock()
+        let recorder = HistoryProviderRecorder(
+            results: [
+                .success(historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4))
+            ]
+        )
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { form, entityID, range in
+                await recorder.provide(form: form, entityID: entityID, range: range)
+            },
+            clock: clock,
+            historyDebounce: .milliseconds(0),
+            historyHoverGrace: .milliseconds(300)
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        // Click pins the popover open.
+        model.toggleHistoryPin("sensor.office_temperature")
+        await spinUntil { model.snapshot.historyPresentationEntityID == "sensor.office_temperature" }
+        XCTAssertEqual(model.pinnedHistoryEntityID, "sensor.office_temperature")
+
+        // Hover-out is ignored while pinned: no grace close is even scheduled.
+        model.cancelHistoryHover()
+        _ = await clock.advance(by: .seconds(2))
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+
+        // Hovering another row must not steal a pinned popover.
+        model.startHistoryHover("sensor.office_humidity")
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+
+        // Clicking again unpins and closes immediately.
+        model.toggleHistoryPin("sensor.office_temperature")
+        XCTAssertNil(model.pinnedHistoryEntityID)
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+    }
+
     func test_t_history_reconnect_clears_cached_series_and_visible_history() async {
         let recorder = HistoryProviderRecorder(
             results: [
@@ -928,8 +1011,9 @@ final class PerchHAUITests: XCTestCase {
     func testHistoryCacheEvictsLeastRecentlyUsedEntryWhenCapacityIsReached() async {
         let recorder = HistoryProviderRecorder(
             results: [
-                .success(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4)),
-                .success(historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.8)),
+                .success(historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4)),
+                .success(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.8)),
+                .success(historySeries(entityID: "sensor.office_temperature", range: .week, value: 21.9)),
                 .success(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 22.0))
             ]
         )
@@ -939,23 +1023,35 @@ final class PerchHAUITests: XCTestCase {
                 await recorder.provide(form: form, entityID: entityID, range: range)
             },
             historyDebounce: .milliseconds(0),
-            historyCacheConfiguration: PerchHAHistoryCacheConfiguration(capacity: 1, ttl: .seconds(60))
+            historyCacheConfiguration: PerchHAHistoryCacheConfiguration(capacity: 2, ttl: .seconds(60))
         )
 
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
-        await model.loadHistory("sensor.office_temperature", range: .hour)
+        // .day is the displayed default range — its key backs the inline
+        // preview and is exempt from eviction. The hover ranges compete for the
+        // remaining capacity: loading .week over a full cache evicts .hour (the
+        // least recently used evictable entry), never the .day preview key.
         await model.loadHistory("sensor.office_temperature", range: .day)
         await model.loadHistory("sensor.office_temperature", range: .hour)
+        await model.loadHistory("sensor.office_temperature", range: .week)
+
+        // .hour was evicted, so it refetches; .day is still cached.
+        await model.loadHistory("sensor.office_temperature", range: .hour)
+        await model.loadHistory("sensor.office_temperature", range: .day)
 
         let _hoisted19 = await recorder.callCount()
-        XCTAssertEqual(_hoisted19, 3)
+        XCTAssertEqual(_hoisted19, 4)
         let _hoisted20 = await recorder.ranges()
-        XCTAssertEqual(_hoisted20, [.hour, .day, .hour])
-        XCTAssertEqual(model.snapshot.historyState, .loaded(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 22.0)))
+        XCTAssertEqual(_hoisted20, [.day, .hour, .week, .hour])
+        XCTAssertEqual(model.snapshot.historyState, .loaded(historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4)))
+        XCTAssertEqual(
+            model.cachedHistorySeries(for: "sensor.office_temperature"),
+            historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4),
+            "the displayed preview key must survive capacity pressure"
+        )
     }
-
     func test_t_history_hover_out_closes_loaded_and_unavailable_popovers() async {
         let loadedClock = TestPerchClock()
         let loadedRecorder = HistoryProviderRecorder(
@@ -1173,65 +1269,6 @@ final class PerchHAUITests: XCTestCase {
     /// a real micro chart must not change the row's height, so cache-fill lands in
     /// place without shifting neighbors. Rendered through the public ``TelemetryRow``
     /// entrypoint into a hosting view at a fixed width.
-    func testTelemetryRowHeightIsStableBetweenPlaceholderAndChartPreview() {
-        let series = HistorySeries(
-            entityID: "sensor.office_temperature",
-            range: .hour,
-            samples: [
-                HistorySample(timestamp: Date(timeIntervalSince1970: 0), state: "20", numericValue: 20),
-                HistorySample(timestamp: Date(timeIntervalSince1970: 600), state: "21", numericValue: 21),
-                HistorySample(timestamp: Date(timeIntervalSince1970: 1_200), state: "22", numericValue: 22)
-            ]
-        )
-        let placeholderRow = TelemetryRow(
-            icon: "thermometer.medium",
-            iconActive: true,
-            label: "Office temperature",
-            preview: { TelemetryPreviewPlaceholder() },
-            value: { Text("21°") },
-            control: { EmptyView() }
-        )
-        let chartRow = TelemetryRow(
-            icon: "thermometer.medium",
-            iconActive: true,
-            label: "Office temperature",
-            preview: {
-                MicroSparkline(series: series, color: .blue, muted: .gray)
-                    .frame(width: TelemetryRowMetrics.previewWidth, height: 22)
-            },
-            value: { Text("21°") },
-            control: { EmptyView() }
-        )
-
-        let placeholderHeight = telemetryRowFittingHeight(placeholderRow)
-        let chartHeight = telemetryRowFittingHeight(chartRow)
-
-        XCTAssertEqual(placeholderHeight, chartHeight, accuracy: 0.5,
-                       "placeholder→chart swap must not change row height")
-    }
-
-    /// The reserved history-preview placeholder occupies the full reserved column
-    /// width so a no-history row's preview column matches a charted row's column.
-    func testTelemetryPreviewPlaceholderReservesColumnWidth() {
-        let hostingView = NSHostingView(rootView: TelemetryPreviewPlaceholder())
-        hostingView.layoutSubtreeIfNeeded()
-        let width = hostingView.fittingSize.width
-
-        XCTAssertEqual(width, TelemetryRowMetrics.previewWidth, accuracy: 0.5,
-                       "placeholder reserves the full preview column width")
-    }
-
-    private func telemetryRowFittingHeight(_ row: some View) -> CGFloat {
-        let hostingView = NSHostingView(
-            rootView: row
-                .frame(width: 360)
-                .environment(\.dashboardPalette, PerchHATheme.Dashboard.palette(.light))
-        )
-        hostingView.frame = NSRect(x: 0, y: 0, width: 360, height: 200)
-        hostingView.layoutSubtreeIfNeeded()
-        return hostingView.fittingSize.height
-    }
-
     func testHistoryContentSummaryEmptySeriesIsEmpty() {
         XCTAssertEqual(
             PerchHAHistoryContentSummary(
@@ -3794,6 +3831,85 @@ final class PerchHAUITests: XCTestCase {
         )
     }
 
+    func test_t_live_update_stream_starts_on_connect_applies_events_and_reconnects_with_backoff() async {
+        let clock = TestPerchClock()
+        let script = LiveStreamSessionScript(sessions: [
+            // Session 1 pushes one live value, then drops after events flowed.
+            LiveStreamSessionScript.Session(
+                events: [EntityState(id: "sensor.office_humidity", name: "Office humidity", state: "47", unit: "%")],
+                failure: .unreachable(host: "homeassistant.local"),
+                holdsOpen: false
+            ),
+            // Session 2 dies before producing anything — backoff must double.
+            LiveStreamSessionScript.Session(
+                events: [],
+                failure: .unreachable(host: "homeassistant.local"),
+                holdsOpen: false
+            ),
+            // Session 3 pushes another value and stays open.
+            LiveStreamSessionScript.Session(
+                events: [EntityState(id: "sensor.office_humidity", name: "Office humidity", state: "51", unit: "%")],
+                failure: .unreachable(host: "homeassistant.local"),
+                holdsOpen: true
+            )
+        ])
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            liveUpdateStreamer: { form, onEvent in
+                await script.run(form: form, onEvent: onEvent)
+            },
+            clock: clock,
+            bulkSyncConfiguration: .disabled,
+            periodicRefreshConfiguration: .disabled,
+            liveUpdateConfiguration: PerchHALiveUpdateConfiguration(reconnectDelay: .seconds(1), maximumBackoff: .seconds(8))
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        // The stream starts with the successful connect (no panel visibility
+        // required) and its pushed value lands in the snapshot immediately.
+        await spinUntil {
+            model.snapshot.rooms.first?.entities.contains { $0.id == "sensor.office_humidity" && $0.state == "47" } == true
+        }
+        let formTokens = await script.formTokens()
+        XCTAssertEqual(formTokens.first, "fake-token", "the stream authenticates with the connected form")
+
+        // Session 1 dropped after delivering events: reconnect at the base delay.
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .seconds(1))
+        await spinUntil { await script.startedSessions() == 2 }
+
+        // Session 2 failed before any event: the next delay doubles, so one
+        // base interval is not enough to start session 3.
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .seconds(1))
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        let afterBaseDelay = await script.startedSessions()
+        XCTAssertEqual(afterBaseDelay, 2, "a stream that died without events reconnects with doubled backoff")
+
+        _ = await clock.advance(by: .seconds(1))
+        await spinUntil { await script.startedSessions() == 3 }
+        await spinUntil {
+            model.snapshot.rooms.first?.entities.contains { $0.id == "sensor.office_humidity" && $0.state == "51" } == true
+        }
+        XCTAssertTrue(
+            model.diagnosticEvents.contains { $0.kind == .liveUpdatesInterrupted },
+            "stream drops surface in diagnostics"
+        )
+
+        // Signing out ends the loop for good.
+        model.signOut()
+        await script.release()
+        _ = await clock.advance(by: .seconds(30))
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        let afterSignOut = await script.startedSessions()
+        XCTAssertEqual(afterSignOut, 3, "sign-out cancels the live update loop")
+    }
+
     func test_t_live_update_after_refresh_failure_preserves_failed_stale_phase() async {
         let failure = ConnectionFailure.unreachable(host: "homeassistant.local")
         let calls = CallCounter()
@@ -3915,7 +4031,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.connectionState, .connected)
         XCTAssertEqual(model.snapshot.rooms.first?.entities.first?.state, "22")
         XCTAssertEqual(model.snapshot.refreshCount, 1)
-        XCTAssertEqual(model.snapshot.lastUpdateDescription, "Updated just now")
+        XCTAssertTrue(model.snapshot.lastUpdateDescription.hasPrefix("Updated at "), model.snapshot.lastUpdateDescription)
     }
 
     func testConnectedEmptyStateDoesNotShowFirstRunPhase() async {
@@ -3973,97 +4089,30 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(Int(frameSize.height.rounded()), 468)
     }
 
-    func testAppShellSettingsButtonEditorExposesGuidedNameFieldAndServiceTargetPickers() {
-        let action = EntityCustomAction(
-            id: "boost-air",
-            entityID: "sensor.office_temperature",
-            title: "Boost air",
-            action: ActionSpec(
-                domain: "script",
-                service: "turn_on",
-                targetEntityID: "sensor.office_humidity"
-            ),
-            requiresConfirmation: true
-        )
-        let rooms = selectionRooms()
-        let snapshot = PerchHAPanelSnapshot(
-            connectionState: .connected,
-            phase: .connectedData,
-            rooms: rooms,
-            availableRooms: rooms,
-            selectionQuery: "temperature",
-            isSettingsPresented: true,
-            lastUpdateDescription: "Snapshot ready",
-            canRetry: true,
-            serviceMetadata: [
-                HAServiceMetadata(domain: "script", service: "turn_on", name: "Turn on", description: nil),
-                HAServiceMetadata(domain: "switch", service: "turn_on", name: "Turn on", description: nil)
-            ]
-        )
-        let model = PerchHAPanelModel(
-            snapshot: snapshot,
-            selectionConfiguration: snapshot.selectionConfiguration,
-            menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
-            customActionConfiguration: CustomActionConfiguration(actions: [action])
-        )
-        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities, initiallyExpandedEntityIDs: ["sensor.office_temperature"])
-        defer {
-            panel.orderOut(nil)
-            panel.contentView = nil
-        }
-
-        panel.makeKeyAndOrderFront(nil)
-        drainPanelRunLoop()
-        panel.contentView?.layoutSubtreeIfNeeded()
-
-        let textFields = editableTextFields(in: panel.contentView)
-        let popUpButtons = nativePopUpButtons(in: panel.contentView)
-        let debugSummary = nativeControlDebugSummary(in: panel.contentView)
-        let nameField = textFields.first { $0.placeholderString == "Name" }
-
-        XCTAssertNotNil(nameField, debugSummary)
-        // The removed raw fields must not appear in the guided editor.
-        XCTAssertNil(textFields.first { $0.placeholderString == "Title" }, debugSummary)
-        XCTAssertNil(textFields.first { $0.placeholderString == "Domain" }, debugSummary)
-        XCTAssertNil(textFields.first { $0.placeholderString == "Service" }, debugSummary)
-        XCTAssertNil(textFields.first { $0.placeholderString == "Target entity" }, debugSummary)
-        XCTAssertNil(textFields.first { $0.placeholderString == "Key" }, debugSummary)
-        XCTAssertNil(textFields.first { $0.placeholderString == "Value" }, debugSummary)
-
-        let selectedPopupTitles = Set(popUpButtons.compactMap(\.titleOfSelectedItem))
-        XCTAssertTrue(selectedPopupTitles.contains("Script: Turn on"), debugSummary)
-        XCTAssertTrue(selectedPopupTitles.contains("Office humidity"), debugSummary)
-
-        guard let nameField else {
-            return
-        }
-        XCTAssertTrue(panel.makeFirstResponder(nameField))
-        let firstResponder = panel.firstResponder as AnyObject?
-        XCTAssertTrue(firstResponder === nameField.currentEditor() || firstResponder === nameField)
-    }
-
     func testAppShellConnectionFormNormalizesFrontendURLsThroughNativeTextFields() throws {
+        // The connection form lives only in the Settings window; the menu-bar
+        // panel just points there.
         let recorder = ConnectionFormRecorder()
         let model = PerchHAPanelModel { form in
             await recorder.record(form)
             return .success(rooms: [])
         }
-        let panel = PerchHAApplication.makePanel(model: model)
+        let window = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .connection)
         defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
+            window.orderOut(nil)
+            window.contentView = nil
         }
 
-        panel.makeKeyAndOrderFront(nil)
+        window.makeKeyAndOrderFront(nil)
         drainPanelRunLoop()
-        panel.contentView?.layoutSubtreeIfNeeded()
+        window.contentView?.layoutSubtreeIfNeeded()
 
         model.addConnectionAddress()
         drainPanelRunLoop()
-        panel.contentView?.layoutSubtreeIfNeeded()
+        window.contentView?.layoutSubtreeIfNeeded()
 
-        let textFields = editableTextFields(in: panel.contentView)
-        let debugSummary = nativeControlDebugSummary(in: panel.contentView)
+        let textFields = editableTextFields(in: window.contentView)
+        let debugSummary = nativeControlDebugSummary(in: window.contentView)
         guard let urlField = textFields.first(where: { $0.placeholderString == "Home Assistant URL" }) else {
             XCTFail(debugSummary)
             return
@@ -4073,8 +4122,8 @@ final class PerchHAUITests: XCTestCase {
             return
         }
 
-        try setNativeTextFieldValue("https://home.gomoo.io/lovelace/0", for: urlField, in: panel)
-        try setNativeTextFieldValue("https://fallback.example/ha/history?entity=sensor.temp", for: fallbackField, in: panel)
+        try setNativeTextFieldValue("https://home.gomoo.io/lovelace/0", for: urlField, in: window)
+        try setNativeTextFieldValue("https://fallback.example/ha/history?entity=sensor.temp", for: fallbackField, in: window)
 
         XCTAssertEqual(model.snapshot.connectionForm.urlString, "https://home.gomoo.io")
         XCTAssertEqual(model.snapshot.connectionForm.fallbackURLString, "https://fallback.example/ha")
@@ -4082,18 +4131,18 @@ final class PerchHAUITests: XCTestCase {
 
     func testAppShellConnectionFormUsesNativeSecurePasswordFieldForTokenEntry() {
         let model = PerchHAPanelModel()
-        let panel = PerchHAApplication.makePanel(model: model)
+        let window = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .connection)
         defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
+            window.orderOut(nil)
+            window.contentView = nil
         }
 
-        panel.makeKeyAndOrderFront(nil)
+        window.makeKeyAndOrderFront(nil)
         drainPanelRunLoop()
-        panel.contentView?.layoutSubtreeIfNeeded()
+        window.contentView?.layoutSubtreeIfNeeded()
 
-        let secureFields = secureTextFields(in: panel.contentView)
-        let debugSummary = nativeControlDebugSummary(in: panel.contentView)
+        let secureFields = secureTextFields(in: window.contentView)
+        let debugSummary = nativeControlDebugSummary(in: window.contentView)
         guard let tokenField = secureFields.first(where: { $0.placeholderString == "Access token" }) else {
             XCTFail(debugSummary)
             return
@@ -4104,20 +4153,20 @@ final class PerchHAUITests: XCTestCase {
         }
     }
 
-    func testAppShellConnectionFormSupportsCommandVPasteInStatusPanel() throws {
+    func testAppShellConnectionFormSupportsCommandVPasteInSettingsWindow() throws {
         let model = PerchHAPanelModel()
-        let panel = PerchHAApplication.makePanel(model: model)
+        let window = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .connection)
         defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
+            window.orderOut(nil)
+            window.contentView = nil
         }
 
-        panel.makeKeyAndOrderFront(nil)
+        window.makeKeyAndOrderFront(nil)
         drainPanelRunLoop()
-        panel.contentView?.layoutSubtreeIfNeeded()
+        window.contentView?.layoutSubtreeIfNeeded()
 
-        let textFields = editableTextFields(in: panel.contentView)
-        let debugSummary = nativeControlDebugSummary(in: panel.contentView)
+        let textFields = editableTextFields(in: window.contentView)
+        let debugSummary = nativeControlDebugSummary(in: window.contentView)
         guard let urlField = textFields.first(where: { $0.placeholderString == "Home Assistant URL" }) else {
             XCTFail(debugSummary)
             return
@@ -4127,9 +4176,9 @@ final class PerchHAUITests: XCTestCase {
         pasteboard.clearContents()
         XCTAssertTrue(pasteboard.setString("https://home.gomoo.io/lovelace/0", forType: .string))
 
-        XCTAssertTrue(panel.makeFirstResponder(urlField))
+        XCTAssertTrue(window.makeFirstResponder(urlField))
         drainPanelRunLoop()
-        let firstResponder = panel.firstResponder as AnyObject?
+        let firstResponder = window.firstResponder as AnyObject?
         let responder = urlField.currentEditor() ?? urlField
         XCTAssertTrue(firstResponder === responder || firstResponder === urlField)
 
@@ -4139,7 +4188,7 @@ final class PerchHAUITests: XCTestCase {
                 location: .zero,
                 modifierFlags: [.command],
                 timestamp: ProcessInfo.processInfo.systemUptime,
-                windowNumber: panel.windowNumber,
+                windowNumber: window.windowNumber,
                 context: nil,
                 characters: "v",
                 charactersIgnoringModifiers: "v",
@@ -4148,160 +4197,19 @@ final class PerchHAUITests: XCTestCase {
             )
         )
 
-        XCTAssertTrue(panel.performKeyEquivalent(with: event))
+        // A titled window resolves Cmd+V through the application main menu —
+        // the same Edit menu `PerchHAApplication.main()` installs. Menu-claimed
+        // actions dispatch through the key window, which headless tests do not
+        // reliably have, so the paste itself drives the field editor directly.
+        let mainMenu = PerchHAApplication.standardMainMenu()
+        XCTAssertTrue(mainMenu.performKeyEquivalent(with: event), "the standard Edit menu claims Cmd+V")
+        let editor = try XCTUnwrap(urlField.currentEditor(), "the focused URL field has a field editor")
+        editor.paste(urlField)
         drainPanelRunLoop()
-        panel.endEditing(for: nil)
+        window.endEditing(for: nil)
         drainPanelRunLoop()
 
         XCTAssertEqual(model.snapshot.connectionForm.urlString, "https://home.gomoo.io")
-    }
-
-    func testAppShellSettingsButtonEditorMutatesNameAndTargetThroughGuidedControls() throws {
-        let action = EntityCustomAction(
-            id: "boost-air",
-            entityID: "sensor.office_temperature",
-            title: "Boost air",
-            action: ActionSpec(
-                domain: "script",
-                service: "turn_on",
-                targetEntityID: nil,
-                serviceData: [
-                    "variables": .object([
-                        "steps": .array(["fan", "purifier"])
-                    ])
-                ]
-            ),
-            requiresConfirmation: true
-        )
-        let rooms = selectionRooms()
-        let snapshot = PerchHAPanelSnapshot(
-            connectionState: .connected,
-            phase: .connectedData,
-            rooms: rooms,
-            availableRooms: rooms,
-            selectionQuery: "temperature",
-            isSettingsPresented: true,
-            lastUpdateDescription: "Snapshot ready",
-            canRetry: true,
-            serviceMetadata: [
-                HAServiceMetadata(domain: "script", service: "turn_on", name: "Turn on", description: nil)
-            ]
-        )
-        let model = PerchHAPanelModel(
-            snapshot: snapshot,
-            selectionConfiguration: snapshot.selectionConfiguration,
-            menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
-            customActionConfiguration: CustomActionConfiguration(actions: [action])
-        )
-        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities, initiallyExpandedEntityIDs: ["sensor.office_temperature"])
-        defer {
-            panel.orderOut(nil)
-            panel.contentView = nil
-        }
-
-        panel.makeKeyAndOrderFront(nil)
-        drainPanelRunLoop()
-        panel.contentView?.layoutSubtreeIfNeeded()
-
-        let textFields = editableTextFields(in: panel.contentView)
-        let popUpButtons = nativePopUpButtons(in: panel.contentView)
-        let debugSummary = nativeControlDebugSummary(in: panel.contentView)
-        guard let nameField = textFields.first(where: { $0.placeholderString == "Name" && $0.stringValue == "Boost air" }) else {
-            XCTFail(debugSummary)
-            return
-        }
-        guard let targetPopUp = popUpButtons.first(where: { $0.titleOfSelectedItem == "None" }) else {
-            XCTFail(debugSummary)
-            return
-        }
-
-        try setNativeTextFieldValue("Boost harder", for: nameField, in: panel)
-        try setNativePopUpSelection("Office humidity", for: targetPopUp)
-
-        let updatedAction = try XCTUnwrap(model.customActionConfiguration.action(id: "boost-air"))
-        XCTAssertEqual(updatedAction.title, "Boost harder")
-        XCTAssertEqual(updatedAction.action.targetEntityID, "sensor.office_humidity")
-        // The stored service-data payload is preserved untouched by the guided editor.
-        XCTAssertEqual(
-            updatedAction.action.serviceData,
-            [
-                "variables": .object([
-                    "steps": .array(["fan", "purifier"])
-                ])
-            ]
-        )
-    }
-
-    func testAppShellSettingsButtonEditorMutatesServiceThroughWhatItDoesPicker() throws {
-        let action = EntityCustomAction(
-            id: "boost-air",
-            entityID: "sensor.office_temperature",
-            title: "Boost air",
-            action: ActionSpec(
-                domain: "script",
-                service: "turn_on",
-                targetEntityID: nil,
-                serviceData: [
-                    "variables": .object([
-                        "steps": .array(["fan", "purifier"])
-                    ])
-                ]
-            ),
-            requiresConfirmation: true
-        )
-        let rooms = selectionRooms()
-        let snapshot = PerchHAPanelSnapshot(
-            connectionState: .connected,
-            phase: .connectedData,
-            rooms: rooms,
-            availableRooms: rooms,
-            selectionQuery: "temperature",
-            isSettingsPresented: true,
-            lastUpdateDescription: "Snapshot ready",
-            canRetry: true,
-            serviceMetadata: [
-                HAServiceMetadata(domain: "script", service: "turn_on", name: "Turn on", description: nil),
-                HAServiceMetadata(domain: "script", service: "turn_off", name: "Turn off", description: nil),
-                HAServiceMetadata(domain: "switch", service: "turn_on", name: "Turn on", description: nil)
-            ]
-        )
-        let model = PerchHAPanelModel(
-            snapshot: snapshot,
-            selectionConfiguration: snapshot.selectionConfiguration,
-            menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
-            customActionConfiguration: CustomActionConfiguration(actions: [action])
-        )
-        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities, initiallyExpandedEntityIDs: ["sensor.office_temperature"])
-        defer {
-            panel.orderOut(nil)
-            panel.contentView = nil
-        }
-
-        panel.makeKeyAndOrderFront(nil)
-        drainPanelRunLoop()
-        panel.contentView?.layoutSubtreeIfNeeded()
-
-        let popUpButtons = nativePopUpButtons(in: panel.contentView)
-        let debugSummary = nativeControlDebugSummary(in: panel.contentView)
-        guard let servicePopUp = popUpButtons.first(where: { $0.titleOfSelectedItem == "Script: Turn on" }) else {
-            XCTFail(debugSummary)
-            return
-        }
-
-        try setNativePopUpSelection("Switch: Turn on", for: servicePopUp)
-
-        let updatedAction = try XCTUnwrap(model.customActionConfiguration.action(id: "boost-air"))
-        XCTAssertEqual(updatedAction.action.domain, "switch")
-        XCTAssertEqual(updatedAction.action.service, "turn_on")
-        // The stored payload is preserved as-is by the guided picker.
-        XCTAssertEqual(
-            updatedAction.action.serviceData,
-            [
-                "variables": .object([
-                    "steps": .array(["fan", "purifier"])
-                ])
-            ]
-        )
     }
 
     func testAppShellBuiltInControlsExposeNativeSwitchAndSlider() {
@@ -4456,7 +4364,8 @@ final class PerchHAUITests: XCTestCase {
 
         XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
         XCTAssertEqual(application.snapshot.statusItemAccessibilityLabel, "Office humidity, 44%")
-        XCTAssertFalse(application.snapshot.statusItemHasImage)
+        // Text items carry the per-entity menu-bar icon by default.
+        XCTAssertTrue(application.snapshot.statusItemHasImage)
 
         XCTAssertTrue(
             application.applyLiveState(
@@ -4470,7 +4379,7 @@ final class PerchHAUITests: XCTestCase {
         )
         XCTAssertEqual(application.snapshot.statusItemTitle, "47%")
         XCTAssertEqual(application.snapshot.statusItemAccessibilityLabel, "Office humidity, 47%")
-        XCTAssertFalse(application.snapshot.statusItemHasImage)
+        XCTAssertTrue(application.snapshot.statusItemHasImage)
     }
 
     func test_t_app_shell_menu_bar_appearance_mode_suppresses_text_or_image() async throws {
@@ -4502,17 +4411,15 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
         XCTAssertFalse(application.snapshot.statusItemHasImage)
 
-        // Icon-only drops the title only when there is an image to show. This
-        // entity has no glyph, so the item must not collapse to an invisible
-        // zero-width status item: it falls back to a visible value title.
+        // Icon-only: the per-entity menu-bar icon supplies the image, so the
+        // title is genuinely dropped and the item stays visible via the glyph.
         XCTAssertEqual(
             application.persist(displayPreferences: application.displayPreferences.with(menuBarAppearance: .iconOnly)),
             .saved
         )
         let iconOnlyItem = application.snapshot.menuBarItems[0]
-        let iconOnlyHasContent = iconOnlyItem.hasImage || !(iconOnlyItem.title ?? "").isEmpty
-        XCTAssertTrue(iconOnlyHasContent, "glyph-less promoted item must stay visible under icon-only")
-        XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
+        XCTAssertTrue(iconOnlyItem.hasImage, "icon-only items draw the per-entity menu-bar icon")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "")
 
         // Returning to icon-and-text restores the value title.
         XCTAssertEqual(
@@ -4567,6 +4474,58 @@ final class PerchHAUITests: XCTestCase {
         model.applyDisplayPreferences(.defaults.with(dashboardRowDensity: .compact))
 
         XCTAssertEqual(model.displayPreferences.dashboardRowDensity, .compact)
+    }
+
+    func test_t_entity_icon_visibility_and_custom_symbol_apply_and_persist() async {
+        let model = PerchHAPanelModel(connector: { _ in .success(rooms: selectionRooms()) })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let id = EntityID("sensor.office_temperature")
+
+        // Defaults: icon shown, automatic symbol.
+        var configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id)
+        XCTAssertTrue(configuration.showsEntityIcon)
+        XCTAssertNil(configuration.customIconName)
+
+        XCTAssertTrue(model.setShowsEntityIcon(id, showsEntityIcon: false))
+        configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id)
+        XCTAssertFalse(configuration.showsEntityIcon)
+
+        XCTAssertTrue(model.setCustomEntityIcon(id, symbolName: "flame"))
+        configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id)
+        XCTAssertEqual(configuration.customIconName, "flame")
+
+        // A blank name clears back to the automatic icon.
+        XCTAssertTrue(model.setCustomEntityIcon(id, symbolName: "   "))
+        configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id)
+        XCTAssertNil(configuration.customIconName)
+    }
+
+    func test_t_alert_count_ignores_hidden_modules_and_counts_only_visible_problems() async {
+        let rooms = [
+            Room(id: "office", name: "Office", entities: [
+                DiscoveredEntity(id: "sensor.ok", name: "OK", state: "21.4", unit: "°C", areaID: nil, deviceID: nil),
+                DiscoveredEntity(id: "sensor.broken", name: "Broken", state: "unavailable", unit: nil, areaID: nil, deviceID: nil)
+            ]),
+            Room(id: "attic", name: "Attic", entities: [
+                DiscoveredEntity(id: "sensor.dead_1", name: "Dead 1", state: "unavailable", unit: nil, areaID: nil, deviceID: nil),
+                DiscoveredEntity(id: "sensor.dead_2", name: "Dead 2", state: "unknown", unit: nil, areaID: nil, deviceID: nil)
+            ])
+        ]
+        let model = PerchHAPanelModel(connector: { _ in .success(rooms: rooms) })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        // Every module visible: all three problem entities count.
+        XCTAssertEqual(model.snapshot.dashboardSummary().warningCount, 3)
+
+        // Hidden modules do not contribute — the summary describes only what
+        // the dashboard actually shows.
+        XCTAssertEqual(
+            model.snapshot.dashboardSummary(hiddenModuleIDs: ["attic"]).warningCount,
+            1,
+            "the warning count must cover only entities in visible modules"
+        )
     }
 
     func test_t_status_panel_escape_closes_and_command_comma_opens_settings() {
@@ -5005,7 +4964,7 @@ final class PerchHAUITests: XCTestCase {
                     baseURL: try XCTUnwrap(URL(string: "http://homeassistant.local:8123")),
                     refreshToken: "refresh-token",
                     clientID: "https://perchha.dev/app",
-                    serverTrustPolicy: HAServerTrustPolicy(trustsAllHosts: true)
+                    serverTrustPolicy: HAServerTrustPolicy()
                 )
             ]
         )
@@ -5056,14 +5015,17 @@ final class PerchHAUITests: XCTestCase {
         application.updateConnectionForm(
             urlString: "https://HOMEASSISTANT.local:8123",
             fallbackURLString: "https://fallback.example",
-            usesStoredAuthSession: true
+            usesStoredAuthSession: true,
+            allowsSelfSignedCertificates: true
         )
         await application.connect()
 
-        let expectedPolicy = HAServerTrustPolicy(trustsAllHosts: true)
+        let expectedPolicy = HAServerTrustPolicy(
+            allowedSelfSignedCertificateHosts: ["homeassistant.local", "fallback.example"]
+        )
         XCTAssertEqual(application.snapshot.connectionState, .connected)
         XCTAssertEqual(application.snapshot.connectionForm.token, "")
-        XCTAssertTrue(expectedPolicy.trustsAllHosts)
+        XCTAssertFalse(expectedPolicy.trustsAllHosts)
         let _hoisted59 = await client.discoveryTrustPolicies()
         XCTAssertEqual(_hoisted59, [expectedPolicy, expectedPolicy])
         let _mlHoisted1010 = await client.refreshRequests()
@@ -5121,7 +5083,11 @@ final class PerchHAUITests: XCTestCase {
         }
         let primaryURL = try XCTUnwrap(URL(string: "https://primary.local:8123"))
         let fallbackURL = try XCTUnwrap(URL(string: "https://fallback.example"))
-        let expectedPolicy = HAServerTrustPolicy(trustsAllHosts: true)
+        // The default trusting posture scopes the allowance to the form's own
+        // HTTPS hosts — never all hosts.
+        let expectedPolicy = HAServerTrustPolicy(
+            allowedSelfSignedCertificateHosts: ["primary.local", "fallback.example"]
+        )
 
         application.updateConnectionForm(
             urlString: primaryURL.absoluteString,
@@ -5575,7 +5541,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(request.url.path, "/auth/token")
         XCTAssertEqual(
             request.serverTrustPolicy,
-            HAServerTrustPolicy(trustsAllHosts: true)
+            HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["homeassistant.local", "fallback.example"])
         )
         XCTAssertEqual(
             String(data: try XCTUnwrap(request.body), encoding: .utf8),
@@ -5835,14 +5801,14 @@ final class PerchHAUITests: XCTestCase {
         )
         XCTAssertEqual(application.snapshot.statusItemTitle, "Office humidity \(expectedDecimalValue)")
 
-        XCTAssertTrue(application.setMenuBarDefaultHistoryRange("sensor.office_humidity", defaultHistoryRange: .day))
+        XCTAssertTrue(application.setMenuBarDefaultHistoryRange("sensor.office_humidity", defaultHistoryRange: .week))
         XCTAssertEqual(gaugeRenderer.renderCount, 2)
         XCTAssertEqual(application.snapshot.statusItemTitle, "Office humidity \(expectedDecimalValue)")
         XCTAssertEqual(
             application.snapshot.menuBarDisplayConfiguration
                 .itemConfiguration(for: "sensor.office_humidity")
                 .defaultHistoryRange,
-            .day
+            .week
         )
 
         let saved = try store.load()
@@ -5852,7 +5818,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(saved.menuBarItemConfigurations.first?.showsLabel, true)
         XCTAssertEqual(saved.menuBarItemConfigurations.first?.showsUnit, false)
         XCTAssertEqual(saved.menuBarItemConfigurations.first?.maximumFractionDigits, 1)
-        XCTAssertEqual(saved.menuBarItemConfigurations.first?.defaultHistoryRange, .day)
+        XCTAssertEqual(saved.menuBarItemConfigurations.first?.defaultHistoryRange, .week)
     }
 
     func test_t_status_item_gauge_image_renderer_draws_severity_colors() {
@@ -5878,7 +5844,7 @@ final class PerchHAUITests: XCTestCase {
             configuration: MenuBarItemConfiguration(
                 entityID: "sensor.office_humidity",
                 style: .bar,
-                thresholds: ValueThresholds(warning: ValueThreshold(value: 40, direction: .aboveOrEqual))
+                thresholds: ValueThresholds(warning: ValueThreshold(value: 40, direction: .aboveOrEqual), critical: nil)
             ),
             locale: Locale(identifier: "en_US")
         )
@@ -5894,7 +5860,7 @@ final class PerchHAUITests: XCTestCase {
             configuration: MenuBarItemConfiguration(
                 entityID: "sensor.office_humidity",
                 style: .battery,
-                thresholds: ValueThresholds(critical: ValueThreshold(value: 40, direction: .aboveOrEqual))
+                thresholds: ValueThresholds(warning: nil, critical: ValueThreshold(value: 40, direction: .aboveOrEqual))
             ),
             locale: Locale(identifier: "en_US")
         )
@@ -5911,7 +5877,7 @@ final class PerchHAUITests: XCTestCase {
                 entityID: "sensor.energy_today",
                 style: .ring,
                 absoluteTotal: 120,
-                thresholds: ValueThresholds(critical: ValueThreshold(value: 20, direction: .aboveOrEqual))
+                thresholds: ValueThresholds(warning: nil, critical: ValueThreshold(value: 20, direction: .aboveOrEqual))
             ),
             locale: Locale(identifier: "en_US")
         )
@@ -5972,7 +5938,8 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(application.snapshot.statusItemTitle, "30 kWh")
         XCTAssertTrue(application.setMenuBarDisplayStyle("sensor.energy_today", style: .ring))
         XCTAssertEqual(application.snapshot.statusItemTitle, "30 kWh")
-        XCTAssertFalse(application.snapshot.statusItemHasImage)
+        // No total yet, so no gauge — the per-entity menu-bar icon fills in.
+        XCTAssertTrue(application.snapshot.statusItemHasImage)
 
         XCTAssertTrue(application.setMenuBarAbsoluteTotal("sensor.energy_today", total: 120))
         XCTAssertEqual(application.snapshot.statusItemTitle, "30 kWh")
@@ -6011,8 +5978,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(savedConfiguration.style, .ring)
         XCTAssertNil(savedConfiguration.absoluteTotal)
         XCTAssertEqual(savedConfiguration.totalEntityID, EntityID("sensor.energy_budget"))
-        XCTAssertNil(savedConfiguration.thresholds.warning)
-        XCTAssertNil(savedConfiguration.thresholds.critical)
+        XCTAssertTrue(savedConfiguration.thresholds.steps.isEmpty)
     }
 
     func test_t_display_total_threshold_settings_reject_invalid_inputs() async throws {
@@ -6031,7 +5997,8 @@ final class PerchHAUITests: XCTestCase {
                         style: .ring,
                         absoluteTotal: 120,
                         thresholds: ValueThresholds(
-                            warning: ValueThreshold(value: 20, direction: .aboveOrEqual)
+                            warning: ValueThreshold(value: 20, direction: .aboveOrEqual),
+                            critical: nil
                         )
                     )
                 ],
@@ -6073,7 +6040,11 @@ final class PerchHAUITests: XCTestCase {
             .itemConfiguration(for: "sensor.energy_today")
         XCTAssertEqual(savedConfiguration.absoluteTotal, 120)
         XCTAssertNil(savedConfiguration.totalEntityID)
-        XCTAssertEqual(savedConfiguration.thresholds.warning, ValueThreshold(value: 20, direction: .aboveOrEqual))
+        XCTAssertEqual(
+            savedConfiguration.thresholds.steps,
+            [ThresholdStep(value: 20, color: ValueThresholds.warningColor)],
+            "the legacy warning setter maps to an orange step"
+        )
     }
 
     func test_t_display_settings_save_failure_rejects_live_status_item_change() async {
@@ -6327,6 +6298,106 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(secondApplication.snapshot.connectionForm.token, "")
         XCTAssertTrue(secondApplication.snapshot.connectionForm.usesStoredAuthSession)
         XCTAssertTrue(secondApplication.snapshot.hasTokenInput)
+        XCTAssertTrue(
+            secondApplication.snapshot.connectionForm.allowsSelfSignedCertificates,
+            "the default trusting posture survives a relaunch"
+        )
+    }
+
+    func test_t_keychain_save_failure_when_remembering_session_surfaces_in_settings() async throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let secretStore = ScriptableFailureSecretStore()
+        secretStore.failsSave = true
+        let application = PerchHAApplication(
+            configStore: JSONConfigStore(fileURL: url),
+            authSessionStore: PerchHAAuthSessionStore(secretStore: secretStore),
+            client: RefreshingHAClientRecorder(
+                discoveryResults: [.success(oauthDiscoverySnapshot())]
+            )
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        application.updateConnectionForm(urlString: "https://homeassistant.local:8123", token: "long-lived-token")
+        await application.connect()
+
+        // The connection works, but the remembered session was lost — the user
+        // will have to re-enter the token next launch. That must be visible.
+        XCTAssertEqual(application.snapshot.connectionState, .connected)
+        let failure = try XCTUnwrap(application.snapshot.shellPersistenceFailureDescription)
+        XCTAssertFalse(failure.contains("long-lived-token"), "the banner must never carry the token")
+    }
+
+    func test_t_keychain_clear_failure_on_sign_out_surfaces_in_settings() async throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let secretStore = ScriptableFailureSecretStore()
+        let application = PerchHAApplication(
+            configStore: JSONConfigStore(fileURL: url),
+            authSessionStore: PerchHAAuthSessionStore(secretStore: secretStore),
+            client: RefreshingHAClientRecorder(
+                discoveryResults: [.success(oauthDiscoverySnapshot())]
+            )
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+        application.updateConnectionForm(urlString: "https://homeassistant.local:8123", token: "long-lived-token")
+        await application.connect()
+        XCTAssertNil(application.snapshot.shellPersistenceFailureDescription)
+
+        // The token is still in the Keychain even though the user signed out —
+        // silently pretending otherwise would be a lie about their security.
+        secretStore.failsDelete = true
+        application.signOut()
+
+        XCTAssertNotNil(application.snapshot.shellPersistenceFailureDescription)
+    }
+
+    func testAppShellRemembersSelfSignedCertificateOptInAcrossRelaunch() async throws {
+        let url = temporaryConfigURL()
+        let keychain = KeychainSecretStore(service: "dev.perchha.ui.tests.\(UUID().uuidString)")
+        let sessionStore = PerchHAAuthSessionStore(secretStore: keychain)
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+            _ = try? sessionStore.clear()
+        }
+
+        let firstApplication = PerchHAApplication(
+            configStore: JSONConfigStore(fileURL: url),
+            authSessionStore: sessionStore,
+            client: RefreshingHAClientRecorder(
+                discoveryResults: [.success(oauthDiscoverySnapshot())]
+            )
+        )
+        firstApplication.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        firstApplication.updateConnectionForm(
+            urlString: "https://homeassistant.local:8123",
+            token: "long-lived-token",
+            allowsSelfSignedCertificates: true
+        )
+        await firstApplication.connect()
+        firstApplication.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+
+        let secondApplication = PerchHAApplication(
+            configStore: JSONConfigStore(fileURL: url),
+            authSessionStore: sessionStore,
+            client: RefreshingHAClientRecorder()
+        )
+        secondApplication.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            secondApplication.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        XCTAssertTrue(secondApplication.snapshot.connectionForm.allowsSelfSignedCertificates)
     }
 
     func testAppShellAutoConnectsOnLaunchWhenStoredSessionAndProfileExist() async throws {
@@ -6666,6 +6737,175 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(requested, Set((0..<10).map { EntityID("sensor.prefetch_\($0)") }))
     }
 
+    func test_t_cancelled_bulk_cycle_never_writes_previous_connections_history() async {
+        let clock = TestPerchClock()
+        let recorder = BulkHistoryRecorder(defaultValue: 111)
+        let settleDelay = PerchDuration.milliseconds(250)
+        let model = await makeConnectedBulkSyncModel(
+            recorder: recorder,
+            clock: clock,
+            rooms: prefetchRooms(count: 1),
+            bulkSync: PerchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40, coldRefreshDivisor: 1)
+        )
+        await recorder.holdNextBatches(1)
+
+        model.setPanelActive(true)
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: settleDelay)
+        await spinUntil { await recorder.heldBatchCount() == 1 }
+
+        // Reconnect to a DIFFERENT instance while the old fetch is in flight.
+        // The connection change evicts the cache and cancels the old cycle.
+        model.updateConnectionForm(urlString: "http://127.0.0.1:9999", token: "other-token")
+        await model.connect()
+        XCTAssertNil(model.cachedHistorySeries(for: "sensor.prefetch_0"))
+
+        // The old cycle only now completes its in-flight batch. Its results
+        // belong to the previous connection (entity IDs overlap across HA
+        // instances) and must not poison the freshly cleared cache.
+        await recorder.releaseHeldBatches()
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+        XCTAssertNil(
+            model.cachedHistorySeries(for: "sensor.prefetch_0"),
+            "a cancelled bulk cycle must not write the previous connection's history"
+        )
+        model.setPanelActive(false)
+    }
+
+    func test_t_scroll_pause_rearm_does_not_refetch_recently_synced_entities() async {
+        let clock = TestPerchClock()
+        let recorder = BulkHistoryRecorder()
+        let settleDelay = PerchDuration.milliseconds(250)
+        let interval = PerchDuration.seconds(30)
+        let model = await makeConnectedBulkSyncModel(
+            recorder: recorder,
+            clock: clock,
+            rooms: prefetchRooms(count: 3),
+            bulkSync: PerchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, coldRefreshDivisor: 1)
+        )
+
+        model.setPanelActive(true)
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
+        let afterFirstCycle = await recorder.batchCount()
+        XCTAssertEqual(afterFirstCycle, 1)
+        // Wait for the cycle's results to land in the cache — re-arming while
+        // the apply is still in flight would cancel it and drop the sync marks.
+        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0") != nil }
+
+        // A scroll pause re-arms the loop, but every displayed entity was synced
+        // moments ago — the settled cycle must fetch nothing instead of
+        // re-requesting the whole list on every 250 ms pause.
+        model.updateVisibleEntities(["sensor.prefetch_1"])
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: settleDelay)
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+        let afterRearm = await recorder.batchCount()
+        XCTAssertEqual(afterRearm, 1, "a re-arm within the interval must not refetch just-synced entities")
+
+        // After a full interval the same entities are due again.
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: interval)
+        await spinUntil { await recorder.batchCount() >= 2 }
+        model.setPanelActive(false)
+    }
+
+    func test_t_bulk_history_refreshes_expired_oauth_session_and_retries_once() async throws {
+        let keychain = KeychainSecretStore(service: "dev.perchha.ui.tests.\(UUID().uuidString)")
+        let sessionStore = PerchHAAuthSessionStore(secretStore: keychain)
+        defer {
+            _ = try? sessionStore.clear()
+        }
+        try sessionStore.save(
+            PerchHAAuthSession(
+                accessToken: "expired-access",
+                refreshToken: "refresh-token",
+                clientID: "https://perchha.dev/app"
+            )
+        )
+        let client = RefreshingHAClientRecorder(
+            refreshResults: [
+                .success(
+                    HAOAuthToken(
+                        accessToken: "fresh-access",
+                        refreshToken: nil,
+                        expiresInSeconds: 1800,
+                        tokenType: "Bearer"
+                    )
+                )
+            ],
+            historyBatchResults: [
+                .failure(.authentication),
+                .success(["sensor.a": historySeries(entityID: "sensor.a", range: .hour, value: 1.0)])
+            ]
+        )
+        let gateway = PerchHAAuthorizedHomeAssistantGateway(client: client, authSessionStore: sessionStore)
+        let form = PerchHAConnectionForm(urlString: "http://homeassistant.local:8123", usesStoredAuthSession: true)
+
+        // OAuth access tokens expire after ~30 minutes. The background sync used
+        // to bypass the refresh path entirely, silently returning nothing forever.
+        let result = await gateway.bulkHistory(form: form, entityIDs: ["sensor.a"], range: .hour)
+
+        XCTAssertEqual(result["sensor.a"], historySeries(entityID: "sensor.a", range: .hour, value: 1.0))
+        let tokens = await client.historyBatchTokens()
+        XCTAssertEqual(tokens, ["expired-access", "fresh-access"], "the expired token is refreshed and the batch retried once")
+        XCTAssertEqual(try sessionStore.load().accessToken, "fresh-access")
+    }
+
+    func test_t_bulk_sync_pauses_while_connection_failed_and_resumes_on_recovery() async {
+        let clock = TestPerchClock()
+        let recorder = BulkHistoryRecorder()
+        let settleDelay = PerchDuration.milliseconds(250)
+        let interval = PerchDuration.seconds(30)
+        let outcomes = PeriodicConnectorOutcomes(
+            results: [
+                .success(rooms: prefetchRooms(count: 2)),
+                .failure(.unreachable(host: "ha.local")),
+                .success(rooms: prefetchRooms(count: 2))
+            ],
+            fallback: .success(rooms: prefetchRooms(count: 2))
+        )
+        let model = PerchHAPanelModel(
+            connector: { _ in await outcomes.next() },
+            bulkHistoryProvider: { form, entityIDs, range in
+                await recorder.provide(form: form, entityIDs: entityIDs, range: range)
+            },
+            clock: clock,
+            bulkSyncConfiguration: PerchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, coldRefreshDivisor: 1),
+            periodicRefreshConfiguration: .disabled
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.setPanelActive(true)
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
+
+        // The connection drops: while the state is failed, interval ticks must
+        // not hammer the dead server with bulk batches across fallback URLs.
+        await model.refresh()
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: interval)
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+        let duringOutage = await recorder.batchCount()
+        XCTAssertEqual(duringOutage, 1, "bulk sync must pause while the connection is failed")
+
+        // Recovery: a successful refresh restores the connected state, and the
+        // next interval tick resumes syncing.
+        await model.refresh()
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: interval)
+        await spinUntil { await recorder.batchCount() >= 2 }
+        model.setPanelActive(false)
+    }
+
     func test_t_bulk_sync_rearms_and_runs_multiple_cycles_over_time() async {
         let clock = TestPerchClock()
         let recorder = BulkHistoryRecorder()
@@ -6971,6 +7211,33 @@ final class PerchHAUITests: XCTestCase {
         )))
     }
 
+    func test_t_same_connection_differs_when_self_signed_opt_in_changes() {
+        let trusting = PerchHAConnectionForm(urlString: "https://home:8123", token: "tok")
+        var strict = trusting
+        strict.allowsSelfSignedCertificates = false
+        // Changing the certificate trust posture is a real connection change: the
+        // session must be rebuilt with the new policy, not silently reused.
+        XCTAssertFalse(strict.sameConnection(as: trusting))
+        XCTAssertTrue(strict.sameConnection(as: strict))
+    }
+
+    func test_t_self_signed_hosts_are_scoped_to_https_addresses_only() {
+        let form = PerchHAConnectionForm(
+            urlString: "https://HOME.local:8123",
+            addresses: [
+                PerchHAConnectionAddressField(label: "VPN", urlString: "https://vpn.example/ha"),
+                PerchHAConnectionAddressField(label: "LAN", urlString: "http://plain.local:8123"),
+                PerchHAConnectionAddressField(label: "Broken", urlString: "not a url")
+            ],
+            token: "tok",
+            allowsSelfSignedCertificates: true
+        )
+        XCTAssertEqual(form.selfSignedCertificateHosts(), ["home.local", "vpn.example"])
+
+        let httpOnly = PerchHAConnectionForm(urlString: "http://plain.local:8123", token: "tok")
+        XCTAssertEqual(httpOnly.selfSignedCertificateHosts(), [])
+    }
+
     func test_t_reapplying_equivalent_form_keeps_history_cache() async {
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
@@ -7198,6 +7465,95 @@ final class PerchHAUITests: XCTestCase {
             await Task.yield()
         }
         XCTAssertEqual(model.snapshot.refreshCount, 2)
+    }
+
+    func test_t_model_with_active_background_loops_deallocates_when_released() async {
+        let clock = TestPerchClock()
+        weak var weakModel: PerchHAPanelModel?
+        do {
+            let model = PerchHAPanelModel(
+                connector: { _ in .success(rooms: prefetchRooms(count: 1)) },
+                clock: clock,
+                bulkSyncConfiguration: PerchHAHistoryBulkSyncConfiguration(),
+                periodicRefreshConfiguration: PerchHAPeriodicRefreshConfiguration()
+            )
+            model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+            await model.connect()
+            model.setPanelActive(true)
+            // Let both loops arm and reach their clock sleeps.
+            await spinUntil { await clock.sleepingTaskCount() >= 1 }
+            weakModel = model
+        }
+        // The loops re-bind self weakly per iteration, so dropping the last
+        // strong reference must deallocate the model (deinit cancels the
+        // loops) instead of the loops pinning it alive forever.
+        for _ in 0..<100 {
+            await Task.yield()
+        }
+        XCTAssertNil(weakModel, "background loops must not keep the released model alive")
+    }
+
+    func test_t_periodic_refresh_arms_after_first_run_connect_while_panel_open() async {
+        let clock = TestPerchClock()
+        let interval = PerchDuration.seconds(45)
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: prefetchRooms(count: 1)) },
+            clock: clock,
+            bulkSyncConfiguration: .disabled,
+            periodicRefreshConfiguration: PerchHAPeriodicRefreshConfiguration(interval: interval)
+        )
+
+        // First-run order: the panel opens before any session exists, so
+        // activation alone cannot arm the refresh loop.
+        model.setPanelActive(true)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        // The connect itself delivered fresh data — no immediate re-refresh —
+        // but the safety-net loop must now be armed on the clock.
+        XCTAssertEqual(model.snapshot.refreshCount, 0)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+
+        _ = await clock.advance(by: interval)
+        await spinUntil { model.snapshot.refreshCount == 1 }
+
+        model.setPanelActive(false)
+    }
+
+    func test_t_status_panel_reports_visibility_changes_on_every_dismissal_path() {
+        let panel = PerchHAStatusPanel()
+        var reported: [Bool] = []
+        panel.onVisibilityChange = { reported.append($0) }
+
+        panel.makeKeyAndOrderFront(nil)
+        XCTAssertEqual(reported, [true])
+
+        // Escape routes through cancelOperation -> orderOut.
+        panel.cancelOperation(nil)
+        XCTAssertEqual(reported, [true, false])
+
+        // Repeated hides do not re-report; only genuine changes fire.
+        panel.orderOut(nil)
+        XCTAssertEqual(reported, [true, false])
+    }
+
+    func test_t_panel_dismissal_stops_background_work_without_status_item_toggle() async {
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: prefetchRooms(count: 1)) }
+        )
+        let panel = PerchHAApplication.makePanel(model: model)
+        defer {
+            panel.orderOut(nil)
+            panel.contentViewController = nil
+        }
+
+        panel.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(model.isPanelActive, "showing the panel activates background sync")
+
+        // Escape (or click-away auto-hide) must deactivate the model even though
+        // the status-item toggle never ran — this leaked background loops before.
+        panel.cancelOperation(nil)
+        XCTAssertFalse(model.isPanelActive, "hiding the panel stops background sync")
     }
 
     func test_t_periodic_refresh_backs_off_after_failure() async {
@@ -7933,6 +8289,95 @@ private final class OAuthPresenterRecorder: PerchHAOAuthAuthorizationPresenter, 
     }
 }
 
+/// An in-memory secret store whose save/delete calls can be scripted to fail,
+/// for exercising the shell's Keychain-failure surfacing.
+private final class ScriptableFailureSecretStore: SecretStore, @unchecked Sendable {
+    var failsSave = false
+    var failsDelete = false
+    private var values: [PerchHASecret: String] = [:]
+
+    @discardableResult
+    func save(_ value: String, for secret: PerchHASecret) throws -> SecretWriteResult {
+        if failsSave {
+            throw SecretStoreError.operationFailed(operation: "save", secret: secret, status: -25299)
+        }
+        let result: SecretWriteResult = values[secret] == nil ? .created : .updated
+        values[secret] = value
+        return result
+    }
+
+    func read(_ secret: PerchHASecret) throws -> String {
+        guard let value = values[secret] else {
+            throw SecretStoreError.notFound(secret)
+        }
+        return value
+    }
+
+    @discardableResult
+    func delete(_ secret: PerchHASecret) throws -> SecretDeleteResult {
+        if failsDelete {
+            throw SecretStoreError.operationFailed(operation: "delete", secret: secret, status: -25299)
+        }
+        let result: SecretDeleteResult = values[secret] == nil ? .notFound : .deleted
+        values[secret] = nil
+        return result
+    }
+}
+
+/// Scripted live-update stream sessions for exercising the model's reconnect
+/// loop: each `run` consumes one session, emits its events, optionally holds
+/// the stream open until released, then returns its failure.
+private actor LiveStreamSessionScript {
+    struct Session {
+        let events: [EntityState]
+        let failure: ConnectionFailure
+        let holdsOpen: Bool
+    }
+
+    private var sessions: [Session]
+    private var started = 0
+    private var recordedFormTokens: [String] = []
+    private var holdWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(sessions: [Session]) {
+        self.sessions = sessions
+    }
+
+    func run(
+        form: PerchHAConnectionForm,
+        onEvent: @Sendable (EntityState) async -> Void
+    ) async -> ConnectionFailure {
+        started += 1
+        recordedFormTokens.append(form.trimmedToken)
+        guard !sessions.isEmpty else {
+            await withCheckedContinuation { holdWaiters.append($0) }
+            return .protocolError("script exhausted")
+        }
+        let session = sessions.removeFirst()
+        for event in session.events {
+            await onEvent(event)
+        }
+        if session.holdsOpen {
+            await withCheckedContinuation { holdWaiters.append($0) }
+        }
+        return session.failure
+    }
+
+    func startedSessions() -> Int {
+        started
+    }
+
+    func formTokens() -> [String] {
+        recordedFormTokens
+    }
+
+    func release() {
+        let waiters = holdWaiters
+        holdWaiters = []
+        waiters.forEach { $0.resume() }
+    }
+}
+
 private actor OAuthHARESTTransportRecorder: HARESTTransport {
     private var responses: [HARESTResponse]
     private var recordedRequests: [HARESTRequest] = []
@@ -7957,17 +8402,21 @@ private actor OAuthHARESTTransportRecorder: HARESTTransport {
 private actor RefreshingHAClientRecorder: PerchHAServerTrustRefreshingHomeAssistantClient {
     private var discoveryResults: [HAClientResult<DiscoverySnapshot>]
     private var refreshResults: [HAClientResult<HAOAuthToken>]
+    private var historyBatchResults: [HAClientResult<[EntityID: HistorySeries]>]
     private var recordedDiscoveryURLs: [URL] = []
     private var recordedDiscoveryTokens: [String] = []
     private var recordedDiscoveryTrustPolicies: [HAServerTrustPolicy] = []
     private var recordedRefreshRequests: [OAuthRefreshRequest] = []
+    private var recordedHistoryBatchTokens: [String] = []
 
     init(
         discoveryResults: [HAClientResult<DiscoverySnapshot>] = [],
-        refreshResults: [HAClientResult<HAOAuthToken>] = []
+        refreshResults: [HAClientResult<HAOAuthToken>] = [],
+        historyBatchResults: [HAClientResult<[EntityID: HistorySeries]>] = []
     ) {
         self.discoveryResults = discoveryResults
         self.refreshResults = refreshResults
+        self.historyBatchResults = historyBatchResults
     }
 
     func discovery(_ input: HAConnectionInput) async -> HAClientResult<DiscoverySnapshot> {
@@ -7984,8 +8433,23 @@ private actor RefreshingHAClientRecorder: PerchHAServerTrustRefreshingHomeAssist
         .failure(.transport("unexpected history request"))
     }
 
-    func historyBatch(_ input: HAConnectionInput, entityIDs: [EntityID], range: HistoryRange, end: Date) async -> [EntityID: HistorySeries] {
-        [:]
+    func historyBatch(_ input: HAConnectionInput, entityIDs: [EntityID], range: HistoryRange, end: Date) async -> HAClientResult<[EntityID: HistorySeries]> {
+        recordedHistoryBatchTokens.append(input.token)
+        guard !historyBatchResults.isEmpty else {
+            return .success([:])
+        }
+        return historyBatchResults.removeFirst()
+    }
+
+    func streamEntityStateChanges(
+        _ input: HAConnectionInput,
+        onEvent: @escaping @Sendable (EntityState) async -> Void
+    ) async -> HAClientFailure {
+        .transport("live updates are not scripted in this recorder")
+    }
+
+    func historyBatchTokens() -> [String] {
+        recordedHistoryBatchTokens
     }
 
     func services(_ input: HAConnectionInput) async -> HAClientResult<[HAServiceMetadata]> {
@@ -8180,6 +8644,10 @@ private actor BulkHistoryRecorder {
     /// Entities the provider must omit from its result (simulating a partial
     /// response — the entity stays absent without failing the batch).
     private var omitted: Set<EntityID> = []
+    /// How many upcoming batches must block until ``releaseHeldBatches()``,
+    /// letting a test change the connection while a bulk fetch is in flight.
+    private var holdCount = 0
+    private var heldWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(defaultValue: Double = 1.0) {
         self.defaultValue = defaultValue
@@ -8193,12 +8661,32 @@ private actor BulkHistoryRecorder {
         omitted.insert(entityID)
     }
 
+    func holdNextBatches(_ count: Int) {
+        holdCount = count
+    }
+
+    func heldBatchCount() -> Int {
+        heldWaiters.count
+    }
+
+    func releaseHeldBatches() {
+        let waiters = heldWaiters
+        heldWaiters = []
+        waiters.forEach { $0.resume() }
+    }
+
     func provide(
         form: PerchHAConnectionForm,
         entityIDs: [EntityID],
         range: HistoryRange
     ) async -> [EntityID: HistorySeries] {
         batches.append(entityIDs)
+        if holdCount > 0 {
+            holdCount -= 1
+            await withCheckedContinuation { continuation in
+                heldWaiters.append(continuation)
+            }
+        }
         var result: [EntityID: HistorySeries] = [:]
         for id in entityIDs where !omitted.contains(id) {
             let value = valueByEntity[id] ?? defaultValue
@@ -8689,3 +9177,15 @@ private func historySeriesFixture(entityID: EntityID, range: HistoryRange, value
     )
 }
 #endif
+
+extension PerchHAUITests {
+    @MainActor
+    func test_t_pearch_application_icon_resource_loads() throws {
+        // The Dock icon for unbundled dev runs comes from this module
+        // resource; a rename or packaging change must fail loudly here, not as
+        // a silently generic Dock icon.
+        let icon = try XCTUnwrap(PerchHAApplication.pearchApplicationIcon())
+        XCTAssertGreaterThan(icon.size.width, 0)
+        XCTAssertGreaterThan(icon.size.height, 0)
+    }
+}

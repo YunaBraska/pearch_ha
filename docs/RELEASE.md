@@ -43,7 +43,6 @@ Required smoke screenshots:
 - `connected-light-reduced-motion.png`
 - `connected-light.png`
 - `connecting-light.png`
-- `custom-action-editor-light.png`
 - `empty-light.png`
 - `error-dark.png`
 - `first-run-light.png`

@@ -77,9 +77,6 @@ struct PerchHASmoke {
         try await verifyPanelModelAgainstFakeHA()
         try verifyAppShellPanelFactory()
         try await verifyBuiltInControlsPanelFactory()
-        try await verifySettingsCustomActionEditorTextFieldFocusPath()
-        try await verifySettingsCustomActionEditorNativeMutation()
-        try await verifySettingsCustomActionEditorNativePopupMutation()
         try verifyPanelOpenPerformance()
         try await verifyApplicationLifecycleMemorySoak()
         try await verifyIdleCPUAtRest()
@@ -2972,268 +2969,39 @@ struct PerchHASmoke {
         try expect(Int(frameSize.width.rounded()) == 384, "app shell panel frame width is stable")
         try expect(Int(frameSize.height.rounded()) >= 468, "app shell panel frame height fits first-run content")
 
-        panel.makeKeyAndOrderFront(nil)
+        // The panel no longer hosts the connection form (it points to
+        // Settings); the fields live in the Settings window's Connection tab.
+        let settingsWindow = PerchHAApplication.makeSettingsWindow(
+            model: PerchHAPanelModel(),
+            initialTab: .connection
+        )
+        defer {
+            settingsWindow.orderOut(nil)
+            settingsWindow.contentView = nil
+        }
+        settingsWindow.makeKeyAndOrderFront(nil)
         drainMainRunLoop()
-        panel.contentView?.layoutSubtreeIfNeeded()
-        let textFields = nativeTextFields(in: panel.contentView)
-        let focusDebug = nativeControlDebugSummary(in: panel.contentView)
+        settingsWindow.contentView?.layoutSubtreeIfNeeded()
+        settingsWindow.recalculateKeyViewLoop()
+        let textFields = nativeTextFields(in: settingsWindow.contentView)
+        let focusDebug = nativeControlDebugSummary(in: settingsWindow.contentView)
         let urlField = textFields.first { $0.placeholderString == "Home Assistant URL" }
         let tokenField = textFields.first { $0.placeholderString == "Access token" }
-        try expect(urlField != nil, "app shell panel exposes native Home Assistant URL field (\(focusDebug))")
-        try expect(tokenField != nil, "app shell panel exposes native token field (\(focusDebug))")
+        try expect(urlField != nil, "settings connection tab exposes native Home Assistant URL field (\(focusDebug))")
+        try expect(tokenField != nil, "settings connection tab exposes native token field (\(focusDebug))")
 
         if let urlField {
-            try expect(panel.makeFirstResponder(urlField), "app shell panel accepts native URL field focus")
-            let firstResponder = panel.firstResponder as AnyObject?
-            try expect(firstResponder === urlField.currentEditor() || firstResponder === urlField, "app shell panel installs the URL field as first responder")
+            try expect(settingsWindow.makeFirstResponder(urlField), "settings connection tab accepts native URL field focus")
+            let firstResponder = settingsWindow.firstResponder as AnyObject?
+            try expect(firstResponder === urlField.currentEditor() || firstResponder === urlField, "settings connection tab installs the URL field as first responder")
             guard let next = urlField.nextValidKeyView else {
-                throw SmokeFailure("app shell panel URL field has no next valid key view")
+                throw SmokeFailure("settings connection tab URL field has no next valid key view")
             }
-            try expect(next !== urlField, "app shell panel native key view loop advances from URL field")
+            try expect(next !== urlField, "settings connection tab native key view loop advances from URL field")
         }
         if let tokenField {
-            try expect(tokenField.acceptsFirstResponder, "app shell panel token field is natively focusable")
+            try expect(tokenField.acceptsFirstResponder, "settings connection tab token field is natively focusable")
         }
-    }
-
-    @MainActor
-    private static func verifySettingsCustomActionEditorTextFieldFocusPath() async throws {
-        _ = NSApplication.shared
-        let model = try await panelSnapshotModel(for: .customActionEditorLight)
-        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities, initiallyExpandedEntityIDs: ["sensor.office_humidity"])
-        defer {
-            panel.orderOut(nil)
-            panel.contentView = nil
-        }
-
-        panel.makeKeyAndOrderFront(nil)
-        drainMainRunLoop()
-        panel.contentView?.layoutSubtreeIfNeeded()
-
-        let textFields = nativeTextFields(in: panel.contentView)
-        let popUpButtons = nativePopUpButtons(in: panel.contentView)
-        let focusDebug = nativeControlDebugSummary(in: panel.contentView)
-        let nameField = textFields.first { $0.placeholderString == "Name" }
-
-        try expect(nameField != nil, "settings button editor exposes a native name field (\(focusDebug))")
-        try expect(textFields.first { $0.placeholderString == "Title" } == nil, "settings button editor removes the raw title field (\(focusDebug))")
-        try expect(textFields.first { $0.placeholderString == "Domain" } == nil, "settings button editor removes the raw domain field (\(focusDebug))")
-        try expect(textFields.first { $0.placeholderString == "Service" } == nil, "settings button editor removes the raw service field (\(focusDebug))")
-        try expect(textFields.first { $0.placeholderString == "Target entity" } == nil, "settings button editor removes the raw target field (\(focusDebug))")
-        try expect(textFields.first { $0.placeholderString == "Key" } == nil, "settings button editor removes the service-data key field (\(focusDebug))")
-        try expect(textFields.first { $0.placeholderString == "Value" } == nil, "settings button editor removes the service-data value field (\(focusDebug))")
-        let selectedPopupTitles = Set(popUpButtons.compactMap(\.titleOfSelectedItem))
-        try expect(selectedPopupTitles.contains("Script: Turn on"), "settings button editor exposes the guided what-it-does selection (\(focusDebug))")
-        if let nameField {
-            try expect(panel.makeFirstResponder(nameField), "settings button editor accepts native name focus")
-            let firstResponder = panel.firstResponder as AnyObject?
-            try expect(firstResponder === nameField.currentEditor() || firstResponder === nameField, "settings button editor installs the name field as first responder")
-        }
-    }
-
-    @MainActor
-    private static func verifySettingsCustomActionEditorNativeMutation() async throws {
-        _ = NSApplication.shared
-        let protectedStore = InMemoryProtectedActionValueStore()
-        try protectedStore.save("1234", for: "snapshot-boost-air-pin")
-        let snapshot = SmokePanelSnapshotVariant.customActionEditorLight.snapshot
-        let model = PerchHAPanelModel(
-            snapshot: snapshot,
-            selectionConfiguration: snapshot.selectionConfiguration,
-            menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
-            customActionConfiguration: SmokePanelSnapshotVariant.customActionEditorLight.customActionConfiguration,
-            protectedActionValueStore: protectedStore
-        )
-        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities, initiallyExpandedEntityIDs: ["sensor.office_humidity"])
-        defer {
-            panel.orderOut(nil)
-            panel.contentView = nil
-        }
-
-        panel.makeKeyAndOrderFront(nil)
-        drainMainRunLoop()
-        panel.contentView?.layoutSubtreeIfNeeded()
-
-        let textFields = nativeTextFields(in: panel.contentView)
-        let popUpButtons = nativePopUpButtons(in: panel.contentView)
-        let focusDebug = nativeControlDebugSummary(in: panel.contentView)
-        guard let nameField = textFields.first(where: { $0.placeholderString == "Name" && $0.stringValue == "Boost air" }) else {
-            throw SmokeFailure("settings button editor name field is missing for mutation (\(focusDebug))")
-        }
-        guard let targetPopUp = popUpButtons.first(where: { $0.titleOfSelectedItem == "script.air_cleaner_boost" }) else {
-            throw SmokeFailure("settings button editor target picker is missing for mutation (\(focusDebug))")
-        }
-        try setNativeTextFieldValue("Boost harder", for: nameField, in: panel)
-        try setNativePopUpButtonSelection("Office lamp", for: targetPopUp)
-
-        guard let action = model.customActionConfiguration.action(id: "snapshot-boost-air") else {
-            throw SmokeFailure("settings button editor lost the seeded custom action")
-        }
-        try expect(action.title == "Boost harder", "settings button editor commits name edits through the native name field")
-        try expect(action.action.targetEntityID == "switch.office_lamp", "settings button editor commits target edits through the guided target picker")
-        guard case let .protectedString(reference) = action.action.serviceData["pin"] else {
-            throw SmokeFailure("settings button editor did not preserve protected value reference")
-        }
-        let storedProtectedValue = try protectedStore.load(reference)
-        try expect(storedProtectedValue == "1234", "settings button editor preserves protected values outside JSON config")
-        try expect(
-            action.action.serviceData == [
-                "variables": .object([
-                    "steps": .array(["fan", "purifier"])
-                ]),
-                "pin": .protectedString(reference)
-            ],
-            "settings button editor preserves the stored service-data payload untouched"
-        )
-        let encoded = try JSONEncoder().encode(model.customActionConfiguration)
-        let text = String(decoding: encoded, as: UTF8.self)
-        try expect(!text.contains("1234"), "settings button editor keeps protected values out of JSON config")
-        try expect(!focusDebug.contains("1234"), "settings button editor does not leak protected values through visible native control text")
-    }
-
-    @MainActor
-    private static func verifySettingsCustomActionEditorNativePopupMutation() async throws {
-        _ = NSApplication.shared
-        let protectedStore = InMemoryProtectedActionValueStore()
-        try protectedStore.save("1234", for: "snapshot-boost-air-pin")
-        let rooms = [
-            Room(
-                id: "office",
-                name: "Office",
-                entities: [
-                    DiscoveredEntity(
-                        id: "sensor.office_humidity",
-                        name: "Office humidity",
-                        state: "44",
-                        unit: "%",
-                        areaID: nil,
-                        deviceID: nil
-                    )
-                ]
-            )
-        ]
-        let snapshot = PerchHAPanelSnapshot(
-            connectionState: .connected,
-            phase: .connectedData,
-            rooms: rooms,
-            availableRooms: rooms,
-            selectionQuery: "humidity",
-            isSettingsPresented: true,
-            lastUpdateDescription: "Snapshot ready",
-            canRetry: true,
-            serviceMetadata: [
-                HAServiceMetadata(
-                    domain: "script",
-                    service: "turn_on",
-                    name: "Turn on",
-                    description: nil,
-                    fields: [
-                        HAServiceFieldMetadata(
-                            key: "variables",
-                            name: "Variables",
-                            description: nil,
-                            required: false,
-                            example: .object([
-                                "steps": .array(["fan", "purifier"])
-                            ]),
-                            selector: .object(["object": .object([:])])
-                        ),
-                        HAServiceFieldMetadata(
-                            key: "pin",
-                            name: "PIN",
-                            description: "Alarm code",
-                            required: false,
-                            example: "1234",
-                            selector: .object(["text": .object([:])])
-                        )
-                    ]
-                ),
-                HAServiceMetadata(
-                    domain: "script",
-                    service: "turn_off",
-                    name: "Turn off",
-                    description: nil,
-                    fields: [
-                        HAServiceFieldMetadata(
-                            key: "transition",
-                            name: "Transition",
-                            description: nil,
-                            required: false,
-                            example: 3,
-                            selector: .object(["number": .object(["min": 0])])
-                        )
-                    ]
-                )
-            ]
-        )
-        let model = PerchHAPanelModel(
-            snapshot: snapshot,
-            selectionConfiguration: snapshot.selectionConfiguration,
-            menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
-            customActionConfiguration: CustomActionConfiguration(actions: [
-                EntityCustomAction(
-                    id: "snapshot-boost-air",
-                    entityID: "sensor.office_humidity",
-                    title: "Boost air",
-                    action: ActionSpec(
-                        domain: "script",
-                        service: "turn_on",
-                        targetEntityID: "script.air_cleaner_boost",
-                        serviceData: [
-                            "variables": .object([
-                                "steps": .array(["fan", "purifier"])
-                            ]),
-                            "pin": .protectedString("snapshot-boost-air-pin")
-                        ]
-                    ),
-                    requiresConfirmation: true
-                )
-            ]),
-            protectedActionValueStore: protectedStore
-        )
-        let panel = PerchHAApplication.makeSettingsWindow(model: model, initialTab: .entities, initiallyExpandedEntityIDs: ["sensor.office_humidity"])
-        defer {
-            panel.orderOut(nil)
-            panel.contentView = nil
-        }
-
-        panel.makeKeyAndOrderFront(nil)
-        drainMainRunLoop()
-        panel.contentView?.layoutSubtreeIfNeeded()
-
-        let popUpButtons = nativePopUpButtons(in: panel.contentView)
-        let focusDebug = nativeControlDebugSummary(in: panel.contentView)
-        guard let servicePopUp = popUpButtons.first(where: { $0.titleOfSelectedItem == "Script: Turn on" }) else {
-            throw SmokeFailure("settings button editor what-it-does picker is missing for mutation (\(focusDebug))")
-        }
-
-        try setNativePopUpButtonSelection("Script: Turn off", for: servicePopUp)
-
-        guard let action = model.customActionConfiguration.action(id: "snapshot-boost-air") else {
-            throw SmokeFailure("settings button editor lost the seeded custom action after popup mutation")
-        }
-        try expect(
-            action.action.domain == "script" && action.action.service == "turn_off",
-            "settings button editor commits the what-it-does selection through the panel model: \(action.action.domain)/\(action.action.service)"
-        )
-        guard case let .protectedString(reference) = action.action.serviceData["pin"] else {
-            throw SmokeFailure("settings button editor preserves protected value references through popup mutation")
-        }
-        guard case let .object(variables) = action.action.serviceData["variables"] else {
-            throw SmokeFailure("settings button editor preserves variables object through popup mutation")
-        }
-        try expect(
-            variables["steps"] == .array(["fan", "purifier"]),
-            "settings button editor preserves the stored payload through the what-it-does selection: \(String(describing: variables["steps"]))"
-        )
-        try expect(
-            action.action.serviceData["transition"] == 3,
-            "settings button editor applies new metadata defaults after the service change: \(String(describing: action.action.serviceData["transition"]))"
-        )
-        try expect(
-            action.action.serviceData["pin"] == .protectedString(reference),
-            "settings button editor keeps protected references through popup mutation: \(String(describing: action.action.serviceData["pin"]))"
-        )
     }
 
     @MainActor
@@ -3838,7 +3606,6 @@ struct PerchHASmoke {
               let reducedMotion = signatures[.connectedLightReducedMotion],
               let historyLoaded = signatures[.historyLoadedLight],
               let historyLoadedIncreasedContrast = signatures[.historyLoadedLightIncreasedContrast],
-              let customActionEditor = signatures[.customActionEditorLight],
               let builtInControls = signatures[.builtInControlsLight],
               let firstRun = signatures[.firstRunLight],
               let connecting = signatures[.connectingLight],
@@ -3870,10 +3637,6 @@ struct PerchHASmoke {
         try expect(
             historyLoadedIncreasedContrast.sampledHash != historyLoaded.sampledHash,
             "panel history-loaded snapshot distinguishes increased contrast"
-        )
-        try expect(
-            customActionEditor.sampledHash != connectedLight.sampledHash,
-            "panel custom-action editor snapshot renders distinct settings state"
         )
         try expect(
             builtInControls.sampledHash != connectedLight.sampledHash,
@@ -3947,7 +3710,6 @@ struct PerchHASmoke {
                 connectedLight.sampledHash,
                 historyLoaded.sampledHash,
                 historyLoadedIncreasedContrast.sampledHash,
-                customActionEditor.sampledHash,
                 builtInControls.sampledHash,
                 firstRun.sampledHash,
                 connecting.sampledHash,
@@ -3956,8 +3718,8 @@ struct PerchHASmoke {
                 reconnecting.sampledHash,
                 emptyLight.sampledHash,
                 errorDark.sampledHash
-            ]).count == 12,
-            "panel snapshots distinguish success, history, increased-contrast history, custom action, controls, first-run, connecting, signing-in, settings, reconnecting, empty, and error states"
+            ]).count == 11,
+            "panel snapshots distinguish success, history, increased-contrast history, controls, first-run, connecting, signing-in, settings, reconnecting, empty, and error states"
         )
     }
 
@@ -4018,6 +3780,8 @@ struct PerchHASmoke {
             },
             oauthSignInRunner: variant.oauthSignInRunner,
             clock: clock,
+            // Deterministic footer timestamp so snapshot hashes stay stable.
+            wallClock: { Date(timeIntervalSince1970: 1_803_607_200) },
             bulkSyncConfiguration: PerchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1),
             selectionConfiguration: snapshot.selectionConfiguration,
             menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
@@ -4071,7 +3835,7 @@ struct PerchHASmoke {
                 .environment(\.colorScheme, variant.colorScheme)
             )
             size = NSSize(width: 360, height: 420)
-        } else if variant == .customActionEditorLight || variant == .settingsSelectionLight {
+        } else if variant == .settingsSelectionLight {
             view = AnyView(
                 PerchHASettingsView(
                     model: model,
@@ -4831,7 +4595,7 @@ struct PerchHASmoke {
             configuration: MenuBarItemConfiguration(
                 entityID: "sensor.office_humidity",
                 style: .bar,
-                thresholds: ValueThresholds(warning: ValueThreshold(value: 40, direction: .aboveOrEqual))
+                thresholds: ValueThresholds(warning: ValueThreshold(value: 40, direction: .aboveOrEqual), critical: nil)
             ),
             locale: Locale(identifier: "en_US")
         )
@@ -4846,7 +4610,7 @@ struct PerchHASmoke {
                 entityID: "sensor.energy_today",
                 style: .ring,
                 absoluteTotal: 120,
-                thresholds: ValueThresholds(critical: ValueThreshold(value: 20, direction: .aboveOrEqual))
+                thresholds: ValueThresholds(warning: nil, critical: ValueThreshold(value: 20, direction: .aboveOrEqual))
             ),
             locale: Locale(identifier: "en_US")
         )
@@ -5079,7 +4843,7 @@ struct PerchHASmoke {
             "decimal precision applies to status item value title immediately"
         )
         try expect(
-            application.setMenuBarDefaultHistoryRange("sensor.office_humidity", defaultHistoryRange: .day),
+            application.setMenuBarDefaultHistoryRange("sensor.office_humidity", defaultHistoryRange: .week),
             "app shell persists default history range"
         )
         try expect(gaugeRenderer.renderCount == 2, "menu bar reuses gauge image when default history range changes")
@@ -5101,7 +4865,7 @@ struct PerchHASmoke {
             "display decimal precision survives JSON save"
         )
         try expect(
-            savedDisplayConfiguration.menuBarItemConfigurations.first?.defaultHistoryRange == .day,
+            savedDisplayConfiguration.menuBarItemConfigurations.first?.defaultHistoryRange == .week,
             "default history range survives JSON save"
         )
 
@@ -5155,7 +4919,7 @@ struct PerchHASmoke {
             savedEnergyDisplayConfiguration.totalEntityID == "sensor.energy_budget",
             "total entity gauge source survives JSON save"
         )
-        try expect(savedEnergyDisplayConfiguration.thresholds.warning == nil, "cleared warning threshold survives JSON save")
+        try expect(!savedEnergyDisplayConfiguration.thresholds.steps.contains { $0.color == ValueThresholds.warningColor }, "cleared warning threshold survives JSON save")
     }
 
     private static func spinUntil(_ message: String, condition: @escaping () async -> Bool) async throws {
@@ -5296,7 +5060,6 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
     case connectedLightReducedMotion = "connected-light-reduced-motion"
     case historyLoadedLight = "history-loaded-light"
     case historyLoadedLightIncreasedContrast = "history-loaded-light-increased-contrast"
-    case customActionEditorLight = "custom-action-editor-light"
     case builtInControlsLight = "built-in-controls-light"
     case firstRunLight = "first-run-light"
     case connectingLight = "connecting-light"
@@ -5314,7 +5077,6 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
              .connectedLightReducedMotion,
              .historyLoadedLight,
              .historyLoadedLightIncreasedContrast,
-             .customActionEditorLight,
              .builtInControlsLight,
              .firstRunLight,
              .connectingLight,
@@ -5378,18 +5140,6 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
                 canRetry: true,
                 historyState: .loaded(Self.loadedHistorySeries),
                 historyPresentationEntityID: "sensor.office_humidity"
-            )
-        case .customActionEditorLight:
-            PerchHAPanelSnapshot(
-                connectionState: .connected,
-                phase: .connectedData,
-                rooms: Self.connectedRooms,
-                availableRooms: Self.connectedRooms,
-                selectionQuery: "humidity",
-                isSettingsPresented: true,
-                lastUpdateDescription: "Snapshot ready",
-                canRetry: true,
-                serviceMetadata: Self.customActionServiceMetadata
             )
         case .builtInControlsLight:
             PerchHAPanelSnapshot(
@@ -5502,26 +5252,6 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
                     action: ActionSpec(domain: "script", service: "turn_on", targetEntityID: "script.air_cleaner_boost")
                 )
             ])
-        case .customActionEditorLight:
-            CustomActionConfiguration(actions: [
-                EntityCustomAction(
-                    id: "snapshot-boost-air",
-                    entityID: "sensor.office_humidity",
-                    title: "Boost air",
-                    action: ActionSpec(
-                        domain: "script",
-                        service: "turn_on",
-                        targetEntityID: "script.air_cleaner_boost",
-                        serviceData: [
-                            "variables": .object([
-                                "steps": .array(["fan", "purifier"])
-                            ]),
-                            "pin": .protectedString("snapshot-boost-air-pin")
-                        ]
-                    ),
-                    requiresConfirmation: true
-                )
-            ])
         case .builtInControlsLight, .firstRunLight, .connectingLight, .signingInLight, .settingsSelectionLight, .emptyLight, .errorDark:
             CustomActionConfiguration()
         }
@@ -5537,7 +5267,7 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
         switch self {
         case .connectedLight, .connectedDark, .connectedDarkIncreasedContrast, .connectedLightReducedMotion:
             true
-        case .historyLoadedLight, .historyLoadedLightIncreasedContrast, .customActionEditorLight,
+        case .historyLoadedLight, .historyLoadedLightIncreasedContrast,
              .builtInControlsLight, .firstRunLight, .connectingLight, .signingInLight,
              .settingsSelectionLight, .reconnectingLight, .emptyLight, .errorDark:
             false
@@ -5550,7 +5280,7 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
     fileprivate static let inlineHistorySeries: [EntityID: HistorySeries] = [
         "sensor.office_humidity": HistorySeries(
             entityID: "sensor.office_humidity",
-            range: .hour,
+            range: .day,
             samples: [
                 HistorySample(timestamp: Date(timeIntervalSince1970: 1_803_600_000), state: "41", numericValue: 41),
                 HistorySample(timestamp: Date(timeIntervalSince1970: 1_803_601_800), state: "43", numericValue: 43),
@@ -5561,7 +5291,7 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
         ),
         "cover.office_blinds": HistorySeries(
             entityID: "cover.office_blinds",
-            range: .hour,
+            range: .day,
             samples: [
                 HistorySample(timestamp: Date(timeIntervalSince1970: 1_803_600_000), state: "closed", numericValue: nil),
                 HistorySample(timestamp: Date(timeIntervalSince1970: 1_803_604_000), state: "open", numericValue: nil),

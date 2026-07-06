@@ -253,47 +253,81 @@ public struct PerchHAStatusItemLogoImageRenderer {
         bounds.fill()
 
         // Template images are masked by alpha; draw the glyph in opaque black.
+        // The shape mirrors the Pearch brand mark: a right-facing perch with
+        // its signature tall spiky dorsal fin and a forked tail.
         let ink = NSColor.black
         let width = bounds.width
         let height = bounds.height
-        let midY = bounds.minY + height * 0.5
+        func point(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
+            NSPoint(x: bounds.minX + width * x, y: bounds.minY + height * y)
+        }
+        // Body sits slightly low so the dorsal spikes fit above it.
+        let midY = 0.44
+        let noseX = 0.88
+        let backX = 0.30
 
-        // Body: an oval/teardrop pointing toward the head (right side).
+        // Body: a full teardrop, nose to the right.
         let body = NSBezierPath()
-        let headX = bounds.minX + width * 0.82
-        let bodyBackX = bounds.minX + width * 0.28
-        let bodyTopY = bounds.minY + height * 0.74
-        let bodyBottomY = bounds.minY + height * 0.26
-        body.move(to: NSPoint(x: headX, y: midY))
+        body.move(to: point(noseX, midY))
         body.curve(
-            to: NSPoint(x: bodyBackX, y: bodyTopY),
-            controlPoint1: NSPoint(x: headX, y: bodyTopY),
-            controlPoint2: NSPoint(x: bounds.minX + width * 0.40, y: bodyTopY)
+            to: point(backX, midY + 0.16),
+            controlPoint1: point(noseX - 0.06, midY + 0.20),
+            controlPoint2: point(backX + 0.14, midY + 0.22)
         )
         body.curve(
-            to: NSPoint(x: headX, y: midY),
-            controlPoint1: NSPoint(x: bounds.minX + width * 0.40, y: bodyBottomY),
-            controlPoint2: NSPoint(x: headX, y: bodyBottomY)
+            to: point(backX, midY - 0.16),
+            controlPoint1: point(backX - 0.04, midY + 0.06),
+            controlPoint2: point(backX - 0.04, midY - 0.06)
+        )
+        body.curve(
+            to: point(noseX, midY),
+            controlPoint1: point(backX + 0.14, midY - 0.22),
+            controlPoint2: point(noseX - 0.06, midY - 0.20)
         )
         body.close()
         ink.setFill()
         body.fill()
 
-        // Tail: a triangular fin trailing off the back of the body.
+        // Dorsal fin: the perch's spiky crest along the top of the back.
+        let dorsal = NSBezierPath()
+        dorsal.move(to: point(0.34, midY + 0.12))
+        dorsal.line(to: point(0.38, 0.94))
+        dorsal.line(to: point(0.47, midY + 0.20))
+        dorsal.line(to: point(0.52, 0.90))
+        dorsal.line(to: point(0.60, midY + 0.18))
+        dorsal.line(to: point(0.64, 0.80))
+        dorsal.line(to: point(0.70, midY + 0.12))
+        dorsal.close()
+        ink.setFill()
+        dorsal.fill()
+
+        // Tail: forked, two lobes with a notch toward the body.
         let tail = NSBezierPath()
-        tail.move(to: NSPoint(x: bodyBackX + width * 0.02, y: midY))
-        tail.line(to: NSPoint(x: bounds.minX + width * 0.08, y: bounds.minY + height * 0.72))
-        tail.line(to: NSPoint(x: bounds.minX + width * 0.08, y: bounds.minY + height * 0.28))
+        tail.move(to: point(backX + 0.04, midY + 0.07))
+        tail.line(to: point(0.04, midY + 0.28))
+        tail.line(to: point(0.14, midY))
+        tail.line(to: point(0.04, midY - 0.28))
+        tail.line(to: point(backX + 0.04, midY - 0.07))
         tail.close()
         ink.setFill()
         tail.fill()
 
+        // Ventral fin: a small triangle under the belly.
+        let ventral = NSBezierPath()
+        ventral.move(to: point(0.48, midY - 0.14))
+        ventral.line(to: point(0.52, midY - 0.32))
+        ventral.line(to: point(0.60, midY - 0.14))
+        ventral.close()
+        ink.setFill()
+        ventral.fill()
+
         // Eye punched out of the head as negative space.
+        let eyeSize = 0.10
         let eye = NSRect(
-            x: bounds.minX + width * 0.66,
-            y: midY - width * 0.045,
-            width: width * 0.09,
-            height: width * 0.09
+            x: bounds.minX + width * 0.72,
+            y: bounds.minY + height * (midY + 0.02),
+            width: width * eyeSize,
+            height: width * eyeSize
         )
         let previousMode = NSGraphicsContext.current?.compositingOperation
         NSGraphicsContext.current?.compositingOperation = .clear

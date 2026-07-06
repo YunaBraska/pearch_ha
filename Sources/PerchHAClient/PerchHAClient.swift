@@ -161,6 +161,10 @@ public struct URLSessionHARESTTransport: HARESTTransport {
     public func send(_ request: HARESTRequest) async throws -> HARESTResponse {
         var urlRequest = URLRequest(url: request.url)
         urlRequest.httpMethod = request.method
+        // Fail fast instead of URLSession's 60 s default: with multi-address
+        // fallback a UI action would otherwise stall for minutes before the
+        // next address is even tried.
+        urlRequest.timeoutInterval = 15
         request.headers.forEach { key, value in
             urlRequest.setValue(value, forHTTPHeaderField: key)
         }
@@ -419,7 +423,7 @@ public protocol HAClient: Sendable {
     func callService(_ input: HAConnectionInput, call: HAServiceCall) async -> HAClientResult<HAServiceCallResult>
     func discovery(_ input: HAConnectionInput) async -> HAClientResult<DiscoverySnapshot>
     func history(_ input: HAConnectionInput, entityID: EntityID, range: HistoryRange, end: Date) async -> HAClientResult<HistorySeries>
-    func historyBatch(_ input: HAConnectionInput, entityIDs: [EntityID], range: HistoryRange, end: Date) async -> [EntityID: HistorySeries]
+    func historyBatch(_ input: HAConnectionInput, entityIDs: [EntityID], range: HistoryRange, end: Date) async -> HAClientResult<[EntityID: HistorySeries]>
 }
 
 public struct PlannedHAClient: HAClient {
@@ -469,7 +473,7 @@ public struct PlannedHAClient: HAClient {
         await client.history(input, entityID: entityID, range: range, end: end)
     }
 
-    public func historyBatch(_ input: HAConnectionInput, entityIDs: [EntityID], range: HistoryRange, end: Date = Date()) async -> [EntityID: HistorySeries] {
+    public func historyBatch(_ input: HAConnectionInput, entityIDs: [EntityID], range: HistoryRange, end: Date = Date()) async -> HAClientResult<[EntityID: HistorySeries]> {
         await client.historyBatch(input, entityIDs: entityIDs, range: range, end: end)
     }
 }
@@ -477,10 +481,24 @@ public struct PlannedHAClient: HAClient {
 public struct HomeAssistantClient: HAClient {
     private let transport: any HARESTTransport
     private let redactor: Redactor
+    private let webSocketCommandTimeout: PerchDuration
 
-    public init(transport: any HARESTTransport = URLSessionHARESTTransport(), redactor: Redactor = Redactor()) {
+    /// Creates a Home Assistant client.
+    ///
+    /// - Parameters:
+    ///   - transport: The REST transport. Defaults to a URLSession transport.
+    ///   - redactor: The secret redactor applied to error text.
+    ///   - webSocketCommandTimeout: Deadline for each WebSocket command, auth,
+    ///     or subscription-ack response (default 15 s). Subscription event
+    ///     waits are exempt — they legitimately stay silent between events.
+    public init(
+        transport: any HARESTTransport = URLSessionHARESTTransport(),
+        redactor: Redactor = Redactor(),
+        webSocketCommandTimeout: PerchDuration = .seconds(15)
+    ) {
         self.transport = transport
         self.redactor = redactor
+        self.webSocketCommandTimeout = webSocketCommandTimeout
     }
 
     public func describe() -> PerchHAModule {
@@ -700,6 +718,149 @@ public struct HomeAssistantClient: HAClient {
         }
     }
 
+    /// Streams live entity state updates over one authenticated WebSocket until
+    /// the stream ends.
+    ///
+    /// Subscribes with the optimized `subscribe_entities` command and falls back
+    /// to the documented `subscribe_events` path when the command is
+    /// unavailable. Every entity update is delivered through `onEvent` in
+    /// arrival order, one at a time. Unlike ``nextStateChangedEvent(_:)`` — which
+    /// pays a full connect/auth handshake per event — this holds a single
+    /// connection open for the life of the subscription.
+    ///
+    /// - Parameters:
+    ///   - input: The connection input. Addresses are tried in order for the
+    ///     initial connection; a mid-stream drop ends the stream instead.
+    ///   - onEvent: Invoked for each entity state update.
+    /// - Returns: The terminal failure that ended the stream — cancellation,
+    ///   socket drop, or protocol violation. Callers own reconnect policy.
+    public func streamEntityStateChanges(
+        _ input: HAConnectionInput,
+        onEvent: @escaping @Sendable (EntityState) async -> Void
+    ) async -> HAClientFailure {
+        let result = await authenticateWebSocket(input)
+        let session: AuthenticatedWebSocket
+        switch result {
+        case let .success(value):
+            session = value
+        case let .failure(failure):
+            return failure
+        }
+        defer {
+            session.close(code: .goingAway)
+        }
+        let optimized = await streamEntityUpdates(on: session.task, onEvent: onEvent)
+        guard optimized.isUnavailableCommand else {
+            return optimized
+        }
+        return await streamStateChangedEvents(on: session.task, id: 3, onEvent: onEvent)
+    }
+
+    /// Streams compact `subscribe_entities` updates until the socket ends.
+    private func streamEntityUpdates(
+        on task: URLSessionWebSocketTask,
+        onEvent: @escaping @Sendable (EntityState) async -> Void
+    ) async -> HAClientFailure {
+        let currentStates = await sendGetStates(on: task, id: 1)
+        var knownStates: [EntityID: EntityState]
+        switch currentStates {
+        case let .success(states):
+            knownStates = Dictionary(uniqueKeysWithValues: states.map { ($0.id, $0) })
+        case let .failure(failure):
+            return failure
+        }
+
+        guard let message = encodeWebSocketMessage(HAWebSocketSubscribeEntitiesCommand(id: 2)) else {
+            return .invalidPayload(path: "/api/websocket", reason: "could not encode subscribe_entities command")
+        }
+        do {
+            try await task.send(.string(message))
+        } catch {
+            return map(transportError: error, baseURL: task.currentRequest?.url ?? URL(fileURLWithPath: "/"))
+        }
+
+        let ack = await receiveWebSocketEnvelope(task: task, path: "/api/websocket", deadline: webSocketCommandTimeout)
+        switch ack {
+        case let .success(envelope):
+            guard envelope.type == "result", envelope.id == 2 else {
+                return .webSocketProtocol("expected subscribe_entities result")
+            }
+            guard envelope.success == true else {
+                return .webSocketCommand(id: envelope.id, code: envelope.error?.code, message: envelope.error?.message)
+            }
+        case let .failure(failure):
+            return failure
+        }
+
+        while true {
+            if Task.isCancelled {
+                task.cancel(with: .goingAway, reason: nil)
+                return .transport("WebSocket subscription cancelled")
+            }
+            let event = await receiveWebSocketEnvelope(task: task, path: "/api/websocket")
+            switch event {
+            case let .success(envelope):
+                guard envelope.type == "event", envelope.id == 2 else {
+                    return .webSocketProtocol("expected subscribe_entities event")
+                }
+                guard let frame = envelope.event else {
+                    continue
+                }
+                for state in frame.entityUpdates(updating: &knownStates) {
+                    await onEvent(state)
+                }
+            case let .failure(failure):
+                return failure
+            }
+        }
+    }
+
+    /// Streams documented `subscribe_events` state changes until the socket ends.
+    private func streamStateChangedEvents(
+        on task: URLSessionWebSocketTask,
+        id: Int,
+        onEvent: @escaping @Sendable (EntityState) async -> Void
+    ) async -> HAClientFailure {
+        guard let message = encodeWebSocketMessage(HAWebSocketSubscribeEventsCommand(id: id, eventType: "state_changed")) else {
+            return .invalidPayload(path: "/api/websocket", reason: "could not encode subscribe_events command")
+        }
+        do {
+            try await task.send(.string(message))
+        } catch {
+            return map(transportError: error, baseURL: task.currentRequest?.url ?? URL(fileURLWithPath: "/"))
+        }
+
+        let ack = await receiveWebSocketEnvelope(task: task, path: "/api/websocket", deadline: webSocketCommandTimeout)
+        switch ack {
+        case let .success(envelope):
+            guard envelope.type == "result", envelope.id == id, envelope.success == true else {
+                return .webSocketProtocol("expected subscribe_events result")
+            }
+        case let .failure(failure):
+            return failure
+        }
+
+        while true {
+            if Task.isCancelled {
+                task.cancel(with: .goingAway, reason: nil)
+                return .transport("WebSocket subscription cancelled")
+            }
+            let event = await receiveWebSocketEnvelope(task: task, path: "/api/websocket")
+            switch event {
+            case let .success(envelope):
+                guard envelope.type == "event", envelope.id == id, envelope.event?.eventType == "state_changed" else {
+                    return .webSocketProtocol("expected state_changed event")
+                }
+                guard let state = envelope.event?.data?.newState else {
+                    continue
+                }
+                await onEvent(state.entityState)
+            case let .failure(failure):
+                return failure
+            }
+        }
+    }
+
     private func nextStateChangedEventAttempt(_ input: HAConnectionInput) async -> HAClientResult<EntityState> {
         let result = await authenticateWebSocket(input)
         switch result {
@@ -865,14 +1026,17 @@ public struct HomeAssistantClient: HAClient {
     ///   - end: The window end (defaults to now).
     ///   - batchSize: Maximum entity IDs per request. Defaults to
     ///     ``bulkHistoryDefaultBatchSize``; values below 1 are clamped to 1.
-    /// - Returns: A map from entity ID to its fetched series. Entities whose batch
-    ///   failed or that returned no rows are absent. Never carries a token.
+    /// - Returns: A map from entity ID to its fetched series on success. Entities
+    ///   whose batch failed non-fatally or that returned no rows are absent. An
+    ///   authentication failure fails the whole call — silently absorbing it would
+    ///   let an expired token starve the background sync forever — as does a run
+    ///   where every batch failed. Never carries a token.
     public func historyBatch(
         _ input: HAConnectionInput,
         entityIDs: [EntityID],
         range: HistoryRange,
         end: Date
-    ) async -> [EntityID: HistorySeries] {
+    ) async -> HAClientResult<[EntityID: HistorySeries]> {
         await historyBatch(input, entityIDs: entityIDs, range: range, end: end, batchSize: HomeAssistantClient.bulkHistoryDefaultBatchSize)
     }
 
@@ -882,22 +1046,132 @@ public struct HomeAssistantClient: HAClient {
         range: HistoryRange,
         end: Date = Date(),
         batchSize: Int = HomeAssistantClient.bulkHistoryDefaultBatchSize
-    ) async -> [EntityID: HistorySeries] {
+    ) async -> HAClientResult<[EntityID: HistorySeries]> {
         let uniqueIDs = Self.deduplicatedPreservingOrder(entityIDs)
         guard !uniqueIDs.isEmpty else {
-            return [:]
+            return .success([:])
         }
         let cap = max(1, batchSize)
         let start = end.addingTimeInterval(-range.historyDuration)
+        if range.prefersRecorderStatistics {
+            // Week/month hover loads use recorder statistics; the bulk sync
+            // must fetch the SAME source or the shared cache key oscillates
+            // between aggregated statistics and raw REST states (which the
+            // recorder purges after ~10 days) on every cycle.
+            let statistics = await recorderStatisticsHistoryBatch(input, entityIDs: uniqueIDs, range: range, start: start, end: end)
+            switch statistics {
+            case .success:
+                return statistics
+            case let .failure(failure) where failure.shouldFallbackFromRecorderStatisticsToREST:
+                break
+            case let .failure(failure):
+                return .failure(scrubbed(failure, token: input.token))
+            }
+        }
         var series: [EntityID: HistorySeries] = [:]
+        var lastFailure: HAClientFailure?
         var index = 0
         while index < uniqueIDs.count {
             let batch = Array(uniqueIDs[index..<min(index + cap, uniqueIDs.count)])
             index += cap
-            let batchSeries = await restHistoryBatch(input, entityIDs: batch, range: range, start: start, end: end)
-            series.merge(batchSeries) { _, new in new }
+            switch await restHistoryBatch(input, entityIDs: batch, range: range, start: start, end: end) {
+            case let .success(batchSeries):
+                series.merge(batchSeries) { _, new in new }
+            case .failure(.authentication):
+                // Every remaining batch would fail the same way; surface it so
+                // the caller can refresh the token instead of caching nothing.
+                return .failure(.authentication)
+            case let .failure(failure):
+                lastFailure = failure
+            }
         }
-        return series
+        if series.isEmpty, let lastFailure {
+            return .failure(scrubbed(lastFailure, token: input.token))
+        }
+        return .success(series)
+    }
+
+    /// Fetches recorder statistics for many entities in one WebSocket command,
+    /// mirroring the single-entity week/month path so both write the same data
+    /// shape into the history cache.
+    private func recorderStatisticsHistoryBatch(
+        _ input: HAConnectionInput,
+        entityIDs: [EntityID],
+        range: HistoryRange,
+        start: Date,
+        end: Date
+    ) async -> HAClientResult<[EntityID: HistorySeries]> {
+        guard let period = range.recorderStatisticsPeriod else {
+            return .failure(.invalidPayload(path: "/api/websocket", reason: "\(range.rawValue) does not support recorder statistics"))
+        }
+        let result = await authenticateWebSocket(input)
+        let session: AuthenticatedWebSocket
+        switch result {
+        case let .success(value):
+            session = value
+        case let .failure(failure):
+            return .failure(failure)
+        }
+        defer {
+            session.close(code: .goingAway)
+        }
+        let response = await sendWebSocketCommandEnvelope(
+            on: session.task,
+            command: HAWebSocketRecorderStatisticsCommand(
+                id: 1,
+                statisticIDs: entityIDs.map(\.rawValue),
+                period: period,
+                startTime: Self.historyDateFormatter.string(from: start),
+                endTime: Self.historyDateFormatter.string(from: end)
+            ),
+            expectedID: 1,
+            commandName: "recorder/statistics_during_period"
+        )
+        switch response {
+        case let .success(envelope):
+            guard let statistics = envelope.resultStatistics else {
+                return .failure(.invalidPayload(path: "/api/websocket", reason: "missing recorder statistics result"))
+            }
+            var series: [EntityID: HistorySeries] = [:]
+            for entityID in entityIDs {
+                let samples = (statistics[entityID.rawValue] ?? [])
+                    .compactMap(\.sample)
+                    .sorted { $0.timestamp < $1.timestamp }
+                guard !samples.isEmpty else {
+                    continue
+                }
+                series[entityID] = HistorySeries(entityID: entityID, range: range, samples: samples)
+            }
+            return .success(series)
+        case let .failure(failure):
+            return .failure(failure)
+        }
+    }
+
+    /// Removes any literal occurrence of the bearer token from failure text.
+    ///
+    /// Transport layers can echo request context into error messages; the
+    /// pattern-based redactor cannot know the token's value, so the client —
+    /// which does — scrubs it before a failure leaves this boundary.
+    private func scrubbed(_ failure: HAClientFailure, token: String) -> HAClientFailure {
+        guard !token.isEmpty else {
+            return failure
+        }
+        func scrub(_ message: String) -> String {
+            message.replacingOccurrences(of: token, with: redactor.replacement)
+        }
+        switch failure {
+        case let .transport(message):
+            return .transport(scrub(message))
+        case let .webSocketProtocol(message):
+            return .webSocketProtocol(scrub(message))
+        case let .invalidPayload(path, reason):
+            return .invalidPayload(path: path, reason: scrub(reason))
+        case let .webSocketCommand(id, code, message):
+            return .webSocketCommand(id: id, code: code, message: message.map(scrub))
+        case .authentication, .unreachable, .tlsRejected, .invalidURL, .invalidResponse, .httpStatus:
+            return failure
+        }
     }
 
     private func restHistoryBatch(
@@ -906,7 +1180,7 @@ public struct HomeAssistantClient: HAClient {
         range: HistoryRange,
         start: Date,
         end: Date
-    ) async -> [EntityID: HistorySeries] {
+    ) async -> HAClientResult<[EntityID: HistorySeries]> {
         let requested = Set(entityIDs)
         let path = "/api/history/period/\(Self.historyDateFormatter.string(from: start))"
         let result = await get(
@@ -921,8 +1195,12 @@ public struct HomeAssistantClient: HAClient {
         ) { response in
             decode(path: "/api/history/period", response: response, as: [[HAHistoryStateDTO]].self)
         }
-        guard case let .success(groups) = result else {
-            return [:]
+        let groups: [[HAHistoryStateDTO]]
+        switch result {
+        case let .success(decoded):
+            groups = decoded
+        case let .failure(failure):
+            return .failure(failure)
         }
         var series: [EntityID: HistorySeries] = [:]
         for group in groups {
@@ -941,7 +1219,7 @@ public struct HomeAssistantClient: HAClient {
                 .sorted { $0.timestamp < $1.timestamp }
             series[entityID] = HistorySeries(entityID: entityID, range: range, samples: samples)
         }
-        return series
+        return .success(series)
     }
 
     private static func deduplicatedPreservingOrder(_ ids: [EntityID]) -> [EntityID] {
@@ -1296,8 +1574,7 @@ public struct HomeAssistantClient: HAClient {
              .serverCertificateHasUnknownRoot,
              .serverCertificateNotYetValid,
              .clientCertificateRejected,
-             .clientCertificateRequired,
-             .cannotLoadFromNetwork:
+             .clientCertificateRequired:
             return .tlsRejected(host: host)
         case .cannotFindHost,
              .cannotConnectToHost,
@@ -1307,7 +1584,8 @@ public struct HomeAssistantClient: HAClient {
              .timedOut,
              .internationalRoamingOff,
              .callIsActive,
-             .dataNotAllowed:
+             .dataNotAllowed,
+             .cannotLoadFromNetwork:
             return .unreachable(host: host)
         default:
             return .transport(redactor.redact(message: urlError.localizedDescription))
@@ -1365,7 +1643,7 @@ public struct HomeAssistantClient: HAClient {
         let task = context.task
         task.resume()
 
-        let required = await receiveWebSocketEnvelope(task: task, path: "/api/websocket")
+        let required = await receiveWebSocketEnvelope(task: task, path: "/api/websocket", deadline: webSocketCommandTimeout)
         switch required {
         case let .success(envelope):
             guard envelope.type == "auth_required" else {
@@ -1393,7 +1671,7 @@ public struct HomeAssistantClient: HAClient {
             return .failure(map(transportError: error, baseURL: baseURL))
         }
 
-        let response = await receiveWebSocketEnvelope(task: task, path: "/api/websocket")
+        let response = await receiveWebSocketEnvelope(task: task, path: "/api/websocket", deadline: webSocketCommandTimeout)
         switch response {
         case let .success(envelope):
             if envelope.type == "auth_ok" {
@@ -1421,6 +1699,11 @@ public struct HomeAssistantClient: HAClient {
         }
     }
 
+    /// Frame-size ceiling for WebSocket messages. Home Assistant `get_states`
+    /// and registry payloads on large installs exceed URLSession's 1 MiB
+    /// default, which would fail as a generic transport error.
+    private static let webSocketMaximumMessageSize = 16 * 1024 * 1024
+
     private func makeWebSocketTask(
         url: URL,
         serverTrustPolicy: HAServerTrustPolicy
@@ -1431,14 +1714,18 @@ public struct HomeAssistantClient: HAClient {
                 delegate: HAServerTrustPolicyURLSessionDelegate(policy: serverTrustPolicy),
                 delegateQueue: nil
             )
+            let task = session.webSocketTask(with: url)
+            task.maximumMessageSize = Self.webSocketMaximumMessageSize
             return HAWebSocketTaskContext(
-                task: session.webSocketTask(with: url),
+                task: task,
                 session: session,
                 shouldInvalidateSession: true
             )
         }
+        let task = URLSession.shared.webSocketTask(with: url)
+        task.maximumMessageSize = Self.webSocketMaximumMessageSize
         return HAWebSocketTaskContext(
-            task: URLSession.shared.webSocketTask(with: url),
+            task: task,
             session: URLSession.shared,
             shouldInvalidateSession: false
         )
@@ -1595,7 +1882,7 @@ public struct HomeAssistantClient: HAClient {
             )
         }
 
-        let ack = await receiveWebSocketEnvelope(task: task, path: "/api/websocket")
+        let ack = await receiveWebSocketEnvelope(task: task, path: "/api/websocket", deadline: webSocketCommandTimeout)
         switch ack {
         case let .success(envelope):
             guard envelope.type == "result", envelope.id == 2 else {
@@ -1609,6 +1896,10 @@ public struct HomeAssistantClient: HAClient {
         }
 
         while true {
+            if Task.isCancelled {
+                task.cancel(with: .goingAway, reason: nil)
+                return .failure(.transport("WebSocket subscription cancelled"))
+            }
             let event = await receiveWebSocketEnvelope(task: task, path: "/api/websocket")
             switch event {
             case let .success(envelope):
@@ -1639,7 +1930,7 @@ public struct HomeAssistantClient: HAClient {
             )
         }
 
-        let ack = await receiveWebSocketEnvelope(task: task, path: "/api/websocket")
+        let ack = await receiveWebSocketEnvelope(task: task, path: "/api/websocket", deadline: webSocketCommandTimeout)
         switch ack {
         case let .success(envelope):
             guard envelope.type == "result", envelope.id == id, envelope.success == true else {
@@ -1760,7 +2051,7 @@ public struct HomeAssistantClient: HAClient {
             )
         }
 
-        let response = await receiveWebSocketEnvelope(task: task, path: "/api/websocket")
+        let response = await receiveWebSocketEnvelope(task: task, path: "/api/websocket", deadline: webSocketCommandTimeout)
         switch response {
         case let .success(envelope):
             guard envelope.type == "result" else {
@@ -1778,26 +2069,88 @@ public struct HomeAssistantClient: HAClient {
         }
     }
 
+    /// Waits for the next WebSocket frame without a deadline.
+    ///
+    /// Only subscription event waits use this directly — a live subscription
+    /// legitimately stays silent until the next state change. Command, auth,
+    /// and ack responses go through the deadline-bounded overload so a server
+    /// that accepts the connection and then goes silent cannot suspend its
+    /// caller forever.
     private func receiveWebSocketEnvelope(task: URLSessionWebSocketTask, path: String) async -> HAClientResult<HAWebSocketEnvelopeDTO> {
-        do {
-            let message = try await task.receive()
-            let data: Data
-            switch message {
-            case let .string(text):
-                data = Data(text.utf8)
-            case let .data(raw):
-                data = raw
-            @unknown default:
-                return .failure(.invalidPayload(path: path, reason: "unknown WebSocket message"))
-            }
-            return decode(path: path, response: HARESTResponse(statusCode: 200, headers: [:], body: data), as: HAWebSocketEnvelopeDTO.self)
-        } catch {
-            return .failure(
-                map(
-                    transportError: error,
-                    baseURL: task.currentRequest?.url ?? URL(fileURLWithPath: "/")
+        // URLSession's receive does not respond to Swift task cancellation on
+        // its own; a cancelled caller would otherwise stay suspended until the
+        // server happens to send a frame. Killing the socket on cancellation
+        // unblocks the receive immediately with a transport error.
+        await withTaskCancellationHandler {
+            do {
+                let message = try await task.receive()
+                let data: Data
+                switch message {
+                case let .string(text):
+                    data = Data(text.utf8)
+                case let .data(raw):
+                    data = raw
+                @unknown default:
+                    return .failure(.invalidPayload(path: path, reason: "unknown WebSocket message"))
+                }
+                return decode(path: path, response: HARESTResponse(statusCode: 200, headers: [:], body: data), as: HAWebSocketEnvelopeDTO.self)
+            } catch {
+                return .failure(
+                    map(
+                        transportError: error,
+                        baseURL: task.currentRequest?.url ?? URL(fileURLWithPath: "/")
+                    )
                 )
-            )
+            }
+        } onCancel: {
+            task.cancel(with: .goingAway, reason: nil)
+        }
+    }
+
+    /// Waits for the next WebSocket frame, failing as unreachable when the
+    /// server sends nothing within the deadline.
+    ///
+    /// On timeout the socket is cancelled (each client operation owns its
+    /// connection, so the pending receive unblocks immediately) and the failure
+    /// maps to ``HAClientFailure/unreachable(host:)`` — the same posture as a
+    /// connect timeout, which lets multi-address fallback try the next URL.
+    private func receiveWebSocketEnvelope(
+        task: URLSessionWebSocketTask,
+        path: String,
+        deadline: PerchDuration
+    ) async -> HAClientResult<HAWebSocketEnvelopeDTO> {
+        enum RaceOutcome: Sendable {
+            case received(HAClientResult<HAWebSocketEnvelopeDTO>)
+            case deadlineElapsed
+        }
+        return await withTaskGroup(of: RaceOutcome.self) { group in
+            group.addTask {
+                .received(await receiveWebSocketEnvelope(task: task, path: path))
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, deadline.nanoseconds)))
+                return .deadlineElapsed
+            }
+            defer {
+                group.cancelAll()
+            }
+            for await outcome in group {
+                switch outcome {
+                case let .received(result):
+                    return result
+                case .deadlineElapsed:
+                    // Kill the socket in both cases: a genuine timeout must
+                    // unblock the pending receive, and a cancelled caller must
+                    // not leave it hanging on a silent server either.
+                    task.cancel(with: .goingAway, reason: nil)
+                    if Task.isCancelled {
+                        return .failure(.transport("WebSocket receive cancelled"))
+                    }
+                    let host = task.currentRequest?.url?.host ?? "Home Assistant"
+                    return .failure(.unreachable(host: host))
+                }
+            }
+            return .failure(.transport("WebSocket receive ended without a result"))
         }
     }
 
@@ -2101,8 +2454,12 @@ private struct HAWebSocketRecorderStatisticsCommand: Encodable {
     let types: [String]
 
     init(id: Int, statisticID: String, period: String, startTime: String, endTime: String) {
+        self.init(id: id, statisticIDs: [statisticID], period: period, startTime: startTime, endTime: endTime)
+    }
+
+    init(id: Int, statisticIDs: [String], period: String, startTime: String, endTime: String) {
         self.id = id
-        self.statisticIDs = [statisticID]
+        self.statisticIDs = statisticIDs
         self.period = period
         self.startTime = startTime
         self.endTime = endTime
@@ -2198,19 +2555,25 @@ private struct HAWebSocketEventDTO: Decodable {
     let entityRemovals: [String]?
 
     func firstEntityUpdate(updating knownStates: inout [EntityID: EntityState]) -> EntityState? {
+        entityUpdates(updating: &knownStates).first
+    }
+
+    /// Applies the frame's removals, additions, and compact diffs to the known
+    /// state map and returns every resulting entity update in deterministic
+    /// (sorted) order. Streaming consumers deliver all of them; the one-shot
+    /// path takes the first.
+    func entityUpdates(updating knownStates: inout [EntityID: EntityState]) -> [EntityState] {
         for removedEntityID in entityRemovals ?? [] {
             knownStates.removeValue(forKey: EntityID(removedEntityID))
         }
-        if let addition = entityAdditions?.sorted(by: { $0.key < $1.key }).first {
+        var updates: [EntityState] = []
+        for addition in (entityAdditions ?? [:]).sorted(by: { $0.key < $1.key }) {
             let id = EntityID(addition.key)
             let state = addition.value.entityState(id: id)
             knownStates[id] = state
-            return state
+            updates.append(state)
         }
-        guard let entityChanges else {
-            return nil
-        }
-        for change in entityChanges.sorted(by: { $0.key < $1.key }) {
+        for change in (entityChanges ?? [:]).sorted(by: { $0.key < $1.key }) {
             let id = EntityID(change.key)
             guard let previous = knownStates[id],
                   let updated = change.value.updatedState(id: id, previous: previous)
@@ -2218,9 +2581,9 @@ private struct HAWebSocketEventDTO: Decodable {
                 continue
             }
             knownStates[id] = updated
-            return updated
+            updates.append(updated)
         }
-        return nil
+        return updates
     }
 
     private enum CodingKeys: String, CodingKey {

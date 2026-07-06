@@ -60,6 +60,14 @@ public enum PerchHATheme {
         }
     }
 
+    /// The concrete render color for a stored RGBA accent value.
+    ///
+    /// - Parameter accent: The stored color.
+    /// - Returns: The SwiftUI color.
+    public static func color(for accent: PerchHAAccentColor) -> Color {
+        Color(red: accent.red, green: accent.green, blue: accent.blue, opacity: accent.alpha)
+    }
+
     /// A stable muted color for an unmapped non-numeric state slot.
     ///
     /// - Parameter slot: A palette slot in `0..<HistoryStateColorKind.paletteSlotCount`.
@@ -553,5 +561,23 @@ public struct PerchHACard<Content: View>: View {
             .overlay(shape.strokeBorder(PerchHATheme.cardBorder(colorScheme), lineWidth: 1))
             .clipShape(shape)
             .shadow(color: PerchHATheme.cardShadow(colorScheme), radius: 3, x: 0, y: 1)
+    }
+}
+
+extension PerchHAAccentColor {
+    /// Creates a stored RGBA value from a picked SwiftUI color.
+    ///
+    /// - Parameter color: The picked color.
+    /// - Returns: `nil` when the color cannot be resolved into sRGB.
+    public init?(_ color: Color) {
+        guard let converted = NSColor(color).usingColorSpace(.sRGB) else {
+            return nil
+        }
+        self.init(
+            red: converted.redComponent,
+            green: converted.greenComponent,
+            blue: converted.blueComponent,
+            alpha: converted.alphaComponent
+        )
     }
 }

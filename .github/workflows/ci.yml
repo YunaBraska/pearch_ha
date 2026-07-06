@@ -252,7 +252,6 @@ jobs:
           rg -q "func verifyIdleCPUAtRest" Tools/perchha-smoke/main.swift
           rg -q "func verifyPanelSnapshotRendering" Tools/perchha-smoke/main.swift
           rg -q "history-loaded-light" Tools/perchha-smoke/main.swift docs/TESTING.md
-          rg -q "custom-action-editor-light" Tools/perchha-smoke/main.swift docs/TESTING.md
           rg -q "built-in-controls-light" Tools/perchha-smoke/main.swift docs/TESTING.md
           rg -q "first-run-light" Tools/perchha-smoke/main.swift docs/TESTING.md
           rg -q "connecting-light" Tools/perchha-smoke/main.swift docs/TESTING.md
@@ -519,7 +518,6 @@ jobs:
           test -f .build/perchha-oauth-site/index.html
           test -f .build/perchha-snapshots/current/connected-light.png
           test -f .build/perchha-snapshots/current/history-loaded-light.png
-          test -f .build/perchha-snapshots/current/custom-action-editor-light.png
           test -f .build/perchha-snapshots/current/built-in-controls-light.png
           test -f .build/perchha-snapshots/current/first-run-light.png
           test -f .build/perchha-snapshots/current/connecting-light.png

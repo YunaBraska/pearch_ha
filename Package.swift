@@ -40,6 +40,9 @@ let package = Package(
                 "PerchHAClient",
                 "PerchHAPersistence",
                 "PerchHAUI"
+            ],
+            resources: [
+                .copy("Resources/PearchHA.icns")
             ]
         ),
         .target(

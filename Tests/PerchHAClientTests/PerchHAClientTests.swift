@@ -1292,8 +1292,12 @@ final class PerchHAClientTests: XCTestCase {
             end: try historyDate("2026-06-27T12:00:00+00:00")
         )
 
+        guard case let .success(series) = result else {
+            XCTFail("bulk history unexpectedly failed: \(result)")
+            return
+        }
         XCTAssertEqual(
-            result["sensor.a"],
+            series["sensor.a"],
             HistorySeries(
                 entityID: "sensor.a",
                 range: .hour,
@@ -1304,7 +1308,7 @@ final class PerchHAClientTests: XCTestCase {
             )
         )
         XCTAssertEqual(
-            result["sensor.b"],
+            series["sensor.b"],
             HistorySeries(
                 entityID: "sensor.b",
                 range: .hour,
@@ -1349,7 +1353,11 @@ final class PerchHAClientTests: XCTestCase {
             batchSize: 2
         )
 
-        XCTAssertEqual(Set(result.keys), ["sensor.a", "sensor.b", "sensor.c"])
+        guard case let .success(series) = result else {
+            XCTFail("bulk history unexpectedly failed: \(result)")
+            return
+        }
+        XCTAssertEqual(Set(series.keys), ["sensor.a", "sensor.b", "sensor.c"])
         let requests = await transport.requests
         XCTAssertEqual(requests.count, 2, "a >cap set splits into sequential batches")
         let filters = requests.map { request in
@@ -1384,8 +1392,12 @@ final class PerchHAClientTests: XCTestCase {
             end: try historyDate("2026-06-27T12:00:00+00:00")
         )
 
-        XCTAssertNotNil(result["sensor.a"])
-        XCTAssertNil(result["sensor.b"], "an entity with no rows is simply absent")
+        guard case let .success(series) = result else {
+            XCTFail("bulk history unexpectedly failed: \(result)")
+            return
+        }
+        XCTAssertNotNil(series["sensor.a"])
+        XCTAssertNil(series["sensor.b"], "an entity with no rows is simply absent")
     }
 
     func test_t_bulk_history_falls_back_to_next_url_on_unreachable_primary() async throws {
@@ -1415,7 +1427,11 @@ final class PerchHAClientTests: XCTestCase {
             end: try historyDate("2026-06-27T12:00:00+00:00")
         )
 
-        XCTAssertNotNil(result["sensor.a"])
+        guard case let .success(series) = result else {
+            XCTFail("bulk history unexpectedly failed: \(result)")
+            return
+        }
+        XCTAssertNotNil(series["sensor.a"])
         let requests = await transport.requests
         XCTAssertEqual(requests.map { $0.url.host }, ["primary.local", "fallback.example"])
     }
@@ -1439,12 +1455,116 @@ final class PerchHAClientTests: XCTestCase {
             end: try historyDate("2026-06-27T12:00:00+00:00")
         )
 
-        // A failed batch yields no series, and never surfaces the token anywhere.
-        XCTAssertTrue(result.isEmpty)
+        // A fully failed batch surfaces an explicit failure whose text never
+        // contains the token; the Authorization header is the only place the
+        // token appears.
+        guard case let .failure(failure) = result else {
+            XCTFail("a fully failed bulk history must fail explicitly, got \(result)")
+            return
+        }
+        XCTAssertFalse(failure.description.contains("super-secret-token"), "failure text must never leak the token")
         let requests = await transport.requests
         XCTAssertEqual(requests.first?.headers["Authorization"], "Bearer super-secret-token")
-        // The Authorization header is the only place the token appears; the result
-        // is empty and carries no failure string at all.
+    }
+
+    func test_t_bulk_history_week_routes_to_recorder_statistics_in_one_command() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[]"#,
+            recorderStatisticsBody: """
+            {
+              "sensor.office_temperature": [
+                {"start":1782554400000,"end":1782558000000,"state":21.4}
+              ],
+              "sensor.office_humidity": [
+                {"start":1782554400000,"end":1782558000000,"mean":47.0}
+              ]
+            }
+            """
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = HomeAssistantClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        // The bulk sync must fetch week/month history from the SAME source as
+        // the hover load (recorder statistics) — mixing raw REST states into
+        // the same cache key made week previews oscillate between two shapes.
+        let result = await client.historyBatch(
+            input,
+            entityIDs: ["sensor.office_temperature", "sensor.office_humidity"],
+            range: .week,
+            end: try historyDate("2026-06-27T12:00:00+00:00")
+        )
+
+        guard case let .success(series) = result else {
+            XCTFail("bulk statistics history unexpectedly failed: \(result)")
+            return
+        }
+        XCTAssertEqual(
+            series["sensor.office_temperature"]?.samples,
+            [HistorySample(timestamp: try historyDate("2026-06-27T10:00:00+00:00"), state: "21.4", numericValue: 21.4)]
+        )
+        XCTAssertEqual(
+            series["sensor.office_humidity"]?.samples,
+            [HistorySample(timestamp: try historyDate("2026-06-27T10:00:00+00:00"), state: "47.0", numericValue: 47.0)]
+        )
+        try await waitForJournalPath(server: server, path: "/api/websocket/recorder/statistics_during_period")
+        let journal = await server.journal.snapshot()
+        let command = try XCTUnwrap(journal.first { $0.path == "/api/websocket/recorder/statistics_during_period" })
+        XCTAssertTrue(
+            command.bodyText?.contains(#""statistic_ids":["sensor.office_temperature","sensor.office_humidity"]"#) ?? false,
+            "both entities travel in one statistics command"
+        )
+        XCTAssertFalse(journal.contains { $0.path.hasPrefix("/api/history/period/") })
+    }
+
+    func test_t_bulk_history_week_falls_back_to_rest_when_recorder_statistics_is_unknown() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[]"#,
+            historyBody: """
+            [
+              [
+                {"entity_id":"sensor.office_temperature","state":"21.4","last_changed":"2026-06-25T10:00:00+00:00"}
+              ]
+            ]
+            """
+        )
+        let server = try FakeHAWebSocketServer(
+            fixtures: fixtures,
+            mode: .unavailableCommands(["recorder/statistics_during_period"], code: .unknownCommand)
+        )
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = HomeAssistantClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        let result = await client.historyBatch(
+            input,
+            entityIDs: ["sensor.office_temperature"],
+            range: .week,
+            end: try historyDate("2026-06-27T12:00:00+00:00")
+        )
+
+        guard case let .success(series) = result else {
+            XCTFail("bulk history fallback unexpectedly failed: \(result)")
+            return
+        }
+        XCTAssertNotNil(series["sensor.office_temperature"], "an HA without recorder statistics still serves bulk history via REST")
+        let journal = await server.journal.snapshot()
+        XCTAssertTrue(journal.contains { $0.path.hasPrefix("/api/history/period/") })
     }
 
     func test_t_history_week_routes_to_recorder_statistics() async throws {
@@ -3294,6 +3414,77 @@ final class PerchHAClientTests: XCTestCase {
         XCTAssertEqual(evidence.subscribeEntities.command, "subscribe_entities")
         XCTAssertTrue(evidence.subscribeEntities.available)
         XCTAssertEqual(evidence.subscribeEntities.eventKeys, ["a"])
+    }
+
+    func testStreamEntityStateChangesDeliversUpdatesAndStaysOpenUntilTheSocketEnds() async throws {
+        let server = try FakeHAWebSocketServer()
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = HomeAssistantClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(urls: [server.baseURL]),
+            token: "fake-token"
+        )
+        actor Collector {
+            private(set) var states: [EntityState] = []
+            func append(_ state: EntityState) {
+                states.append(state)
+            }
+        }
+        let collector = Collector()
+        let streamTask = Task {
+            await client.streamEntityStateChanges(input) { state in
+                await collector.append(state)
+            }
+        }
+
+        // The optimized subscription delivers the pushed update...
+        var received: [EntityState] = []
+        for _ in 0..<200 {
+            received = await collector.states
+            if !received.isEmpty {
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(received.count, 1, "the stream delivers the pushed entity update")
+
+        // ...and unlike the one-shot API the stream stays open after it. A
+        // cancelled consumer must unblock the in-flight receive immediately
+        // instead of hanging until the server's next frame.
+        streamTask.cancel()
+        let terminal = await streamTask.value
+        if case .authentication = terminal {
+            XCTFail("a cancelled stream must not report an authentication failure")
+        }
+    }
+
+    func testWebSocketCommandTimesOutAsUnreachableWhenServerGoesSilentAfterAuth() async throws {
+        let server = try FakeHAWebSocketServer(mode: .silentAfterAuth)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = HomeAssistantClient(webSocketCommandTimeout: .milliseconds(200))
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(urls: [server.baseURL]),
+            token: "fake-token"
+        )
+
+        // The server accepts auth and then never answers get_states. Without a
+        // receive deadline this call suspended its caller forever.
+        let result = await client.webSocketStates(input)
+
+        guard case let .failure(failure) = result else {
+            XCTFail("webSocketStates unexpectedly succeeded against a silent server")
+            return
+        }
+        guard case .unreachable = failure else {
+            XCTFail("expected unreachable after a silent-server timeout, got \(failure)")
+            return
+        }
     }
 
     func testMirrorWebSocketEvidenceCaptureTimesOutWhenServerStopsResponding() async throws {

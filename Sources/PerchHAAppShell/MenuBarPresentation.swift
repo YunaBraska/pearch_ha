@@ -12,7 +12,8 @@ public struct PerchHAMenuBarPresentation: Equatable, Sendable {
         renderedItem: nil,
         showsImage: true,
         showsTitle: false,
-        visibleFallbackTitle: "PearchHA"
+        visibleFallbackTitle: "PearchHA",
+        iconSymbolName: nil
     )
 
     /// The promoted entity this item represents, or `nil` for the fallback
@@ -30,6 +31,11 @@ public struct PerchHAMenuBarPresentation: Equatable, Sendable {
     /// the resolved appearance would otherwise leave it with no image and no
     /// title (a zero-width, invisible status item).
     public let visibleFallbackTitle: String
+    /// The SF Symbol drawn as the status-item icon when the entity's "Show
+    /// icon" option is on: the user's custom pick, else the automatic
+    /// domain-derived symbol. `nil` when the icon is turned off or when a gauge
+    /// image already occupies the image slot.
+    public let iconSymbolName: String?
 
     public init(
         entityID: EntityID?,
@@ -39,7 +45,8 @@ public struct PerchHAMenuBarPresentation: Equatable, Sendable {
         renderedItem: RenderedMenuBarItem?,
         showsImage: Bool,
         showsTitle: Bool,
-        visibleFallbackTitle: String
+        visibleFallbackTitle: String,
+        iconSymbolName: String? = nil
     ) {
         self.entityID = entityID
         self.title = title
@@ -49,6 +56,7 @@ public struct PerchHAMenuBarPresentation: Equatable, Sendable {
         self.showsImage = showsImage
         self.showsTitle = showsTitle
         self.visibleFallbackTitle = visibleFallbackTitle
+        self.iconSymbolName = iconSymbolName
     }
 }
 
@@ -125,6 +133,12 @@ public struct PerchHAMenuBarPresenter: Sendable {
             )
             // A per-entity appearance always wins over the global default.
             let appearance = itemConfiguration.appearance ?? globalAppearance
+            // A gauge image owns the image slot; otherwise the per-entity
+            // "Show icon" option supplies an SF Symbol (custom pick, else the
+            // automatic domain icon) so a text item can carry an icon.
+            let iconSymbolName: String? = rendered.gauge == nil && itemConfiguration.showsEntityIcon
+                ? (itemConfiguration.customIconName ?? perchHAEntityIconName(for: entity))
+                : nil
             return PerchHAMenuBarPresentation(
                 entityID: entity.id,
                 title: rendered.title,
@@ -133,7 +147,8 @@ public struct PerchHAMenuBarPresenter: Sendable {
                 renderedItem: rendered,
                 showsImage: appearance.showsImage,
                 showsTitle: appearance.showsTitle,
-                visibleFallbackTitle: Self.visibleFallbackTitle(for: entity, rendered: rendered)
+                visibleFallbackTitle: Self.visibleFallbackTitle(for: entity, rendered: rendered),
+                iconSymbolName: iconSymbolName
             )
         }
     }

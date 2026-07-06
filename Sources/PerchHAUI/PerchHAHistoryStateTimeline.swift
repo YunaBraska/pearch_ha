@@ -88,6 +88,21 @@ struct PerchHAHistoryStateTimelinePopoverBody: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(entityName) state timeline, current state \(currentStateLabel)")
+        .accessibilityValue(accessibilitySegmentSummary)
+    }
+
+    /// The recent state segments spoken by assistive technology, since the
+    /// drawn timeline itself is a single ignored element.
+    private var accessibilitySegmentSummary: String {
+        let recent = segments.suffix(6)
+        guard !recent.isEmpty else {
+            return "No recorded states"
+        }
+        let described = recent
+            .map { "\(Self.label(for: $0.state)) for \(Self.durationLabel($0.duration))" }
+            .joined(separator: ", ")
+        let omitted = segments.count - recent.count
+        return omitted > 0 ? "\(described), and \(omitted) earlier" : described
     }
 
     private var timeline: some View {
@@ -217,6 +232,13 @@ private struct FlowingLegend: View {
                         .foregroundStyle(labelColor)
                         .lineLimit(1)
                 }
+            }
+            if states.count > 4 {
+                Text("+\(states.count - 4) more")
+                    .font(.caption2)
+                    .foregroundStyle(labelColor)
+                    .lineLimit(1)
+                    .accessibilityLabel("\(states.count - 4) more states not shown")
             }
             Spacer(minLength: 0)
         }

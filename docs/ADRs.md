@@ -91,3 +91,23 @@ Decision: Ship a Developer ID signed and notarized app. Use a DMG for v1. Add Sp
 Consequences: Direct install is viable; automatic updates are deferred until they earn the added dependency and release work.
 
 Alternatives: Mac App Store first was deferred because sandbox and review constraints can slow this kind of utility.
+
+## ADR-0010 - Host-scoped self-signed trust, on by default, never trust-all
+
+Context: The dashboard-overhaul connection form briefly shipped with certificate validation disabled for every host, exposing bearer tokens to interception on any connection. Home-lab Home Assistant deployments, PerchHA's primary audience, very commonly run behind self-issued certificates, so a strict-only default breaks most first-run connections.
+
+Decision: The self-signed allowance is a visible switch in the Settings Connection tab, on by default, persisted with the connection profile, and scoped to exactly the profile's own HTTPS hosts — the client never trusts all hosts, and hosts outside the configured addresses always get full validation. Turning it off gives strict validation everywhere. The OAuth token exchange uses the same derived policy, and profiles stored before the field decode as trusting so existing setups keep working.
+
+Consequences: Self-signed home labs connect out of the box; the blast radius of the default is limited to the user's own configured addresses. Security-conscious users flip one switch for strict validation. Changing the trust posture counts as a connection-identity change, so caches and sessions rebuild with the new policy.
+
+Alternatives: Trust-all was rejected as a silent security regression with unbounded scope. Strict-by-default with opt-in was implemented first but rejected as product policy because it breaks the dominant deployment. Per-certificate pinning was rejected as disproportionate for a v1 menu bar utility.
+
+## ADR-0011 - Live updates as the primary path, polling as the safety net
+
+Context: The product promise is glanceable, live values. The client had `subscribe_entities` support, but nothing drove it: the UI updated through a periodic refresh that paid a full connect-and-auth handshake per tick.
+
+Decision: The panel model owns one long-lived streaming subscription per connected session (`subscribe_entities`, falling back to `subscribe_events`), applying each pushed state immediately — independent of panel visibility so menu bar items stay live. The stream reconnects with exponential backoff and resets once events flow. The periodic refresh remains only as a backstop, and the background history sync pauses while the connection is failed.
+
+Consequences: Values update in real time over one socket instead of ~45-second polls; request volume drops. WebSocket command/auth/ack receives carry a deadline and receives honor task cancellation, so a silent or half-open server can never hang a caller.
+
+Alternatives: Keeping polling as the primary path was rejected as contradicting FR-3 and wasting request volume. Managing the subscription in the app shell was rejected because the model owns the connection lifecycle and session identity.

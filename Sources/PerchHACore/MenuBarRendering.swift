@@ -74,13 +74,207 @@ public struct ValueThreshold: Codable, Equatable, Sendable {
     }
 }
 
-public struct ValueThresholds: Codable, Equatable, Sendable {
-    public let warning: ValueThreshold?
-    public let critical: ValueThreshold?
+/// One Grafana-style threshold step: from this value upward (until a higher
+/// step takes over) the value wears the step's color.
+public struct ThresholdStep: Codable, Equatable, Sendable {
+    /// The inclusive lower edge of the step (`value >= self.value`).
+    public let value: Double
+    /// The color applied while the step is active.
+    public let color: PerchHAAccentColor
 
-    public init(warning: ValueThreshold? = nil, critical: ValueThreshold? = nil) {
-        self.warning = warning
-        self.critical = critical
+    /// Creates a step.
+    ///
+    /// - Parameters:
+    ///   - value: The inclusive lower edge.
+    ///   - color: The applied color.
+    public init(value: Double, color: PerchHAAccentColor) {
+        self.value = value
+        self.color = color
+    }
+}
+
+/// Grafana-style thresholds: ordered steps over a base color.
+///
+/// The highest step at or below the value wins; below every step the optional
+/// base color applies. Severity (for gauges and accessibility text) derives
+/// from the matched color: red-dominant reads as critical, yellow/orange as
+/// warning, everything else as normal.
+///
+/// Legacy configurations stored a `warning`/`critical` pair or bounded rules;
+/// both decode into equivalent steps so existing setups keep their meaning.
+public struct ValueThresholds: Codable, Equatable, Sendable {
+    /// The canonical warning color (orange) used by legacy mappings.
+    public static let warningColor = PerchHAAccentColor(red: 0.95, green: 0.61, blue: 0.07, alpha: 1)
+    /// The canonical critical color (red) used by legacy mappings.
+    public static let criticalColor = PerchHAAccentColor(red: 0.91, green: 0.30, blue: 0.24, alpha: 1)
+    /// The canonical healthy color (green) used by legacy mappings.
+    public static let okColor = PerchHAAccentColor(red: 0.18, green: 0.80, blue: 0.44, alpha: 1)
+
+    /// The steps, evaluated highest-value-first.
+    public let steps: [ThresholdStep]
+    /// The color applied below every step, or `nil` for the default tint.
+    public let baseColor: PerchHAAccentColor?
+
+    /// Creates thresholds from steps and an optional base color.
+    ///
+    /// - Parameters:
+    ///   - steps: The steps; order does not matter, evaluation sorts them.
+    ///   - baseColor: The color below every step, or `nil`.
+    public init(steps: [ThresholdStep] = [], baseColor: PerchHAAccentColor? = nil) {
+        self.steps = steps
+        self.baseColor = baseColor
+    }
+
+    /// Creates thresholds from the legacy warning/critical pair.
+    ///
+    /// `aboveOrEqual` thresholds become steps at their value. `belowOrEqual`
+    /// thresholds invert: the color becomes the base and a healthy step starts
+    /// just above the value.
+    ///
+    /// - Parameters:
+    ///   - warning: The legacy warning threshold (mapped to orange).
+    ///   - critical: The legacy critical threshold (mapped to red).
+    public init(warning: ValueThreshold?, critical: ValueThreshold?) {
+        var steps: [ThresholdStep] = []
+        var baseColor: PerchHAAccentColor?
+        for (threshold, color) in [(warning, Self.warningColor), (critical, Self.criticalColor)] {
+            guard let threshold else {
+                continue
+            }
+            switch threshold.direction {
+            case .aboveOrEqual:
+                steps.append(ThresholdStep(value: threshold.value, color: color))
+            case .belowOrEqual:
+                baseColor = color
+                steps.append(ThresholdStep(value: threshold.value.nextUp, color: Self.okColor))
+            }
+        }
+        self.init(steps: steps, baseColor: baseColor)
+    }
+
+    /// The color for a value: the highest step at or below it, else the base.
+    ///
+    /// - Parameter value: The numeric value to classify.
+    /// - Returns: The matched color, or `nil` for the default tint.
+    public func color(for value: Double) -> PerchHAAccentColor? {
+        steps
+            .sorted { $0.value > $1.value }
+            .first { value >= $0.value }?
+            .color ?? baseColor
+    }
+
+    /// The severity communicated for the value, derived from the matched
+    /// color: red-dominant is critical, yellow/orange is warning, everything
+    /// else (or no match) is normal.
+    ///
+    /// - Parameter value: The numeric value to classify.
+    /// - Returns: The severity for gauge palettes and accessibility text.
+    public func severity(for value: Double) -> ValueSeverity {
+        guard let color = color(for: value) else {
+            return .normal
+        }
+        return Self.severity(of: color)
+    }
+
+    /// Classifies a color into the severity it visually communicates.
+    ///
+    /// - Parameter color: The threshold color.
+    /// - Returns: Critical for red-dominant colors, warning for yellow/orange,
+    ///   normal otherwise.
+    public static func severity(of color: PerchHAAccentColor) -> ValueSeverity {
+        if color.red > 0.6 && color.green < 0.45 && color.blue < 0.45 {
+            return .critical
+        }
+        if color.red > 0.6 && color.green >= 0.45 && color.blue < 0.4 {
+            return .warning
+        }
+        return .normal
+    }
+
+    /// Returns a copy where the legacy warning/critical slot is replaced (or
+    /// removed) — the bridge for the legacy setter API and its tests.
+    ///
+    /// - Parameters:
+    ///   - color: The legacy slot color.
+    ///   - threshold: The legacy threshold, or `nil` to remove the slot.
+    /// - Returns: The updated thresholds.
+    public func replacingLegacyRule(color: PerchHAAccentColor, threshold: ValueThreshold?) -> ValueThresholds {
+        var remaining = steps.filter { $0.color != color }
+        var base = baseColor == color ? nil : baseColor
+        if let threshold {
+            switch threshold.direction {
+            case .aboveOrEqual:
+                remaining.append(ThresholdStep(value: threshold.value, color: color))
+            case .belowOrEqual:
+                base = color
+                remaining.append(ThresholdStep(value: threshold.value.nextUp, color: Self.okColor))
+            }
+        }
+        return ValueThresholds(steps: remaining, baseColor: base)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case steps
+        case baseColor
+        case rules
+        case warning
+        case critical
+    }
+
+    private struct LegacyRule: Decodable {
+        let lowerBound: Double?
+        let upperBound: Double?
+        let color: String
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if container.contains(.steps) || container.contains(.baseColor) {
+            self.init(
+                steps: try container.decodeIfPresent([ThresholdStep].self, forKey: .steps) ?? [],
+                baseColor: try container.decodeIfPresent(PerchHAAccentColor.self, forKey: .baseColor)
+            )
+            return
+        }
+        if let legacyRules = try container.decodeIfPresent([LegacyRule].self, forKey: .rules) {
+            // The short-lived bounded-rule shape: lower bounds become steps;
+            // an upper-bound-only rule becomes the base color.
+            var steps: [ThresholdStep] = []
+            var baseColor: PerchHAAccentColor?
+            for rule in legacyRules {
+                let color = Self.legacyColor(named: rule.color)
+                if let lower = rule.lowerBound {
+                    steps.append(ThresholdStep(value: lower, color: color))
+                } else if rule.upperBound != nil {
+                    baseColor = color
+                }
+            }
+            self.init(steps: steps, baseColor: baseColor)
+            return
+        }
+        self.init(
+            warning: try container.decodeIfPresent(ValueThreshold.self, forKey: .warning),
+            critical: try container.decodeIfPresent(ValueThreshold.self, forKey: .critical)
+        )
+    }
+
+    private static func legacyColor(named name: String) -> PerchHAAccentColor {
+        switch name {
+        case "red":
+            criticalColor
+        case "orange":
+            warningColor
+        case "yellow":
+            PerchHAAccentColor(red: 0.95, green: 0.77, blue: 0.06, alpha: 1)
+        default:
+            okColor
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(steps, forKey: .steps)
+        try container.encodeIfPresent(baseColor, forKey: .baseColor)
     }
 }
 
@@ -97,7 +291,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
     public let absoluteTotal: Double?
     public let totalEntityID: EntityID?
     public let thresholds: ValueThresholds
-    public let defaultHistoryRange: HistoryRange
+    /// The chart range for this entity's inline preview and history popover,
+    /// or `nil` to inherit the global Appearance default.
+    public let defaultHistoryRange: HistoryRange?
     /// Which controls a cover entity exposes in the panel.
     public let coverControlMode: CoverControlMode
     /// The selected unit that converts and formats this entity's value, or `nil`
@@ -107,6 +303,11 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
     public let minValue: Double?
     /// The optional upper bound mapped to `1` for percentage/icon units.
     public let maxValue: Double?
+    /// Whether the promoted menu-bar item shows an icon beside its value.
+    public let showsEntityIcon: Bool
+    /// A custom SF Symbol name for the menu-bar icon, or `nil` to use the
+    /// automatic domain-derived symbol.
+    public let customIconName: String?
 
     public init(
         entityID: EntityID,
@@ -118,11 +319,13 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         absoluteTotal: Double? = nil,
         totalEntityID: EntityID? = nil,
         thresholds: ValueThresholds = ValueThresholds(),
-        defaultHistoryRange: HistoryRange = .hour,
+        defaultHistoryRange: HistoryRange? = nil,
         coverControlMode: CoverControlMode = .both,
         displayUnit: ValueUnit? = nil,
         minValue: Double? = nil,
-        maxValue: Double? = nil
+        maxValue: Double? = nil,
+        showsEntityIcon: Bool = true,
+        customIconName: String? = nil
     ) {
         self.entityID = entityID
         self.style = style
@@ -138,6 +341,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         self.displayUnit = displayUnit
         self.minValue = minValue
         self.maxValue = maxValue
+        self.showsEntityIcon = showsEntityIcon
+        let trimmedIcon = customIconName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.customIconName = (trimmedIcon?.isEmpty ?? true) ? nil : trimmedIcon
     }
 
     public func updating(
@@ -148,7 +354,6 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         absoluteTotal: Double? = nil,
         totalEntityID: EntityID? = nil,
         thresholds: ValueThresholds? = nil,
-        defaultHistoryRange: HistoryRange? = nil,
         coverControlMode: CoverControlMode? = nil,
         displayUnit: ValueUnit? = nil,
         minValue: Double? = nil,
@@ -164,11 +369,13 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             absoluteTotal: absoluteTotal ?? self.absoluteTotal,
             totalEntityID: totalEntityID ?? self.totalEntityID,
             thresholds: thresholds ?? self.thresholds,
-            defaultHistoryRange: defaultHistoryRange ?? self.defaultHistoryRange,
+            defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode ?? self.coverControlMode,
             displayUnit: displayUnit ?? self.displayUnit,
             minValue: minValue ?? self.minValue,
-            maxValue: maxValue ?? self.maxValue
+            maxValue: maxValue ?? self.maxValue,
+            showsEntityIcon: showsEntityIcon,
+            customIconName: customIconName
         )
     }
 
@@ -192,7 +399,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
             minValue: minValue,
-            maxValue: maxValue
+            maxValue: maxValue,
+            showsEntityIcon: showsEntityIcon,
+            customIconName: customIconName
         )
     }
 
@@ -215,7 +424,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             coverControlMode: coverControlMode,
             displayUnit: unit,
             minValue: minValue,
-            maxValue: maxValue
+            maxValue: maxValue,
+            showsEntityIcon: showsEntityIcon,
+            customIconName: customIconName
         )
     }
 
@@ -240,7 +451,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
             minValue: minValue,
-            maxValue: maxValue
+            maxValue: maxValue,
+            showsEntityIcon: showsEntityIcon,
+            customIconName: customIconName
         )
     }
 
@@ -259,7 +472,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
             minValue: minValue,
-            maxValue: maxValue
+            maxValue: maxValue,
+            showsEntityIcon: showsEntityIcon,
+            customIconName: customIconName
         )
     }
 
@@ -278,25 +493,43 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
             minValue: minValue,
-            maxValue: maxValue
+            maxValue: maxValue,
+            showsEntityIcon: showsEntityIcon,
+            customIconName: customIconName
         )
     }
 
     public func settingWarningThreshold(_ threshold: ValueThreshold?) -> MenuBarItemConfiguration {
-        settingThresholds(
-            ValueThresholds(
-                warning: threshold,
-                critical: thresholds.critical
-            )
-        )
+        settingThresholds(thresholds.replacingLegacyRule(color: ValueThresholds.warningColor, threshold: threshold))
     }
 
     public func settingCriticalThreshold(_ threshold: ValueThreshold?) -> MenuBarItemConfiguration {
-        settingThresholds(
-            ValueThresholds(
-                warning: thresholds.warning,
-                critical: threshold
-            )
+        settingThresholds(thresholds.replacingLegacyRule(color: ValueThresholds.criticalColor, threshold: threshold))
+    }
+
+    /// Returns a copy with the chart range replaced.
+    ///
+    /// - Parameter range: The per-entity range, or `nil` to inherit the global
+    ///   Appearance default.
+    /// - Returns: An updated configuration value.
+    public func settingDefaultHistoryRange(_ range: HistoryRange?) -> MenuBarItemConfiguration {
+        MenuBarItemConfiguration(
+            entityID: entityID,
+            style: style,
+            appearance: appearance,
+            showsLabel: showsLabel,
+            showsUnit: showsUnit,
+            maximumFractionDigits: maximumFractionDigits,
+            absoluteTotal: absoluteTotal,
+            totalEntityID: totalEntityID,
+            thresholds: thresholds,
+            defaultHistoryRange: range,
+            coverControlMode: coverControlMode,
+            displayUnit: displayUnit,
+            minValue: minValue,
+            maxValue: maxValue,
+            showsEntityIcon: showsEntityIcon,
+            customIconName: customIconName
         )
     }
 
@@ -315,7 +548,60 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
             minValue: minValue,
-            maxValue: maxValue
+            maxValue: maxValue,
+            showsEntityIcon: showsEntityIcon,
+            customIconName: customIconName
+        )
+    }
+
+    /// Returns a copy with the dashboard icon visibility replaced.
+    ///
+    /// - Parameter shows: Whether the dashboard row shows the entity icon.
+    /// - Returns: An updated configuration value.
+    public func settingShowsEntityIcon(_ shows: Bool) -> MenuBarItemConfiguration {
+        MenuBarItemConfiguration(
+            entityID: entityID,
+            style: style,
+            appearance: appearance,
+            showsLabel: showsLabel,
+            showsUnit: showsUnit,
+            maximumFractionDigits: maximumFractionDigits,
+            absoluteTotal: absoluteTotal,
+            totalEntityID: totalEntityID,
+            thresholds: thresholds,
+            defaultHistoryRange: defaultHistoryRange,
+            coverControlMode: coverControlMode,
+            displayUnit: displayUnit,
+            minValue: minValue,
+            maxValue: maxValue,
+            showsEntityIcon: shows,
+            customIconName: customIconName
+        )
+    }
+
+    /// Returns a copy with the custom dashboard icon replaced.
+    ///
+    /// - Parameter symbolName: The SF Symbol to show, or `nil` for the
+    ///   automatic domain-derived icon. Blank strings clear to automatic.
+    /// - Returns: An updated configuration value.
+    public func settingCustomIconName(_ symbolName: String?) -> MenuBarItemConfiguration {
+        MenuBarItemConfiguration(
+            entityID: entityID,
+            style: style,
+            appearance: appearance,
+            showsLabel: showsLabel,
+            showsUnit: showsUnit,
+            maximumFractionDigits: maximumFractionDigits,
+            absoluteTotal: absoluteTotal,
+            totalEntityID: totalEntityID,
+            thresholds: thresholds,
+            defaultHistoryRange: defaultHistoryRange,
+            coverControlMode: coverControlMode,
+            displayUnit: displayUnit,
+            minValue: minValue,
+            maxValue: maxValue,
+            showsEntityIcon: showsEntityIcon,
+            customIconName: symbolName
         )
     }
 
@@ -335,6 +621,8 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         case minValue
         case maxValue
         case temperatureUnit
+        case showsEntityIcon
+        case customIconName
     }
 
     public init(from decoder: Decoder) throws {
@@ -351,11 +639,15 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         absoluteTotal = try container.decodeIfPresent(Double.self, forKey: .absoluteTotal)
         totalEntityID = try container.decodeIfPresent(EntityID.self, forKey: .totalEntityID)
         thresholds = try container.decodeIfPresent(ValueThresholds.self, forKey: .thresholds) ?? ValueThresholds()
-        defaultHistoryRange = try container.decodeIfPresent(HistoryRange.self, forKey: .defaultHistoryRange) ?? .hour
+        defaultHistoryRange = try container.decodeIfPresent(HistoryRange.self, forKey: .defaultHistoryRange)
         coverControlMode = try container.decodeIfPresent(CoverControlMode.self, forKey: .coverControlMode) ?? .both
         displayUnit = Self.decodeDisplayUnit(from: container)
         minValue = try container.decodeIfPresent(Double.self, forKey: .minValue)
         maxValue = try container.decodeIfPresent(Double.self, forKey: .maxValue)
+        showsEntityIcon = try container.decodeIfPresent(Bool.self, forKey: .showsEntityIcon) ?? true
+        let decodedIcon = try container.decodeIfPresent(String.self, forKey: .customIconName)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        customIconName = (decodedIcon?.isEmpty ?? true) ? nil : decodedIcon
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -369,11 +661,13 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         try container.encodeIfPresent(absoluteTotal, forKey: .absoluteTotal)
         try container.encodeIfPresent(totalEntityID, forKey: .totalEntityID)
         try container.encode(thresholds, forKey: .thresholds)
-        try container.encode(defaultHistoryRange, forKey: .defaultHistoryRange)
+        try container.encodeIfPresent(defaultHistoryRange, forKey: .defaultHistoryRange)
         try container.encode(coverControlMode, forKey: .coverControlMode)
         try container.encodeIfPresent(displayUnit, forKey: .displayUnit)
         try container.encodeIfPresent(minValue, forKey: .minValue)
         try container.encodeIfPresent(maxValue, forKey: .maxValue)
+        try container.encode(showsEntityIcon, forKey: .showsEntityIcon)
+        try container.encodeIfPresent(customIconName, forKey: .customIconName)
     }
 
     /// Decodes the optional `displayUnit`, mapping legacy payloads to `nil`.
@@ -751,13 +1045,7 @@ public struct MenuBarItemRenderer: Sendable {
         guard let metric else {
             return .normal
         }
-        if configuration.thresholds.critical?.matches(metric) == true {
-            return .critical
-        }
-        if configuration.thresholds.warning?.matches(metric) == true {
-            return .warning
-        }
-        return .normal
+        return configuration.thresholds.severity(for: metric)
     }
 
     private func numericState(_ state: String) -> Double? {

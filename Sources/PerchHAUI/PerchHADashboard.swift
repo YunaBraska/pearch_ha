@@ -202,88 +202,6 @@ public struct SummaryStripMetric: Equatable {
 
 // MARK: - Header
 
-/// The dashboard header: a tiny connection dot + brand on one line, with a
-/// compact summary strip of monospaced readouts below.
-///
-/// No refresh button and no warning count — values auto-update and diagnostics
-/// live in Settings. Settings/quit live only in the footer. The header is part of
-/// the single surface: it has padding but no border or card of its own.
-public struct DashboardHeader: View {
-    @Environment(\.dashboardPalette) private var palette
-    private let summary: PerchHADashboardSummary
-
-    /// Creates the header.
-    ///
-    /// - Parameter summary: The pure summary projection built from the snapshot.
-    public init(summary: PerchHADashboardSummary) {
-        self.summary = summary
-    }
-
-    public var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(palette.connectionColor(summary.connectionState))
-                    .frame(width: 7, height: 7)
-                    .accessibilityHidden(true)
-                Text("PearchHA")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(palette.textPrimary)
-                Spacer(minLength: 0)
-            }
-            SummaryStrip(metrics: metrics)
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
-        .padding(.bottom, 12)
-    }
-
-    private var metrics: [SummaryStripMetric] {
-        var result: [SummaryStripMetric] = [
-            SummaryStripMetric(
-                caption: "Status",
-                value: summary.connectionLabel,
-                tint: palette.connectionColor(summary.connectionState)
-            )
-        ]
-        // When the user has chosen explicit summary metrics, render those in
-        // order (with muted placeholders for unavailable entities) instead of the
-        // auto-derived primary metric and alert count. The status pill above is
-        // kept regardless of the selection.
-        if !summary.selectedMetrics.isEmpty {
-            for metric in summary.selectedMetrics {
-                result.append(
-                    SummaryStripMetric(
-                        caption: metric.name,
-                        value: metric.valueText,
-                        tint: metric.isAvailable ? nil : palette.textTertiary
-                    )
-                )
-            }
-            return result
-        }
-        if let metric = summary.primaryMetric {
-            result.append(
-                SummaryStripMetric(
-                    caption: metric.name,
-                    value: metric.valueText,
-                    tint: metric.severity == .normal ? nil : palette.severityColor(metric.severity)
-                )
-            )
-        }
-        if let warnings = summary.warningCount, warnings > 0 {
-            result.append(
-                SummaryStripMetric(
-                    caption: "Alerts",
-                    value: "\(warnings)",
-                    tint: palette.warning
-                )
-            )
-        }
-        return result
-    }
-}
-
 // MARK: - Module block
 
 /// A small uppercase, tracked module label that introduces a group of rows.
@@ -416,7 +334,7 @@ public enum TelemetryRowMetrics {
 public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
     @Environment(\.dashboardPalette) private var palette
     @Environment(\.dashboardRowDensity) private var rowDensity
-    private let icon: String
+    private let icon: String?
     private let iconActive: Bool
     private let label: String
     private let subtitle: String?
@@ -428,7 +346,9 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
     /// Creates a telemetry row.
     ///
     /// - Parameters:
-    ///   - icon: The leading SF Symbol.
+    ///   - icon: The leading SF Symbol, or `nil` to leave the reserved icon
+    ///     column empty (per-entity "show icon" turned off) without breaking
+    ///     the table alignment.
     ///   - iconActive: When `true` the icon takes the accent tint; otherwise muted.
     ///   - label: The single-line entity name.
     ///   - subtitle: An optional tiny muted subtitle (e.g. a unit).
@@ -442,7 +362,7 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
     ///     empty view when the row exposes no control; the slot stays reserved so
     ///     controls align across rows.
     public init(
-        icon: String,
+        icon: String?,
         iconActive: Bool,
         label: String,
         subtitle: String? = nil,
@@ -464,11 +384,17 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 10) {
-                Image(systemName: icon)
-                    .font(.system(size: 14))
-                    .frame(width: TelemetryRowMetrics.iconWidth, alignment: .center)
-                    .foregroundStyle(iconActive ? palette.accentPrimary : palette.textTertiary)
-                    .accessibilityHidden(true)
+                Group {
+                    if let icon {
+                        Image(systemName: icon)
+                            .font(.system(size: 14))
+                            .foregroundStyle(iconActive ? palette.accentPrimary : palette.textTertiary)
+                    } else {
+                        Color.clear
+                    }
+                }
+                .frame(width: TelemetryRowMetrics.iconWidth, height: 16, alignment: .center)
+                .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 0) {
                     Text(label)
                         .font(.system(size: 12.5, weight: .medium))
@@ -504,23 +430,6 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
     }
 }
 
-/// A muted reserved-slot placeholder: a faint baseline dash filling the history
-/// preview column when an entity has no cached history yet. It occupies the same
-/// footprint as a micro chart so the column never changes geometry when real data
-/// lands — calm, not a shimmering skeleton.
-public struct TelemetryPreviewPlaceholder: View {
-    @Environment(\.dashboardPalette) private var palette
-
-    /// Creates the placeholder.
-    public init() {}
-
-    public var body: some View {
-        MicroDash(color: palette.meterTrack)
-            .frame(width: TelemetryRowMetrics.previewWidth, height: 7)
-            .accessibilityHidden(true)
-    }
-}
-
 // MARK: - Footer
 
 /// The dashboard footer: a quiet anchored bar with a connection dot, a calm
@@ -533,28 +442,27 @@ public struct DashboardFooter: View {
     @Environment(\.dashboardPalette) private var palette
     private let connectionColor: Color
     private let updatedText: String
-    private let settingsDisabled: Bool
     private let onSettings: () -> Void
     private let onQuit: () -> Void
 
     /// Creates the footer.
     ///
+    /// Settings is always enabled: it hosts the Connection, Privacy, and About
+    /// tabs, which matter most precisely when nothing is connected yet.
+    ///
     /// - Parameters:
     ///   - connectionColor: The status indicator color.
     ///   - updatedText: A calm relative "updated" description.
-    ///   - settingsDisabled: Whether the settings control is disabled.
     ///   - onSettings: The open-settings action.
     ///   - onQuit: The quit action.
     public init(
         connectionColor: Color,
         updatedText: String,
-        settingsDisabled: Bool,
         onSettings: @escaping () -> Void,
         onQuit: @escaping () -> Void
     ) {
         self.connectionColor = connectionColor
         self.updatedText = updatedText
-        self.settingsDisabled = settingsDisabled
         self.onSettings = onSettings
         self.onQuit = onQuit
     }
@@ -579,7 +487,6 @@ public struct DashboardFooter: View {
                     Image(systemName: "gearshape")
                 }
                 .buttonStyle(PerchHAIconButtonStyle())
-                .disabled(settingsDisabled)
                 .help("Settings")
                 .accessibilityLabel("Settings")
                 Button(action: onQuit) {
@@ -592,5 +499,40 @@ public struct DashboardFooter: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
         }
+    }
+}
+
+// MARK: - Settings switch style
+
+/// The PerchHA switch: a compact accent capsule with a sliding knob, replacing
+/// the stock checkbox everywhere in Settings so controls read as part of the
+/// instrument design language. The label stays a real `Toggle` label, keeping
+/// the switch keyboard-focusable and accessible.
+public struct PerchHASwitchToggleStyle: ToggleStyle {
+    public init() {}
+
+    public func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            HStack(spacing: 7) {
+                Capsule(style: .continuous)
+                    .fill(configuration.isOn ? PerchHATheme.accent : Color.primary.opacity(0.18))
+                    .frame(width: 26, height: 15)
+                    .overlay(alignment: configuration.isOn ? .trailing : .leading) {
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 11, height: 11)
+                            .padding(2)
+                            .shadow(color: Color.black.opacity(0.25), radius: 0.6, y: 0.4)
+                    }
+                    .animation(.easeInOut(duration: PerchHAMotion.standardDuration), value: configuration.isOn)
+                configuration.label
+                    .font(.caption)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(configuration.isOn ? [.isSelected] : [])
     }
 }

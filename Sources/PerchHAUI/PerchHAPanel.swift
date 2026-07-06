@@ -43,17 +43,25 @@ public struct PerchHAConnectionForm: Equatable, Sendable {
     public var addresses: [PerchHAConnectionAddressField]
     public var token: String
     public var usesStoredAuthSession: Bool
+    /// Whether the user trusts self-signed TLS certificates for the form's
+    /// current HTTPS hosts. On by default — home-lab Home Assistant commonly
+    /// runs on a self-issued certificate — but the allowance is always scoped
+    /// to exactly the hosts listed in this form, never all hosts, and can be
+    /// switched off in Settings for strict validation.
+    public var allowsSelfSignedCertificates: Bool
 
     public init(
         urlString: String = "",
         addresses: [PerchHAConnectionAddressField] = [],
         token: String = "",
-        usesStoredAuthSession: Bool = false
+        usesStoredAuthSession: Bool = false,
+        allowsSelfSignedCertificates: Bool = true
     ) {
         self.urlString = urlString
         self.addresses = addresses
         self.token = token
         self.usesStoredAuthSession = usesStoredAuthSession
+        self.allowsSelfSignedCertificates = allowsSelfSignedCertificates
     }
 
     /// Creates a form from a primary URL and a single fallback URL string.
@@ -64,14 +72,16 @@ public struct PerchHAConnectionForm: Equatable, Sendable {
         urlString: String,
         fallbackURLString: String,
         token: String = "",
-        usesStoredAuthSession: Bool = false
+        usesStoredAuthSession: Bool = false,
+        allowsSelfSignedCertificates: Bool = true
     ) {
         let trimmedFallback = fallbackURLString.trimmingCharacters(in: .whitespacesAndNewlines)
         self.init(
             urlString: urlString,
             addresses: trimmedFallback.isEmpty ? [] : [PerchHAConnectionAddressField(urlString: fallbackURLString)],
             token: token,
-            usesStoredAuthSession: usesStoredAuthSession
+            usesStoredAuthSession: usesStoredAuthSession,
+            allowsSelfSignedCertificates: allowsSelfSignedCertificates
         )
     }
 
@@ -132,6 +142,25 @@ public struct PerchHAConnectionForm: Equatable, Sendable {
         return urls() == other.urls()
             && trimmedToken == other.trimmedToken
             && usesStoredAuthSession == other.usesStoredAuthSession
+            && allowsSelfSignedCertificates == other.allowsSelfSignedCertificates
+    }
+
+    /// The lowercased HTTPS hosts a self-signed certificate allowance would be
+    /// scoped to, derived from the form's current resolved URLs.
+    ///
+    /// Plain-HTTP addresses carry no certificate, so they never contribute a
+    /// host. Returns an empty set when the form holds no valid HTTPS address.
+    ///
+    /// - Returns: The unique lowercased HTTPS hosts of ``urls()``.
+    public func selfSignedCertificateHosts() -> Set<String> {
+        Set(
+            urls().compactMap { url in
+                guard url.scheme?.lowercased() == "https", let host = url.host, !host.isEmpty else {
+                    return nil
+                }
+                return host.lowercased()
+            }
+        )
     }
 
     public var validationFailure: ConnectionFailure? {
@@ -764,62 +793,6 @@ public struct PerchHAHistoryCacheConfiguration: Equatable, Sendable {
     }
 }
 
-/// Tuning for the inline-history prefetch coordinator.
-///
-/// The coordinator warms the in-memory history cache for the rows the panel is
-/// actually showing (plus a small lookahead) so the inline sparklines render
-/// from cache without the row ever triggering a fetch. It is fully gated on the
-/// panel being active and on settled visibility, and is bounded so it never
-/// inflates request volume.
-public struct PerchHAHistoryPrefetchConfiguration: Equatable, Sendable {
-    /// Sentinel for ``lookahead`` meaning "warm every entity after the visible
-    /// set", so the coordinator walks the full ordered list progressively while
-    /// the panel is open instead of stopping after a fixed window.
-    public static let unboundedLookahead = -1
-
-    /// Entities beyond the visible set to warm, taken in display order from the
-    /// panel's ordered entity list. ``unboundedLookahead`` (the default) walks the
-    /// entire remaining list progressively; a non-negative value caps the window.
-    public let lookahead: Int
-    /// How long visibility must stay unchanged before a prefetch pass runs, so
-    /// scrolling never fetches.
-    public let settleDelay: PerchDuration
-    /// Refresh interval applied to visible entities. A visible entity is
-    /// refetched once this interval has elapsed since its last fetch, even if its
-    /// cached series is still within the cache TTL. Lookahead entities ignore this
-    /// and only fetch when absent or expired by the cache TTL.
-    public let activeRefreshInterval: PerchDuration
-    /// Maximum number of history fetches allowed in flight at once during a pass.
-    public let maxConcurrentFetches: Int
-
-    /// Creates a prefetch configuration.
-    ///
-    /// - Parameters:
-    ///   - lookahead: Entities to warm beyond the visible set. Defaults to
-    ///     ``unboundedLookahead``, which progressively covers the whole list. A
-    ///     non-negative value caps the lookahead window to that many entities.
-    ///   - settleDelay: Quiet period before a pass runs (default 250 ms).
-    ///   - activeRefreshInterval: Visible-entity refresh interval (default 30 s,
-    ///     shorter than the typical 60 s cache TTL so visible rows refresh sooner).
-    ///   - maxConcurrentFetches: In-flight fetch cap (default 3).
-    public init(
-        lookahead: Int = PerchHAHistoryPrefetchConfiguration.unboundedLookahead,
-        settleDelay: PerchDuration = .milliseconds(250),
-        activeRefreshInterval: PerchDuration = .seconds(30),
-        maxConcurrentFetches: Int = 3
-    ) {
-        self.lookahead = lookahead < 0 ? Self.unboundedLookahead : lookahead
-        self.settleDelay = settleDelay
-        self.activeRefreshInterval = activeRefreshInterval
-        self.maxConcurrentFetches = max(1, maxConcurrentFetches)
-    }
-
-    /// Whether the coordinator walks the entire list beyond the visible set.
-    public var isLookaheadUnbounded: Bool {
-        lookahead == Self.unboundedLookahead
-    }
-}
-
 /// Tuning for the active-panel periodic refresh safety net.
 ///
 /// Live WebSocket push already updates values; this gentle periodic refresh only
@@ -854,6 +827,42 @@ public struct PerchHAPeriodicRefreshConfiguration: Equatable, Sendable {
 
     /// A configuration that disables the periodic safety net.
     public static let disabled = PerchHAPeriodicRefreshConfiguration(interval: .seconds(0))
+}
+
+/// Tuning for the live WebSocket update loop.
+///
+/// While a session is connected the model holds one live subscription open and
+/// applies each pushed state change immediately — this is the primary update
+/// path; polling is only the safety net. When the stream drops, the loop
+/// reconnects with exponential backoff and resets to the base delay once
+/// events flow again.
+public struct PerchHALiveUpdateConfiguration: Equatable, Sendable {
+    /// The delay before the first reconnect attempt after a dropped stream.
+    public let reconnectDelay: PerchDuration
+    /// The backoff ceiling for repeated reconnect failures.
+    public let maximumBackoff: PerchDuration
+
+    /// Creates a live update configuration.
+    ///
+    /// - Parameters:
+    ///   - reconnectDelay: Base reconnect delay (default 1 s). Zero disables
+    ///     the live update loop entirely.
+    ///   - maximumBackoff: Backoff ceiling (default 60 s).
+    public init(
+        reconnectDelay: PerchDuration = .seconds(1),
+        maximumBackoff: PerchDuration = .seconds(60)
+    ) {
+        self.reconnectDelay = reconnectDelay
+        self.maximumBackoff = maximumBackoff
+    }
+
+    /// Whether the live update loop runs. `false` when the delay is zero.
+    public var isEnabled: Bool {
+        reconnectDelay.nanoseconds > 0
+    }
+
+    /// A configuration that disables live updates.
+    public static let disabled = PerchHALiveUpdateConfiguration(reconnectDelay: .seconds(0))
 }
 
 /// Tuning for the intelligent bulk history sync loop.
@@ -1101,9 +1110,15 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
     /// - Returns: A pure ``PerchHADashboardSummary`` for the header.
     public func dashboardSummary(
         selectedMetricIDs: [EntityID] = [],
+        hiddenModuleIDs: Set<String> = [],
         locale: Locale = .current
     ) -> PerchHADashboardSummary {
-        let allEntities = rooms.flatMap(\.entities)
+        // Alerts and the primary metric must describe what the dashboard
+        // actually shows: modules the user hid do not contribute, otherwise
+        // the count is dominated by entities the user never sees.
+        let visibleRooms = rooms.filter { !hiddenModuleIDs.contains($0.id.rawValue) }
+        let countedRooms = visibleRooms.isEmpty ? rooms : visibleRooms
+        let allEntities = countedRooms.flatMap(\.entities)
         let primary = resolvePrimaryMetric(allEntities: allEntities, locale: locale)
         let warningCount: Int? = allEntities.isEmpty
             ? nil
@@ -1115,9 +1130,11 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
                     count
                 }
             }
+        // Explicitly selected metrics resolve against every room: the user
+        // picked them by name, hiding their module should not blank them.
         let selectedMetrics = resolveSelectedMetrics(
             selectedMetricIDs: selectedMetricIDs,
-            allEntities: allEntities,
+            allEntities: rooms.flatMap(\.entities),
             locale: locale
         )
         return PerchHADashboardSummary(
@@ -1284,7 +1301,8 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
                 urlString: connectionForm.urlString,
                 addresses: connectionForm.addresses,
                 token: "",
-                usesStoredAuthSession: connectionForm.usesStoredAuthSession
+                usesStoredAuthSession: connectionForm.usesStoredAuthSession,
+                allowsSelfSignedCertificates: connectionForm.allowsSelfSignedCertificates
             ),
             lastUpdateDescription: lastUpdateDescription,
             refreshCount: refreshCount,
@@ -1433,6 +1451,63 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
     }
 }
 
+/// Keyboard access for a dashboard row's history popover.
+///
+/// On macOS 14+ the row is focusable and Space toggles the popover, matching
+/// the pointer hover affordance. The stock focus ring is replaced with a
+/// subtle accent wash that also marks a pinned row — and, unlike the system
+/// ring, it clears when the row is unpinned instead of lingering after a
+/// click. Earlier systems keep the VoiceOver named action as the non-pointer
+/// path; there is no pre-14 API to make an arbitrary row focusable without
+/// hijacking its embedded controls.
+private struct HistoryRowKeyboardAccess: ViewModifier {
+    let isPresented: Bool
+    let open: () -> Void
+    let close: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    func body(content: Content) -> some View {
+        if #available(macOS 14.0, *) {
+            content
+                .background(
+                    (isPresented || isFocused) ? PerchHATheme.accent.opacity(0.08) : Color.clear
+                )
+                .focusable()
+                .focused($isFocused)
+                .focusEffectDisabled()
+                .onKeyPress(.space) {
+                    if isPresented {
+                        close()
+                    } else {
+                        open()
+                    }
+                    return .handled
+                }
+                .onChange(of: isPresented) { _, presented in
+                    // Unpinning releases the click-granted focus so the row
+                    // does not stay highlighted after deselecting.
+                    if !presented {
+                        isFocused = false
+                    }
+                }
+        } else {
+            content
+        }
+    }
+}
+
+/// Marks whether a live stream delivered at least one event, deciding whether
+/// the reconnect backoff resets (events flowed before the drop) or doubles
+/// (the stream failed before producing anything).
+private actor PerchHALiveEventReceipt {
+    private(set) var didReceive = false
+
+    func mark() {
+        didReceive = true
+    }
+}
+
 private struct PerchHAHistoryCacheKey: Hashable, Sendable {
     let entityID: EntityID
     let range: HistoryRange
@@ -1452,7 +1527,10 @@ private struct PerchHAHistoryCache {
             return nil
         }
         guard entry.expiresAt > now else {
-            remove(key)
+            // Expired for the fetch path, but the entry stays: the stale-tolerant
+            // display peek still needs it if the refetch fails, and a successful
+            // refetch overwrites it in place. Deleting here used to blank inline
+            // previews whenever a TTL-expired hover read raced a server hiccup.
             return nil
         }
         markRecentlyUsed(key)
@@ -1472,14 +1550,15 @@ private struct PerchHAHistoryCache {
         _ series: HistorySeries,
         for key: PerchHAHistoryCacheKey,
         now: PerchInstant,
-        configuration: PerchHAHistoryCacheConfiguration
+        configuration: PerchHAHistoryCacheConfiguration,
+        protecting protected: Set<PerchHAHistoryCacheKey> = []
     ) {
         entries[key] = PerchHAHistoryCacheEntry(
             series: series,
             expiresAt: now.advanced(by: configuration.ttl)
         )
         markRecentlyUsed(key)
-        trim(to: configuration.capacity)
+        trim(to: configuration.capacity, protecting: protected)
     }
 
     private mutating func markRecentlyUsed(_ key: PerchHAHistoryCacheKey) {
@@ -1487,16 +1566,21 @@ private struct PerchHAHistoryCache {
         order.append(key)
     }
 
-    private mutating func trim(to capacity: Int) {
-        while order.count > capacity {
-            let removed = order.removeFirst()
-            entries[removed] = nil
+    /// Evicts least-recently-used entries above capacity, never touching the
+    /// protected keys (the displayed working set). On a dashboard larger than
+    /// the configured capacity the cache overflows by the protected count rather
+    /// than evicting on-screen rows — evicting those is what used to re-create
+    /// the preview flicker on every cold sync cycle.
+    private mutating func trim(to capacity: Int, protecting protected: Set<PerchHAHistoryCacheKey>) {
+        guard order.count > capacity else {
+            return
         }
-    }
-
-    private mutating func remove(_ key: PerchHAHistoryCacheKey) {
-        entries[key] = nil
-        order.removeAll { $0 == key }
+        var removableInLRUOrder = order.filter { !protected.contains($0) }
+        while order.count > capacity, !removableInLRUOrder.isEmpty {
+            let removed = removableInLRUOrder.removeFirst()
+            entries[removed] = nil
+            order.removeAll { $0 == removed }
+        }
     }
 }
 
@@ -1519,6 +1603,13 @@ public final class PerchHAPanelModel: ObservableObject {
     /// simply absent. Must never carry or leak a token.
     public typealias BulkHistoryProvider = @Sendable (PerchHAConnectionForm, [EntityID], HistoryRange) async -> [EntityID: HistorySeries]
     public typealias ServiceMetadataProvider = @Sendable (PerchHAConnectionForm) async -> PerchHAServiceMetadataProviderResult
+    /// Opens one live update stream for the connection and delivers each pushed
+    /// entity state through the handler. Returns only when the stream ends,
+    /// with the failure that ended it. Must never carry or leak a token.
+    public typealias LiveUpdateStreamer = @Sendable (
+        PerchHAConnectionForm,
+        @escaping @Sendable (EntityState) async -> Void
+    ) async -> ConnectionFailure
     public typealias ActionRunner = @Sendable (PerchHAConnectionForm, ActionSpec) async -> PerchHAActionResult
     public typealias OAuthSignInRunner = @MainActor @Sendable (PerchHAConnectionForm) async -> PerchHAOAuthSignInResult
     public typealias SelectionConfigurationSink = @MainActor (EntitySelectionConfiguration) -> SelectionPersistenceResult
@@ -1532,10 +1623,27 @@ public final class PerchHAPanelModel: ObservableObject {
         didSet {
             snapshotSink(snapshot)
             refreshRetryBackoffState()
+            settingsSelectionTree = snapshot.selectionTree
         }
     }
+
+    /// The entity whose history popover the user pinned open with a click, or
+    /// `nil` when the popover follows hover. While pinned, hover-out and other
+    /// rows' hovers are ignored; clicking the pinned row again releases it.
+    @Published public private(set) var pinnedHistoryEntityID: EntityID?
+
+    /// The Settings Entities tree, recomputed only when the snapshot changes.
+    /// The projection filters and orders every room and entity; computing it
+    /// once per snapshot instead of several times per body evaluation is what
+    /// keeps the Entities tab responsive on large installs.
+    @Published public private(set) var settingsSelectionTree: [SelectableRoom] = []
     @Published public private(set) var customActionConfiguration: CustomActionConfiguration
     @Published public private(set) var customActionPersistenceFailureDescription: String?
+    /// A persistence problem reported by the app shell that the user must see:
+    /// the Keychain refused the remembered session, sign-out could not clear
+    /// the stored token, or the configuration store is unavailable. `nil` when
+    /// shell persistence is healthy. Never carries a secret.
+    @Published public private(set) var shellPersistenceFailureDescription: String?
     @Published public private(set) var oauthSignInState = PerchHAOAuthSignInState.idle
 
     /// The live dashboard display preferences the panel honors (row density,
@@ -1580,13 +1688,17 @@ public final class PerchHAPanelModel: ObservableObject {
     private let historyProvider: HistoryProvider
     private let bulkHistoryProvider: BulkHistoryProvider
     private let serviceMetadataProvider: ServiceMetadataProvider
+    private let liveUpdateStreamer: LiveUpdateStreamer?
+    private let liveUpdateConfiguration: PerchHALiveUpdateConfiguration
+    /// Supplies the wall-clock time stamped into the footer's "Updated at"
+    /// caption. Injectable so tests stay deterministic.
+    private let wallClock: @Sendable () -> Date
     private let actionRunner: ActionRunner
     private let oauthSignInRunner: OAuthSignInRunner
     private let clock: any PerchClock
     private let historyDebounce: PerchDuration
     private let historyHoverGrace: PerchDuration
     private let historyCacheConfiguration: PerchHAHistoryCacheConfiguration
-    private let historyPrefetchConfiguration: PerchHAHistoryPrefetchConfiguration
     private let bulkSyncConfiguration: PerchHAHistoryBulkSyncConfiguration
     private let periodicRefreshConfiguration: PerchHAPeriodicRefreshConfiguration
     private let selectionSink: SelectionConfigurationSink
@@ -1606,7 +1718,10 @@ public final class PerchHAPanelModel: ObservableObject {
     private var historyCloseTask: Task<Void, Never>?
     private var historyRequestGeneration = 0
     private var protectedValueDrafts: [String: String] = [:]
-    private var isPanelActive = false
+    /// Whether the panel is currently shown, gating all background fetching.
+    /// Set through ``setPanelActive(_:)``; readable so the app shell's
+    /// window-visibility wiring can be verified through the public boundary.
+    public private(set) var isPanelActive = false
     private var visibleEntityIDs: [EntityID] = []
     /// The single re-arming background bulk-history sync loop. Active only while
     /// the panel is open and a session is connected.
@@ -1616,10 +1731,17 @@ public final class PerchHAPanelModel: ObservableObject {
     /// every cycle, cold ones every Nth cycle. Bounded so it never grows without
     /// limit (capped per entity; pruned to displayed/visible entities each cycle).
     private var entityInterest: [EntityID: Int] = [:]
+    /// When each entity's history last landed from a bulk cycle. Bounds re-arm
+    /// churn: a scroll-pause re-arm skips entities synced within the interval.
+    private var entityLastSyncedAt: [EntityID: PerchInstant] = [:]
     /// Monotonic count of completed sync cycles, used to gate cold-entity refresh.
     private var bulkSyncCycle = 0
     private var periodicRefreshTask: Task<Void, Never>?
     private var periodicRefreshFailureStreak = 0
+    /// The single long-lived live update loop. Runs while a session is
+    /// connected — independent of panel visibility, so promoted menu-bar items
+    /// stay live with the panel closed.
+    private var liveUpdateTask: Task<Void, Never>?
     private var diagnosticLog = PerchHADiagnosticLog()
     /// Whether a connection/refresh failure has been recorded since the last
     /// successful connection. Gates the `.recovered` event so a routine
@@ -1636,15 +1758,17 @@ public final class PerchHAPanelModel: ObservableObject {
         historyProvider: @escaping HistoryProvider = { _, _, _ in .unavailable("history client is not configured") },
         bulkHistoryProvider: @escaping BulkHistoryProvider = { _, _, _ in [:] },
         serviceMetadataProvider: @escaping ServiceMetadataProvider = { _ in .success([]) },
+        liveUpdateStreamer: LiveUpdateStreamer? = nil,
         actionRunner: @escaping ActionRunner = { _, _ in .failed("action client is not configured") },
         oauthSignInRunner: @escaping OAuthSignInRunner = { _ in .failed("OAuth sign-in is not configured") },
         clock: any PerchClock = SystemPerchClock(),
+        wallClock: @escaping @Sendable () -> Date = { Date() },
         historyDebounce: PerchDuration = .milliseconds(150),
         historyHoverGrace: PerchDuration = .milliseconds(300),
         historyCacheConfiguration: PerchHAHistoryCacheConfiguration = PerchHAHistoryCacheConfiguration(),
-        historyPrefetchConfiguration: PerchHAHistoryPrefetchConfiguration = PerchHAHistoryPrefetchConfiguration(),
         bulkSyncConfiguration: PerchHAHistoryBulkSyncConfiguration = PerchHAHistoryBulkSyncConfiguration(),
         periodicRefreshConfiguration: PerchHAPeriodicRefreshConfiguration = PerchHAPeriodicRefreshConfiguration(),
+        liveUpdateConfiguration: PerchHALiveUpdateConfiguration = PerchHALiveUpdateConfiguration(),
         selectionConfiguration: EntitySelectionConfiguration = EntitySelectionConfiguration(),
         menuBarDisplayConfiguration: MenuBarDisplayConfiguration = MenuBarDisplayConfiguration(),
         customActionConfiguration: CustomActionConfiguration = CustomActionConfiguration(),
@@ -1694,16 +1818,19 @@ public final class PerchHAPanelModel: ObservableObject {
         self.actionRunner = actionRunner
         self.oauthSignInRunner = oauthSignInRunner
         self.clock = clock
+        self.wallClock = wallClock
         self.historyDebounce = historyDebounce
         self.historyHoverGrace = historyHoverGrace
         self.historyCacheConfiguration = historyCacheConfiguration
-        self.historyPrefetchConfiguration = historyPrefetchConfiguration
         self.bulkSyncConfiguration = bulkSyncConfiguration
         self.periodicRefreshConfiguration = periodicRefreshConfiguration
+        self.liveUpdateStreamer = liveUpdateStreamer
+        self.liveUpdateConfiguration = liveUpdateConfiguration
         self.selectionSink = selectionSink
         self.menuBarDisplaySink = menuBarDisplaySink
         self.customActionSink = customActionSink
         self.protectedActionValueStore = protectedActionValueStore ?? UnavailableProtectedActionValueStore()
+        self.settingsSelectionTree = self.snapshot.selectionTree
     }
 
     deinit {
@@ -1713,6 +1840,7 @@ public final class PerchHAPanelModel: ObservableObject {
         historyCloseTask?.cancel()
         bulkSyncTask?.cancel()
         periodicRefreshTask?.cancel()
+        liveUpdateTask?.cancel()
     }
 
     public func updateConnectionForm(
@@ -1720,7 +1848,8 @@ public final class PerchHAPanelModel: ObservableObject {
         fallbackURLString: String? = nil,
         addresses: [PerchHAConnectionAddressField]? = nil,
         token: String? = nil,
-        usesStoredAuthSession: Bool? = nil
+        usesStoredAuthSession: Bool? = nil,
+        allowsSelfSignedCertificates: Bool? = nil
     ) {
         let nextUsesStoredAuthSession = usesStoredAuthSession
             ?? (token?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? false : editableForm.usesStoredAuthSession)
@@ -1736,7 +1865,8 @@ public final class PerchHAPanelModel: ObservableObject {
             urlString: urlString ?? editableForm.urlString,
             addresses: nextAddresses,
             token: token ?? editableForm.token,
-            usesStoredAuthSession: nextUsesStoredAuthSession
+            usesStoredAuthSession: nextUsesStoredAuthSession,
+            allowsSelfSignedCertificates: allowsSelfSignedCertificates ?? editableForm.allowsSelfSignedCertificates
         )
         publishEditableForm()
     }
@@ -1922,6 +2052,19 @@ public final class PerchHAPanelModel: ObservableObject {
         displayPreferences = preferences
     }
 
+    /// Reports (or clears) a shell-level persistence problem so it surfaces in
+    /// Settings instead of being swallowed.
+    ///
+    /// The app shell calls this when Keychain or configuration-store work it
+    /// performs outside the model fails — losing a remembered session or
+    /// failing to clear one on sign-out must be visible, not silent.
+    ///
+    /// - Parameter description: The sanitized, secret-free problem text, or
+    ///   `nil` when the previously reported problem has been resolved.
+    public func reportShellPersistenceFailure(_ description: String?) {
+        shellPersistenceFailureDescription = description
+    }
+
     public func toggleSettings() {
         snapshot = PerchHAPanelSnapshot(
             connectionState: snapshot.connectionState,
@@ -2089,11 +2232,10 @@ public final class PerchHAPanelModel: ObservableObject {
     }
 
     @discardableResult
-    public func setMenuBarDefaultHistoryRange(_ id: EntityID, defaultHistoryRange: HistoryRange) -> Bool {
+    public func setMenuBarDefaultHistoryRange(_ id: EntityID, defaultHistoryRange: HistoryRange?) -> Bool {
         updateMenuBarItemConfiguration(
-            snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).updating(
-                defaultHistoryRange: defaultHistoryRange
-            )
+            snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id)
+                .settingDefaultHistoryRange(defaultHistoryRange)
         )
     }
 
@@ -2113,6 +2255,57 @@ public final class PerchHAPanelModel: ObservableObject {
     public func setDisplayUnit(_ id: EntityID, displayUnit: ValueUnit?) -> Bool {
         updateMenuBarItemConfiguration(
             snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).settingDisplayUnit(displayUnit)
+        )
+    }
+
+    /// Shows or hides the entity's leading icon on its dashboard row.
+    ///
+    /// - Parameters:
+    ///   - id: The entity whose dashboard icon visibility changes.
+    ///   - showsEntityIcon: Whether the icon column renders the icon.
+    /// - Returns: `true` when the configuration was updated and persisted.
+    @discardableResult
+    public func setShowsEntityIcon(_ id: EntityID, showsEntityIcon: Bool) -> Bool {
+        updateMenuBarItemConfiguration(
+            snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).settingShowsEntityIcon(showsEntityIcon)
+        )
+    }
+
+    /// The effective chart range for an entity: its explicit per-entity range,
+    /// or the global Appearance default when the entity inherits.
+    ///
+    /// - Parameter id: The entity whose range is resolved.
+    /// - Returns: The range driving the inline preview and history popover.
+    public func historyRange(for id: EntityID) -> HistoryRange {
+        snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).defaultHistoryRange
+            ?? displayPreferences.defaultHistoryRange
+    }
+
+    /// Replaces the entity's threshold steps and base color.
+    ///
+    /// - Parameters:
+    ///   - id: The entity whose thresholds change.
+    ///   - thresholds: The Grafana-style steps plus optional base color.
+    /// - Returns: `true` when the configuration was updated and persisted.
+    @discardableResult
+    public func setThresholds(_ id: EntityID, thresholds: ValueThresholds) -> Bool {
+        updateMenuBarItemConfiguration(
+            snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id)
+                .settingThresholds(thresholds)
+        )
+    }
+
+    /// Overrides the entity's dashboard icon with a custom SF Symbol.
+    ///
+    /// - Parameters:
+    ///   - id: The entity whose dashboard icon changes.
+    ///   - symbolName: The SF Symbol name, or `nil` to restore the automatic
+    ///     domain-derived icon.
+    /// - Returns: `true` when the configuration was updated and persisted.
+    @discardableResult
+    public func setCustomEntityIcon(_ id: EntityID, symbolName: String?) -> Bool {
+        updateMenuBarItemConfiguration(
+            snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).settingCustomIconName(symbolName)
         )
     }
 
@@ -2229,7 +2422,11 @@ public final class PerchHAPanelModel: ObservableObject {
     ///   - id: The entity whose history should be shown.
     ///   - range: An explicit range, or `nil` to use the entity's default.
     public func startHistoryHover(_ id: EntityID, range: HistoryRange? = nil) {
-        let resolvedRange = range ?? snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).defaultHistoryRange
+        // While a row is pinned, hovering other rows must not steal the popover.
+        guard pinnedHistoryEntityID == nil || pinnedHistoryEntityID == id else {
+            return
+        }
+        let resolvedRange = range ?? historyRange(for: id)
         // Opening a detail/hover marks the entity as hot so the bulk sync keeps it
         // freshest across cycles.
         bumpInterest(id)
@@ -2269,6 +2466,11 @@ public final class PerchHAPanelModel: ObservableObject {
     /// ``keepHistoryHoverAlive()`` called before the timer fires cancels the
     /// pending close.
     public func cancelHistoryHover() {
+        // A pinned popover stays open until the user unpins it; hover-out is
+        // ignored entirely.
+        guard pinnedHistoryEntityID == nil else {
+            return
+        }
         let isLoading: Bool
         if case .loading = snapshot.historyState {
             isLoading = true
@@ -2306,6 +2508,7 @@ public final class PerchHAPanelModel: ObservableObject {
     /// Used by teardown paths (sign-out, reconnect, panel dismissal) where the
     /// popover must disappear without waiting.
     private func closeHistoryHoverImmediately() {
+        pinnedHistoryEntityID = nil
         cancelPendingHistoryClose()
         historyTask?.cancel()
         historyTask = nil
@@ -2316,8 +2519,26 @@ public final class PerchHAPanelModel: ObservableObject {
         }
     }
 
+    /// Pins (or unpins) an entity's history popover from a click.
+    ///
+    /// A pinned popover ignores hover-out and stays open while the user reads
+    /// or scrubs the chart; clicking the row again — or dismissing the popover —
+    /// releases the pin. Hovering other rows does not steal a pinned popover.
+    ///
+    /// - Parameter id: The clicked entity.
+    public func toggleHistoryPin(_ id: EntityID) {
+        if pinnedHistoryEntityID == id {
+            pinnedHistoryEntityID = nil
+            closeHistoryHoverImmediately()
+            return
+        }
+        pinnedHistoryEntityID = nil
+        startHistoryHover(id)
+        pinnedHistoryEntityID = id
+    }
+
     public func loadHistory(_ id: EntityID, range: HistoryRange? = nil) async {
-        let resolvedRange = range ?? snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).defaultHistoryRange
+        let resolvedRange = range ?? historyRange(for: id)
         let cacheKey = PerchHAHistoryCacheKey(entityID: id, range: resolvedRange)
         let now = await clock.now()
         lastObservedInstant = now
@@ -2380,7 +2601,7 @@ public final class PerchHAPanelModel: ObservableObject {
     /// - Parameter id: The entity whose cached history is requested.
     /// - Returns: The cached series for the entity's default range, or `nil`.
     public func cachedHistorySeries(for id: EntityID) -> HistorySeries? {
-        let range = snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).defaultHistoryRange
+        let range = historyRange(for: id)
         let key = PerchHAHistoryCacheKey(entityID: id, range: range)
         // Display uses the stale-tolerant peek so the inline sparkline keeps
         // showing its last-known data instead of flickering out when the entry
@@ -2395,8 +2616,29 @@ public final class PerchHAPanelModel: ObservableObject {
     /// the affected rows immediately. The bump is a cheap counter; it carries no
     /// series payload, so chart redraw throttling stays intact.
     private func insertHistory(_ series: HistorySeries, for key: PerchHAHistoryCacheKey, now: PerchInstant) {
-        historyCache.insert(series, for: key, now: now, configuration: historyCacheConfiguration)
+        historyCache.insert(
+            series,
+            for: key,
+            now: now,
+            configuration: historyCacheConfiguration,
+            protecting: protectedHistoryKeys()
+        )
         historyRevision &+= 1
+    }
+
+    /// The cache keys that back the on-screen inline previews: every displayed
+    /// entity at its default history range. These are exempt from capacity
+    /// eviction so a dashboard larger than the cache capacity cannot flicker
+    /// its own visible rows out while the tail of the list syncs.
+    private func protectedHistoryKeys() -> Set<PerchHAHistoryCacheKey> {
+        Set(
+            displayedEntityIDs().map { id in
+                PerchHAHistoryCacheKey(
+                    entityID: id,
+                    range: historyRange(for: id)
+                )
+            }
+        )
     }
 
     /// Drops the entire history cache and publishes the eviction so previews that
@@ -2422,6 +2664,10 @@ public final class PerchHAPanelModel: ObservableObject {
         }
         isPanelActive = active
         if active {
+            // A reopen starts cold so every displayed row refreshes in the first
+            // cycle; previews that aged while the panel was hidden catch up
+            // immediately instead of waiting out the warm-cycle rotation.
+            bulkSyncCycle = 0
             startHistoryBulkSync()
             startPeriodicRefresh()
         } else {
@@ -2439,30 +2685,35 @@ public final class PerchHAPanelModel: ObservableObject {
     /// to the configured ceiling; a success resets the streak to the base
     /// interval. Live WebSocket push remains the primary update path; this is a
     /// gentle backstop that keeps the request-volume budget intact.
-    private func startPeriodicRefresh() {
+    private func startPeriodicRefresh(refreshImmediately: Bool = true) {
         periodicRefreshTask?.cancel()
         guard periodicRefreshConfiguration.isEnabled, lastConnectedForm != nil else {
             periodicRefreshTask = nil
             return
         }
         periodicRefreshFailureStreak = 0
-        periodicRefreshTask = Task { @MainActor [weak self] in
-            guard let self else {
-                return
-            }
+        periodicRefreshTask = Task { @MainActor [weak self, clock] in
             // Refresh immediately on open, then settle into the interval loop.
-            await self.runPeriodicRefreshTick()
-            while !Task.isCancelled, self.isPanelActive {
-                let delay = self.periodicRefreshDelay()
+            // Arming right after a successful connect skips the immediate tick —
+            // the data just arrived. Self is re-bound weakly each iteration so
+            // the long-lived loop never pins the model; deinit stays reachable
+            // and cancels the task.
+            if refreshImmediately {
+                await self?.runPeriodicRefreshTick()
+            }
+            while !Task.isCancelled {
+                guard let delay = self.map({ $0.periodicRefreshDelay() }), self?.isPanelActive == true else {
+                    return
+                }
                 do {
-                    _ = try await self.clock.sleep(for: delay)
+                    _ = try await clock.sleep(for: delay)
                 } catch {
                     return
                 }
-                guard !Task.isCancelled, self.isPanelActive, self.lastConnectedForm != nil else {
+                guard !Task.isCancelled, let model = self, model.isPanelActive, model.lastConnectedForm != nil else {
                     return
                 }
-                await self.runPeriodicRefreshTick()
+                await model.runPeriodicRefreshTick()
             }
         }
     }
@@ -2470,6 +2721,69 @@ public final class PerchHAPanelModel: ObservableObject {
     private func cancelPeriodicRefresh() {
         periodicRefreshTask?.cancel()
         periodicRefreshTask = nil
+    }
+
+    // MARK: - Live update loop
+
+    /// Starts (or restarts) the single live WebSocket update loop for the
+    /// current connection.
+    ///
+    /// The loop holds one subscription open and applies each pushed state
+    /// change immediately — the primary update path promised by the product;
+    /// the periodic refresh is only a safety net. It runs independently of
+    /// panel visibility so promoted menu-bar items stay live with the panel
+    /// closed. A dropped stream reconnects with exponential backoff on the
+    /// injected clock, resetting to the base delay once events flowed. The
+    /// loop ends on cancellation or when the connection identity changes.
+    private func startLiveUpdates() {
+        liveUpdateTask?.cancel()
+        liveUpdateTask = nil
+        guard liveUpdateConfiguration.isEnabled,
+              let streamer = liveUpdateStreamer,
+              let form = lastConnectedForm
+        else {
+            return
+        }
+        let baseDelay = liveUpdateConfiguration.reconnectDelay
+        let maximumBackoff = liveUpdateConfiguration.maximumBackoff
+        liveUpdateTask = Task { @MainActor [weak self, clock] in
+            var reconnectDelay = baseDelay
+            while !Task.isCancelled {
+                // Re-bind weakly each iteration so a long-running loop never
+                // pins the model alive; deinit stays reachable and cancels us.
+                guard let current = self, form.sameConnection(as: current.lastConnectedForm) else {
+                    return
+                }
+                let receipt = PerchHALiveEventReceipt()
+                let failure = await streamer(form) { [weak self] state in
+                    await receipt.mark()
+                    await MainActor.run {
+                        _ = self?.applyLiveState(state)
+                    }
+                }
+                guard !Task.isCancelled, let model = self, form.sameConnection(as: model.lastConnectedForm) else {
+                    return
+                }
+                let eventsFlowed = await receipt.didReceive
+                reconnectDelay = eventsFlowed
+                    ? baseDelay
+                    : PerchDuration(nanoseconds: min(reconnectDelay.nanoseconds * 2, maximumBackoff.nanoseconds))
+                model.recordDiagnostic(
+                    .liveUpdatesInterrupted,
+                    message: "Live updates interrupted: \(PerchHAPanelSnapshot.describe(failure))"
+                )
+                do {
+                    _ = try await clock.sleep(for: reconnectDelay)
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func cancelLiveUpdates() {
+        liveUpdateTask?.cancel()
+        liveUpdateTask = nil
     }
 
     // MARK: - Diagnostics ring buffer
@@ -2488,6 +2802,22 @@ public final class PerchHAPanelModel: ObservableObject {
         diagnosticsReferenceInstant = lastObservedInstant
         refreshRetryBackoffState()
     }
+
+    /// The footer caption for a fresh update: a real, human-readable clock
+    /// time ("Updated at 15:48:03") instead of a vague "just now".
+    static func updatedDescription(at date: Date) -> String {
+        "Updated at \(Self.updatedTimeFormatter.string(from: date))"
+    }
+
+    private static let updatedTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale.current
+        // Minutes are enough for a glanceable "how fresh" answer; seconds
+        // would tick constantly for no information gain.
+        formatter.timeStyle = .short
+        formatter.dateStyle = .none
+        return formatter
+    }()
 
     /// A short, relative age label for a diagnostic event ("just now", "2m ago"),
     /// computed from the monotonic gap between the event and the latest observed
@@ -2633,23 +2963,31 @@ public final class PerchHAPanelModel: ObservableObject {
         }
         let settleDelay = bulkSyncConfiguration.settleDelay
         let interval = bulkSyncConfiguration.interval
-        bulkSyncTask = Task { @MainActor [weak self] in
-            guard let self else {
-                return
-            }
+        bulkSyncTask = Task { @MainActor [weak self, clock] in
             do {
                 // Settle first so scrolling coalesces into one armed loop.
                 _ = try await clock.sleep(for: settleDelay)
             } catch {
                 return
             }
-            while !Task.isCancelled, self.isPanelActive, self.lastConnectedForm != nil {
-                await self.runBulkSyncCycle()
-                guard !Task.isCancelled, self.isPanelActive else {
+            // Self is re-bound weakly each iteration so the long-lived loop
+            // never pins the model; deinit stays reachable and cancels the task.
+            while !Task.isCancelled {
+                guard let model = self, model.isPanelActive, model.lastConnectedForm != nil else {
+                    return
+                }
+                // While the connection is failed, fetching is pointless: the
+                // periodic refresh (with its own exponential backoff) drives
+                // recovery, and hammering every batch across every fallback URL
+                // each cycle would just amplify the outage. Skip, keep sleeping.
+                if !model.connectionStateIsFailed {
+                    await model.runBulkSyncCycle()
+                }
+                guard !Task.isCancelled, self?.isPanelActive == true else {
                     return
                 }
                 do {
-                    _ = try await self.clock.sleep(for: interval)
+                    _ = try await clock.sleep(for: interval)
                 } catch {
                     return
                 }
@@ -2675,7 +3013,8 @@ public final class PerchHAPanelModel: ObservableObject {
         bulkSyncCycle &+= 1
         pruneInterest()
 
-        let targets = bulkSyncTargets(cycle: cycle)
+        let now = await clock.now()
+        let targets = bulkSyncTargets(cycle: cycle, now: now)
         guard !targets.isEmpty else {
             return
         }
@@ -2683,7 +3022,7 @@ public final class PerchHAPanelModel: ObservableObject {
         // Group entities by their default range so each bulk request covers a
         // single range, then split each range group into client-capped batches.
         let byRange = Dictionary(grouping: targets) { id in
-            snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).defaultHistoryRange
+            historyRange(for: id)
         }
         var batches: [(range: HistoryRange, ids: [EntityID])] = []
         for (range, ids) in byRange {
@@ -2704,7 +3043,9 @@ public final class PerchHAPanelModel: ObservableObject {
         let limit = bulkSyncConfiguration.maxConcurrentBatches
         var index = 0
         while index < batches.count {
-            guard !Task.isCancelled, isPanelActive, lastConnectedForm == form else {
+            // Identity compare, not value equality: a rebuilt-but-equivalent form
+            // (fresh address-row UUIDs) must not abort the cycle mid-flight.
+            guard !Task.isCancelled, isPanelActive, form.sameConnection(as: lastConnectedForm) else {
                 return
             }
             let window = batches[index..<min(index + limit, batches.count)]
@@ -2723,7 +3064,7 @@ public final class PerchHAPanelModel: ObservableObject {
                 }
                 return merged
             }
-            await applyBulkSyncResults(results)
+            await applyBulkSyncResults(results, from: form)
         }
     }
 
@@ -2733,7 +3074,7 @@ public final class PerchHAPanelModel: ObservableObject {
     /// visibility/hover) sync every cycle. Cold entities (displayed but never
     /// looked at) sync only every `coldRefreshDivisor`-th cycle, so hot rows stay
     /// freshest while the whole list is still covered periodically.
-    private func bulkSyncTargets(cycle: Int) -> [EntityID] {
+    private func bulkSyncTargets(cycle: Int, now: PerchInstant) -> [EntityID] {
         let displayed = displayedEntityIDs()
         let visible = Set(visibleEntityIDs)
         let includeCold = cycle % bulkSyncConfiguration.coldRefreshDivisor == 0
@@ -2743,9 +3084,18 @@ public final class PerchHAPanelModel: ObservableObject {
         // Visible first (highest priority), then the rest of the displayed list.
         for id in visibleEntityIDs + displayed where seen.insert(id).inserted {
             let isHot = visible.contains(id) || (entityInterest[id] ?? 0) > 0
-            if isHot || includeCold {
-                targets.append(id)
+            guard isHot || includeCold else {
+                continue
             }
+            // Skip entities synced within the cycle interval. Scroll-pause
+            // re-arms would otherwise refetch the same rows every settle delay;
+            // an entity never synced (or synced a full interval ago) still
+            // fetches immediately, so newly displayed rows warm without waiting.
+            if let lastSynced = entityLastSyncedAt[id],
+               now.nanosecondsSinceStart - lastSynced.nanosecondsSinceStart < bulkSyncConfiguration.interval.nanoseconds {
+                continue
+            }
+            targets.append(id)
         }
         return targets
     }
@@ -2755,13 +3105,27 @@ public final class PerchHAPanelModel: ObservableObject {
     private func pruneInterest() {
         let live = Set(displayedEntityIDs() + visibleEntityIDs)
         entityInterest = entityInterest.filter { live.contains($0.key) }
+        entityLastSyncedAt = entityLastSyncedAt.filter { live.contains($0.key) }
+    }
+
+    /// Whether the visible connection state is a failure (including failed-stale).
+    private var connectionStateIsFailed: Bool {
+        if case .failed = snapshot.connectionState {
+            return true
+        }
+        return false
     }
 
     /// Overrides the cache in place for every series a cycle successfully fetched.
     /// Bumps ``historyRevision`` once per changed entry so inline previews redraw.
     /// Never removes an entry: entities absent here simply keep their prior series.
-    private func applyBulkSyncResults(_ results: [EntityID: HistorySeries]) async {
-        guard !results.isEmpty, isPanelActive else {
+    ///
+    /// Results are applied only while the cycle's connection is still the live
+    /// one and the cycle has not been cancelled — a cancelled cycle finishing its
+    /// in-flight batches must not write the previous connection's history into a
+    /// freshly cleared cache (entity IDs overlap across HA instances).
+    private func applyBulkSyncResults(_ results: [EntityID: HistorySeries], from form: PerchHAConnectionForm) async {
+        guard !results.isEmpty, isPanelActive, !Task.isCancelled, form.sameConnection(as: lastConnectedForm) else {
             return
         }
         let now = await clock.now()
@@ -2769,6 +3133,7 @@ public final class PerchHAPanelModel: ObservableObject {
         for (entityID, series) in results {
             let key = PerchHAHistoryCacheKey(entityID: entityID, range: series.range)
             insertHistory(series, for: key, now: now)
+            entityLastSyncedAt[entityID] = now
         }
     }
 
@@ -3560,7 +3925,13 @@ public final class PerchHAPanelModel: ObservableObject {
         )
         let resolvedAction: ActionSpec
         do {
-            resolvedAction = try action.action.resolvedProtectedValues(using: protectedActionValueStore.load)
+            // Keychain reads are synchronous system calls; resolve off the main
+            // actor so the click that triggered the action never stalls the UI.
+            let store = protectedActionValueStore
+            let spec = action.action
+            resolvedAction = try await Task.detached(priority: .userInitiated) {
+                try spec.resolvedProtectedValues(using: store.load)
+            }.value
         } catch {
             applyControlActionState(
                 .failed(entityID: action.entityID, message: String(describing: error)),
@@ -4071,7 +4442,10 @@ public final class PerchHAPanelModel: ObservableObject {
         pendingControlChange = nil
         evictAllHistory()
         cancelHistoryBulkSync()
+        cancelPeriodicRefresh()
+        cancelLiveUpdates()
         entityInterest = [:]
+        entityLastSyncedAt = [:]
         bulkSyncCycle = 0
         visibleEntityIDs = []
         lastConnectedForm = nil
@@ -4081,7 +4455,8 @@ public final class PerchHAPanelModel: ObservableObject {
             urlString: editableForm.urlString,
             addresses: editableForm.addresses,
             token: "",
-            usesStoredAuthSession: false
+            usesStoredAuthSession: false,
+            allowsSelfSignedCertificates: editableForm.allowsSelfSignedCertificates
         )
         snapshot = PerchHAPanelSnapshot(
             connectionState: .disconnected,
@@ -4259,7 +4634,7 @@ public final class PerchHAPanelModel: ObservableObject {
             selectionQuery: snapshot.selectionQuery,
             isSettingsPresented: snapshot.isSettingsPresented,
             connectionForm: snapshot.connectionForm,
-            lastUpdateDescription: "Live update received",
+            lastUpdateDescription: Self.updatedDescription(at: wallClock()),
             refreshCount: snapshot.refreshCount,
             canRetry: snapshot.canRetry,
             hasTokenInput: hasToken(in: editableForm),
@@ -4291,6 +4666,7 @@ public final class PerchHAPanelModel: ObservableObject {
                 evictAllHistory()
                 cancelHistoryBulkSync()
                 entityInterest = [:]
+                entityLastSyncedAt = [:]
                 bulkSyncCycle = 0
                 pendingControlChange = nil
             }
@@ -4307,7 +4683,7 @@ public final class PerchHAPanelModel: ObservableObject {
                 selectionQuery: snapshot.selectionQuery,
                 isSettingsPresented: snapshot.isSettingsPresented,
                 connectionForm: nonSecretForm(form),
-                lastUpdateDescription: "Updated just now",
+                lastUpdateDescription: Self.updatedDescription(at: wallClock()),
                 refreshCount: refreshCount,
                 canRetry: true,
                 hasTokenInput: hasToken(in: form),
@@ -4325,6 +4701,19 @@ public final class PerchHAPanelModel: ObservableObject {
                 // staying blank forever.
                 startHistoryBulkSync()
             }
+            if isPanelActive, periodicRefreshTask == nil {
+                // First-run flow: the panel was opened before any session existed,
+                // so activation could not arm the refresh safety net. Arm it now
+                // that a connection exists; the immediate tick is skipped because
+                // this connect just delivered fresh data.
+                startPeriodicRefresh(refreshImmediately: false)
+            }
+            if connectionChanged || liveUpdateTask == nil {
+                // The live push stream follows the session, not the panel: it
+                // starts with the first successful connect and restarts when the
+                // connection identity genuinely changes.
+                startLiveUpdates()
+            }
             if diagnosticIsDegraded {
                 diagnosticIsDegraded = false
                 recordDiagnostic(.recovered, message: "Recovered, connection restored")
@@ -4339,7 +4728,9 @@ public final class PerchHAPanelModel: ObservableObject {
 
     private func refreshServiceMetadata(form: PerchHAConnectionForm) async {
         let result = await serviceMetadataProvider(form)
-        guard !Task.isCancelled, lastConnectedForm == form else {
+        // Identity compare, not value equality: a rebuilt-but-equivalent form
+        // (fresh address-row UUIDs) must not silently drop the metadata result.
+        guard !Task.isCancelled, form.sameConnection(as: lastConnectedForm) else {
             return
         }
         switch result {
@@ -4429,7 +4820,8 @@ public final class PerchHAPanelModel: ObservableObject {
             urlString: form.urlString,
             addresses: form.addresses,
             token: "",
-            usesStoredAuthSession: form.usesStoredAuthSession
+            usesStoredAuthSession: form.usesStoredAuthSession,
+            allowsSelfSignedCertificates: form.allowsSelfSignedCertificates
         )
     }
 
@@ -5375,18 +5767,31 @@ public struct PerchHAHistoryPopoverContent: View {
         return trimmedUnit.isEmpty ? number : "\(number) \(trimmedUnit)"
     }
 
-    private func formattedCursorTimestamp(_ timestamp: Date, range: HistoryRange) -> String {
+    /// Cached cursor-timestamp formatters: `DateFormatter` construction is
+    /// expensive and this runs on every chart mouse-move.
+    private static let cursorTimeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale.current
+        formatter.timeStyle = .short
+        formatter.dateStyle = .none
+        return formatter
+    }()
+
+    private static let cursorDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale.current
+        formatter.timeStyle = .none
+        formatter.dateStyle = .short
+        return formatter
+    }()
+
+    private func formattedCursorTimestamp(_ timestamp: Date, range: HistoryRange) -> String {
         switch range {
         case .hour, .day:
-            formatter.timeStyle = .short
-            formatter.dateStyle = .none
+            return Self.cursorTimeFormatter.string(from: timestamp)
         case .week, .month:
-            formatter.timeStyle = .none
-            formatter.dateStyle = .short
+            return Self.cursorDateFormatter.string(from: timestamp)
         }
-        return formatter.string(from: timestamp)
     }
 
     private func historyStats(_ statistics: PerchHAHistoryStatistics) -> some View {
@@ -5486,8 +5891,10 @@ public struct PerchHAPanelView: View {
         let palette = PerchHATheme.Dashboard.palette(colorScheme)
         let shape = RoundedRectangle(cornerRadius: PerchHATheme.Dashboard.panelCornerRadius, style: .continuous)
         return VStack(alignment: .leading, spacing: 0) {
-            topBar
-            dashboardDivider
+            if showsTopBar {
+                topBar
+                dashboardDivider
+            }
             content
             dashboardDivider
             footer
@@ -5585,22 +5992,21 @@ public struct PerchHAPanelView: View {
             .frame(height: 1)
     }
 
-    /// The dashboard header. For connected/data and stale phases it shows the
-    /// brand row plus the real-data summary strip; during onboarding/connecting/
-    /// empty/failed phases the summary strip would have no meaningful values, so
-    /// only the compact brand+refresh row is shown.
-    @ViewBuilder
-    private var topBar: some View {
+    /// Whether the panel shows a header at all. While connected it does not —
+    /// the footer's status dot already communicates connection health, and every
+    /// vertical point goes to entity rows instead. Onboarding/connecting/failed
+    /// phases keep the compact status row so those states stay explicit.
+    private var showsTopBar: Bool {
         switch model.snapshot.phase {
         case .connectedData, .reconnecting, .failedStale:
-            DashboardHeader(
-                summary: model.snapshot.dashboardSummary(
-                    selectedMetricIDs: model.displayPreferences.summaryMetricEntityIDs
-                )
-            )
+            false
         case .firstRun, .connecting, .connectedEmpty, .failed:
-            statusBar
+            true
         }
+    }
+
+    private var topBar: some View {
+        statusBar
     }
 
     private var statusBar: some View {
@@ -5683,11 +6089,28 @@ public struct PerchHAPanelView: View {
         )
     }
 
+    /// The menu-bar panel never hosts the connection form: the dropdown is a
+    /// glanceable dashboard, and connection/TLS editing lives in Settings where
+    /// there is room to do it properly. First run just points there; while an
+    /// OAuth sign-in started from Settings is in flight, the panel reflects it.
+    @ViewBuilder
     private var connectionForm: some View {
-        ScrollView {
-            PerchHAConnectionFormFields(model: model)
-                .textFieldStyle(.roundedBorder)
-                .padding(14)
+        if model.oauthSignInState == .signingIn {
+            PerchHALoadingState(
+                title: "Signing in…",
+                message: "Approve access to Home Assistant in your browser."
+            )
+        } else {
+            PerchHAEmptyState(
+                systemImage: "antenna.radiowaves.left.and.right",
+                title: "Not connected",
+                message: model.snapshot.failureDescription
+                    ?? "Connect PearchHA to your Home Assistant in Settings.",
+                actionTitle: "Open Settings…",
+                actionSystemImage: "gearshape",
+                actionDisabled: false,
+                action: { openSettings() }
+            )
         }
     }
     /// A curated module of telemetry rows for a room/area.
@@ -5757,14 +6180,27 @@ public struct PerchHAPanelView: View {
     private func telemetryRow(_ entity: DiscoveredEntity) -> some View {
         let value = entityValue(entity)
         let presentation = rowPresentation(for: entity)
+        // A row with a real switch reads as `[icon] name ………… [switch]`: the
+        // switch alone communicates the on/off state, so the redundant ON/OFF
+        // pill and the meaningless meter band are dropped. Mixing those in was
+        // what made the column grid feel random next to numeric rows.
+        let hasToggle = model.snapshot.control(for: entity) != nil
         return TelemetryRow(
             icon: entityIconName(for: entity),
             iconActive: value.status == .available,
             label: entity.name,
             subtitle: rowSubtitle(for: entity, value: value),
             secondLine: rowSecondLine(for: entity),
-            preview: { rowPreview(for: entity, presentation: presentation) },
-            value: { rowValueOrPill(entity: entity, value: value, presentation: presentation) },
+            preview: {
+                if !hasToggle {
+                    rowPreview(for: entity, presentation: presentation)
+                }
+            },
+            value: {
+                if !hasToggle {
+                    rowValueOrPill(entity: entity, value: value, presentation: presentation)
+                }
+            },
             control: { rowControls(for: entity) }
         )
         .onAppear {
@@ -5780,11 +6216,30 @@ public struct PerchHAPanelView: View {
                 model.cancelHistoryHover()
             }
         }
+        .onTapGesture {
+            model.toggleHistoryPin(entity.id)
+        }
         .popover(isPresented: historyPopoverBinding(for: entity.id), arrowEdge: .trailing) {
             historyPopover(for: entity)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(entity.name), \(value.text)")
+        // Hover is a pointer-only affordance; history must also open without a
+        // mouse. VoiceOver gets a named action, and (macOS 14+) a focused row
+        // toggles the popover with Space.
+        .accessibilityAction(named: "Show history") {
+            model.toggleHistoryPin(entity.id)
+        }
+        .accessibilityAction(named: "Hide history") {
+            model.dismissHistoryPopover()
+        }
+        .modifier(
+            HistoryRowKeyboardAccess(
+                isPresented: model.pinnedHistoryEntityID == entity.id,
+                open: { model.toggleHistoryPin(entity.id) },
+                close: { model.dismissHistoryPopover() }
+            )
+        )
     }
 
     /// The optional compact second line: a cover control row, then any failure
@@ -5826,8 +6281,11 @@ public struct PerchHAPanelView: View {
         model.updateVisibleEntities(ordered)
     }
 
-    private func entityIconName(for entity: DiscoveredEntity) -> String {
-        perchHAEntityIconName(for: entity)
+    private func entityIconName(for entity: DiscoveredEntity) -> String? {
+        // The custom icon applies everywhere the entity appears; the menu-bar
+        // "Show icon" toggle only affects the status item, never the row.
+        let configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entity.id)
+        return configuration.customIconName ?? perchHAEntityIconName(for: entity)
     }
 
     private func entityControlHelp(for entity: DiscoveredEntity, control: PerchHAEntityControl) -> String {
@@ -5943,15 +6401,7 @@ public struct PerchHAPanelView: View {
     private func historyRangeBinding(for entity: DiscoveredEntity) -> Binding<HistoryRange> {
         Binding(
             get: {
-                if let range = model.snapshot.historyState.range {
-                    return range
-                }
-                let perEntity = model.snapshot.menuBarDisplayConfiguration
-                    .itemConfiguration(for: entity.id).defaultHistoryRange
-                // The per-entity range wins only when the user moved it off the
-                // shipped per-entity default; otherwise the global Dashboard
-                // default-range preference applies.
-                return perEntity == .hour ? model.displayPreferences.defaultHistoryRange : perEntity
+                model.snapshot.historyState.range ?? model.historyRange(for: entity.id)
             },
             set: { range in
                 model.startHistoryHover(entity.id, range: range)
@@ -5985,7 +6435,6 @@ public struct PerchHAPanelView: View {
         DashboardFooter(
             connectionColor: connectionStatusColor,
             updatedText: footerUpdatedText,
-            settingsDisabled: model.snapshot.availableRooms.isEmpty,
             onSettings: { openSettings() },
             onQuit: { NSApplication.shared.terminate(nil) }
         )
@@ -6044,7 +6493,9 @@ public struct PerchHAPanelView: View {
         } else if let series = revisionedCachedHistorySeries(for: entity.id) {
             inlineMicroChart(series: series, palette: palette)
         } else {
-            TelemetryPreviewPlaceholder()
+            // No history for this value: leave the reserved slot empty instead
+            // of drawing a placeholder band that suggests a chart is coming.
+            Color.clear
         }
     }
 
@@ -6197,7 +6648,7 @@ public struct PerchHAPanelView: View {
 ///
 /// - Parameter entity: The discovered entity to represent.
 /// - Returns: A valid SF Symbol name; never empty.
-func perchHAEntityIconName(for entity: DiscoveredEntity) -> String {
+public func perchHAEntityIconName(for entity: DiscoveredEntity) -> String {
     let domain = entity.id.domain
     let name = entity.name.lowercased()
     let unit = (entity.unit ?? "").lowercased()

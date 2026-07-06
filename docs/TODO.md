@@ -51,3 +51,16 @@ What is still missing before PerchHA can honestly be called production-ready:
 - [x] Smoke screenshots and release-review baseline are currently stable in the local CLT path.
 - [x] `perchha-xcode-doctor` now reports discovered Xcode developer directories, honors local `DEVELOPER_DIR`, and reports Xcode license blockage explicitly.
 - [x] The checked-in macOS app icon is integrated into the Xcode wrapper and the local ad-hoc packaging path.
+- [x] Certificate validation is strict by default again; the connection form has an explicit self-signed opt-in scoped to its HTTPS hosts, persisted with the profile (ADR-0010).
+- [x] Live WebSocket updates are wired end to end: one streaming `subscribe_entities` session per connection with reconnect backoff, running with the panel closed so menu bar items stay live (ADR-0011).
+- [x] WebSocket command/auth/ack receives carry a deadline, receives honor cancellation, REST requests time out at 15 s, and the frame-size ceiling covers large `get_states` payloads.
+- [x] The background history sync refreshes OAuth tokens (no more silent decay after 30 minutes), pauses during outages, skips just-synced entities on scroll re-arms, never evicts displayed preview keys, and fetches week/month ranges from recorder statistics like the hover path.
+- [x] Every panel dismissal path (Escape, click-away, toggle) stops the background loops; background loops re-bind `self` weakly so a released model deallocates.
+- [x] Keychain and configuration-store failures surface in Settings instead of being swallowed; bulk-history failure text scrubs the bearer token.
+- [x] History popovers open without a pointer (VoiceOver action everywhere; focus + Space on macOS 14+), Settings stays reachable before a connection exists, and the timeline popover speaks its segments.
+
+## Remaining polish candidates (non-blocking)
+
+- [ ] Localization posture is undecided: UI strings are hardcoded English with no string catalog. If v1 is English-only, record it in an ADR.
+- [ ] `applyLiveState` rebuilds the room list per pushed event; fine at curated-dashboard scale, worth indexing by entity ID if live-update volume grows.
+- [ ] Transient `unavailable` during an HA restart briefly changes row shape (gauge hides, pill becomes text). A grace window that maps short unavailable blips to stale would need a time source in the presentation layer.

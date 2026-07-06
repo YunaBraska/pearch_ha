@@ -46,6 +46,62 @@ public final class PerchHAStatusPanel: NSPanel {
         true
     }
 
+    /// Called with the panel's visibility whenever it genuinely changes.
+    ///
+    /// Every dismissal path funnels through here — Escape, the status-item
+    /// toggle, programmatic `orderOut`, and the auto-hide that fires when the
+    /// app deactivates (click-away) — so the shell can stop background work the
+    /// moment the panel disappears instead of only on explicit toggles.
+    public var onVisibilityChange: ((Bool) -> Void)?
+
+    private var lastReportedVisibility: Bool?
+
+    private func reportVisibilityIfChanged() {
+        let visible = isVisible
+        guard visible != lastReportedVisibility else {
+            return
+        }
+        lastReportedVisibility = visible
+        onVisibilityChange?(visible)
+    }
+
+    public override func order(_ place: NSWindow.OrderingMode, relativeTo otherWin: Int) {
+        super.order(place, relativeTo: otherWin)
+        reportVisibilityIfChanged()
+    }
+
+    public override func orderOut(_ sender: Any?) {
+        super.orderOut(sender)
+        reportVisibilityIfChanged()
+    }
+
+    public override func makeKeyAndOrderFront(_ sender: Any?) {
+        super.makeKeyAndOrderFront(sender)
+        reportVisibilityIfChanged()
+    }
+
+    public override init(
+        contentRect: NSRect,
+        styleMask style: NSWindow.StyleMask,
+        backing backingStoreType: NSWindow.BackingStoreType,
+        defer flag: Bool
+    ) {
+        super.init(contentRect: contentRect, styleMask: style, backing: backingStoreType, defer: flag)
+        // The auto-hide that `hidesOnDeactivate` performs on click-away does not
+        // route through the public ordering overrides, but it does flip the
+        // occlusion state — observe it so click-away also reports visibility.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowVisibilityMayHaveChanged(_:)),
+            name: NSWindow.didChangeOcclusionStateNotification,
+            object: self
+        )
+    }
+
+    @objc private func windowVisibilityMayHaveChanged(_ notification: Notification) {
+        reportVisibilityIfChanged()
+    }
+
     /// Closes the panel when Escape is pressed, matching macOS popover behavior.
     public override func cancelOperation(_ sender: Any?) {
         orderOut(sender)
@@ -170,6 +226,9 @@ public struct PerchHAApplicationSnapshot: Equatable, Sendable {
     public let isEntitySelectionExplicit: Bool
     public let displayPersistenceFailureDescription: String?
     public let customActionPersistenceFailureDescription: String?
+    /// A shell-level Keychain/configuration-store problem the user must see,
+    /// or `nil` when shell persistence is healthy.
+    public let shellPersistenceFailureDescription: String?
     public let serviceMetadata: [HAServiceMetadata]
     public let serviceMetadataFailureDescription: String?
     public let configurationPersistenceState: PerchHAConfigurationPersistenceState
@@ -220,10 +279,14 @@ extension PerchHAAuthSessionStore: PerchHAAuthSessionStorage {}
 public protocol PerchHARefreshingHomeAssistantClient: Sendable {
     func discovery(_ input: HAConnectionInput) async -> HAClientResult<DiscoverySnapshot>
     func history(_ input: HAConnectionInput, entityID: EntityID, range: HistoryRange, end: Date) async -> HAClientResult<HistorySeries>
-    func historyBatch(_ input: HAConnectionInput, entityIDs: [EntityID], range: HistoryRange, end: Date) async -> [EntityID: HistorySeries]
+    func historyBatch(_ input: HAConnectionInput, entityIDs: [EntityID], range: HistoryRange, end: Date) async -> HAClientResult<[EntityID: HistorySeries]>
     func services(_ input: HAConnectionInput) async -> HAClientResult<[HAServiceMetadata]>
     func callService(_ input: HAConnectionInput, call: HAServiceCall) async -> HAClientResult<HAServiceCallResult>
     func refreshAccessToken(baseURL: URL, refreshToken: String, clientID: String) async -> HAClientResult<HAOAuthToken>
+    func streamEntityStateChanges(
+        _ input: HAConnectionInput,
+        onEvent: @escaping @Sendable (EntityState) async -> Void
+    ) async -> HAClientFailure
 }
 
 public protocol PerchHAServerTrustRefreshingHomeAssistantClient: PerchHARefreshingHomeAssistantClient {
@@ -289,16 +352,20 @@ public struct PerchHAAuthorizedHomeAssistantGateway: Sendable {
     /// Fetches history for many entities sharing a range in as few requests as
     /// possible, for the background bulk sync loop.
     ///
-    /// Resolves the authorized input once and delegates batching plus the ordered
-    /// multi-URL fallback to the client. Failures are absorbed per batch by the
-    /// client, so a partial result simply returns the entities that came back. No
-    /// token is ever logged or leaked.
+    /// Routes through the same authorized-request path as every other call, so
+    /// an expired OAuth access token is refreshed and retried once instead of
+    /// silently starving the background sync after the token's 30-minute
+    /// lifetime. Non-fatal batch failures are absorbed by the client — a
+    /// partial result simply returns the entities that came back. No token is
+    /// ever logged or leaked.
     ///
     /// - Parameters:
     ///   - form: The active connection profile.
     ///   - entityIDs: The entities to fetch.
     ///   - range: The shared history range.
-    /// - Returns: A series per entity that came back; missing entities are absent.
+    /// - Returns: A series per entity that came back; missing entities are
+    ///   absent. Empty when the whole call failed — the sync loop keeps prior
+    ///   cache entries and retries next cycle.
     public func bulkHistory(
         form: PerchHAConnectionForm,
         entityIDs: [EntityID],
@@ -307,10 +374,47 @@ public struct PerchHAAuthorizedHomeAssistantGateway: Sendable {
         guard let primaryURL = form.primaryURL(), !entityIDs.isEmpty else {
             return [:]
         }
-        guard case let .success(authorizedInput) = resolveInput(form: form, primaryURL: primaryURL) else {
+        let result = await perform(form: form, primaryURL: primaryURL) { input in
+            await client.historyBatch(input, entityIDs: entityIDs, range: range, end: Date())
+        }
+        guard case let .success(series) = result else {
             return [:]
         }
-        return await client.historyBatch(authorizedInput.input, entityIDs: entityIDs, range: range, end: Date())
+        return series
+    }
+
+    /// Streams live entity state updates for the connection until the stream
+    /// ends, delivering each update through `onEvent`.
+    ///
+    /// Rides the same authorized-request machinery as every other call: an
+    /// expired OAuth access token is refreshed and the stream restarted once,
+    /// and an unreachable address falls through to the next configured URL for
+    /// the initial connection. Returns only when the stream is over — the
+    /// caller owns reconnect pacing.
+    ///
+    /// - Parameters:
+    ///   - form: The active connection profile.
+    ///   - onEvent: Invoked for each live entity state update.
+    /// - Returns: The failure that ended the stream.
+    public func streamLiveUpdates(
+        form: PerchHAConnectionForm,
+        onEvent: @escaping @Sendable (EntityState) async -> Void
+    ) async -> ConnectionFailure {
+        guard let primaryURL = form.primaryURL() else {
+            return .protocolError("invalid Home Assistant URL")
+        }
+        // A healthy stream never returns, so the operation's value is never
+        // produced; wrapping the terminal failure keeps the shared refresh and
+        // URL-fallback machinery applicable.
+        let result: HAClientResult<Bool> = await perform(form: form, primaryURL: primaryURL) { input in
+            .failure(await client.streamEntityStateChanges(input, onEvent: onEvent))
+        }
+        switch result {
+        case .success:
+            return .protocolError("live update stream ended without a failure")
+        case let .failure(failure):
+            return failure.connectionFailure
+        }
     }
 
     public func services(form: PerchHAConnectionForm) async -> PerchHAServiceMetadataProviderResult {
@@ -380,7 +484,7 @@ public struct PerchHAAuthorizedHomeAssistantGateway: Sendable {
     private func resolveInput(form: PerchHAConnectionForm, primaryURL: URL) -> HAClientResult<PerchHAAuthorizedInput> {
         let urls = form.urls()
         let endpoint = HAEndpoint(urls: urls.isEmpty ? [primaryURL] : urls)
-        let serverTrustPolicy = HAServerTrustPolicy(trustsAllHosts: true)
+        let serverTrustPolicy = PerchHAServerTrustPolicyResolver.policy(for: form)
         if !form.trimmedToken.isEmpty {
             return .success(
                 PerchHAAuthorizedInput(
@@ -707,6 +811,26 @@ public enum PerchHAOAuthSignInFailure: Error, Equatable, CustomStringConvertible
     }
 }
 
+/// Maps a connection form's certificate preference to the client trust policy.
+///
+/// Certificate validation is strict by default. Only an explicit user opt-in on
+/// the form produces an allowance, and that allowance is scoped to the form's
+/// current HTTPS hosts — the app never trusts all hosts.
+public enum PerchHAServerTrustPolicyResolver {
+    /// Resolves the trust policy for a connection form.
+    ///
+    /// - Parameter form: The connection form describing the target addresses and
+    ///   the user's self-signed certificate preference.
+    /// - Returns: The default strict policy, or a policy allowing self-signed
+    ///   certificates for exactly the form's HTTPS hosts when the user opted in.
+    public static func policy(for form: PerchHAConnectionForm) -> HAServerTrustPolicy {
+        guard form.allowsSelfSignedCertificates else {
+            return .default
+        }
+        return HAServerTrustPolicy(allowedSelfSignedCertificateHosts: form.selfSignedCertificateHosts())
+    }
+}
+
 public struct PerchHAOAuthSignInCoordinator: Sendable {
     private let configuration: PerchHAOAuthApplicationConfiguration?
     private let client: HomeAssistantClient
@@ -790,7 +914,7 @@ public struct PerchHAOAuthSignInCoordinator: Sendable {
             baseURL: primaryURL,
             code: callback.code,
             clientID: configuration.clientID,
-            serverTrustPolicy: HAServerTrustPolicy(trustsAllHosts: true)
+            serverTrustPolicy: PerchHAServerTrustPolicyResolver.policy(for: form)
         )
         let token: HAOAuthToken
         switch exchange {
@@ -913,6 +1037,8 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     private var statusItems: [PerchHAStatusItemEntry] = []
     private var panel: NSPanel?
     private var settingsWindow: NSWindow?
+    /// Restores the accessory activation policy when Settings closes.
+    private var settingsWindowCloseObserver: NSObjectProtocol?
     private var panelModel: PerchHAPanelModel?
     private var autoConnectTask: Task<Void, Never>?
     private let configStore: ConfigStore?
@@ -921,6 +1047,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     private let historyProvider: PerchHAPanelModel.HistoryProvider
     private let bulkHistoryProvider: PerchHAPanelModel.BulkHistoryProvider
     private let serviceMetadataProvider: PerchHAPanelModel.ServiceMetadataProvider
+    private let liveUpdateStreamer: PerchHAPanelModel.LiveUpdateStreamer?
     private let actionRunner: PerchHAPanelModel.ActionRunner
     private let oauthSignInRunner: PerchHAPanelModel.OAuthSignInRunner
     private let protectedActionValueStore: any ProtectedActionValueStore
@@ -961,6 +1088,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             historyProvider: gateway.history(form:entityID:range:),
             bulkHistoryProvider: gateway.bulkHistory(form:entityIDs:range:),
             serviceMetadataProvider: gateway.services(form:),
+            liveUpdateStreamer: gateway.streamLiveUpdates(form:onEvent:),
             actionRunner: gateway.action(form:action:),
             protectedActionValueStore: KeychainProtectedActionValueStore(),
             oauthSignInRunner: oauthSignInRunner,
@@ -984,6 +1112,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             historyProvider: gateway.history(form:entityID:range:),
             bulkHistoryProvider: gateway.bulkHistory(form:entityIDs:range:),
             serviceMetadataProvider: gateway.services(form:),
+            liveUpdateStreamer: gateway.streamLiveUpdates(form:onEvent:),
             actionRunner: gateway.action(form:action:),
             protectedActionValueStore: KeychainProtectedActionValueStore(),
             oauthSignInRunner: { _ in .failed("OAuth sign-in is not configured") },
@@ -1022,6 +1151,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         historyProvider: @escaping PerchHAPanelModel.HistoryProvider,
         bulkHistoryProvider: @escaping PerchHAPanelModel.BulkHistoryProvider = { _, _, _ in [:] },
         serviceMetadataProvider: @escaping PerchHAPanelModel.ServiceMetadataProvider = { _ in .success([]) },
+        liveUpdateStreamer: PerchHAPanelModel.LiveUpdateStreamer? = nil,
         actionRunner: @escaping PerchHAPanelModel.ActionRunner = PerchHAApplication.action(form:action:),
         protectedActionValueStore: any ProtectedActionValueStore = KeychainProtectedActionValueStore(),
         oauthSignInRunner: @escaping PerchHAPanelModel.OAuthSignInRunner = { _ in .failed("OAuth sign-in is not configured") },
@@ -1035,6 +1165,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         self.historyProvider = historyProvider
         self.bulkHistoryProvider = bulkHistoryProvider
         self.serviceMetadataProvider = serviceMetadataProvider
+        self.liveUpdateStreamer = liveUpdateStreamer
         self.actionRunner = actionRunner
         self.protectedActionValueStore = protectedActionValueStore
         self.oauthSignInRunner = oauthSignInRunner
@@ -1049,7 +1180,34 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         let delegate = PerchHAApplication(configStore: try? JSONConfigStore())
         application.delegate = delegate
         application.setActivationPolicy(.accessory)
+        applyPearchApplicationIcon()
+        // An accessory app has no visible menu bar, but the main menu still
+        // drives keyboard equivalents: without an Edit menu, Cmd+C/V/X/A and
+        // undo are dead in the Settings window's text fields.
+        application.mainMenu = standardMainMenu()
         application.run()
+    }
+
+    /// Builds the minimal main menu an accessory app needs: a standard Edit
+    /// menu so text fields in the Settings window get the system keyboard
+    /// equivalents (cut, copy, paste, select-all, undo, redo).
+    ///
+    /// - Returns: The main menu to install on the shared application.
+    public static func standardMainMenu() -> NSMenu {
+        let mainMenu = NSMenu()
+        let editItem = NSMenuItem()
+        mainMenu.addItem(editItem)
+        let editMenu = NSMenu(title: "Edit")
+        editItem.submenu = editMenu
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redoItem = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(redoItem)
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        return mainMenu
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1078,6 +1236,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             historyProvider: historyProvider,
             bulkHistoryProvider: bulkHistoryProvider,
             serviceMetadataProvider: serviceMetadataProvider,
+            liveUpdateStreamer: liveUpdateStreamer,
             actionRunner: actionRunner,
             oauthSignInRunner: oauthSignInRunner,
             selectionConfiguration: configuration.selectionConfiguration,
@@ -1180,6 +1339,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             isEntitySelectionExplicit: panelModel?.snapshot.selectionConfiguration.isExplicit ?? false,
             displayPersistenceFailureDescription: panelModel?.snapshot.displayPersistenceFailureDescription,
             customActionPersistenceFailureDescription: panelModel?.customActionPersistenceFailureDescription,
+            shellPersistenceFailureDescription: panelModel?.shellPersistenceFailureDescription,
             serviceMetadata: panelModel?.snapshot.serviceMetadata ?? [],
             serviceMetadataFailureDescription: panelModel?.snapshot.serviceMetadataFailureDescription,
             configurationPersistenceState: configurationPersistenceState,
@@ -1198,14 +1358,16 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         fallbackURLString: String? = nil,
         addresses: [PerchHAConnectionAddressField]? = nil,
         token: String? = nil,
-        usesStoredAuthSession: Bool? = nil
+        usesStoredAuthSession: Bool? = nil,
+        allowsSelfSignedCertificates: Bool? = nil
     ) {
         panelModel?.updateConnectionForm(
             urlString: urlString,
             fallbackURLString: fallbackURLString,
             addresses: addresses,
             token: token,
-            usesStoredAuthSession: usesStoredAuthSession
+            usesStoredAuthSession: usesStoredAuthSession,
+            allowsSelfSignedCertificates: allowsSelfSignedCertificates
         )
     }
 
@@ -1220,7 +1382,16 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     }
 
     private func clearStoredAuthSession() {
-        _ = try? authSessionStore?.clear()
+        do {
+            _ = try authSessionStore?.clear()
+            panelModel?.reportShellPersistenceFailure(nil)
+        } catch {
+            // A failed clear means the token is still in the Keychain even
+            // though the user believes they signed out — that must be visible.
+            panelModel?.reportShellPersistenceFailure(
+                "Sign-out could not remove the stored session from the Keychain: \(error)"
+            )
+        }
     }
 
     public func startOAuthSignIn() async {
@@ -1397,7 +1568,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     }
 
     @discardableResult
-    public func setMenuBarDefaultHistoryRange(_ id: EntityID, defaultHistoryRange: HistoryRange) -> Bool {
+    public func setMenuBarDefaultHistoryRange(_ id: EntityID, defaultHistoryRange: HistoryRange?) -> Bool {
         panelModel?.setMenuBarDefaultHistoryRange(id, defaultHistoryRange: defaultHistoryRange) ?? false
     }
 
@@ -1441,13 +1612,8 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             return .failed("configuration load failed; save blocked: \(message)")
         }
 
-        let nextConfiguration = PerchHAConfiguration(
-            schemaVersion: configuration.schemaVersion,
+        let nextConfiguration = configuration.replacing(
             selectedEntityIDs: selection.selectedEntityIDs,
-            menuBarEntityIDs: configuration.menuBarEntityIDs,
-            menuBarItemConfigurations: configuration.menuBarItemConfigurations,
-            customActions: configuration.customActions,
-            connectionProfile: configuration.connectionProfile,
             roomOrder: selection.roomOrder,
             entityOrder: selection.entityOrder,
             isEntitySelectionExplicit: selection.isExplicit
@@ -1473,16 +1639,9 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             return .failed("configuration load failed; save blocked: \(message)")
         }
 
-        let nextConfiguration = PerchHAConfiguration(
-            schemaVersion: configuration.schemaVersion,
-            selectedEntityIDs: configuration.selectedEntityIDs,
+        let nextConfiguration = configuration.replacing(
             menuBarEntityIDs: displayConfiguration.promotedEntityIDs,
-            menuBarItemConfigurations: displayConfiguration.itemConfigurations,
-            customActions: configuration.customActions,
-            connectionProfile: configuration.connectionProfile,
-            roomOrder: configuration.roomOrder,
-            entityOrder: configuration.entityOrder,
-            isEntitySelectionExplicit: configuration.isEntitySelectionExplicit
+            menuBarItemConfigurations: displayConfiguration.itemConfigurations
         )
         do {
             configuration = try configStore.save(nextConfiguration)
@@ -1510,16 +1669,8 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             return .failed(message)
         }
 
-        let nextConfiguration = PerchHAConfiguration(
-            schemaVersion: configuration.schemaVersion,
-            selectedEntityIDs: configuration.selectedEntityIDs,
-            menuBarEntityIDs: configuration.menuBarEntityIDs,
-            menuBarItemConfigurations: configuration.menuBarItemConfigurations,
-            customActions: customActionConfiguration.actions,
-            connectionProfile: configuration.connectionProfile,
-            roomOrder: configuration.roomOrder,
-            entityOrder: configuration.entityOrder,
-            isEntitySelectionExplicit: configuration.isEntitySelectionExplicit
+        let nextConfiguration = configuration.replacing(
+            customActions: customActionConfiguration.actions
         )
         do {
             configuration = try configStore.save(nextConfiguration)
@@ -1649,6 +1800,12 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         panel.contentViewController = hostingController
         // Route the panel-local Cmd+, shortcut to the same open-settings path.
         panel.onOpenSettings = onOpenSettings
+        // Gate background work on real window visibility so every dismissal
+        // path — Escape, click-away auto-hide, status-item toggle — stops the
+        // model's sync loops, not just the explicit toggle.
+        panel.onVisibilityChange = { [weak model] visible in
+            model?.setPanelActive(visible)
+        }
         // Size to the fixed SwiftUI content so the borderless window matches the
         // rounded surface exactly (no chrome inset). The root paints at this size.
         panel.setContentSize(AppShellLayout.panelContentSize)
@@ -1724,11 +1881,54 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             }
         )
         settingsWindow = window
+        if settingsWindowCloseObserver == nil {
+            settingsWindowCloseObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification,
+                object: window,
+                queue: .main
+            ) { _ in
+                // Back to a pure menu-bar presence once Settings closes.
+                Task { @MainActor in
+                    NSApp.setActivationPolicy(.accessory)
+                }
+            }
+        }
         if !window.isVisible {
             window.center()
         }
+        // Settings is a real document-style window: give the app a Dock icon
+        // and app switcher presence while it is open.
+        NSApp.setActivationPolicy(.regular)
+        // The Dock tile is built when the app turns regular; an icon set while
+        // the app was still an accessory does not reliably survive the switch,
+        // so it is (re)applied here every time.
+        Self.applyPearchApplicationIcon()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Applies the bundled Pearch mark as the application icon for unbundled
+    /// (SwiftPM dev) runs, where AppKit would otherwise show the generic
+    /// executable icon in the Dock and the About panel. Bundled builds carry
+    /// the icon through Info.plist and are left untouched.
+    private static func applyPearchApplicationIcon() {
+        guard Bundle.main.bundleURL.pathExtension != "app",
+              let icon = pearchApplicationIcon()
+        else {
+            return
+        }
+        NSApp.applicationIconImage = icon
+        NSApp.dockTile.display()
+    }
+
+    /// The bundled Pearch application icon loaded from the module resources.
+    ///
+    /// - Returns: The icon image, or `nil` when the resource is unavailable.
+    public static func pearchApplicationIcon() -> NSImage? {
+        guard let iconURL = Bundle.module.url(forResource: "PearchHA", withExtension: "icns") else {
+            return nil
+        }
+        return NSImage(contentsOf: iconURL)
     }
 
     // TODO: A system-wide global hotkey to toggle the panel from any app is
@@ -1780,6 +1980,10 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         settingsWindow?.orderOut(nil)
         settingsWindow?.contentViewController = nil
         settingsWindow = nil
+        if let settingsWindowCloseObserver {
+            NotificationCenter.default.removeObserver(settingsWindowCloseObserver)
+            self.settingsWindowCloseObserver = nil
+        }
         panelModel = nil
 
         for entry in statusItems {
@@ -1827,6 +2031,16 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             image = cachedStatusItemImage(for: renderedItem, in: &entry)
             // Icon units carry the value in the glyph, so the title is dropped.
             title = renderedItem.value.iconSymbolName != nil ? "" : presentation.statusItemTitle
+        } else if let iconSymbolName = presentation.iconSymbolName {
+            // The per-entity "Show icon" option: a template SF Symbol beside
+            // (or instead of, per the resolved appearance) the value text.
+            entry.imageCache = nil
+            image = NSImage(
+                systemSymbolName: iconSymbolName,
+                accessibilityDescription: presentation.accessibilityLabel
+            )
+            image?.isTemplate = true
+            title = presentation.statusItemTitle
         } else if presentation == .fallback {
             // Nothing is promoted: show the template logo glyph instead of text.
             entry.imageCache = nil
@@ -1932,6 +2146,13 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     /// The result is a non-template (colored) image fitted into the renderer's
     /// square size, preserving aspect ratio and centered.
     private func appIconStatusItemImage() -> NSImage? {
+        // Outside a real .app bundle (bare SwiftPM executable, tests) AppKit
+        // reports the generic executable document icon — that is what used to
+        // replace the Pearch logo in the menu bar. Only trust the icon when a
+        // bundled app actually provides one.
+        guard Bundle.main.bundleURL.pathExtension == "app" else {
+            return nil
+        }
         let appIcon = NSApp.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
         guard let appIcon, appIcon.size.width > 0, appIcon.size.height > 0 else {
             return nil
@@ -1993,26 +2214,34 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             urlString: primaryURLString,
             addresses: Array(alternativeFields),
             token: "",
-            usesStoredAuthSession: usesStoredAuthSession
+            usesStoredAuthSession: usesStoredAuthSession,
+            allowsSelfSignedCertificates: profile?.allowsSelfSignedCertificates ?? true
         )
     }
 
     private func rememberConnection(_ form: PerchHAConnectionForm) {
         if let authSessionStore, !form.trimmedToken.isEmpty {
-            _ = try? authSessionStore.saveAccessToken(form.trimmedToken)
+            do {
+                _ = try authSessionStore.saveAccessToken(form.trimmedToken)
+                panelModel?.reportShellPersistenceFailure(nil)
+            } catch {
+                // Losing this write silently would make the user re-enter the
+                // token on every launch with no explanation.
+                panelModel?.reportShellPersistenceFailure(
+                    "Could not remember the session in the Keychain: \(error)"
+                )
+            }
         }
         guard let configStore else {
+            panelModel?.reportShellPersistenceFailure(
+                "Settings cannot be saved: the configuration store is unavailable."
+            )
             return
         }
         if case .loadFailed = configurationPersistenceState {
             return
         }
-        let nextConfiguration = PerchHAConfiguration(
-            schemaVersion: configuration.schemaVersion,
-            selectedEntityIDs: configuration.selectedEntityIDs,
-            menuBarEntityIDs: configuration.menuBarEntityIDs,
-            menuBarItemConfigurations: configuration.menuBarItemConfigurations,
-            customActions: configuration.customActions,
+        let nextConfiguration = configuration.replacing(
             connectionProfile: PerchHAConnectionProfile(
                 addresses: [
                     PerchHAConnectionAddress(
@@ -2023,11 +2252,9 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
                         label: address.label,
                         urlString: PerchHAConnectionForm.normalizedHomeAssistantURLString(address.urlString)
                     )
-                }
-            ),
-            roomOrder: configuration.roomOrder,
-            entityOrder: configuration.entityOrder,
-            isEntitySelectionExplicit: configuration.isEntitySelectionExplicit
+                },
+                allowsSelfSignedCertificates: form.allowsSelfSignedCertificates
+            )
         )
         do {
             configuration = try configStore.save(nextConfiguration)

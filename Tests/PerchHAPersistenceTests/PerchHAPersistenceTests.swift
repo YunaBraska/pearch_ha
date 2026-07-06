@@ -45,7 +45,9 @@ final class PerchHAPersistenceTests: XCTestCase {
                     entityID: "sensor.energy_today",
                     style: .bar,
                     totalEntityID: "sensor.energy_budget",
-                    defaultHistoryRange: .month
+                    defaultHistoryRange: .month,
+                    showsEntityIcon: false,
+                    customIconName: "flame"
                 )
             ],
             customActions: [
@@ -90,7 +92,7 @@ final class PerchHAPersistenceTests: XCTestCase {
         XCTAssertEqual(try store.load(), configuration)
     }
 
-    func testJSONConfigStoreDefaultsMissingHistoryRangeToHour() throws {
+    func testJSONConfigStoreDefaultsMissingHistoryRangeToInheritGlobal() throws {
         let url = temporaryConfigURL()
         defer {
             try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
@@ -117,11 +119,11 @@ final class PerchHAPersistenceTests: XCTestCase {
 
         let configuration = try JSONConfigStore(fileURL: url).load()
 
-        XCTAssertEqual(
+        // No stored range means "inherit the global Appearance default".
+        XCTAssertNil(
             configuration.menuBarDisplayConfiguration
                 .itemConfiguration(for: "sensor.office_temperature")
-                .defaultHistoryRange,
-            .hour
+                .defaultHistoryRange
         )
         XCTAssertEqual(configuration.customActionConfiguration, CustomActionConfiguration())
     }
@@ -895,6 +897,73 @@ final class PerchHAPersistenceTests: XCTestCase {
 
         XCTAssertEqual(try store.save(configuration), configuration)
         XCTAssertEqual(try store.load(), configuration)
+    }
+
+    func testConnectionProfileRoundTripsStrictCertificateValidationChoice() throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        // Strict validation is the non-default choice now; it must survive the
+        // round trip rather than silently reverting to the trusting default.
+        let configuration = PerchHAConfiguration(
+            connectionProfile: PerchHAConnectionProfile(
+                addresses: [PerchHAConnectionAddress(urlString: "https://home.local:8123")],
+                allowsSelfSignedCertificates: false
+            )
+        )
+        let store = JSONConfigStore(fileURL: url)
+
+        XCTAssertEqual(try store.save(configuration), configuration)
+        let loaded = try XCTUnwrap(try store.load().connectionProfile)
+        XCTAssertFalse(loaded.allowsSelfSignedCertificates)
+    }
+
+    func testConnectionProfileWithoutSelfSignedFieldDecodesAsTrusting() throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let json = """
+        {
+          "schemaVersion": 1,
+          "connectionProfile": {
+            "addresses": [{"label": "", "urlString": "https://home.local:8123"}]
+          }
+        }
+        """
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data(json.utf8).write(to: url)
+
+        let profile = try XCTUnwrap(try JSONConfigStore(fileURL: url).load().connectionProfile)
+        XCTAssertTrue(profile.allowsSelfSignedCertificates, "profiles from before the field default to the trusting posture")
+    }
+
+    func testLegacyConnectionProfileDecodesAsTrustingSelfSignedCertificates() throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let json = """
+        {
+          "schemaVersion": 1,
+          "connectionProfile": {
+            "urlString": "https://home.local:8123",
+            "fallbackURLString": ""
+          }
+        }
+        """
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data(json.utf8).write(to: url)
+
+        let profile = try XCTUnwrap(try JSONConfigStore(fileURL: url).load().connectionProfile)
+        XCTAssertTrue(profile.allowsSelfSignedCertificates)
     }
 
     private func temporaryConfigURL() -> URL {

@@ -88,6 +88,50 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         PerchHAConfiguration()
     }
 
+    /// Returns a copy replacing only the given selection/menu-bar/action/
+    /// connection fields, carrying every other field — including all display
+    /// preferences — unchanged.
+    ///
+    /// Rebuilding a configuration by listing fields at the call site silently
+    /// reset every omitted field to its default: connecting once wiped the
+    /// user's persisted appearance, theme, and accent. All partial updates go
+    /// through this copy instead.
+    ///
+    /// - Parameters mirror the stored fields; `nil` keeps the current value
+    ///   (`connectionProfile` uses a double optional so it can be cleared).
+    /// - Returns: The updated configuration value.
+    public func replacing(
+        selectedEntityIDs: [EntityID]? = nil,
+        menuBarEntityIDs: [EntityID]? = nil,
+        menuBarItemConfigurations: [MenuBarItemConfiguration]? = nil,
+        customActions: [EntityCustomAction]? = nil,
+        connectionProfile: PerchHAConnectionProfile?? = nil,
+        roomOrder: [RoomID]? = nil,
+        entityOrder: [EntityID]? = nil,
+        isEntitySelectionExplicit: Bool? = nil
+    ) -> PerchHAConfiguration {
+        PerchHAConfiguration(
+            schemaVersion: schemaVersion,
+            selectedEntityIDs: selectedEntityIDs ?? self.selectedEntityIDs,
+            menuBarEntityIDs: menuBarEntityIDs ?? self.menuBarEntityIDs,
+            menuBarItemConfigurations: menuBarItemConfigurations ?? self.menuBarItemConfigurations,
+            customActions: customActions ?? self.customActions,
+            connectionProfile: connectionProfile ?? self.connectionProfile,
+            roomOrder: roomOrder ?? self.roomOrder,
+            entityOrder: entityOrder ?? self.entityOrder,
+            isEntitySelectionExplicit: isEntitySelectionExplicit ?? self.isEntitySelectionExplicit,
+            menuBarAppearance: menuBarAppearance,
+            stableMenuBarWidth: stableMenuBarWidth,
+            themeMode: themeMode,
+            accentColor: accentColor,
+            dashboardRowDensity: dashboardRowDensity,
+            dashboardDefaultHistoryRange: dashboardDefaultHistoryRange,
+            dashboardShowsFooterTimestamp: dashboardShowsFooterTimestamp,
+            dashboardHiddenModuleIDs: dashboardHiddenModuleIDs,
+            dashboardSummaryMetricEntityIDs: dashboardSummaryMetricEntityIDs
+        )
+    }
+
     public var selectionConfiguration: EntitySelectionConfiguration {
         EntitySelectionConfiguration(
             selectedEntityIDs: selectedEntityIDs,
@@ -238,12 +282,22 @@ public struct PerchHAConnectionAddress: Equatable, Codable, Sendable {
 public struct PerchHAConnectionProfile: Equatable, Codable, Sendable {
     public let addresses: [PerchHAConnectionAddress]
 
+    /// Whether the user trusts self-signed TLS certificates for the profile's
+    /// HTTPS hosts. Defaults to `true` (scoped to the profile's own hosts,
+    /// never all hosts); older stored profiles without the field decode as
+    /// `true` so existing self-signed setups keep working.
+    public let allowsSelfSignedCertificates: Bool
+
     /// Creates a profile from an ordered list of addresses.
     ///
-    /// - Parameter addresses: The ordered addresses. Entries with an empty URL
-    ///   string are dropped.
-    public init(addresses: [PerchHAConnectionAddress]) {
+    /// - Parameters:
+    ///   - addresses: The ordered addresses. Entries with an empty URL string
+    ///     are dropped.
+    ///   - allowsSelfSignedCertificates: The user's self-signed certificate
+    ///     preference for the profile's HTTPS hosts. Defaults to `true`.
+    public init(addresses: [PerchHAConnectionAddress], allowsSelfSignedCertificates: Bool = true) {
         self.addresses = addresses.filter { !$0.urlString.isEmpty }
+        self.allowsSelfSignedCertificates = allowsSelfSignedCertificates
     }
 
     /// Creates a profile from a primary URL and an optional single fallback.
@@ -274,22 +328,28 @@ public struct PerchHAConnectionProfile: Equatable, Codable, Sendable {
         case addresses
         case urlString
         case fallbackURLString
+        case allowsSelfSignedCertificates
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let allowsSelfSignedCertificates = try container.decodeIfPresent(Bool.self, forKey: .allowsSelfSignedCertificates) ?? true
         if let decodedAddresses = try container.decodeIfPresent([PerchHAConnectionAddress].self, forKey: .addresses) {
-            self.init(addresses: decodedAddresses)
+            self.init(addresses: decodedAddresses, allowsSelfSignedCertificates: allowsSelfSignedCertificates)
             return
         }
         let legacyURL = try container.decodeIfPresent(String.self, forKey: .urlString) ?? ""
         let legacyFallback = try container.decodeIfPresent(String.self, forKey: .fallbackURLString) ?? ""
-        self.init(urlString: legacyURL, fallbackURLString: legacyFallback)
+        self.init(addresses: [
+            PerchHAConnectionAddress(urlString: legacyURL),
+            PerchHAConnectionAddress(urlString: legacyFallback)
+        ], allowsSelfSignedCertificates: allowsSelfSignedCertificates)
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(addresses, forKey: .addresses)
+        try container.encode(allowsSelfSignedCertificates, forKey: .allowsSelfSignedCertificates)
     }
 }
 
