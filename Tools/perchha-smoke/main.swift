@@ -279,8 +279,13 @@ struct PerchHASmoke {
         if diagnostic.nativeVerification == .ready {
             try expect(strictExitCode == 0, "xcode doctor strict mode succeeds when native verification is ready")
             try expect(diagnostic.issues.isEmpty, "xcode doctor ready state has no issues")
+            // The suggestion may carry a machine-specific DEVELOPER_DIR prefix
+            // (CI runners install version-suffixed Xcode bundles), so match by
+            // the command's tail.
             try expect(
-                diagnostic.suggestedCommands.contains("swift test --disable-swift-testing --enable-xctest list"),
+                diagnostic.suggestedCommands.contains { command in
+                    command.hasSuffix("swift test --disable-swift-testing --enable-xctest list")
+                },
                 "xcode doctor ready state suggests XCTest listing"
             )
         } else {
