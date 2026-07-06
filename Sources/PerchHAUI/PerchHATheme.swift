@@ -36,14 +36,15 @@ public enum PerchHATheme {
         Self.accentColor = accentColor
     }
 
-    /// A healthy/normal severity color.
-    public static let ok = Color(red: 0x2E / 255, green: 0xCC / 255, blue: 0x71 / 255)
+    /// A healthy/normal severity color (the Home Assistant success green,
+    /// ≈ `#4CAF50`).
+    public static let ok = Color(red: 0x4C / 255, green: 0xAF / 255, blue: 0x50 / 255)
 
-    /// A warning severity color.
-    public static let warn = Color(red: 0xF5 / 255, green: 0xA6 / 255, blue: 0x23 / 255)
+    /// A warning severity color (the Home Assistant accent orange, ≈ `#FF9800`).
+    public static let warn = Color(red: 0xFF / 255, green: 0x98 / 255, blue: 0x00 / 255)
 
-    /// A critical severity color.
-    public static let critical = Color(red: 0xE7 / 255, green: 0x4C / 255, blue: 0x3C / 255)
+    /// A critical severity color (the Home Assistant error red, ≈ `#F44336`).
+    public static let critical = Color(red: 0xF4 / 255, green: 0x43 / 255, blue: 0x36 / 255)
 
     /// The color for a threshold severity.
     ///
@@ -102,10 +103,11 @@ public enum PerchHATheme {
         }
     }
 
-    /// The elevated card fill for the current appearance.
+    /// The elevated card fill for the current appearance (the Home Assistant
+    /// card surface, `#1C1C1C` in dark).
     public static func cardFill(_ scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color(red: 0.16, green: 0.17, blue: 0.19)
+            ? Color(red: 0x1C / 255, green: 0x1C / 255, blue: 0x1C / 255)
             : Color.white
     }
 
@@ -257,8 +259,9 @@ public enum PerchHATheme {
         /// The primary accent (the calm Home Assistant blue, resolved live).
         public static var accentPrimary: Color { PerchHATheme.accent }
 
-        /// The outer corner radius of the dashboard panel surface.
-        public static let panelCornerRadius: CGFloat = 20
+        /// The outer corner radius of the dashboard panel surface (the Home
+        /// Assistant card radius).
+        public static let panelCornerRadius: CGFloat = 12
 
         /// Builds the resolved dashboard palette for an appearance.
         ///
@@ -268,41 +271,40 @@ public enum PerchHATheme {
             scheme == .dark ? darkPalette : lightPalette
         }
 
-        /// The dark instrument-panel palette: deep graphite/navy root, a slightly
-        /// lighter panel, near-white primary text, blue-gray secondary, calm
-        /// blue/violet accents, and almost-invisible strokes/separators.
+        /// The dark palette, matched to the Home Assistant dark theme: a
+        /// `#111111` root, `#1C1C1C` card surfaces, `#282828` elevated surfaces,
+        /// and the neutral HA text grays (`#E1E1E1` / `#9B9B9B` / `#6F6F6F`).
         public static let darkPalette = DashboardPalette(
-            surfaceRoot: Color(red: 0.055, green: 0.063, blue: 0.082),
-            surfacePanel: Color(red: 0.086, green: 0.098, blue: 0.122),
-            surfacePanelElevated: Color(red: 0.122, green: 0.137, blue: 0.165),
+            surfaceRoot: Color(red: 0x11 / 255, green: 0x11 / 255, blue: 0x11 / 255),
+            surfacePanel: Color(red: 0x1C / 255, green: 0x1C / 255, blue: 0x1C / 255),
+            surfacePanelElevated: Color(red: 0x28 / 255, green: 0x28 / 255, blue: 0x28 / 255),
             surfaceControl: Color.white.opacity(0.07),
             surfaceControlActive: PerchHATheme.accent.opacity(0.22),
             borderSubtle: Color.white.opacity(0.07),
             separatorSubtle: Color.white.opacity(0.05),
-            textPrimary: Color(red: 0.93, green: 0.95, blue: 0.97),
-            textSecondary: Color(red: 0.60, green: 0.65, blue: 0.74),
-            textTertiary: Color(red: 0.42, green: 0.47, blue: 0.55),
+            textPrimary: Color(red: 0xE1 / 255, green: 0xE1 / 255, blue: 0xE1 / 255),
+            textSecondary: Color(red: 0x9B / 255, green: 0x9B / 255, blue: 0x9B / 255),
+            textTertiary: Color(red: 0x6F / 255, green: 0x6F / 255, blue: 0x6F / 255),
             chartSecondaryColor: accentSecondary,
             chartMuted: Color.white.opacity(0.22),
             meterTrack: Color.white.opacity(0.10),
             shadowSoft: Color.black.opacity(0.55)
         )
 
-        /// The light palette: a soft translucent light-graphite root (not pure
-        /// white), a slightly elevated off-white panel, dark-graphite text, and the
-        /// same calm hierarchy and accents as the dark palette — designed, not
-        /// mechanically inverted.
+        /// The light palette, matched to the Home Assistant light theme: a
+        /// `#FAFAFA` root behind white card surfaces and the HA text grays
+        /// (`#212121` / `#727272` / `#9B9B9B`).
         public static let lightPalette = DashboardPalette(
-            surfaceRoot: Color(red: 0.90, green: 0.91, blue: 0.94),
-            surfacePanel: Color(red: 0.965, green: 0.970, blue: 0.985),
+            surfaceRoot: Color(red: 0xFA / 255, green: 0xFA / 255, blue: 0xFA / 255),
+            surfacePanel: Color.white,
             surfacePanelElevated: Color.white,
             surfaceControl: Color.black.opacity(0.05),
             surfaceControlActive: PerchHATheme.accent.opacity(0.16),
             borderSubtle: Color.black.opacity(0.07),
             separatorSubtle: Color.black.opacity(0.06),
-            textPrimary: Color(red: 0.11, green: 0.13, blue: 0.18),
-            textSecondary: Color(red: 0.34, green: 0.38, blue: 0.45),
-            textTertiary: Color(red: 0.54, green: 0.58, blue: 0.65),
+            textPrimary: Color(red: 0x21 / 255, green: 0x21 / 255, blue: 0x21 / 255),
+            textSecondary: Color(red: 0x72 / 255, green: 0x72 / 255, blue: 0x72 / 255),
+            textTertiary: Color(red: 0x9B / 255, green: 0x9B / 255, blue: 0x9B / 255),
             chartSecondaryColor: accentSecondary,
             chartMuted: Color.black.opacity(0.22),
             meterTrack: Color.black.opacity(0.08),

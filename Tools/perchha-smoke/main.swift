@@ -4275,7 +4275,10 @@ struct PerchHASmoke {
                 isEntitySelectionExplicit: true
             )
         )
-        let configured = PerchHAApplication(configStore: store)
+        let configured = PerchHAApplication(
+            configStore: store,
+            authSessionStore: PerchHAAuthSessionStore(secretStore: SmokeSecretStore())
+        )
         configured.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         var configuredIsRunning = true
         defer {
@@ -4299,7 +4302,10 @@ struct PerchHASmoke {
         configured.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
         configuredIsRunning = false
 
-        let relaunched = PerchHAApplication(configStore: store)
+        let relaunched = PerchHAApplication(
+            configStore: store,
+            authSessionStore: PerchHAAuthSessionStore(secretStore: SmokeSecretStore())
+        )
         relaunched.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             relaunched.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -4313,7 +4319,10 @@ struct PerchHASmoke {
         let loadFailureStore = SmokeConfigStore(
             loadError: .malformedConfig(URL(fileURLWithPath: "/tmp/perchha-bad-config.json"), message: "bad json")
         )
-        let loadFailure = PerchHAApplication(configStore: loadFailureStore)
+        let loadFailure = PerchHAApplication(
+            configStore: loadFailureStore,
+            authSessionStore: PerchHAAuthSessionStore(secretStore: SmokeSecretStore())
+        )
         loadFailure.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             loadFailure.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -4334,7 +4343,10 @@ struct PerchHASmoke {
             loadedConfiguration: PerchHAConfiguration(selectedEntityIDs: ["sensor.office_temperature"], isEntitySelectionExplicit: true),
             saveError: .writeFailed(URL(fileURLWithPath: "/tmp/perchha-config.json"), message: "disk full")
         )
-        let saveFailure = PerchHAApplication(configStore: saveFailureStore)
+        let saveFailure = PerchHAApplication(
+            configStore: saveFailureStore,
+            authSessionStore: PerchHAAuthSessionStore(secretStore: SmokeSecretStore())
+        )
         saveFailure.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             saveFailure.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -4350,7 +4362,10 @@ struct PerchHASmoke {
             throw SmokeFailure("app shell exposes save failure state")
         }
 
-        let panelSaveFailure = PerchHAApplication(configStore: saveFailureStore)
+        let panelSaveFailure = PerchHAApplication(
+            configStore: saveFailureStore,
+            authSessionStore: PerchHAAuthSessionStore(secretStore: SmokeSecretStore())
+        )
         panelSaveFailure.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             panelSaveFailure.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -4807,8 +4822,8 @@ struct PerchHASmoke {
         )
         try expect(gaugeRenderer.renderCount == 1, "menu bar reuses gauge image when label text changes")
         try expect(
-            application.snapshot.statusItemTitle == "Office humidity 47%",
-            "label visibility applies to status item value title immediately"
+            application.snapshot.statusItemTitle == "OFFICE HUMIDITY\n47%",
+            "label visibility applies as the stacked caps-label-above-value title immediately"
         )
         try expect(
             application.applyLiveState(EntityState(id: "sensor.office_humidity", name: "Office humidity", state: "47.4", unit: "%")),
@@ -4839,7 +4854,7 @@ struct PerchHASmoke {
             "decimal precision applies to status item accessibility immediately"
         )
         try expect(
-            application.snapshot.statusItemTitle == "Office humidity \(expectedHumidityValue)",
+            application.snapshot.statusItemTitle == "OFFICE HUMIDITY\n\(expectedHumidityValue)",
             "decimal precision applies to status item value title immediately"
         )
         try expect(
@@ -4848,7 +4863,7 @@ struct PerchHASmoke {
         )
         try expect(gaugeRenderer.renderCount == 2, "menu bar reuses gauge image when default history range changes")
         try expect(
-            application.snapshot.statusItemTitle == "Office humidity \(expectedHumidityValue)",
+            application.snapshot.statusItemTitle == "OFFICE HUMIDITY\n\(expectedHumidityValue)",
             "default history range leaves status item value title stable"
         )
         let savedDisplayConfiguration = try store.load()
@@ -5802,6 +5817,46 @@ final class CountingStatusItemGaugeImageRenderer: PerchHAStatusItemGaugeImageRen
     func image(for item: RenderedMenuBarItem) -> NSImage? {
         renderedItems.append(item)
         return renderer.image(for: item)
+    }
+}
+
+/// An in-process secret store backing the auth-session storage during smoke
+/// runs, so they never read the user's real keychain: another binary reading
+/// the app's keychain item blocks the run on a GUI consent prompt.
+final class SmokeSecretStore: SecretStore, @unchecked Sendable {
+    private var values: [PerchHASecret: String] = [:]
+    private let lock = NSLock()
+
+    func save(_ value: String, for secret: PerchHASecret) throws -> SecretWriteResult {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        let existed = values[secret] != nil
+        values[secret] = value
+        return existed ? .updated : .created
+    }
+
+    func read(_ secret: PerchHASecret) throws -> String {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        guard let value = values[secret] else {
+            throw SecretStoreError.notFound(secret)
+        }
+        return value
+    }
+
+    func delete(_ secret: PerchHASecret) throws -> SecretDeleteResult {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        guard values.removeValue(forKey: secret) != nil else {
+            return .notFound
+        }
+        return .deleted
     }
 }
 

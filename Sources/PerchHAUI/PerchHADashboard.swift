@@ -225,11 +225,12 @@ public struct ModuleHeader: View {
 
     public var body: some View {
         HStack(spacing: 6) {
+            // Accent-colored caps, the iStat Menus section-header signature.
             Text(title)
                 .font(.system(size: 10.5, weight: .semibold))
                 .textCase(.uppercase)
                 .tracking(0.8)
-                .foregroundStyle(palette.textSecondary)
+                .foregroundStyle(palette.accentPrimary)
                 .lineLimit(1)
             Spacer(minLength: 0)
             if let trailingText {

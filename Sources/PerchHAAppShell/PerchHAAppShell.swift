@@ -2076,9 +2076,51 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         let button = entry.item.button
         button?.image = image
         button?.imagePosition = image == nil ? .noImage : .imageLeading
-        applyTitle(title, to: button, stableWidth: configuration.stableMenuBarWidth)
+        // The stacked (label-above-value) style only replaces a full title; the
+        // empty title and the visibility fallback keep their plain rendering.
+        if let stackedLabel = presentation.stackedLabel,
+           title == presentation.statusItemTitle,
+           let valueText = presentation.renderedItem?.value.text,
+           !valueText.isEmpty {
+            applyStackedTitle(label: stackedLabel, value: valueText, to: button)
+        } else {
+            applyTitle(title, to: button, stableWidth: configuration.stableMenuBarWidth)
+        }
         button?.toolTip = presentation.accessibilityLabel
         button?.setAccessibilityLabel(presentation.accessibilityLabel)
+    }
+
+    /// Sets a two-line status-item title in the iStat Menus stacked style: a
+    /// tiny tracked caps label above a monospaced-digit value, centered, sized
+    /// so both lines fit the standard menu-bar height.
+    private func applyStackedTitle(label: String, value: String, to button: NSStatusBarButton?) {
+        guard let button else {
+            return
+        }
+        let labelParagraph = NSMutableParagraphStyle()
+        labelParagraph.alignment = .center
+        labelParagraph.minimumLineHeight = 8
+        labelParagraph.maximumLineHeight = 8
+        let valueParagraph = NSMutableParagraphStyle()
+        valueParagraph.alignment = .center
+        valueParagraph.minimumLineHeight = 11
+        valueParagraph.maximumLineHeight = 11
+        let title = NSMutableAttributedString(
+            string: label.uppercased() + "\n",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 7.5, weight: .medium),
+                .kern: 0.4,
+                .paragraphStyle: labelParagraph
+            ]
+        )
+        title.append(NSAttributedString(
+            string: value,
+            attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .medium),
+                .paragraphStyle: valueParagraph
+            ]
+        ))
+        button.attributedTitle = title
     }
 
     /// Sets the status-item button title, optionally as a monospaced-digit

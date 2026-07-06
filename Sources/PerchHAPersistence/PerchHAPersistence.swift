@@ -43,6 +43,7 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
     public let dashboardShowsFooterTimestamp: Bool
     public let dashboardHiddenModuleIDs: [String]
     public let dashboardSummaryMetricEntityIDs: [EntityID]
+    public let dashboardRoomRowLimit: Int
 
     public init(
         schemaVersion: Int = Self.currentSchemaVersion,
@@ -62,7 +63,8 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         dashboardDefaultHistoryRange: HistoryRange = .day,
         dashboardShowsFooterTimestamp: Bool = true,
         dashboardHiddenModuleIDs: [String] = [],
-        dashboardSummaryMetricEntityIDs: [EntityID] = []
+        dashboardSummaryMetricEntityIDs: [EntityID] = [],
+        dashboardRoomRowLimit: Int = PerchHADisplayPreferences.defaultDashboardRoomRowLimit
     ) {
         self.schemaVersion = schemaVersion
         self.selectedEntityIDs = selectedEntityIDs
@@ -82,6 +84,7 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         self.dashboardShowsFooterTimestamp = dashboardShowsFooterTimestamp
         self.dashboardHiddenModuleIDs = dashboardHiddenModuleIDs
         self.dashboardSummaryMetricEntityIDs = PerchHADisplayPreferences.cappedSummaryMetricEntityIDs(dashboardSummaryMetricEntityIDs)
+        self.dashboardRoomRowLimit = dashboardRoomRowLimit
     }
 
     public static var empty: PerchHAConfiguration {
@@ -128,7 +131,8 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
             dashboardDefaultHistoryRange: dashboardDefaultHistoryRange,
             dashboardShowsFooterTimestamp: dashboardShowsFooterTimestamp,
             dashboardHiddenModuleIDs: dashboardHiddenModuleIDs,
-            dashboardSummaryMetricEntityIDs: dashboardSummaryMetricEntityIDs
+            dashboardSummaryMetricEntityIDs: dashboardSummaryMetricEntityIDs,
+            dashboardRoomRowLimit: dashboardRoomRowLimit
         )
     }
 
@@ -171,6 +175,7 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         case dashboardShowsFooterTimestamp
         case dashboardHiddenModuleIDs
         case dashboardSummaryMetricEntityIDs
+        case dashboardRoomRowLimit
     }
 
     public init(from decoder: Decoder) throws {
@@ -203,6 +208,8 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         dashboardSummaryMetricEntityIDs = PerchHADisplayPreferences.cappedSummaryMetricEntityIDs(
             try container.decodeIfPresent([EntityID].self, forKey: .dashboardSummaryMetricEntityIDs) ?? []
         )
+        dashboardRoomRowLimit = try container.decodeIfPresent(Int.self, forKey: .dashboardRoomRowLimit)
+            ?? PerchHADisplayPreferences.defaultDashboardRoomRowLimit
     }
 
     /// The display preferences embedded in this configuration.
@@ -219,7 +226,8 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
             defaultHistoryRange: dashboardDefaultHistoryRange,
             showsFooterTimestamp: dashboardShowsFooterTimestamp,
             hiddenModuleIDs: Set(dashboardHiddenModuleIDs),
-            summaryMetricEntityIDs: dashboardSummaryMetricEntityIDs
+            summaryMetricEntityIDs: dashboardSummaryMetricEntityIDs,
+            dashboardRoomRowLimit: dashboardRoomRowLimit
         )
     }
 
@@ -245,7 +253,8 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
             dashboardDefaultHistoryRange: displayPreferences.defaultHistoryRange,
             dashboardShowsFooterTimestamp: displayPreferences.showsFooterTimestamp,
             dashboardHiddenModuleIDs: Array(displayPreferences.hiddenModuleIDs).sorted(),
-            dashboardSummaryMetricEntityIDs: displayPreferences.summaryMetricEntityIDs
+            dashboardSummaryMetricEntityIDs: displayPreferences.summaryMetricEntityIDs,
+            dashboardRoomRowLimit: displayPreferences.dashboardRoomRowLimit
         )
     }
 }

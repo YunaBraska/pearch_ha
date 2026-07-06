@@ -119,8 +119,8 @@ public struct PerchHAAccentColor: Equatable, Codable, Sendable {
         PerchHASwatch(id: "ha-blue", name: "Home Assistant", color: .homeAssistantBlue),
         PerchHASwatch(id: "indigo", name: "Indigo", color: PerchHAAccentColor(red: 0x5E / 255, green: 0x5C / 255, blue: 0xE6 / 255)),
         PerchHASwatch(id: "teal", name: "Teal", color: PerchHAAccentColor(red: 0x0F / 255, green: 0xB5 / 255, blue: 0xA8 / 255)),
-        PerchHASwatch(id: "green", name: "Green", color: PerchHAAccentColor(red: 0x2E / 255, green: 0xCC / 255, blue: 0x71 / 255)),
-        PerchHASwatch(id: "orange", name: "Orange", color: PerchHAAccentColor(red: 0xF5 / 255, green: 0xA6 / 255, blue: 0x23 / 255)),
+        PerchHASwatch(id: "green", name: "Green", color: PerchHAAccentColor(red: 0x4C / 255, green: 0xAF / 255, blue: 0x50 / 255)),
+        PerchHASwatch(id: "orange", name: "Orange", color: PerchHAAccentColor(red: 0xFF / 255, green: 0x98 / 255, blue: 0x00 / 255)),
         PerchHASwatch(id: "pink", name: "Pink", color: PerchHAAccentColor(red: 0xE7 / 255, green: 0x4C / 255, blue: 0x9C / 255)),
         PerchHASwatch(id: "graphite", name: "Graphite", color: PerchHAAccentColor(red: 0x8E / 255, green: 0x9A / 255, blue: 0xAF / 255))
     ]
@@ -197,10 +197,17 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
     /// dashboard header summary strip, capped at ``maxSummaryMetricEntityIDs``.
     /// An empty array means "automatic" — the header derives its own metrics.
     public let summaryMetricEntityIDs: [EntityID]
+    /// The number of telemetry rows a dashboard module shows before the rest
+    /// collapse behind the "x more" affordance. A negative value means no
+    /// limit — every row is always shown.
+    public let dashboardRoomRowLimit: Int
 
     /// The maximum number of user-selected summary-strip entities honored. The
     /// header shows at most this many; extra selections are truncated.
     public static let maxSummaryMetricEntityIDs = 3
+
+    /// The shipped default ``dashboardRoomRowLimit``.
+    public static let defaultDashboardRoomRowLimit = 6
 
     public init(
         menuBarAppearance: PerchHAMenuBarAppearance = .defaultAppearance,
@@ -211,7 +218,8 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
         defaultHistoryRange: HistoryRange = .day,
         showsFooterTimestamp: Bool = true,
         hiddenModuleIDs: Set<String> = [],
-        summaryMetricEntityIDs: [EntityID] = []
+        summaryMetricEntityIDs: [EntityID] = [],
+        dashboardRoomRowLimit: Int = PerchHADisplayPreferences.defaultDashboardRoomRowLimit
     ) {
         self.menuBarAppearance = menuBarAppearance
         self.stableMenuBarWidth = stableMenuBarWidth
@@ -222,6 +230,13 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
         self.showsFooterTimestamp = showsFooterTimestamp
         self.hiddenModuleIDs = hiddenModuleIDs
         self.summaryMetricEntityIDs = PerchHADisplayPreferences.cappedSummaryMetricEntityIDs(summaryMetricEntityIDs)
+        self.dashboardRoomRowLimit = dashboardRoomRowLimit
+    }
+
+    /// The effective per-module row cap, or `nil` when ``dashboardRoomRowLimit``
+    /// is negative (no limit).
+    public var dashboardRoomRowCap: Int? {
+        dashboardRoomRowLimit < 0 ? nil : dashboardRoomRowLimit
     }
 
     /// De-duplicates (keeping first occurrence) and truncates a requested
@@ -288,6 +303,12 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
         copy(summaryMetricEntityIDs: PerchHADisplayPreferences.cappedSummaryMetricEntityIDs(summaryMetricEntityIDs))
     }
 
+    /// Returns a copy with the per-module row limit replaced. Negative means
+    /// no limit.
+    public func with(dashboardRoomRowLimit: Int) -> PerchHADisplayPreferences {
+        copy(dashboardRoomRowLimit: dashboardRoomRowLimit)
+    }
+
     private func copy(
         menuBarAppearance: PerchHAMenuBarAppearance? = nil,
         stableMenuBarWidth: Bool? = nil,
@@ -297,7 +318,8 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
         defaultHistoryRange: HistoryRange? = nil,
         showsFooterTimestamp: Bool? = nil,
         hiddenModuleIDs: Set<String>? = nil,
-        summaryMetricEntityIDs: [EntityID]? = nil
+        summaryMetricEntityIDs: [EntityID]? = nil,
+        dashboardRoomRowLimit: Int? = nil
     ) -> PerchHADisplayPreferences {
         PerchHADisplayPreferences(
             menuBarAppearance: menuBarAppearance ?? self.menuBarAppearance,
@@ -308,7 +330,8 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
             defaultHistoryRange: defaultHistoryRange ?? self.defaultHistoryRange,
             showsFooterTimestamp: showsFooterTimestamp ?? self.showsFooterTimestamp,
             hiddenModuleIDs: hiddenModuleIDs ?? self.hiddenModuleIDs,
-            summaryMetricEntityIDs: summaryMetricEntityIDs ?? self.summaryMetricEntityIDs
+            summaryMetricEntityIDs: summaryMetricEntityIDs ?? self.summaryMetricEntityIDs,
+            dashboardRoomRowLimit: dashboardRoomRowLimit ?? self.dashboardRoomRowLimit
         )
     }
 }

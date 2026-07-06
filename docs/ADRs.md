@@ -111,3 +111,13 @@ Decision: The panel model owns one long-lived streaming subscription per connect
 Consequences: Values update in real time over one socket instead of ~45-second polls; request volume drops. WebSocket command/auth/ack receives carry a deadline and receives honor task cancellation, so a silent or half-open server can never hang a caller.
 
 Alternatives: Keeping polling as the primary path was rejected as contradicting FR-3 and wasting request volume. Managing the subscription in the app shell was rejected because the model owns the connection lifecycle and session identity.
+
+## ADR-0012 - Home Assistant palette on an iStat-style layout
+
+Context: The dashboard used a bespoke graphite/navy palette and a flat "Name Value" menu-bar title. User direction: look and behave like iStat Menus, with theme colors that read as Home Assistant.
+
+Decision: The dashboard palettes adopt the Home Assistant theme tokens (dark `#111111`/`#1C1C1C`/`#282828`, light `#FAFAFA`/white, HA text grays, semantic trio `#4CAF50`/`#FF9800`/`#F44336`, 12pt card radius) while layout idioms come from iStat Menus/Stats: accent-colored caps section headers, min/max peak labels pinned on the history chart, a per-entity gear shortcut in the history popover, and the "Show label" menu-bar option rendering as a stacked tiny-caps-label-above-value status item instead of widening the bar with a flat title.
+
+Consequences: One glance reads as "Home Assistant in an iStat shell". The stacked title changes the persisted-visible rendering of "Show label" (title now carries a line break); the review baseline was regenerated. Severity colors are shared between the panel, thresholds, and menu-bar gauges.
+
+Alternatives: Cloning iStat 7's ring-heavy dropdown was rejected — its density cost is the most criticized part of iStat 7. A full theme-pack system was rejected as disproportionate; the accent stays user-configurable.

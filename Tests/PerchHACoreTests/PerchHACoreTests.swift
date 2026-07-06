@@ -1389,4 +1389,19 @@ extension PerchHACoreTests {
         XCTAssertEqual(thresholds.severity(for: 15), .critical)
         XCTAssertEqual(thresholds.severity(for: 50), .normal)
     }
+
+    func test_t_dashboard_room_row_cap_defaults_to_six() {
+        XCTAssertEqual(PerchHADisplayPreferences.defaults.dashboardRoomRowCap, 6)
+    }
+
+    func test_t_dashboard_room_row_cap_uses_configured_positive_limit() {
+        XCTAssertEqual(
+            PerchHADisplayPreferences.defaults.with(dashboardRoomRowLimit: 3).dashboardRoomRowCap,
+            3
+        )
+    }
+
+    func test_t_dashboard_room_row_cap_negative_means_no_limit() {
+        XCTAssertNil(PerchHADisplayPreferences.defaults.with(dashboardRoomRowLimit: -1).dashboardRoomRowCap)
+    }
 }

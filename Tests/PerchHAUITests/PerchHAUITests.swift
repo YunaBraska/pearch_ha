@@ -1323,6 +1323,44 @@ final class PerchHAUITests: XCTestCase {
         )
     }
 
+    func testHistoryChartPeaksFormatMinAndMaxForCornerLabels() {
+        let series = HistorySeries(
+            entityID: "sensor.office_temperature",
+            range: .day,
+            samples: [
+                HistorySample(timestamp: Date(timeIntervalSince1970: 0), state: "18.2", numericValue: 18.2),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 300), state: "24", numericValue: 24),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 600), state: "unknown", numericValue: nil)
+            ]
+        )
+        let peaks = PerchHAHistoryPopoverContent.chartPeaks(series: series)
+        XCTAssertEqual(peaks?.minimum, "18.2")
+        XCTAssertEqual(peaks?.maximum, "24")
+    }
+
+    func testHistoryChartPeaksHideForFlatOrNonNumericSeries() {
+        let flat = HistorySeries(
+            entityID: "sensor.office_temperature",
+            range: .day,
+            samples: [
+                HistorySample(timestamp: Date(timeIntervalSince1970: 0), state: "21", numericValue: 21),
+                HistorySample(timestamp: Date(timeIntervalSince1970: 300), state: "21", numericValue: 21)
+            ]
+        )
+        XCTAssertNil(
+            PerchHAHistoryPopoverContent.chartPeaks(series: flat),
+            "a flat series has no spread worth labelling"
+        )
+        let nonNumeric = HistorySeries(
+            entityID: "switch.office_lamp",
+            range: .day,
+            samples: [
+                HistorySample(timestamp: Date(timeIntervalSince1970: 0), state: "on", numericValue: nil)
+            ]
+        )
+        XCTAssertNil(PerchHAHistoryPopoverContent.chartPeaks(series: nonNumeric))
+    }
+
     func testHistoryContentSummaryKeepsNumericHistoryWhenTrailingSampleIsNonNumeric() {
         XCTAssertEqual(
             PerchHAHistoryContentSummary(
@@ -3490,26 +3528,25 @@ final class PerchHAUITests: XCTestCase {
         )
     }
 
-    /// A room not in the collapsed set is expanded by default, so the Entities
-    /// tab does not surprise the user by hiding rows on first render.
-    func testSelectionRoomExpandedByDefault() {
-        XCTAssertTrue(
+    /// A room not in the expanded set is collapsed by default, so the Entities
+    /// tab opens as a compact list of room headers.
+    func testSelectionRoomCollapsedByDefault() {
+        XCTAssertFalse(
             SelectionRoomCollapse.isExpanded(
                 roomID: "office",
-                collapsedRoomIDs: [],
+                expandedRoomIDs: [],
                 isSearching: false,
                 roomContainsInspectedEntity: false
             )
         )
     }
 
-    /// A room whose id is in the collapsed set hides its rows when not searching
-    /// and not holding the open inspector.
-    func testSelectionRoomCollapsedHidesRows() {
-        XCTAssertFalse(
+    /// A room whose id is in the expanded set shows its rows.
+    func testSelectionRoomExpandedShowsRows() {
+        XCTAssertTrue(
             SelectionRoomCollapse.isExpanded(
                 roomID: "office",
-                collapsedRoomIDs: ["office"],
+                expandedRoomIDs: ["office"],
                 isSearching: false,
                 roomContainsInspectedEntity: false
             )
@@ -3517,12 +3554,12 @@ final class PerchHAUITests: XCTestCase {
     }
 
     /// An active search forces a collapsed room expanded so matches stay visible,
-    /// without clearing the stored collapsed state.
+    /// without touching the stored expanded state.
     func testSelectionSearchForcesCollapsedRoomVisible() {
         XCTAssertTrue(
             SelectionRoomCollapse.isExpanded(
                 roomID: "office",
-                collapsedRoomIDs: ["office"],
+                expandedRoomIDs: [],
                 isSearching: true,
                 roomContainsInspectedEntity: false
             )
@@ -3535,7 +3572,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertTrue(
             SelectionRoomCollapse.isExpanded(
                 roomID: "office",
-                collapsedRoomIDs: ["office"],
+                expandedRoomIDs: [],
                 isSearching: false,
                 roomContainsInspectedEntity: true
             )
@@ -3547,7 +3584,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertTrue(
             SelectionRoomCollapse.allCollapsed(
                 roomIDs: ["kitchen", "office"],
-                collapsedRoomIDs: ["kitchen", "office"],
+                expandedRoomIDs: [],
                 isSearching: false
             )
         )
@@ -3558,7 +3595,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertFalse(
             SelectionRoomCollapse.allCollapsed(
                 roomIDs: ["kitchen", "office"],
-                collapsedRoomIDs: ["kitchen"],
+                expandedRoomIDs: ["office"],
                 isSearching: false
             )
         )
@@ -3570,7 +3607,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertFalse(
             SelectionRoomCollapse.allCollapsed(
                 roomIDs: ["kitchen", "office"],
-                collapsedRoomIDs: ["kitchen", "office"],
+                expandedRoomIDs: [],
                 isSearching: true
             )
         )
@@ -3581,9 +3618,46 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertFalse(
             SelectionRoomCollapse.allCollapsed(
                 roomIDs: [],
-                collapsedRoomIDs: [],
+                expandedRoomIDs: [],
                 isSearching: false
             )
+        )
+    }
+
+    func test_t_requests_per_minute_counts_outbound_requests() async {
+        let dates = MutableDateBox(Date(timeIntervalSince1970: 1_000_000))
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            wallClock: { dates.now }
+        )
+        XCTAssertEqual(model.requestsPerMinute(), 0)
+
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        XCTAssertGreaterThanOrEqual(
+            model.requestsPerMinute(),
+            1,
+            "connecting sends at least one request that the traffic diagnostic must count"
+        )
+    }
+
+    func test_t_requests_per_minute_prunes_requests_older_than_a_minute() async {
+        let dates = MutableDateBox(Date(timeIntervalSince1970: 1_000_000))
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            wallClock: { dates.now }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        XCTAssertGreaterThanOrEqual(model.requestsPerMinute(), 1)
+
+        dates.advance(by: 61)
+
+        XCTAssertEqual(
+            model.requestsPerMinute(),
+            0,
+            "requests older than the one-minute window must not count"
         )
     }
 
@@ -4660,6 +4734,69 @@ final class PerchHAUITests: XCTestCase {
         let item = application.snapshot.menuBarItems[0]
         XCTAssertTrue(item.hasImage)
         XCTAssertEqual(item.title, "")
+    }
+
+    func test_t_menu_bar_presenter_show_label_sets_stacked_label() {
+        let presenter = PerchHAMenuBarPresenter()
+        let rooms = selectionRooms()
+        let snapshot = PerchHAPanelSnapshot(
+            connectionState: .connected,
+            phase: .connectedData,
+            rooms: rooms,
+            availableRooms: rooms,
+            menuBarDisplayConfiguration: MenuBarDisplayConfiguration(
+                promotedEntityIDs: ["sensor.office_humidity", "sensor.office_temperature"],
+                itemConfigurations: [
+                    MenuBarItemConfiguration(entityID: "sensor.office_humidity", showsLabel: true)
+                ]
+            )
+        )
+        let presentations = presenter.presentations(
+            configuration: PerchHAConfiguration(),
+            panelSnapshot: snapshot
+        )
+        XCTAssertEqual(presentations.count, 2)
+        XCTAssertEqual(
+            presentations[0].stackedLabel,
+            "Office humidity",
+            "Show label renders as the stacked (label-above-value) style"
+        )
+        XCTAssertNil(
+            presentations[1].stackedLabel,
+            "entities without Show label keep the flat single-line title"
+        )
+    }
+
+    func test_t_app_shell_show_label_renders_stacked_two_line_title() async throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let store = JSONConfigStore(fileURL: url)
+        _ = try store.save(
+            PerchHAConfiguration(
+                selectedEntityIDs: ["sensor.office_humidity"],
+                menuBarEntityIDs: ["sensor.office_humidity"],
+                menuBarItemConfigurations: [
+                    MenuBarItemConfiguration(entityID: "sensor.office_humidity", showsLabel: true)
+                ],
+                isEntitySelectionExplicit: true
+            )
+        )
+        let application = PerchHAApplication(
+            configStore: store,
+            connector: { _ in .success(rooms: selectionRooms()) }
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+        application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await application.connect()
+
+        // The stacked style renders the caps label on its own line above the
+        // value, so the status-item title carries exactly one line break.
+        XCTAssertEqual(application.snapshot.menuBarItems[0].title, "OFFICE HUMIDITY\n44%")
     }
 
     func test_t_app_shell_promoted_items_stay_visible_under_icon_only_appearance() async throws {
@@ -5761,8 +5898,9 @@ final class PerchHAUITests: XCTestCase {
         )
         XCTAssertEqual(gaugeRenderer.renderCount, 1)
 
+        // Show label renders as the stacked style: caps label above the value.
         XCTAssertTrue(application.setMenuBarShowsLabel("sensor.office_humidity", showsLabel: true))
-        XCTAssertEqual(application.snapshot.statusItemTitle, "Office humidity 44%")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "OFFICE HUMIDITY\n44%")
         XCTAssertEqual(gaugeRenderer.renderCount, 1)
 
         XCTAssertTrue(application.setMenuBarShowsUnit("sensor.office_humidity", showsUnit: false))
@@ -5799,11 +5937,11 @@ final class PerchHAUITests: XCTestCase {
             application.snapshot.statusItemAccessibilityLabel,
             "Office humidity, \(expectedDecimalValue), 44 percent, battery"
         )
-        XCTAssertEqual(application.snapshot.statusItemTitle, "Office humidity \(expectedDecimalValue)")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "OFFICE HUMIDITY\n\(expectedDecimalValue)")
 
         XCTAssertTrue(application.setMenuBarDefaultHistoryRange("sensor.office_humidity", defaultHistoryRange: .week))
         XCTAssertEqual(gaugeRenderer.renderCount, 2)
-        XCTAssertEqual(application.snapshot.statusItemTitle, "Office humidity \(expectedDecimalValue)")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "OFFICE HUMIDITY\n\(expectedDecimalValue)")
         XCTAssertEqual(
             application.snapshot.menuBarDisplayConfiguration
                 .itemConfiguration(for: "sensor.office_humidity")
@@ -8793,6 +8931,33 @@ private actor ConnectionGate {
         let continuations = waiters
         waiters.removeAll()
         continuations.forEach { $0.resume() }
+    }
+}
+
+/// A mutable, thread-safe wall-clock date source for tests that drive the
+/// model's injected `wallClock`.
+private final class MutableDateBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var date: Date
+
+    init(_ date: Date) {
+        self.date = date
+    }
+
+    var now: Date {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        return date
+    }
+
+    func advance(by interval: TimeInterval) {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        date = date.addingTimeInterval(interval)
     }
 }
 

@@ -2561,6 +2561,7 @@ public final class PerchHAPanelModel: ObservableObject {
         historyRequestGeneration += 1
         let requestGeneration = historyRequestGeneration
         applyHistoryState(.loading(entityID: id, range: resolvedRange))
+        recordOutboundRequest()
         let result = await historyProvider(form, id, resolvedRange)
         guard !Task.isCancelled, requestGeneration == historyRequestGeneration else {
             return
@@ -2754,6 +2755,7 @@ public final class PerchHAPanelModel: ObservableObject {
                 guard let current = self, form.sameConnection(as: current.lastConnectedForm) else {
                     return
                 }
+                current.recordOutboundRequest()
                 let receipt = PerchHALiveEventReceipt()
                 let failure = await streamer(form) { [weak self] state in
                     await receipt.mark()
@@ -2801,6 +2803,35 @@ public final class PerchHAPanelModel: ObservableObject {
         diagnosticEvents = diagnosticLog.newestFirst
         diagnosticsReferenceInstant = lastObservedInstant
         refreshRetryBackoffState()
+    }
+
+    // MARK: - Request-rate diagnostic
+
+    /// Wall-clock timestamps of outbound Home Assistant requests within the
+    /// rolling window, pruned on each record.
+    private var outboundRequestDates: [Date] = []
+
+    /// The rolling window for the requests-per-minute diagnostic.
+    private static let requestRateWindow: TimeInterval = 60
+
+    /// Counts one outbound Home Assistant request (REST call, WebSocket
+    /// connect, or service call) for the requests-per-minute diagnostic.
+    private func recordOutboundRequest() {
+        let now = wallClock()
+        outboundRequestDates.append(now)
+        let cutoff = now.addingTimeInterval(-Self.requestRateWindow)
+        if let first = outboundRequestDates.first, first < cutoff {
+            outboundRequestDates.removeAll { $0 < cutoff }
+        }
+    }
+
+    /// The number of outbound Home Assistant requests within the last minute,
+    /// shown by the Diagnostics tab.
+    ///
+    /// - Returns: The request count in the rolling one-minute window ending now.
+    public func requestsPerMinute() -> Int {
+        let cutoff = wallClock().addingTimeInterval(-Self.requestRateWindow)
+        return outboundRequestDates.filter { $0 >= cutoff }.count
     }
 
     /// The footer caption for a fresh update: a real, human-readable clock
@@ -3050,6 +3081,9 @@ public final class PerchHAPanelModel: ObservableObject {
             }
             let window = batches[index..<min(index + limit, batches.count)]
             index += limit
+            for _ in window {
+                recordOutboundRequest()
+            }
             let results = await withTaskGroup(of: [EntityID: HistorySeries].self) { group in
                 for batch in window {
                     let ids = batch.ids
@@ -3939,6 +3973,7 @@ public final class PerchHAPanelModel: ObservableObject {
             )
             return false
         }
+        recordOutboundRequest()
         let result = await actionRunner(form, resolvedAction)
         guard !Task.isCancelled else {
             return false
@@ -4044,6 +4079,7 @@ public final class PerchHAPanelModel: ObservableObject {
             lastUpdateDescription: "Updating \(entity.name)"
         )
 
+        recordOutboundRequest()
         let result = await actionRunner(form, actionSpec)
         guard !Task.isCancelled else {
             return false
@@ -4134,6 +4170,7 @@ public final class PerchHAPanelModel: ObservableObject {
             lastUpdateDescription: "Updating \(entity.name)"
         )
 
+        recordOutboundRequest()
         let result = await actionRunner(form, actionSpec)
         guard !Task.isCancelled else {
             return false
@@ -4513,6 +4550,7 @@ public final class PerchHAPanelModel: ObservableObject {
             controlActionState: snapshot.controlActionState,
             serviceMetadata: snapshot.serviceMetadata
         )
+        recordOutboundRequest()
         let result = await connector(form)
         guard !Task.isCancelled else {
             return
@@ -4578,6 +4616,7 @@ public final class PerchHAPanelModel: ObservableObject {
                 serviceMetadata: snapshot.serviceMetadata
             )
         }
+        recordOutboundRequest()
         let result = await connector(form)
         guard !Task.isCancelled else {
             return
@@ -4727,6 +4766,7 @@ public final class PerchHAPanelModel: ObservableObject {
     }
 
     private func refreshServiceMetadata(form: PerchHAConnectionForm) async {
+        recordOutboundRequest()
         let result = await serviceMetadataProvider(form)
         // Identity compare, not value equality: a rebuilt-but-equivalent form
         // (fresh address-row UUIDs) must not silently drop the metadata result.
@@ -5568,6 +5608,7 @@ public struct PerchHAHistoryPopoverContent: View {
     private let unit: String?
     private let state: PerchHAHistoryPanelState
     private let increaseContrastOverride: Bool?
+    private let onOpenSettings: (() -> Void)?
     @Binding private var selectedRange: HistoryRange
     @State private var cursorNormalizedX: Double?
     @Environment(\.colorScheme) private var colorScheme
@@ -5580,6 +5621,7 @@ public struct PerchHAHistoryPopoverContent: View {
         unit: String? = nil,
         state: PerchHAHistoryPanelState,
         increaseContrastOverride: Bool? = nil,
+        onOpenSettings: (() -> Void)? = nil,
         selectedRange: Binding<HistoryRange>
     ) {
         self.entityID = entityID
@@ -5588,6 +5630,7 @@ public struct PerchHAHistoryPopoverContent: View {
         self.unit = unit
         self.state = state
         self.increaseContrastOverride = increaseContrastOverride
+        self.onOpenSettings = onOpenSettings
         _selectedRange = selectedRange
     }
 
@@ -5607,6 +5650,14 @@ public struct PerchHAHistoryPopoverContent: View {
                 Text(valueText)
                     .font(.system(size: 16, weight: .semibold).monospacedDigit())
                     .foregroundStyle(historyValueForegroundStyle)
+                if let onOpenSettings {
+                    Button(action: onOpenSettings) {
+                        Image(systemName: "gearshape")
+                    }
+                    .buttonStyle(PerchHAIconButtonStyle())
+                    .help("Entity settings")
+                    .accessibilityLabel("\(entityName) settings")
+                }
             }
             Picker("Range", selection: $selectedRange) {
                 ForEach(rangeOptions, id: \.rawValue) { range in
@@ -5702,8 +5753,23 @@ public struct PerchHAHistoryPopoverContent: View {
 
     private func interactiveChart(series: HistorySeries) -> some View {
         let chartHeight: CGFloat = 80
+        let peaks = Self.chartPeaks(series: series)
         return GeometryReader { proxy in
             ZStack(alignment: .topLeading) {
+                if let peaks {
+                    // Peak values pinned at the chart corners, iStat/Stats-style,
+                    // so the range is readable without leaving the chart.
+                    VStack(alignment: .trailing) {
+                        Text(peaks.maximum)
+                        Spacer(minLength: 0)
+                        Text(peaks.minimum)
+                    }
+                    .font(.system(size: 9).monospacedDigit())
+                    .foregroundStyle(historyLabelForegroundStyle)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(2)
+                    .accessibilityHidden(true)
+                }
                 HistorySparklineArea(series: series)
                     .fill(
                         LinearGradient(
@@ -5748,6 +5814,16 @@ public struct PerchHAHistoryPopoverContent: View {
         }
         .frame(height: chartHeight)
         .accessibilityHidden(true)
+    }
+
+    /// The formatted minimum and maximum of a series for the chart corner
+    /// labels, or `nil` when the series has no numeric spread worth labelling.
+    static func chartPeaks(series: HistorySeries) -> (minimum: String, maximum: String)? {
+        let values = series.samples.compactMap(\.numericValue)
+        guard let minimum = values.min(), let maximum = values.max(), minimum != maximum else {
+            return nil
+        }
+        return (menuBarNumberLabel(minimum), menuBarNumberLabel(maximum))
     }
 
     private func cursorReadout(for series: HistorySeries) -> String? {
@@ -6066,9 +6142,12 @@ public struct PerchHAPanelView: View {
     }
 
     /// The number of telemetry rows shown per module before the rest collapse
-    /// behind a quiet "More" affordance. Overflow stays reachable by expanding the
-    /// module in place; every entity is still reachable via Settings.
-    private static let curatedRowCap = 6
+    /// behind a quiet "More" affordance, from the user's display preferences
+    /// (`nil` = no limit). Overflow stays reachable by expanding the module in
+    /// place; every entity is still reachable via Settings.
+    private var curatedRowCap: Int? {
+        model.displayPreferences.dashboardRoomRowCap
+    }
 
     private var loadingState: some View {
         PerchHALoadingState(
@@ -6123,7 +6202,8 @@ public struct PerchHAPanelView: View {
     private func moduleBlock(_ room: Room) -> some View {
         let isExpanded = expandedModuleIDs.contains(room.id.rawValue)
         let total = room.entities.count
-        let visibleEntities = isExpanded ? room.entities : Array(room.entities.prefix(Self.curatedRowCap))
+        let cap = curatedRowCap
+        let visibleEntities = (isExpanded || cap == nil) ? room.entities : Array(room.entities.prefix(cap ?? total))
         let hiddenCount = total - visibleEntities.count
         return ModuleBlock(title: room.name) {
             ForEach(Array(visibleEntities.enumerated()), id: \.element.id.rawValue) { index, entity in
@@ -6132,7 +6212,7 @@ public struct PerchHAPanelView: View {
                     TelemetryRowSeparator()
                 }
             }
-            if total > Self.curatedRowCap {
+            if let cap, total > cap {
                 TelemetryRowSeparator()
                 moreAffordance(roomID: room.id.rawValue, isExpanded: isExpanded, hiddenCount: hiddenCount)
             }
@@ -6416,6 +6496,7 @@ public struct PerchHAPanelView: View {
             valueText: entityValue(entity).text,
             unit: entity.unit,
             state: model.snapshot.historyState,
+            onOpenSettings: { openSettings() },
             selectedRange: historyRangeBinding(for: entity)
         )
         .onHover { isInside in

@@ -48,17 +48,17 @@ public enum SelectionMoveDirection: Equatable, Sendable {
 
 /// Pure resolver for whether an Entities-tab room shows its entity rows.
 ///
-/// Rooms default to expanded; a room is collapsed only when its id is present in
-/// the caller's collapsed set. Two situations force a room visible without
-/// mutating that set, so the user's collapsed state survives them: an active
+/// Rooms default to collapsed; a room is expanded only when its id is present
+/// in the caller's expanded set. Two situations force a room visible without
+/// mutating that set, so the user's expanded state survives them: an active
 /// search (matches must never hide behind a collapsed header) and the room that
 /// holds the currently-inspected entity (so the open inspector stays reachable).
 public enum SelectionRoomCollapse {
     /// Whether `roomID`'s rows should be shown.
     ///
     /// - Parameters:
-    ///   - roomID: The room's identifier (matched against `collapsedRoomIDs`).
-    ///   - collapsedRoomIDs: Room identifiers the user has explicitly collapsed.
+    ///   - roomID: The room's identifier (matched against `expandedRoomIDs`).
+    ///   - expandedRoomIDs: Room identifiers the user has explicitly expanded.
     ///   - isSearching: `true` while a non-empty search filter is active; forces
     ///     every shown room expanded.
     ///   - roomContainsInspectedEntity: `true` when the room holds the entity
@@ -66,14 +66,14 @@ public enum SelectionRoomCollapse {
     /// - Returns: `true` when the room's entity rows should be visible.
     public static func isExpanded(
         roomID: String,
-        collapsedRoomIDs: Set<String>,
+        expandedRoomIDs: Set<String>,
         isSearching: Bool,
         roomContainsInspectedEntity: Bool
     ) -> Bool {
         if isSearching || roomContainsInspectedEntity {
             return true
         }
-        return !collapsedRoomIDs.contains(roomID)
+        return expandedRoomIDs.contains(roomID)
     }
 
     /// Whether every room in `roomIDs` is collapsed, used to flip a
@@ -82,18 +82,18 @@ public enum SelectionRoomCollapse {
     ///
     /// - Parameters:
     ///   - roomIDs: The identifiers of the rooms currently shown.
-    ///   - collapsedRoomIDs: Room identifiers the user has explicitly collapsed.
+    ///   - expandedRoomIDs: Room identifiers the user has explicitly expanded.
     ///   - isSearching: `true` while a non-empty search filter is active.
     /// - Returns: `true` when every shown room is collapsed.
     public static func allCollapsed(
         roomIDs: [String],
-        collapsedRoomIDs: Set<String>,
+        expandedRoomIDs: Set<String>,
         isSearching: Bool
     ) -> Bool {
         guard !isSearching, !roomIDs.isEmpty else {
             return false
         }
-        return roomIDs.allSatisfy { collapsedRoomIDs.contains($0) }
+        return roomIDs.allSatisfy { !expandedRoomIDs.contains($0) }
     }
 }
 

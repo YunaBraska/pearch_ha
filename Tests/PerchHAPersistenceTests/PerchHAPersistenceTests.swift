@@ -139,6 +139,7 @@ final class PerchHAPersistenceTests: XCTestCase {
         XCTAssertEqual(configuration.dashboardDefaultHistoryRange, .day)
         XCTAssertTrue(configuration.dashboardShowsFooterTimestamp)
         XCTAssertTrue(configuration.dashboardHiddenModuleIDs.isEmpty)
+        XCTAssertEqual(configuration.dashboardRoomRowLimit, 6)
     }
 
     func testJSONConfigStoreRoundTripsDisplayPreferences() throws {
@@ -155,7 +156,8 @@ final class PerchHAPersistenceTests: XCTestCase {
             dashboardRowDensity: .compact,
             dashboardDefaultHistoryRange: .week,
             dashboardShowsFooterTimestamp: false,
-            dashboardHiddenModuleIDs: ["room.office", "room.kitchen"]
+            dashboardHiddenModuleIDs: ["room.office", "room.kitchen"],
+            dashboardRoomRowLimit: -1
         )
 
         try store.save(configuration)
@@ -168,7 +170,8 @@ final class PerchHAPersistenceTests: XCTestCase {
             dashboardRowDensity: .compact,
             dashboardDefaultHistoryRange: .week,
             dashboardShowsFooterTimestamp: false,
-            dashboardHiddenModuleIDs: ["room.office"]
+            dashboardHiddenModuleIDs: ["room.office"],
+            dashboardRoomRowLimit: 12
         )
 
         let preferences = configuration.displayPreferences
@@ -177,6 +180,7 @@ final class PerchHAPersistenceTests: XCTestCase {
         XCTAssertEqual(preferences.defaultHistoryRange, .week)
         XCTAssertFalse(preferences.showsFooterTimestamp)
         XCTAssertEqual(preferences.hiddenModuleIDs, ["room.office"])
+        XCTAssertEqual(preferences.dashboardRoomRowLimit, 12)
     }
 
     func testConfigurationApplyingDisplayPreferencesReplacesOnlyDisplayFields() {
@@ -189,6 +193,7 @@ final class PerchHAPersistenceTests: XCTestCase {
             .with(defaultHistoryRange: .week)
             .with(showsFooterTimestamp: false)
             .with(hiddenModuleIDs: ["room.office"])
+            .with(dashboardRoomRowLimit: -3)
 
         let applied = base.applying(displayPreferences: preferences)
 
@@ -197,6 +202,7 @@ final class PerchHAPersistenceTests: XCTestCase {
         XCTAssertEqual(applied.dashboardDefaultHistoryRange, .week)
         XCTAssertFalse(applied.dashboardShowsFooterTimestamp)
         XCTAssertEqual(applied.dashboardHiddenModuleIDs, ["room.office"])
+        XCTAssertEqual(applied.dashboardRoomRowLimit, -3)
         // Selection/menu-bar state is preserved untouched.
         XCTAssertEqual(applied.selectedEntityIDs, ["sensor.office_temperature"])
         XCTAssertEqual(applied.menuBarEntityIDs, ["sensor.office_temperature"])
@@ -233,6 +239,8 @@ final class PerchHAPersistenceTests: XCTestCase {
         XCTAssertTrue(configuration.dashboardHiddenModuleIDs.isEmpty)
         // Absent summary-metric selection decodes to empty, i.e. automatic.
         XCTAssertTrue(configuration.dashboardSummaryMetricEntityIDs.isEmpty)
+        // Absent room-row limit decodes to the shipped default.
+        XCTAssertEqual(configuration.dashboardRoomRowLimit, 6)
     }
 
     func testConfigurationDefaultsSummaryMetricEntityIDsToEmpty() {

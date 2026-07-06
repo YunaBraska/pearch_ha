@@ -474,7 +474,9 @@ public struct PerchHASettingsView: View {
     /// appears here. A live search or an open inspector force the affected room
     /// visible regardless of this set, without mutating it, so clearing the
     /// search restores the prior collapsed state.
-    @State private var collapsedRooms: Set<String> = []
+    /// Rooms the user has explicitly expanded in the Entities tab. Empty by
+    /// default, so every room starts collapsed.
+    @State private var expandedRooms: Set<String> = []
     @State private var displayPreferences: PerchHADisplayPreferences
     /// View-local echo of the Entities search field; pushed to the model after
     /// a short debounce so typing never rebuilds the whole app state per key.
@@ -949,6 +951,21 @@ public struct PerchHASettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                        settingsControlRow("Rows per room") {
+                            SettingsIntegerField(
+                                placeholder: "6",
+                                value: displayPreferences.dashboardRoomRowLimit,
+                                onCommit: { limit in
+                                    updateDisplayPreferences(displayPreferences.with(dashboardRoomRowLimit: limit))
+                                }
+                            )
+                            .frame(width: 56)
+                            .accessibilityLabel("Rows shown per room before the more affordance")
+                        }
+                        Text("Rows shown per room before \u{201C}x more\u{201D}. A negative number shows every row.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                         Toggle("Show updated timestamp in the footer", isOn: footerTimestampBinding)
                             .fixedSize()
                             .accessibilityLabel("Show the dashboard footer updated timestamp")
@@ -1096,6 +1113,11 @@ public struct PerchHASettingsView: View {
                 }
             }
             settingsCard {
+                settingsSection(title: "Traffic", systemImage: "arrow.up.arrow.down") {
+                    diagnosticsTrafficContent
+                }
+            }
+            settingsCard {
                 settingsSection(title: "Recent issues", systemImage: "list.bullet.rectangle") {
                     diagnosticsRecentIssuesContent
                 }
@@ -1145,6 +1167,29 @@ public struct PerchHASettingsView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The traffic diagnostic: how many requests PearchHA sent to Home
+    /// Assistant within the last minute (REST calls, WebSocket connects, and
+    /// service calls). No secret.
+    private var diagnosticsTrafficContent: some View {
+        let rpm = model.requestsPerMinute()
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                StatusPill(
+                    "\(rpm) req/min",
+                    systemImage: "arrow.up.arrow.down",
+                    color: PerchHATheme.accent,
+                    accessibilityLabel: "\(rpm) requests per minute"
+                )
+                Spacer(minLength: 0)
+            }
+            Text("Requests sent to Home Assistant in the last minute: connection checks, history fetches, live-update connects, and actions.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1767,13 +1812,30 @@ public struct PerchHASettingsView: View {
                     .foregroundStyle(.secondary)
             } else {
                 let tree = settingsTree
-                LazyVStack(alignment: .leading, spacing: 10) {
+                // One flat lazy stack: room headers and entity rows are all
+                // direct lazy children. Nesting a lazy stack per room forces
+                // the whole room to materialize when the outer stack sizes it,
+                // which stalls the main thread for seconds on large rooms.
+                LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(tree.enumerated()), id: \.element.id.rawValue) { index, room in
-                        selectionRoom(
-                            room,
-                            canMoveUp: canReorderSelection && index > tree.startIndex,
-                            canMoveDown: canReorderSelection && index < tree.index(before: tree.endIndex)
+                        selectionDragDrop(
+                            selectionRoomHeader(
+                                room,
+                                isExpanded: isRoomExpanded(room),
+                                canMoveUp: canReorderSelection && index > tree.startIndex,
+                                canMoveDown: canReorderSelection && index < tree.index(before: tree.endIndex)
+                            )
+                            .padding(.horizontal, PerchHASpacing.xs),
+                            item: .room(room.id)
                         )
+                        .padding(.top, index == tree.startIndex ? 0 : 10)
+                        .padding(.bottom, 5)
+                        if isRoomExpanded(room) {
+                            ForEach(Array(room.entities.enumerated()), id: \.element.entity.id.rawValue) { rowIndex, selectable in
+                                selectionEntityRowSegment(room: room, rowIndex: rowIndex, selectable: selectable)
+                                    .transition(.opacity)
+                            }
+                        }
                     }
                 }
             }
@@ -1816,22 +1878,23 @@ public struct PerchHASettingsView: View {
 
     /// True while the user is filtering the entity tree. During a search every
     /// rendered room is forced expanded so matches are never hidden behind a
-    /// collapsed header; the stored ``collapsedRooms`` set is left untouched so
+    /// collapsed header; the stored ``expandedRooms`` set is left untouched so
     /// clearing the search restores the prior state.
     private var isSelectionSearching: Bool {
         !model.snapshot.selectionQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// Whether `room` should show its entity rows. A room is expanded unless it
-    /// is in ``collapsedRooms``; an active search or the room holding the open
-    /// inspector forces it expanded without mutating the stored state.
+    /// Whether `room` should show its entity rows. Rooms default to collapsed;
+    /// a room is expanded only when it is in ``expandedRooms``. An active
+    /// search or the room holding the open inspector forces it expanded
+    /// without mutating the stored state.
     private func isRoomExpanded(_ room: SelectableRoom) -> Bool {
         let containsInspected = inspectedEntityID.map { id in
             room.entities.contains { $0.entity.id == id }
         } ?? false
         return SelectionRoomCollapse.isExpanded(
             roomID: room.id.rawValue,
-            collapsedRoomIDs: collapsedRooms,
+            expandedRoomIDs: expandedRooms,
             isSearching: isSelectionSearching,
             roomContainsInspectedEntity: containsInspected
         )
@@ -1842,7 +1905,7 @@ public struct PerchHASettingsView: View {
     private var allRoomsCollapsed: Bool {
         SelectionRoomCollapse.allCollapsed(
             roomIDs: settingsTree.map { $0.id.rawValue },
-            collapsedRoomIDs: collapsedRooms,
+            expandedRoomIDs: expandedRooms,
             isSearching: isSelectionSearching
         )
     }
@@ -1854,9 +1917,9 @@ public struct PerchHASettingsView: View {
         return Button {
             withSelectionAnimation {
                 if expandAll {
-                    collapsedRooms.removeAll()
+                    expandedRooms = Set(settingsTree.map { $0.id.rawValue })
                 } else {
-                    collapsedRooms = Set(settingsTree.map { $0.id.rawValue })
+                    expandedRooms.removeAll()
                 }
             }
         } label: {
@@ -1878,13 +1941,13 @@ public struct PerchHASettingsView: View {
     private func toggleRoomCollapsed(_ room: SelectableRoom) {
         let id = room.id.rawValue
         withSelectionAnimation {
-            if collapsedRooms.contains(id) {
-                collapsedRooms.remove(id)
-            } else {
-                collapsedRooms.insert(id)
+            if expandedRooms.contains(id) {
+                expandedRooms.remove(id)
                 if let inspectedEntityID, room.entities.contains(where: { $0.entity.id == inspectedEntityID }) {
                     self.inspectedEntityID = nil
                 }
+            } else {
+                expandedRooms.insert(id)
             }
         }
     }
@@ -1902,22 +1965,52 @@ public struct PerchHASettingsView: View {
         }
     }
 
-    private func selectionRoom(_ room: SelectableRoom, canMoveUp: Bool, canMoveDown: Bool) -> some View {
-        let isExpanded = isRoomExpanded(room)
-        return VStack(alignment: .leading, spacing: 5) {
-            selectionDragDrop(
-                selectionRoomHeader(
-                    room,
-                    isExpanded: isExpanded,
-                    canMoveUp: canMoveUp,
-                    canMoveDown: canMoveDown
-                )
-                .padding(.horizontal, PerchHASpacing.xs),
-                item: .room(room.id)
+    /// One lazily-materialized slice of a room card: the row plus its share of
+    /// the card chrome. The first/last rows round the card's outer corners and
+    /// draw the top/bottom border; every row draws the side borders; rows after
+    /// the first draw the inset hairline separator. A run of sibling segments
+    /// reads as one card without a container view forcing the whole room to
+    /// lay out at once.
+    private func selectionEntityRowSegment(
+        room: SelectableRoom,
+        rowIndex: Int,
+        selectable: SelectableEntity
+    ) -> some View {
+        let palette = PerchHATheme.Dashboard.palette(colorScheme)
+        let isFirst = rowIndex == room.entities.startIndex
+        let isLast = rowIndex == room.entities.index(before: room.entities.endIndex)
+        return selectionDragDrop(
+            selectionEntityRow(
+                selectable,
+                canMoveUp: canReorderSelection && !isFirst,
+                canMoveDown: canReorderSelection && !isLast
+            ),
+            item: .entity(selectable.entity.id)
+        )
+        .padding(.top, isFirst ? PerchHASpacing.xs : 0)
+        .padding(.bottom, isLast ? PerchHASpacing.xs : 0)
+        .background(
+            SelectionRoomSegmentShape(
+                radius: PerchHACornerRadius.card,
+                roundsTop: isFirst,
+                roundsBottom: isLast
             )
-            if isExpanded {
-                entitiesRoomCard(room)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+            .fill(palette.surfacePanel)
+        )
+        .overlay(
+            SelectionRoomSegmentBorderShape(
+                radius: PerchHACornerRadius.card,
+                roundsTop: isFirst,
+                roundsBottom: isLast
+            )
+            .stroke(palette.borderSubtle, lineWidth: 1)
+        )
+        .overlay(alignment: .top) {
+            if !isFirst {
+                Rectangle()
+                    .fill(palette.separatorSubtle)
+                    .frame(height: 1)
+                    .padding(.leading, 34)
             }
         }
     }
@@ -1980,42 +2073,6 @@ public struct PerchHASettingsView: View {
                 canMoveDown: canMoveDown
             )
         }
-    }
-
-    /// A token-styled card holding the collapsed entity rows for one room,
-    /// matching the dashboard panel surface with hairline separators between
-    /// rows.
-    private func entitiesRoomCard(_ room: SelectableRoom) -> some View {
-        let palette = PerchHATheme.Dashboard.palette(colorScheme)
-        // Lazy rows: an expanded room with hundreds of entities materializes
-        // only what scrolls into view instead of building every row up front.
-        return LazyVStack(spacing: 0) {
-            ForEach(Array(room.entities.enumerated()), id: \.element.entity.id.rawValue) { index, selectable in
-                selectionDragDrop(
-                    selectionEntityRow(
-                        selectable,
-                        canMoveUp: canReorderSelection && index > room.entities.startIndex,
-                        canMoveDown: canReorderSelection && index < room.entities.index(before: room.entities.endIndex)
-                    ),
-                    item: .entity(selectable.entity.id)
-                )
-                if index < room.entities.count - 1 {
-                    Rectangle()
-                        .fill(palette.separatorSubtle)
-                        .frame(height: 1)
-                        .padding(.leading, 34)
-                }
-            }
-        }
-        .padding(.vertical, PerchHASpacing.xs)
-        .background(
-            RoundedRectangle(cornerRadius: PerchHACornerRadius.card, style: .continuous)
-                .fill(palette.surfacePanel)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: PerchHACornerRadius.card, style: .continuous)
-                .strokeBorder(palette.borderSubtle, lineWidth: 1)
-        )
     }
 
     /// A compact, collapsed entity row: selection checkbox, domain icon, name,
@@ -3072,5 +3129,162 @@ struct ThresholdBoundField: View {
             return String(Int(value))
         }
         return String(value)
+    }
+}
+
+/// The fill outline of one room-card segment: a rectangle whose top and/or
+/// bottom corners round to the card radius, so first/middle/last rows tile
+/// into a single card silhouette.
+struct SelectionRoomSegmentShape: Shape {
+    let radius: CGFloat
+    let roundsTop: Bool
+    let roundsBottom: Bool
+
+    func path(in rect: CGRect) -> Path {
+        let topRadius = roundsTop ? min(radius, min(rect.width, rect.height) / 2) : 0
+        let bottomRadius = roundsBottom ? min(radius, min(rect.width, rect.height) / 2) : 0
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.maxY - bottomRadius))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + topRadius))
+        if topRadius > 0 {
+            path.addArc(
+                center: CGPoint(x: rect.minX + topRadius, y: rect.minY + topRadius),
+                radius: topRadius,
+                startAngle: .degrees(180),
+                endAngle: .degrees(270),
+                clockwise: false
+            )
+        }
+        path.addLine(to: CGPoint(x: rect.maxX - topRadius, y: rect.minY))
+        if topRadius > 0 {
+            path.addArc(
+                center: CGPoint(x: rect.maxX - topRadius, y: rect.minY + topRadius),
+                radius: topRadius,
+                startAngle: .degrees(270),
+                endAngle: .degrees(0),
+                clockwise: false
+            )
+        }
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - bottomRadius))
+        if bottomRadius > 0 {
+            path.addArc(
+                center: CGPoint(x: rect.maxX - bottomRadius, y: rect.maxY - bottomRadius),
+                radius: bottomRadius,
+                startAngle: .degrees(0),
+                endAngle: .degrees(90),
+                clockwise: false
+            )
+        }
+        path.addLine(to: CGPoint(x: rect.minX + bottomRadius, y: rect.maxY))
+        if bottomRadius > 0 {
+            path.addArc(
+                center: CGPoint(x: rect.minX + bottomRadius, y: rect.maxY - bottomRadius),
+                radius: bottomRadius,
+                startAngle: .degrees(90),
+                endAngle: .degrees(180),
+                clockwise: false
+            )
+        }
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// The stroked border of one room-card segment: always the two side edges,
+/// plus the top edge (with corners) on the first row and the bottom edge on
+/// the last, so joints between stacked segments never draw a horizontal line
+/// through the card.
+struct SelectionRoomSegmentBorderShape: Shape {
+    let radius: CGFloat
+    let roundsTop: Bool
+    let roundsBottom: Bool
+
+    func path(in rect: CGRect) -> Path {
+        let topRadius = roundsTop ? min(radius, min(rect.width, rect.height) / 2) : 0
+        let bottomRadius = roundsBottom ? min(radius, min(rect.width, rect.height) / 2) : 0
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.maxY - bottomRadius))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + topRadius))
+        if roundsTop {
+            path.addArc(
+                center: CGPoint(x: rect.minX + topRadius, y: rect.minY + topRadius),
+                radius: topRadius,
+                startAngle: .degrees(180),
+                endAngle: .degrees(270),
+                clockwise: false
+            )
+            path.addLine(to: CGPoint(x: rect.maxX - topRadius, y: rect.minY))
+            path.addArc(
+                center: CGPoint(x: rect.maxX - topRadius, y: rect.minY + topRadius),
+                radius: topRadius,
+                startAngle: .degrees(270),
+                endAngle: .degrees(0),
+                clockwise: false
+            )
+        } else {
+            path.move(to: CGPoint(x: rect.maxX, y: rect.minY))
+        }
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - bottomRadius))
+        if roundsBottom {
+            path.addArc(
+                center: CGPoint(x: rect.maxX - bottomRadius, y: rect.maxY - bottomRadius),
+                radius: bottomRadius,
+                startAngle: .degrees(0),
+                endAngle: .degrees(90),
+                clockwise: false
+            )
+            path.addLine(to: CGPoint(x: rect.minX + bottomRadius, y: rect.maxY))
+            path.addArc(
+                center: CGPoint(x: rect.minX + bottomRadius, y: rect.maxY - bottomRadius),
+                radius: bottomRadius,
+                startAngle: .degrees(90),
+                endAngle: .degrees(180),
+                clockwise: false
+            )
+        }
+        return path
+    }
+}
+
+/// A compact integer field committing on Return or blur, used for whole-number
+/// display preferences (for example the per-room row limit). Non-numeric input
+/// reverts to the last committed value; the field never commits garbage.
+struct SettingsIntegerField: View {
+    let placeholder: String
+    let value: Int
+    let onCommit: (Int) -> Void
+
+    @State private var text: String = ""
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        TextField(placeholder, text: $text)
+            .textFieldStyle(.roundedBorder)
+            .multilineTextAlignment(.trailing)
+            .focused($isFocused)
+            .onAppear {
+                text = String(value)
+            }
+            .onChange(of: value) { newValue in
+                if !isFocused {
+                    text = String(newValue)
+                }
+            }
+            .onSubmit(commit)
+            .onChange(of: isFocused) { focused in
+                if !focused {
+                    commit()
+                }
+            }
+    }
+
+    private func commit() {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let parsed = Int(trimmed) {
+            onCommit(parsed)
+            text = String(parsed)
+        } else {
+            text = String(value)
+        }
     }
 }

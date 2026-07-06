@@ -13,7 +13,8 @@ public struct PerchHAMenuBarPresentation: Equatable, Sendable {
         showsImage: true,
         showsTitle: false,
         visibleFallbackTitle: "PearchHA",
-        iconSymbolName: nil
+        iconSymbolName: nil,
+        stackedLabel: nil
     )
 
     /// The promoted entity this item represents, or `nil` for the fallback
@@ -36,6 +37,10 @@ public struct PerchHAMenuBarPresentation: Equatable, Sendable {
     /// domain-derived symbol. `nil` when the icon is turned off or when a gauge
     /// image already occupies the image slot.
     public let iconSymbolName: String?
+    /// The short label rendered as a tiny caps line *above* the value in the
+    /// status item (the iStat Menus stacked style) when the entity's "Show
+    /// label" option is on. `nil` renders the flat single-line title.
+    public let stackedLabel: String?
 
     public init(
         entityID: EntityID?,
@@ -46,7 +51,8 @@ public struct PerchHAMenuBarPresentation: Equatable, Sendable {
         showsImage: Bool,
         showsTitle: Bool,
         visibleFallbackTitle: String,
-        iconSymbolName: String? = nil
+        iconSymbolName: String? = nil,
+        stackedLabel: String? = nil
     ) {
         self.entityID = entityID
         self.title = title
@@ -57,6 +63,7 @@ public struct PerchHAMenuBarPresentation: Equatable, Sendable {
         self.showsTitle = showsTitle
         self.visibleFallbackTitle = visibleFallbackTitle
         self.iconSymbolName = iconSymbolName
+        self.stackedLabel = stackedLabel
     }
 }
 
@@ -139,6 +146,13 @@ public struct PerchHAMenuBarPresenter: Sendable {
             let iconSymbolName: String? = rendered.gauge == nil && itemConfiguration.showsEntityIcon
                 ? (itemConfiguration.customIconName ?? perchHAEntityIconName(for: entity))
                 : nil
+            // "Show label" renders as the iStat stacked style: a tiny caps
+            // label above the value, instead of widening the item with a flat
+            // "Name Value" title.
+            let trimmedName = entity.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let stackedLabel: String? = itemConfiguration.showsLabel && !trimmedName.isEmpty
+                ? trimmedName
+                : nil
             return PerchHAMenuBarPresentation(
                 entityID: entity.id,
                 title: rendered.title,
@@ -148,7 +162,8 @@ public struct PerchHAMenuBarPresenter: Sendable {
                 showsImage: appearance.showsImage,
                 showsTitle: appearance.showsTitle,
                 visibleFallbackTitle: Self.visibleFallbackTitle(for: entity, rendered: rendered),
-                iconSymbolName: iconSymbolName
+                iconSymbolName: iconSymbolName,
+                stackedLabel: stackedLabel
             )
         }
     }
