@@ -7,6 +7,12 @@ on:
         description: "Optional version override (default: UTC date %Y.%m.%j%H%M)"
         required: false
         type: string
+  # Temporary dry-run trigger while the workflow is verified from this branch:
+  # a push builds, packages, and verifies everything but publishes nothing
+  # (publish steps are gated on workflow_dispatch below).
+  push:
+    branches:
+      - ui-dashboard-overhaul
 
 permissions:
   contents: write
@@ -130,6 +136,7 @@ jobs:
           echo "sha=${sha}" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
@@ -146,7 +153,7 @@ jobs:
           prerelease: false
 
       - name: Checkout Homebrew tap
-        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && env.HOMEBREW_TAP_TOKEN != '' }}
         uses: actions/checkout@v4
         with:
           repository: YunaBraska/homebrew-tap
@@ -154,7 +161,7 @@ jobs:
           path: homebrew-tap
 
       - name: Update Homebrew cask
-        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && env.HOMEBREW_TAP_TOKEN != '' }}
         shell: bash
         run: |
           set -euo pipefail
