@@ -35,6 +35,8 @@ jobs:
 
       - name: Checks and tests
         run: sh scripts/check.sh
+        env:
+          PERCHHA_TLS_DEBUG: "1"
 
       - name: Verify clean working tree
         shell: bash

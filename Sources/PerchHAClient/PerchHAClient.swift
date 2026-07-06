@@ -231,17 +231,38 @@ private final class HAServerTrustPolicyURLSessionDelegate: NSObject, URLSessionD
         // has been evaluated at least once. The result is irrelevant here — an
         // unknown self-signed certificate is expected to fail this pass.
         _ = SecTrustEvaluateWithError(trust, nil)
-        guard let certificateChain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
-              certificateChain.count == 1,
-              isSelfIssued(certificateChain[0])
-        else {
+        guard let certificateChain = SecTrustCopyCertificateChain(trust) as? [SecCertificate] else {
+            debugLog("no certificate chain available for \(host)")
+            return false
+        }
+        guard certificateChain.count == 1 else {
+            debugLog("chain for \(host) has \(certificateChain.count) certificates; only a single self-signed leaf is allowed")
+            return false
+        }
+        guard isSelfIssued(certificateChain[0]) else {
+            debugLog("leaf for \(host) is not self-issued")
             return false
         }
         // Pin the anchor to exactly the presented leaf; changing the anchors
         // resets the cached evaluation, so this second pass is authoritative.
         SecTrustSetAnchorCertificates(trust, certificateChain as CFArray)
         SecTrustSetAnchorCertificatesOnly(trust, true)
-        return SecTrustEvaluateWithError(trust, nil)
+        var evaluationError: CFError?
+        let trusted = SecTrustEvaluateWithError(trust, &evaluationError)
+        if !trusted {
+            debugLog("pinned evaluation failed for \(host): \(evaluationError.map(String.init(describing:)) ?? "no error detail")")
+        }
+        return trusted
+    }
+
+    /// Writes a diagnostic line to standard error when `PERCHHA_TLS_DEBUG` is
+    /// set. Off by default; carries hostnames and evaluation errors only —
+    /// never a token or certificate content.
+    private static func debugLog(_ message: String) {
+        guard ProcessInfo.processInfo.environment["PERCHHA_TLS_DEBUG"] != nil else {
+            return
+        }
+        FileHandle.standardError.write(Data(("PerchHA TLS debug: \(message)\n").utf8))
     }
 
     private static func isSelfIssued(_ certificate: SecCertificate) -> Bool {
