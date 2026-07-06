@@ -91,7 +91,6 @@ jobs:
             --verify-dmg-contents \
             --release-manifest build/perchha-release-manifest.json \
             --bundle-release-evidence build/perchha-release-evidence \
-            --oauth-site build/perchha-oauth-site/index.html \
             --snapshot-dir .build/perchha-snapshots/current
           swift run perchha-package-app \
             --verify-release-manifest build/perchha-release-manifest.json
