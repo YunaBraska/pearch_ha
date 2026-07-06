@@ -7,12 +7,6 @@ on:
         description: "Optional version override (default: UTC date %Y.%m.%j%H%M)"
         required: false
         type: string
-  # Temporary dry-run trigger while the workflow is verified from this branch:
-  # a push builds, packages, and verifies everything but publishes nothing
-  # (publish steps are gated on workflow_dispatch below).
-  push:
-    branches:
-      - ui-dashboard-overhaul
 
 permissions:
   contents: write
