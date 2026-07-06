@@ -2343,8 +2343,7 @@ public struct PerchHASettingsView: View {
     /// Menu bar section: whether the entity is shown in the menu bar and its
     /// position there.
     private func menuBarSectionControls(for entity: DiscoveredEntity, isPromoted: Bool) -> some View {
-        let configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entity.id)
-        return VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Toggle("Show in menu bar", isOn: menuBarVisibilityBinding(for: entity.id))
                     .fixedSize()

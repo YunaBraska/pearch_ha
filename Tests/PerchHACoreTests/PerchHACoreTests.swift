@@ -1,6 +1,7 @@
 #if canImport(XCTest)
 import XCTest
 import PerchHACore
+import PerchHASupport
 
 final class PerchHACoreTests: XCTestCase {
     func testActionValueRoundTripsNestedJSONShapes() throws {
@@ -1405,3 +1406,488 @@ extension PerchHACoreTests {
         XCTAssertNil(PerchHADisplayPreferences.defaults.with(dashboardRoomRowLimit: -1).dashboardRoomRowCap)
     }
 }
+
+#if canImport(XCTest)
+// MARK: - Diagnostics log and retry/backoff summaries
+
+extension PerchHACoreTests {
+    private func instant(_ seconds: Int64) -> PerchInstant {
+        PerchInstant(nanosecondsSinceStart: seconds * 1_000_000_000)
+    }
+
+    func test_t_diagnostic_event_kinds_carry_calm_system_images() {
+        XCTAssertEqual(PerchHADiagnosticEventKind.connectionFailed.systemImage, "exclamationmark.triangle.fill")
+        XCTAssertEqual(PerchHADiagnosticEventKind.reconnecting.systemImage, "arrow.triangle.2.circlepath")
+        XCTAssertEqual(PerchHADiagnosticEventKind.recovered.systemImage, "checkmark.circle.fill")
+        XCTAssertEqual(PerchHADiagnosticEventKind.refreshFailed.systemImage, "arrow.clockwise.circle")
+        XCTAssertEqual(PerchHADiagnosticEventKind.liveUpdatesInterrupted.systemImage, "dot.radiowaves.left.and.right")
+    }
+
+    func test_t_diagnostic_log_records_first_event_with_matching_instants() throws {
+        var log = PerchHADiagnosticLog()
+        XCTAssertTrue(log.isEmpty)
+        XCTAssertEqual(log.count, 0)
+
+        log.record(kind: .connectionFailed, message: "authentication failed", now: instant(1))
+
+        XCTAssertFalse(log.isEmpty)
+        XCTAssertEqual(log.count, 1)
+        let event = try XCTUnwrap(log.oldestFirst.first)
+        XCTAssertEqual(event.kind, .connectionFailed)
+        XCTAssertEqual(event.message, "authentication failed")
+        XCTAssertEqual(event.firstSeen, instant(1))
+        XCTAssertEqual(event.lastSeen, instant(1))
+        XCTAssertEqual(event.count, 1)
+    }
+
+    func test_t_diagnostic_log_collapses_consecutive_identical_events() throws {
+        var log = PerchHADiagnosticLog()
+        log.record(kind: .refreshFailed, message: "host unreachable", now: instant(1))
+        let originalID = try XCTUnwrap(log.oldestFirst.first).id
+
+        log.record(kind: .refreshFailed, message: "host unreachable", now: instant(5))
+
+        XCTAssertEqual(log.count, 1)
+        let collapsed = try XCTUnwrap(log.oldestFirst.first)
+        XCTAssertEqual(collapsed.id, originalID)
+        XCTAssertEqual(collapsed.count, 2)
+        XCTAssertEqual(collapsed.firstSeen, instant(1))
+        XCTAssertEqual(collapsed.lastSeen, instant(5))
+    }
+
+    func test_t_diagnostic_log_appends_distinct_events_and_orders_both_directions() {
+        var log = PerchHADiagnosticLog()
+        log.record(kind: .refreshFailed, message: "host unreachable", now: instant(1))
+        log.record(kind: .refreshFailed, message: "timeout", now: instant(2))
+        log.record(kind: .recovered, message: "timeout", now: instant(3))
+
+        XCTAssertEqual(log.count, 3)
+        XCTAssertEqual(log.oldestFirst.map(\.message), ["host unreachable", "timeout", "timeout"])
+        XCTAssertEqual(log.oldestFirst.map(\.kind), [.refreshFailed, .refreshFailed, .recovered])
+        XCTAssertEqual(log.newestFirst.map(\.kind), [.recovered, .refreshFailed, .refreshFailed])
+    }
+
+    func test_t_diagnostic_log_evicts_oldest_event_beyond_capacity() {
+        var log = PerchHADiagnosticLog(capacity: 2)
+        log.record(kind: .connectionFailed, message: "first", now: instant(1))
+        log.record(kind: .connectionFailed, message: "second", now: instant(2))
+        log.record(kind: .connectionFailed, message: "third", now: instant(3))
+
+        XCTAssertEqual(log.count, 2)
+        XCTAssertEqual(log.oldestFirst.map(\.message), ["second", "third"])
+    }
+
+    func test_t_diagnostic_log_clear_empties_buffer() {
+        var log = PerchHADiagnosticLog()
+        log.record(kind: .reconnecting, message: "attempt 1", now: instant(1))
+
+        log.clear()
+
+        XCTAssertTrue(log.isEmpty)
+        XCTAssertEqual(log.count, 0)
+        XCTAssertEqual(log.oldestFirst, [])
+        XCTAssertEqual(log.newestFirst, [])
+    }
+
+    func test_t_diagnostic_log_init_clamps_capacity_and_keeps_newest_seed_events() {
+        let older = PerchHADiagnosticEvent(
+            kind: .connectionFailed,
+            message: "older",
+            firstSeen: instant(1),
+            lastSeen: instant(1)
+        )
+        let newer = PerchHADiagnosticEvent(
+            kind: .recovered,
+            message: "newer",
+            firstSeen: instant(2),
+            lastSeen: instant(2)
+        )
+
+        let log = PerchHADiagnosticLog(capacity: 0, events: [older, newer])
+
+        XCTAssertEqual(log.capacity, 1)
+        XCTAssertEqual(log.oldestFirst.map(\.message), ["newer"])
+    }
+
+    func test_t_diagnostic_event_clamps_non_positive_count_to_one() {
+        let event = PerchHADiagnosticEvent(
+            kind: .recovered,
+            message: "back",
+            firstSeen: instant(1),
+            lastSeen: instant(1),
+            count: 0
+        )
+        XCTAssertEqual(event.count, 1)
+    }
+
+    func test_t_retry_backoff_summary_connected() {
+        XCTAssertEqual(PerchHARetryBackoffState.connected.summary, "Connected")
+    }
+
+    func test_t_retry_backoff_summary_connecting() {
+        XCTAssertEqual(PerchHARetryBackoffState.connecting.summary, "Connecting")
+    }
+
+    func test_t_retry_backoff_summary_reconnecting_names_the_attempt() {
+        XCTAssertEqual(PerchHARetryBackoffState.reconnecting(attempt: 3).summary, "Reconnecting, attempt 3")
+    }
+
+    func test_t_retry_backoff_summary_single_failure_omits_streak() {
+        XCTAssertEqual(
+            PerchHARetryBackoffState.backingOff(failureStreak: 1, nextRetrySeconds: 30).summary,
+            "Backing off, next retry in 30 s"
+        )
+    }
+
+    func test_t_retry_backoff_summary_repeated_failures_name_the_streak() {
+        XCTAssertEqual(
+            PerchHARetryBackoffState.backingOff(failureStreak: 4, nextRetrySeconds: 120).summary,
+            "Backing off (4 failures), next retry in 120 s"
+        )
+    }
+
+    func test_t_retry_backoff_summary_disconnected() {
+        XCTAssertEqual(PerchHARetryBackoffState.disconnected.summary, "Disconnected")
+    }
+}
+
+// MARK: - Appearance preference labels
+
+extension PerchHACoreTests {
+    func test_t_menu_bar_appearance_display_names() {
+        XCTAssertEqual(PerchHAMenuBarAppearance.iconAndText.displayName, "Icon and text")
+        XCTAssertEqual(PerchHAMenuBarAppearance.iconOnly.displayName, "Icon only")
+        XCTAssertEqual(PerchHAMenuBarAppearance.textOnly.displayName, "Text only")
+    }
+
+    func test_t_theme_mode_display_names() {
+        XCTAssertEqual(PerchHAThemeMode.system.displayName, "System")
+        XCTAssertEqual(PerchHAThemeMode.light.displayName, "Light")
+        XCTAssertEqual(PerchHAThemeMode.dark.displayName, "Dark")
+    }
+
+    func test_t_dashboard_row_density_display_names() {
+        XCTAssertEqual(PerchHADashboardRowDensity.comfortable.displayName, "Comfortable")
+        XCTAssertEqual(PerchHADashboardRowDensity.compact.displayName, "Compact")
+    }
+}
+
+// MARK: - Core identifiers, actions, and service labels
+
+extension PerchHACoreTests {
+    func test_t_area_and_device_ids_round_trip_as_json_strings() throws {
+        let areaData = try JSONEncoder().encode([AreaID("kitchen")])
+        XCTAssertEqual(String(data: areaData, encoding: .utf8), #"["kitchen"]"#)
+        XCTAssertEqual(try JSONDecoder().decode([AreaID].self, from: areaData), [AreaID("kitchen")])
+
+        let deviceData = try JSONEncoder().encode([DeviceID("thermostat")])
+        XCTAssertEqual(String(data: deviceData, encoding: .utf8), #"["thermostat"]"#)
+        XCTAssertEqual(try JSONDecoder().decode([DeviceID].self, from: deviceData), [DeviceID("thermostat")])
+    }
+
+    func test_t_action_value_exposes_protected_reference_only_for_protected_strings() {
+        XCTAssertEqual(ActionValue.protectedString("pin-ref").protectedValueReference, "pin-ref")
+        XCTAssertNil(ActionValue.string("1234").protectedValueReference)
+        XCTAssertNil(ActionValue.number(4).protectedValueReference)
+    }
+
+    func test_t_custom_action_is_runnable_reflects_validation() {
+        let complete = EntityCustomAction(
+            id: "run-scene",
+            entityID: "light.office",
+            title: "Movie scene",
+            action: ActionSpec(domain: "scene", service: "turn_on", targetEntityID: "scene.movie")
+        )
+        let incomplete = EntityCustomAction(
+            id: "blank-title",
+            entityID: "light.office",
+            title: "   ",
+            action: ActionSpec(domain: "scene", service: "turn_on", targetEntityID: nil)
+        )
+
+        XCTAssertTrue(complete.isRunnable)
+        XCTAssertFalse(incomplete.isRunnable)
+    }
+
+    func test_t_service_label_domain_title_capitalizes_each_word() {
+        XCTAssertEqual(PerchHAServiceLabel.domainTitle("media_player"), "Media Player")
+        XCTAssertEqual(PerchHAServiceLabel.domainTitle(""), "")
+    }
+
+    func test_t_service_label_service_title_capitalizes_first_word_only() {
+        XCTAssertEqual(PerchHAServiceLabel.serviceTitle("turn_on"), "Turn on")
+        XCTAssertEqual(PerchHAServiceLabel.serviceTitle("   "), "")
+    }
+
+    func test_t_service_label_friendly_label_combines_available_parts() {
+        XCTAssertEqual(PerchHAServiceLabel.friendlyLabel(domain: "script", service: "turn_on"), "Script: Turn on")
+        XCTAssertEqual(PerchHAServiceLabel.friendlyLabel(domain: "script", service: ""), "Script")
+        XCTAssertEqual(PerchHAServiceLabel.friendlyLabel(domain: "", service: "turn_on"), "Turn on")
+        XCTAssertEqual(PerchHAServiceLabel.friendlyLabel(domain: "", service: ""), "")
+    }
+
+    func test_t_room_resolver_names_unlisted_area_by_its_raw_id() {
+        let rooms = RoomResolver().resolve(
+            snapshot: DiscoverySnapshot(
+                areas: [],
+                devices: [],
+                entities: [
+                    EntityRegistryEntry(id: "sensor.attic_temp", name: "Attic temp", areaID: "attic", deviceID: nil)
+                ],
+                states: [
+                    EntityState(id: "sensor.attic_temp", name: "Fallback", state: "18", unit: "°C")
+                ]
+            )
+        )
+
+        XCTAssertEqual(rooms.map(\.id), [RoomID("attic")])
+        XCTAssertEqual(rooms.map(\.name), ["attic"])
+        XCTAssertEqual(rooms.first?.entities.map(\.id), ["sensor.attic_temp"])
+    }
+}
+
+// MARK: - Threshold and menu-bar configuration behavior
+
+extension PerchHACoreTests {
+    func test_t_value_threshold_matches_directions_inclusively() {
+        let above = ValueThreshold(value: 90, direction: .aboveOrEqual)
+        XCTAssertTrue(above.matches(90))
+        XCTAssertTrue(above.matches(95))
+        XCTAssertFalse(above.matches(89))
+
+        let below = ValueThreshold(value: 15, direction: .belowOrEqual)
+        XCTAssertTrue(below.matches(15))
+        XCTAssertTrue(below.matches(10))
+        XCTAssertFalse(below.matches(16))
+    }
+
+    func test_t_legacy_below_or_equal_setter_inverts_into_base_color() {
+        let thresholds = ValueThresholds().replacingLegacyRule(
+            color: ValueThresholds.warningColor,
+            threshold: ValueThreshold(value: 20, direction: .belowOrEqual)
+        )
+
+        XCTAssertEqual(thresholds.baseColor, ValueThresholds.warningColor)
+        XCTAssertEqual(thresholds.color(for: 10), ValueThresholds.warningColor)
+        XCTAssertEqual(thresholds.severity(for: 20), .warning)
+        XCTAssertEqual(thresholds.severity(for: 50), .normal)
+    }
+
+    func test_t_legacy_bounded_rules_decode_into_steps_and_base_color() throws {
+        let json = """
+        {"rules":[
+            {"lowerBound":90,"color":"red"},
+            {"lowerBound":70,"color":"orange"},
+            {"lowerBound":50,"color":"yellow"},
+            {"upperBound":40,"color":"green"}
+        ]}
+        """
+        let thresholds = try JSONDecoder().decode(ValueThresholds.self, from: Data(json.utf8))
+
+        XCTAssertEqual(thresholds.color(for: 95), ValueThresholds.criticalColor)
+        XCTAssertEqual(thresholds.color(for: 75), ValueThresholds.warningColor)
+        XCTAssertEqual(
+            thresholds.color(for: 55),
+            PerchHAAccentColor(red: 0.95, green: 0.77, blue: 0.06, alpha: 1)
+        )
+        XCTAssertEqual(thresholds.color(for: 45), ValueThresholds.okColor, "upper-bound-only legacy rule becomes the base color")
+        XCTAssertEqual(thresholds.severity(for: 95), .critical)
+        XCTAssertEqual(thresholds.severity(for: 55), .warning)
+        XCTAssertEqual(thresholds.severity(for: 45), .normal)
+    }
+
+    func test_t_legacy_bounded_rule_with_unknown_color_falls_back_to_ok_color() throws {
+        let json = #"{"rules":[{"lowerBound":30,"color":"chartreuse"}]}"#
+        let thresholds = try JSONDecoder().decode(ValueThresholds.self, from: Data(json.utf8))
+
+        XCTAssertEqual(thresholds.color(for: 35), ValueThresholds.okColor)
+        XCTAssertNil(thresholds.color(for: 10))
+    }
+
+    func test_t_menu_bar_display_configuration_reports_promotion() {
+        let configuration = MenuBarDisplayConfiguration(promotedEntityIDs: ["sensor.cpu"])
+
+        XCTAssertTrue(configuration.isPromoted("sensor.cpu"))
+        XCTAssertFalse(configuration.isPromoted("sensor.memory"))
+    }
+
+    func test_t_menu_bar_promotion_boundary_moves_are_no_ops() {
+        let configuration = MenuBarDisplayConfiguration(promotedEntityIDs: ["sensor.first", "sensor.last"])
+
+        XCTAssertEqual(
+            configuration.movingPromotion("sensor.first", direction: .up),
+            configuration
+        )
+        XCTAssertEqual(
+            configuration.movingPromotion("sensor.last", direction: .down),
+            configuration
+        )
+    }
+
+    func test_t_menu_bar_renderer_treats_blank_units_as_compatible_for_total_entity() {
+        let rendered = MenuBarItemRenderer().render(
+            entity: DiscoveredEntity(id: "sensor.used", name: "Used", state: "30", unit: "  ", areaID: nil, deviceID: nil),
+            configuration: MenuBarItemConfiguration(
+                entityID: "sensor.used",
+                style: .ring,
+                totalEntityID: "sensor.total"
+            ),
+            availableEntities: [
+                DiscoveredEntity(id: "sensor.total", name: "Total", state: "120", unit: "", areaID: nil, deviceID: nil)
+            ],
+            locale: Locale(identifier: "en_US")
+        )
+
+        XCTAssertEqual(rendered.title, "RING 25%")
+        XCTAssertEqual(rendered.gauge, MenuBarGauge(percent: 25, filledSegments: 3, segmentCount: 10))
+    }
+}
+
+// MARK: - Value unit metadata and non-numeric fallbacks
+
+extension PerchHACoreTests {
+    func test_t_value_unit_display_names() {
+        let expected: [ValueUnit: String] = [
+            .number: "Number",
+            .compact: "Compact (SI)",
+            .percent: "Percent",
+            .celsius: "Celsius",
+            .fahrenheit: "Fahrenheit",
+            .kelvin: "Kelvin",
+            .bytes: "Bytes",
+            .dataRate: "Data rate",
+            .illuminance: "Illuminance (lx)",
+            .power: "Power (W)",
+            .energy: "Energy (Wh)",
+            .mass: "Mass (g)",
+            .duration: "Duration",
+            .batteryIcon: "Battery icon",
+            .signalIcon: "Signal icon",
+            .soundIcon: "Sound icon",
+            .brightnessIcon: "Brightness icon",
+            .thermometerIcon: "Thermometer icon"
+        ]
+        for unit in ValueUnit.allCases {
+            XCTAssertEqual(unit.displayName, expected[unit], "displayName for \(unit.rawValue)")
+        }
+    }
+
+    func test_t_value_unit_normalized_fraction_applies_to_percent_and_icon_units() {
+        XCTAssertTrue(ValueUnit.percent.usesNormalizedFraction)
+        XCTAssertTrue(ValueUnit.batteryIcon.usesNormalizedFraction)
+        XCTAssertTrue(ValueUnit.signalIcon.usesNormalizedFraction)
+        XCTAssertFalse(ValueUnit.number.usesNormalizedFraction)
+        XCTAssertFalse(ValueUnit.bytes.usesNormalizedFraction)
+    }
+
+    func test_t_temperature_unit_recognition() {
+        XCTAssertTrue(TemperatureConversion.isTemperatureUnit("°C"))
+        XCTAssertTrue(TemperatureConversion.isTemperatureUnit("Fahrenheit"))
+        XCTAssertTrue(TemperatureConversion.isTemperatureUnit("K"))
+        XCTAssertFalse(TemperatureConversion.isTemperatureUnit("lx"))
+        XCTAssertNil(TemperatureConversion.scale(of: nil))
+        XCTAssertNil(TemperatureConversion.scale(of: "   "))
+    }
+
+    func test_t_value_unit_non_numeric_state_passes_through_for_every_converting_unit() {
+        let convertingUnits: [ValueUnit] = [
+            .compact, .percent, .bytes, .dataRate, .illuminance, .power, .energy, .mass, .duration
+        ]
+        for unit in convertingUnits {
+            XCTAssertEqual(
+                formatter(unit).format(entity("sensor.mode", state: "idle", unit: nil)),
+                FormattedEntityValue(text: "idle", status: .available),
+                "non-numeric passthrough for \(unit.rawValue)"
+            )
+        }
+    }
+
+    func test_t_value_unit_illuminance_trims_trailing_decimal_point() {
+        XCTAssertEqual(
+            formatter(.illuminance).format(entity("sensor.lux", state: "0.001", unit: "lx")),
+            FormattedEntityValue(text: "0 lx", status: .available)
+        )
+    }
+}
+
+// MARK: - Selection reorderer no-op guards
+
+extension PerchHACoreTests {
+    private func explicitSelectionConfiguration() -> EntitySelectionConfiguration {
+        EntitySelectionConfiguration(
+            selectedEntityIDs: ["sensor.office_temperature", "sensor.office_humidity", "switch.kitchen_light"],
+            roomOrder: ["office", "kitchen"],
+            entityOrder: ["sensor.office_temperature", "sensor.office_humidity", "switch.kitchen_light"],
+            isExplicit: true
+        )
+    }
+
+    func test_t_selection_reorderer_room_drop_to_same_position_keeps_configuration() {
+        let original = explicitSelectionConfiguration()
+
+        let configuration = EntitySelectionReorderer().moveRoom(
+            "office",
+            relativeTo: "kitchen",
+            placement: .before,
+            rooms: selectionRooms(),
+            configuration: original
+        )
+
+        XCTAssertEqual(configuration, original)
+    }
+
+    func test_t_selection_reorderer_entity_move_up_at_top_keeps_configuration() {
+        let original = explicitSelectionConfiguration()
+
+        let configuration = EntitySelectionReorderer().moveEntity(
+            "sensor.office_temperature",
+            direction: .up,
+            rooms: selectionRooms(),
+            configuration: original
+        )
+
+        XCTAssertEqual(configuration, original)
+    }
+
+    func test_t_selection_reorderer_entity_move_down_at_bottom_keeps_configuration() {
+        let original = explicitSelectionConfiguration()
+
+        let configuration = EntitySelectionReorderer().moveEntity(
+            "switch.kitchen_light",
+            direction: .down,
+            rooms: selectionRooms(),
+            configuration: original
+        )
+
+        XCTAssertEqual(configuration, original)
+    }
+
+    func test_t_selection_reorderer_entity_drop_onto_itself_keeps_configuration() {
+        let original = explicitSelectionConfiguration()
+
+        let configuration = EntitySelectionReorderer().moveEntity(
+            "sensor.office_temperature",
+            relativeTo: "sensor.office_temperature",
+            placement: .after,
+            rooms: selectionRooms(),
+            configuration: original
+        )
+
+        XCTAssertEqual(configuration, original)
+    }
+
+    func test_t_selection_reorderer_entity_drop_to_same_position_keeps_configuration() {
+        let original = explicitSelectionConfiguration()
+
+        let configuration = EntitySelectionReorderer().moveEntity(
+            "sensor.office_temperature",
+            relativeTo: "sensor.office_humidity",
+            placement: .before,
+            rooms: selectionRooms(),
+            configuration: original
+        )
+
+        XCTAssertEqual(configuration, original)
+    }
+}
+#endif

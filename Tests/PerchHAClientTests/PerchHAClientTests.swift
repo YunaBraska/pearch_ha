@@ -4163,4 +4163,73 @@ struct ClientTestFailure: Error, CustomStringConvertible {
         self.description = description
     }
 }
+
+extension PerchHAClientTests {
+    func testHomeAssistantClientIdentifiesModule() {
+        XCTAssertEqual(HomeAssistantClient().describe().name, "PerchHAClient")
+    }
+
+    func testOAuthAuthorizationURLRejectsBlankClientID() throws {
+        let client = HomeAssistantClient()
+        let request = HAOAuthAuthorizationRequest(
+            baseURL: try XCTUnwrap(URL(string: "https://homeassistant.local")),
+            clientID: "   ",
+            redirectURI: "perchha://auth",
+            state: "state"
+        )
+
+        XCTAssertEqual(
+            client.authorizationURL(for: request),
+            .failure(.invalidPayload(path: "/auth/authorize", reason: "client_id is required"))
+        )
+    }
+
+    func testPlannedClientChecksRESTConnectionThroughItsTransport() async throws {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(#"{"message":"API running."}"#.utf8)))
+            ]
+        )
+        let client = PlannedHAClient(transport: transport)
+
+        let result = await client.checkRESTConnection(try connectionInput())
+
+        XCTAssertEqual(result, .success(HARESTCheck(message: "API running.")))
+        let requests = await transport.requests
+        XCTAssertEqual(requests.map { requestPercentEncodedPath($0.url) }, ["/api/"])
+        XCTAssertEqual(requests.first?.headers["Authorization"], "Bearer secret-token")
+    }
+
+    func testPlannedClientFetchesStatesThroughItsTransport() async throws {
+        let body = """
+        [
+          {
+            "entity_id": "sensor.office_temperature",
+            "state": "21.4",
+            "attributes": {
+              "friendly_name": "Office temperature",
+              "unit_of_measurement": "°C"
+            }
+          }
+        ]
+        """
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(body.utf8)))
+            ]
+        )
+        let client = PlannedHAClient(transport: transport)
+
+        let result = await client.states(try connectionInput())
+
+        XCTAssertEqual(
+            result,
+            .success([
+                EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "21.4", unit: "°C")
+            ])
+        )
+        let requests = await transport.requests
+        XCTAssertEqual(requests.map { requestPercentEncodedPath($0.url) }, ["/api/states"])
+    }
+}
 #endif

@@ -259,23 +259,36 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertEqual(entrypoint, try String(contentsOf: swiftPMEntrypointURL, encoding: .utf8))
     }
 
-    func testFullXcodeWorkflowRequiresXCTestBeforeCoverage() throws {
+    func testCIWorkflowRunsTheSharedCheckScriptOnFullXcode() throws {
         let rootURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
         let workflowURL = rootURL.appendingPathComponent(".github/workflows/ci.yml", isDirectory: false)
         let workflow = try String(contentsOf: workflowURL, encoding: .utf8)
 
-        XCTAssertTrue(workflow.contains("full Xcode is required for XCTest execution"))
-        XCTAssertTrue(workflow.contains("swift run perchha-xcode-doctor --json --strict"))
-        XCTAssertTrue(workflow.contains("xcrun --find xctest"))
-        XCTAssertTrue(workflow.contains("xcrun --sdk macosx --show-sdk-platform-path"))
-        XCTAssertTrue(workflow.contains("swift test --disable-swift-testing --enable-xctest list"))
-        XCTAssertTrue(workflow.contains("test -s .build/perchha-test-list.txt"))
+        // CI delegates to the one shared check entrypoint on a full Xcode
+        // toolchain, and fails if the checks dirty the working tree.
+        XCTAssertTrue(workflow.contains("maxim-lobanov/setup-xcode@v1"))
+        XCTAssertTrue(workflow.contains("xcode-version: latest-stable"))
+        XCTAssertTrue(workflow.contains("sh scripts/check.sh"))
+        XCTAssertTrue(workflow.contains("git status --porcelain"))
+    }
+
+    func testCheckScriptEnforcesTestsCoverageSmokeAndAudit() throws {
+        let rootURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let scriptURL = rootURL.appendingPathComponent("scripts/check.sh", isDirectory: false)
+        let script = try String(contentsOf: scriptURL, encoding: .utf8)
+
+        XCTAssertTrue(script.contains("set -eu"))
+        XCTAssertTrue(script.contains("swift build -Xswiftc -warnings-as-errors"))
         XCTAssertTrue(
-            workflow.contains(
+            script.contains(
                 "swift test --disable-swift-testing --enable-xctest -Xswiftc -warnings-as-errors --enable-code-coverage"
             )
         )
-        XCTAssertTrue(workflow.contains("perchha-coverage-check"))
+        XCTAssertTrue(script.contains("swift run perchha-coverage-check"))
+        XCTAssertTrue(script.contains("--line-target PerchHACore=95"))
+        XCTAssertTrue(script.contains("--branch-target PerchHACore=90"))
+        XCTAssertTrue(script.contains("PERCHHA_SMOKE_SNAPSHOT_DIR=.build/perchha-snapshots swift run perchha-smoke"))
+        XCTAssertTrue(script.contains("swift run perchha-repo-audit"))
     }
 
     func testXcodePreflightReportsBlockedWhenOnlyCommandLineToolsAreSelected() throws {
@@ -762,79 +775,42 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertEqual(Set(names), Set(PerchHAReleaseEvidenceScreenshots.requiredNames))
     }
 
-    func testCIWorkflowRetainsCanonicalRequiredScreenshotArtifacts() throws {
-        let rootURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-        let workflowURL = rootURL.appendingPathComponent(".github/workflows/ci.yml", isDirectory: false)
-        let workflow = try String(contentsOf: workflowURL, encoding: .utf8)
-        let lines = workflow.components(separatedBy: .newlines)
-
-        let screenshotPrefix = "          test -f .build/perchha-snapshots/current/"
-        let retainedArtifacts = lines.compactMap { line -> String? in
-            guard line.hasPrefix(screenshotPrefix) else {
-                return nil
-            }
-            return String(line.dropFirst(screenshotPrefix.count))
-        }
-
-        let retainedPNGs = retainedArtifacts.filter { $0.hasSuffix(".png") }
-
-        XCTAssertEqual(Set(retainedPNGs), Set(PerchHAReleaseEvidenceScreenshots.requiredNames))
-        XCTAssertTrue(retainedArtifacts.contains(PerchHAReleaseEvidenceReview.currentBaselineFilename))
-        XCTAssertTrue(retainedArtifacts.contains(PerchHAReleaseEvidenceReview.expectedBaselineFilename))
-    }
-
-    func testReleaseWorkflowSupportsLocalEvidenceAndCredentialedReleaseModes() throws {
+    func testReleaseWorkflowBuildsVerifiesAndPublishesTheUniversalBundle() throws {
         let rootURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
         let workflowURL = rootURL.appendingPathComponent(".github/workflows/release.yml", isDirectory: false)
         let workflow = try String(contentsOf: workflowURL, encoding: .utf8)
 
+        // Manual dispatch with an optional version override; the same shared
+        // checks gate the release build.
         XCTAssertTrue(workflow.contains("workflow_dispatch:"))
-        XCTAssertTrue(workflow.contains("local-evidence"))
-        XCTAssertTrue(workflow.contains("credentialed-release"))
-        XCTAssertTrue(workflow.contains("publish_release"))
-        XCTAssertTrue(workflow.contains("oauth_client_id"))
-        XCTAssertTrue(workflow.contains("oauth_redirect_uri"))
-        XCTAssertTrue(workflow.contains("swift run perchha-xcode-doctor --json --strict"))
-        XCTAssertTrue(
-            workflow.contains(
-                "swift test --disable-swift-testing --enable-xctest -Xswiftc -warnings-as-errors --enable-code-coverage"
-            )
-        )
-        XCTAssertTrue(workflow.contains("swift run perchha-coverage-check"))
-        XCTAssertTrue(workflow.contains("swift run perchha-repo-audit"))
-        XCTAssertTrue(workflow.contains("swift run perchha-package-app --write-oauth-site"))
-        XCTAssertTrue(workflow.contains("swift run perchha-package-app --verify-oauth-site"))
-        XCTAssertTrue(workflow.contains("--bundle-release-evidence .build/perchha-release-evidence"))
+        XCTAssertTrue(workflow.contains("Optional version override"))
+        XCTAssertTrue(workflow.contains("sh scripts/check.sh"))
+        // Universal release binary, packaged with manifest + evidence and
+        // verified before anything is published.
+        XCTAssertTrue(workflow.contains("swift build -c release --arch arm64 --arch x86_64"))
         XCTAssertTrue(workflow.contains("--sign-ad-hoc"))
-        XCTAssertTrue(workflow.contains("--sign-identity \"$PERCHHA_DEVELOPER_ID_IDENTITY\""))
-        XCTAssertTrue(workflow.contains("--notary-profile \"$PERCHHA_NOTARY_PROFILE\""))
-        XCTAssertTrue(workflow.contains("xcrun notarytool store-credentials"))
-        XCTAssertTrue(workflow.contains("gh release create"))
-        XCTAssertTrue(workflow.contains("actions/upload-artifact@v4"))
-        XCTAssertTrue(workflow.contains("publish_release is only allowed from main"))
+        XCTAssertTrue(workflow.contains("--package-dmg"))
+        XCTAssertTrue(workflow.contains("--release-manifest build/perchha-release-manifest.json"))
+        XCTAssertTrue(workflow.contains("--bundle-release-evidence build/perchha-release-evidence"))
+        XCTAssertTrue(workflow.contains("--snapshot-dir .build/perchha-snapshots/current"))
+        XCTAssertTrue(workflow.contains("--verify-release-manifest build/perchha-release-manifest.json"))
+        XCTAssertTrue(workflow.contains("lipo -info"))
+        XCTAssertTrue(workflow.contains("codesign --verify --deep"))
+        // Publishing and the optional Homebrew tap update.
+        XCTAssertTrue(workflow.contains("softprops/action-gh-release@v2"))
+        XCTAssertTrue(workflow.contains("HOMEBREW_TAP_TOKEN"))
+        XCTAssertTrue(workflow.contains("Casks/perchha.rb"))
     }
 
-    func testReleaseGuideDocumentsWorkflowVariablesAndSecrets() throws {
+    func testReleaseGuideDocumentsTheWorkflows() throws {
         let rootURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
         let releaseGuideURL = rootURL.appendingPathComponent("docs/RELEASE.md", isDirectory: false)
         let releaseGuide = try String(contentsOf: releaseGuideURL, encoding: .utf8)
 
+        XCTAssertTrue(releaseGuide.contains(".github/workflows/ci.yml"))
         XCTAssertTrue(releaseGuide.contains(".github/workflows/release.yml"))
-        XCTAssertTrue(releaseGuide.contains("mode=local-evidence"))
-        XCTAssertTrue(releaseGuide.contains("mode=credentialed-release"))
-        XCTAssertTrue(releaseGuide.contains("publish_release=true"))
-        XCTAssertTrue(releaseGuide.contains("oauth_client_id"))
-        XCTAssertTrue(releaseGuide.contains("oauth_redirect_uri"))
-        XCTAssertTrue(releaseGuide.contains("PERCHHA_OAUTH_CLIENT_ID"))
-        XCTAssertTrue(releaseGuide.contains("PERCHHA_OAUTH_REDIRECT_URI"))
-        XCTAssertTrue(releaseGuide.contains("PERCHHA_DEVELOPER_ID_IDENTITY"))
-        XCTAssertTrue(releaseGuide.contains("PERCHHA_NOTARY_PROFILE"))
-        XCTAssertTrue(releaseGuide.contains("PERCHHA_APP_STORE_CONNECT_KEY_ID"))
-        XCTAssertTrue(releaseGuide.contains("PERCHHA_APP_STORE_CONNECT_ISSUER_ID"))
-        XCTAssertTrue(releaseGuide.contains("PERCHHA_DEVELOPER_ID_CERTIFICATE_P12_BASE64"))
-        XCTAssertTrue(releaseGuide.contains("PERCHHA_DEVELOPER_ID_CERTIFICATE_PASSWORD"))
-        XCTAssertTrue(releaseGuide.contains("PERCHHA_KEYCHAIN_PASSWORD"))
-        XCTAssertTrue(releaseGuide.contains("PERCHHA_APP_STORE_CONNECT_KEY_P8_BASE64"))
+        XCTAssertTrue(releaseGuide.contains("scripts/check.sh"))
+        XCTAssertTrue(releaseGuide.contains("HOMEBREW_TAP_TOKEN"))
     }
 
     func testDMGBuilderStagesAppApplicationsShortcutAndRunsHdiutilCreate() throws {
