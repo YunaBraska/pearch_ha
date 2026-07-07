@@ -229,6 +229,23 @@ final class FakeHATests: XCTestCase {
         XCTAssertTrue(result.contains(#""code":"unknown_command""#))
     }
 
+    func testFakeHAWebSocketServerIsReachableImmediatelyAfterStartAcrossRepeatedStarts() throws {
+        let probe = FakeHARawWebSocketProbe()
+
+        for _ in 0..<10 {
+            do {
+                let server = try FakeHAWebSocketServer()
+                server.start()
+                defer {
+                    server.stop()
+                }
+
+                let payload = try probe.authenticateWithCoalescedUpgrade(baseURL: server.baseURL)
+                XCTAssertNotNil(payload.range(of: Data(#""type":"auth_ok""#.utf8)))
+            }
+        }
+    }
+
     func testFakeHAWebSocketServerReturnsRecorderStatistics() async throws {
         let fixtures = FakeHAFixtures(
             apiBody: #"{"message":"API running."}"#,

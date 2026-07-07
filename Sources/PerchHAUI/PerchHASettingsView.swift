@@ -5,6 +5,62 @@ import UniformTypeIdentifiers
 import PerchHACore
 import PerchHASupport
 
+struct PerchHAConnectionTokenAccessPresentation: Equatable {
+    let usesStoredToken: Bool
+    let tokenDraft: String
+
+    private var trimmedTokenDraft: String {
+        tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var hasTokenDraft: Bool {
+        !trimmedTokenDraft.isEmpty
+    }
+
+    var showsSavedTokenGuidance: Bool {
+        usesStoredToken && !hasTokenDraft
+    }
+
+    var fieldPlaceholder: String {
+        showsSavedTokenGuidance ? "Paste new token to replace the saved one" : "Access token"
+    }
+
+    var editableButtonTitle: String {
+        showsSavedTokenGuidance ? "Connect with saved token" : "Connect with token"
+    }
+
+    var connectedButtonTitle: String {
+        if hasTokenDraft {
+            return "Update token and reconnect"
+        }
+        if usesStoredToken {
+            return "Reconnect with saved token"
+        }
+        return "Update connection"
+    }
+
+    var savedTokenGuidance: String? {
+        guard showsSavedTokenGuidance else {
+            return nil
+        }
+        return "A token is already stored in the macOS Keychain. Leave this blank to reuse it, or paste a new token to replace it on the next successful connect."
+    }
+
+    var tokenCreationGuidance: String {
+        "Create one in Home Assistant under your profile → Security → Long-lived access tokens."
+    }
+
+    var connectedActionHelp: String {
+        if hasTokenDraft {
+            return "Reconnect using the token shown here and the addresses above."
+        }
+        if usesStoredToken {
+            return "Reconnect using your saved Keychain token and the addresses above."
+        }
+        return "Reconnect using the addresses above."
+    }
+}
+
 /// Connection form field stack shared by the menu-bar panel's first-run view and
 /// the Settings window's Connection tab.
 ///
@@ -67,16 +123,22 @@ struct PerchHAConnectionFormFields: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 PerchHANativeSecureField(
-                    placeholder: "Access token",
+                    placeholder: tokenAccessPresentation.fieldPlaceholder,
                     text: tokenBinding,
                     contentType: .password
                 )
-                Text("Create one in Home Assistant under your profile → Security → Long-lived access tokens.")
+                if let savedTokenGuidance = tokenAccessPresentation.savedTokenGuidance {
+                    Text(savedTokenGuidance)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text(tokenAccessPresentation.tokenCreationGuidance)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("Where to find a token: Home Assistant profile, Security, Long-lived access tokens.")
-                Button("Connect with token") {
+                Button(tokenAccessPresentation.editableButtonTitle) {
                     model.startConnect()
                 }
                 .buttonStyle(.bordered)
@@ -262,14 +324,32 @@ struct PerchHAConnectionFormFields: View {
 
             addressList
 
+            VStack(alignment: .leading, spacing: 4) {
+                PerchHANativeSecureField(
+                    placeholder: tokenAccessPresentation.fieldPlaceholder,
+                    text: tokenBinding,
+                    contentType: .password
+                )
+                if let savedTokenGuidance = tokenAccessPresentation.savedTokenGuidance {
+                    Text(savedTokenGuidance)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text(tokenAccessPresentation.tokenCreationGuidance)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             HStack(spacing: 8) {
-                Button("Update connection") {
+                Button(tokenAccessPresentation.connectedButtonTitle) {
                     model.applyConnectionEdits()
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(isConnectionBusy || !model.canApplyConnectionEdits)
-                .help("Reconnect using your saved session and the addresses above.")
+                .help(tokenAccessPresentation.connectedActionHelp)
 
                 Button("Sign out") {
                     model.signOut()
@@ -409,6 +489,13 @@ struct PerchHAConnectionFormFields: View {
             set: { value in
                 model.updateConnectionForm(token: value)
             }
+        )
+    }
+
+    private var tokenAccessPresentation: PerchHAConnectionTokenAccessPresentation {
+        PerchHAConnectionTokenAccessPresentation(
+            usesStoredToken: model.snapshot.connectionForm.usesStoredAuthSession,
+            tokenDraft: model.tokenInputForView
         )
     }
 }

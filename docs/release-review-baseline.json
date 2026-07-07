@@ -3,7 +3,7 @@
     "name" : "review-contact-sheet.png",
     "pixelsHigh" : 1346,
     "pixelsWide" : 672,
-    "sampledHashHex" : "713e081a361682fa",
+    "sampledHashHex" : "f2b316d7da3bc9ca",
     "visiblePixelCount" : 904496
   },
   "renderEnvironment" : "macos-26.5.1-arm64",
@@ -13,28 +13,28 @@
       "name" : "connected-light.png",
       "pixelsHigh" : 936,
       "pixelsWide" : 768,
-      "sampledHashHex" : "e949bd7d419786b0",
+      "sampledHashHex" : "fc6b181bacb9b9cf",
       "visiblePixelCount" : 718638
     },
     {
       "name" : "connected-dark.png",
       "pixelsHigh" : 936,
       "pixelsWide" : 768,
-      "sampledHashHex" : "270ed99cfd83020f",
+      "sampledHashHex" : "4ca769eaf25ad777",
       "visiblePixelCount" : 718848
     },
     {
       "name" : "connected-dark-increased-contrast.png",
       "pixelsHigh" : 936,
       "pixelsWide" : 768,
-      "sampledHashHex" : "334ad958a68a3405",
+      "sampledHashHex" : "5d171ece81cd220d",
       "visiblePixelCount" : 718848
     },
     {
       "name" : "connected-light-reduced-motion.png",
       "pixelsHigh" : 936,
       "pixelsWide" : 768,
-      "sampledHashHex" : "e949bd7d419786b0",
+      "sampledHashHex" : "fc6b181bacb9b9cf",
       "visiblePixelCount" : 718638
     },
     {
@@ -55,7 +55,7 @@
       "name" : "built-in-controls-light.png",
       "pixelsHigh" : 936,
       "pixelsWide" : 768,
-      "sampledHashHex" : "998e5dfa11ebf6f7",
+      "sampledHashHex" : "d1f40d4bc528e2bf",
       "visiblePixelCount" : 718638
     },
     {
@@ -87,10 +87,17 @@
       "visiblePixelCount" : 1164800
     },
     {
+      "name" : "settings-about-update-light.png",
+      "pixelsHigh" : 1240,
+      "pixelsWide" : 1040,
+      "sampledHashHex" : "bf4465909110683b",
+      "visiblePixelCount" : 1289600
+    },
+    {
       "name" : "reconnecting-light.png",
       "pixelsHigh" : 936,
       "pixelsWide" : 768,
-      "sampledHashHex" : "83cccbe359e0f9fa",
+      "sampledHashHex" : "97ff8de56ea7ad35",
       "visiblePixelCount" : 718638
     },
     {

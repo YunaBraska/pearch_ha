@@ -608,6 +608,54 @@ final class PerchHAClientTests: XCTestCase {
         )
     }
 
+    func testOAuthCodeExchangeReportsHTTPStatusFailure() async throws {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .success(HARESTResponse(statusCode: 418, headers: [:], body: Data()))
+            ]
+        )
+
+        let result = await HomeAssistantClient(transport: transport).exchangeAuthorizationCode(
+            baseURL: try XCTUnwrap(URL(string: "https://homeassistant.local")),
+            code: "code",
+            clientID: "https://perchha.dev/app"
+        )
+
+        XCTAssertEqual(result, .failure(.httpStatus(path: "/auth/token", statusCode: 418)))
+    }
+
+    func testOAuthCodeExchangeMapsNonHTTPResponseToInvalidResponse() async throws {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .nonHTTPResponse
+            ]
+        )
+
+        let result = await HomeAssistantClient(transport: transport).exchangeAuthorizationCode(
+            baseURL: try XCTUnwrap(URL(string: "https://homeassistant.local")),
+            code: "code",
+            clientID: "https://perchha.dev/app"
+        )
+
+        XCTAssertEqual(result, .failure(.invalidResponse(path: "/auth/token")))
+    }
+
+    func testOAuthCodeExchangeMapsTransportURLFailure() async throws {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .urlError(URLError(.timedOut))
+            ]
+        )
+
+        let result = await HomeAssistantClient(transport: transport).exchangeAuthorizationCode(
+            baseURL: try XCTUnwrap(URL(string: "https://homeassistant.local")),
+            code: "code",
+            clientID: "https://perchha.dev/app"
+        )
+
+        XCTAssertEqual(result, .failure(.unreachable(host: "homeassistant.local")))
+    }
+
     func testOAuthTokenEndpointInactiveUserMapsToAuthentication() async throws {
         let transport = RecordingHARESTTransport(
             responses: [
@@ -772,6 +820,30 @@ final class PerchHAClientTests: XCTestCase {
         }
     }
 
+    func testRESTConnectionReportsHTTPStatusFailure() async throws {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .success(HARESTResponse(statusCode: 503, headers: [:], body: Data(#"{"message":"offline"}"#.utf8)))
+            ]
+        )
+
+        let result = await HomeAssistantClient(transport: transport).checkRESTConnection(try connectionInput())
+
+        XCTAssertEqual(result, .failure(.httpStatus(path: "/api/", statusCode: 503)))
+    }
+
+    func testRESTConnectionMapsNonHTTPResponseToInvalidResponse() async throws {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .nonHTTPResponse
+            ]
+        )
+
+        let result = await HomeAssistantClient(transport: transport).checkRESTConnection(try connectionInput())
+
+        XCTAssertEqual(result, .failure(.invalidResponse(path: "/api/")))
+    }
+
     func testClientFailureMapsToCoreConnectionFailure() {
         XCTAssertEqual(HAClientFailure.authentication.connectionFailure, .authentication)
         XCTAssertEqual(HAClientFailure.unreachable(host: "homeassistant.local").connectionFailure, .unreachable(host: "homeassistant.local"))
@@ -779,6 +851,70 @@ final class PerchHAClientTests: XCTestCase {
         XCTAssertEqual(
             HAClientFailure.httpStatus(path: "/api/", statusCode: 500).connectionFailure,
             .protocolError("HTTP 500 for /api/")
+        )
+        XCTAssertEqual(
+            HAClientFailure.invalidURL(path: "/bad path").connectionFailure,
+            .protocolError("invalid URL path: /bad path")
+        )
+        XCTAssertEqual(
+            HAClientFailure.invalidResponse(path: "/api/").connectionFailure,
+            .protocolError("non-HTTP response for /api/")
+        )
+        XCTAssertEqual(
+            HAClientFailure.invalidPayload(path: "/api/states", reason: "broken").connectionFailure,
+            .protocolError("invalid payload for /api/states: broken")
+        )
+        XCTAssertEqual(
+            HAClientFailure.webSocketProtocol("oops").connectionFailure,
+            .protocolError("WebSocket protocol error: oops")
+        )
+        XCTAssertEqual(
+            HAClientFailure.webSocketCommand(id: 9, code: "unknown_command", message: "nope").connectionFailure,
+            .protocolError("WebSocket command 9 failed: unknown_command - nope")
+        )
+        XCTAssertEqual(
+            HAClientFailure.transport("socket closed").connectionFailure,
+            .protocolError("socket closed")
+        )
+    }
+
+    func testClientFailureDescriptionsStaySpecific() {
+        XCTAssertEqual(HAClientFailure.authentication.description, "Home Assistant rejected the access token")
+        XCTAssertEqual(
+            HAClientFailure.unreachable(host: "ha.local").description,
+            "Home Assistant is unreachable at ha.local"
+        )
+        XCTAssertEqual(
+            HAClientFailure.tlsRejected(host: "ha.local").description,
+            "Home Assistant TLS certificate was rejected for ha.local"
+        )
+        XCTAssertEqual(
+            HAClientFailure.invalidURL(path: "/broken").description,
+            "invalid Home Assistant URL path: /broken"
+        )
+        XCTAssertEqual(
+            HAClientFailure.invalidResponse(path: "/api/").description,
+            "Home Assistant returned a non-HTTP response for /api/"
+        )
+        XCTAssertEqual(
+            HAClientFailure.invalidPayload(path: "/api/states", reason: "missing state").description,
+            "Home Assistant returned invalid payload for /api/states: missing state"
+        )
+        XCTAssertEqual(
+            HAClientFailure.httpStatus(path: "/api/", statusCode: 503).description,
+            "Home Assistant returned HTTP 503 for /api/"
+        )
+        XCTAssertEqual(
+            HAClientFailure.webSocketProtocol("bad ack").description,
+            "Home Assistant WebSocket protocol error: bad ack"
+        )
+        XCTAssertEqual(
+            HAClientFailure.webSocketCommand(id: nil, code: "unknown_command", message: "unsupported").description,
+            "Home Assistant WebSocket command ? failed: unknown_command - unsupported"
+        )
+        XCTAssertEqual(
+            HAClientFailure.transport("connection reset").description,
+            "Home Assistant transport failed: connection reset"
         )
     }
 
@@ -1367,6 +1503,60 @@ final class PerchHAClientTests: XCTestCase {
         XCTAssertEqual(filters, ["sensor.a,sensor.b", "sensor.c"])
     }
 
+    func test_t_bulk_history_returns_empty_without_transport_when_entity_list_is_empty() async throws {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .transportError("transport should stay idle")
+            ]
+        )
+        let client = HomeAssistantClient(transport: transport)
+
+        let result = await client.historyBatch(
+            try connectionInput(),
+            entityIDs: [],
+            range: .hour,
+            end: try historyDate("2026-06-27T12:00:00+00:00")
+        )
+
+        XCTAssertEqual(result, .success([:]))
+        let requests = await transport.requests
+        XCTAssertTrue(requests.isEmpty)
+    }
+
+    func test_t_bulk_history_deduplicates_entity_ids_and_treats_zero_batch_size_as_one() async throws {
+        func body(for id: String) -> String {
+            #"[ [{"entity_id":"\#(id)","state":"1.0","last_changed":"2026-06-27T10:00:00+00:00"}] ]"#
+        }
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(body(for: "sensor.a").utf8))),
+                .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(body(for: "sensor.b").utf8)))
+            ]
+        )
+        let client = HomeAssistantClient(transport: transport)
+
+        let result = await client.historyBatch(
+            try connectionInput(),
+            entityIDs: ["sensor.a", "sensor.a", "sensor.b"],
+            range: .hour,
+            end: try historyDate("2026-06-27T12:00:00+00:00"),
+            batchSize: 0
+        )
+
+        guard case let .success(series) = result else {
+            XCTFail("bulk history unexpectedly failed: \(result)")
+            return
+        }
+        XCTAssertEqual(Set(series.keys), ["sensor.a", "sensor.b"])
+        let requests = await transport.requests
+        XCTAssertEqual(requests.count, 2)
+        let filters = requests.map { request in
+            (URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
+                .first { $0.name == "filter_entity_id" }?.value
+        }
+        XCTAssertEqual(filters, ["sensor.a", "sensor.b"])
+    }
+
     func test_t_bulk_history_partial_or_empty_entity_yields_no_series_without_failing() async throws {
         // sensor.a returns rows; sensor.b is absent entirely; an empty group is
         // ignored. The batch still succeeds for the entities that came back.
@@ -1434,6 +1624,60 @@ final class PerchHAClientTests: XCTestCase {
         XCTAssertNotNil(series["sensor.a"])
         let requests = await transport.requests
         XCTAssertEqual(requests.map { $0.url.host }, ["primary.local", "fallback.example"])
+    }
+
+    func test_t_bulk_history_returns_partial_success_when_later_batch_transport_fails() async throws {
+        let firstBatch = #"[ [{"entity_id":"sensor.a","state":"1.0","last_changed":"2026-06-27T10:00:00+00:00"}] ]"#
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(firstBatch.utf8))),
+                .transportError("secret-token connection dropped")
+            ]
+        )
+        let client = HomeAssistantClient(transport: transport)
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: try XCTUnwrap(URL(string: "http://primary.local:8123")), fallbackURL: nil),
+            token: "secret-token"
+        )
+
+        let result = await client.historyBatch(
+            input,
+            entityIDs: ["sensor.a", "sensor.b"],
+            range: .hour,
+            end: try historyDate("2026-06-27T12:00:00+00:00"),
+            batchSize: 1
+        )
+
+        guard case let .success(series) = result else {
+            XCTFail("bulk history unexpectedly failed: \(result)")
+            return
+        }
+        XCTAssertEqual(Set(series.keys), ["sensor.a"])
+        let requests = await transport.requests
+        XCTAssertEqual(requests.count, 2)
+    }
+
+    func test_t_bulk_history_surfaces_authentication_when_later_batch_rejects_token() async throws {
+        let firstBatch = #"[ [{"entity_id":"sensor.a","state":"1.0","last_changed":"2026-06-27T10:00:00+00:00"}] ]"#
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(firstBatch.utf8))),
+                .success(HARESTResponse(statusCode: 401, headers: [:], body: Data()))
+            ]
+        )
+        let client = HomeAssistantClient(transport: transport)
+
+        let result = await client.historyBatch(
+            try connectionInput(),
+            entityIDs: ["sensor.a", "sensor.b"],
+            range: .hour,
+            end: try historyDate("2026-06-27T12:00:00+00:00"),
+            batchSize: 1
+        )
+
+        XCTAssertEqual(result, .failure(.authentication))
+        let requests = await transport.requests
+        XCTAssertEqual(requests.count, 2)
     }
 
     func test_t_bulk_history_never_leaks_token_on_failure() async throws {
@@ -1523,6 +1767,48 @@ final class PerchHAClientTests: XCTestCase {
             "both entities travel in one statistics command"
         )
         XCTAssertFalse(journal.contains { $0.path.hasPrefix("/api/history/period/") })
+    }
+
+    func test_t_bulk_history_week_skips_entities_without_recorder_samples() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[]"#,
+            recorderStatisticsBody: """
+            {
+              "sensor.office_temperature": [],
+              "sensor.office_humidity": [
+                {"start":1782554400000,"end":1782558000000,"mean":47.0}
+              ]
+            }
+            """
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = HomeAssistantClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        let result = await client.historyBatch(
+            input,
+            entityIDs: ["sensor.office_temperature", "sensor.office_humidity"],
+            range: .week,
+            end: try historyDate("2026-06-27T12:00:00+00:00")
+        )
+
+        guard case let .success(series) = result else {
+            XCTFail("bulk statistics history unexpectedly failed: \(result)")
+            return
+        }
+        XCTAssertNil(series["sensor.office_temperature"])
+        XCTAssertEqual(
+            series["sensor.office_humidity"]?.samples,
+            [HistorySample(timestamp: try historyDate("2026-06-27T10:00:00+00:00"), state: "47.0", numericValue: 47.0)]
+        )
     }
 
     func test_t_bulk_history_week_falls_back_to_rest_when_recorder_statistics_is_unknown() async throws {
@@ -1992,6 +2278,39 @@ final class PerchHAClientTests: XCTestCase {
             XCTAssertTrue(error.description.contains("/api/websocket"))
         } else {
             XCTFail("malformed recorder statistics payload unexpectedly succeeded")
+        }
+    }
+
+    func test_t_bulk_history_week_rejects_malformed_recorder_statistics_payload() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[]"#,
+            recorderStatisticsBody: """
+            {"sensor.office_temperature":[{"start":"bad","mean":22.0}]}
+            """
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = HomeAssistantClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        let result = await client.historyBatch(
+            input,
+            entityIDs: ["sensor.office_temperature"],
+            range: .week,
+            end: try historyDate("2026-06-27T12:00:00+00:00")
+        )
+
+        if case let .failure(error) = result {
+            XCTAssertTrue(error.description.contains("/api/websocket"))
+        } else {
+            XCTFail("malformed bulk recorder statistics payload unexpectedly succeeded")
         }
     }
 
@@ -2648,6 +2967,31 @@ final class PerchHAClientTests: XCTestCase {
                 HAConnectionInput(endpoint: input.endpoint, token: "wrong-token")
             ),
             .failure(.authentication)
+        )
+    }
+
+    func test_t_discovery_surfaces_registry_command_failure_explicitly() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[]"#,
+            areaRegistryBody: #"[]"#,
+            deviceRegistryBody: #"[]"#,
+            entityRegistryBody: #"[]"#
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures, mode: .commandFailure)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = HomeAssistantClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        await assertEqualAsync(
+            await client.discovery(input),
+            .failure(.webSocketCommand(id: 1, code: "failed", message: "Planned command failure"))
         )
     }
 
@@ -3461,6 +3805,82 @@ final class PerchHAClientTests: XCTestCase {
         }
     }
 
+    func testStreamEntityStateChangesSurfacesCommandFailureWithoutFallingBack() async throws {
+        let server = try FakeHAWebSocketServer(mode: .commandFailure)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = HomeAssistantClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(urls: [server.baseURL]),
+            token: "fake-token"
+        )
+
+        let terminal = await client.streamEntityStateChanges(input) { _ in
+            XCTFail("stream should not deliver events when subscribe_entities fails")
+        }
+
+        XCTAssertEqual(
+            terminal,
+            .webSocketCommand(id: 1, code: "failed", message: "Planned command failure")
+        )
+        let paths = await server.journal.snapshot().map(\.path)
+        XCTAssertFalse(paths.contains("/api/websocket/subscribe_events"))
+    }
+
+    func testStreamEntityStateChangesFallsBackToSubscribeEventsWhenSubscribeEntitiesIsUnknown() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[]"#,
+            stateChangedEventBody: #"{"entity_id":"sensor.office_temperature","state":"22.0","attributes":{"friendly_name":"Office temperature","unit_of_measurement":"°C"}}"#
+        )
+        let server = try FakeHAWebSocketServer(
+            fixtures: fixtures,
+            mode: .unavailableCommands(["subscribe_entities"], code: .unknownCommand)
+        )
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = HomeAssistantClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(urls: [server.baseURL]),
+            token: "fake-token"
+        )
+        actor Collector {
+            private(set) var states: [EntityState] = []
+            func append(_ state: EntityState) {
+                states.append(state)
+            }
+        }
+        let collector = Collector()
+        let streamTask = Task {
+            await client.streamEntityStateChanges(input) { state in
+                await collector.append(state)
+            }
+        }
+
+        var received: [EntityState] = []
+        for _ in 0..<200 {
+            received = await collector.states
+            if !received.isEmpty {
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(
+            received,
+            [EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "22.0", unit: "°C")]
+        )
+        try await waitForJournalPath(server: server, path: "/api/websocket/subscribe_events")
+        streamTask.cancel()
+        _ = await streamTask.value
+        let paths = await server.journal.snapshot().map(\.path)
+        XCTAssertTrue(paths.contains("/api/websocket/subscribe_entities"))
+        XCTAssertTrue(paths.contains("/api/websocket/subscribe_events"))
+    }
+
     func testWebSocketCommandTimesOutAsUnreachableWhenServerGoesSilentAfterAuth() async throws {
         let server = try FakeHAWebSocketServer(mode: .silentAfterAuth)
         server.start()
@@ -3583,6 +4003,26 @@ final class PerchHAClientTests: XCTestCase {
         XCTAssertEqual(requests.map { requestPercentEncodedPath($0.url) }, ["/api/"])
     }
 
+    func testMirrorCapturePropagatesMirrorCaptureErrorsFromTransport() async throws {
+        let transport = RecordingMirrorTransport { _ in
+            throw HAMirrorCaptureError.transportFailure(path: "/api/", message: "connection refused")
+        }
+        let environment = HAMirrorEnvironment(
+            primaryURL: try XCTUnwrap(URL(string: "http://127.0.0.1:8123")),
+            fallbackURL: nil,
+            token: "secret-token",
+            user: nil,
+            password: nil
+        )
+
+        do {
+            _ = try await HAMirrorCaptureService(transport: transport).capture(environment: environment)
+            XCTFail("capture unexpectedly succeeded")
+        } catch let error as HAMirrorCaptureError {
+            XCTAssertEqual(error, .transportFailure(path: "/api/", message: "connection refused"))
+        }
+    }
+
     func testMirrorProbeReportsPrimaryReadyWithoutFallback() async throws {
         let transport = RecordingMirrorTransport()
         let service = HAMirrorCaptureService(transport: transport)
@@ -3677,6 +4117,75 @@ final class PerchHAClientTests: XCTestCase {
         )
         let requests = await transport.requests
         XCTAssertTrue(requests.isEmpty)
+    }
+
+    func testMirrorProbeReports404GuidanceForBrokenBasePath() async throws {
+        let transport = RecordingMirrorTransport { _ in
+            HAMirrorResponse(
+                statusCode: 404,
+                headers: [:],
+                body: Data(#"{"message":"missing"}"#.utf8)
+            )
+        }
+        let service = HAMirrorCaptureService(transport: transport)
+        let environment = HAMirrorEnvironment(
+            primaryURL: try XCTUnwrap(URL(string: "http://127.0.0.1:8123/ha")),
+            fallbackURL: nil,
+            token: "secret-token",
+            user: nil,
+            password: nil
+        )
+
+        let report = await service.probe(environment: environment)
+
+        XCTAssertEqual(report.primary.state, .unavailable)
+        XCTAssertEqual(report.primary.message, "Home Assistant returned HTTP 404 for /api/")
+        XCTAssertEqual(
+            report.primary.guidance,
+            "Verify the Home Assistant base URL and reverse-proxy path. The probe expects /api/ to exist on this host."
+        )
+    }
+
+    func testMirrorProbeReportsServerErrorGuidanceWhenHAIsUnhealthy() async throws {
+        let transport = RecordingMirrorTransport(apiStatusCode: 503, apiBody: #"{"message":"starting"}"#)
+        let service = HAMirrorCaptureService(transport: transport)
+        let environment = HAMirrorEnvironment(
+            primaryURL: try XCTUnwrap(URL(string: "http://127.0.0.1:8123")),
+            fallbackURL: nil,
+            token: "secret-token",
+            user: nil,
+            password: nil
+        )
+
+        let report = await service.probe(environment: environment)
+
+        XCTAssertEqual(report.primary.state, .unavailable)
+        XCTAssertEqual(report.primary.message, "Home Assistant returned HTTP 503 for /api/")
+        XCTAssertEqual(
+            report.primary.guidance,
+            "Home Assistant is reachable but unhealthy. Check the server logs and wait for the instance to finish starting."
+        )
+    }
+
+    func testMirrorProbeReportsDefaultHTTPGuidanceForUnexpectedStatus() async throws {
+        let transport = RecordingMirrorTransport(apiStatusCode: 418, apiBody: #"{"message":"teapot"}"#)
+        let service = HAMirrorCaptureService(transport: transport)
+        let environment = HAMirrorEnvironment(
+            primaryURL: try XCTUnwrap(URL(string: "http://127.0.0.1:8123")),
+            fallbackURL: nil,
+            token: "secret-token",
+            user: nil,
+            password: nil
+        )
+
+        let report = await service.probe(environment: environment)
+
+        XCTAssertEqual(report.primary.state, .unavailable)
+        XCTAssertEqual(report.primary.message, "Home Assistant returned HTTP 418 for /api/")
+        XCTAssertEqual(
+            report.primary.guidance,
+            "Verify the Home Assistant URL and that this instance allows API access at /api/."
+        )
     }
 
     func testMirrorCaptureFallsBackToConfiguredFallbackURLOnPrimaryTransportFailure() async throws {
@@ -3858,6 +4367,80 @@ final class PerchHAClientTests: XCTestCase {
         )
     }
 
+    func testFixtureSanitizerRejectsInvalidUTF8DataWithExplicitErrorDescription() {
+        var sanitizer = HAMirrorFixtureSanitizer()
+
+        XCTAssertThrowsError(try sanitizer.sanitize(path: "/api/states", body: Data([0xFF]))) { error in
+            XCTAssertEqual(error as? HAMirrorFixtureSanitizationError, .invalidUTF8("/api/states"))
+            XCTAssertEqual(
+                (error as? HAMirrorFixtureSanitizationError)?.description,
+                "fixture body for /api/states is not UTF-8"
+            )
+        }
+    }
+
+    func testFixtureSanitizerRejectsInvalidJSONTextWithExplicitErrorDescription() {
+        var sanitizer = HAMirrorFixtureSanitizer()
+
+        XCTAssertThrowsError(try sanitizer.sanitize(path: "/api/states", bodyText: "{")) { error in
+            XCTAssertEqual(error as? HAMirrorFixtureSanitizationError, .invalidJSON("/api/states"))
+            XCTAssertEqual(
+                (error as? HAMirrorFixtureSanitizationError)?.description,
+                "fixture body for /api/states is not JSON"
+            )
+        }
+    }
+
+    func testFixtureSanitizerNormalizesLocationsTimestampsAndUnsafeAttributes() throws {
+        var sanitizer = HAMirrorFixtureSanitizer()
+        let body = """
+        [{
+          "entity_id": "sensor.office_temperature",
+          "last_changed": "2026-07-01T12:34:56+00:00",
+          "attributes": {
+            "latitude": 52.52,
+            "longitude": 13.405,
+            "gps_accuracy": 0,
+            "device_class": "temperature",
+            "friendly_name": "Office temperature",
+            "note": "desk side"
+          }
+        }]
+        """
+
+        let sanitized = try sanitizer.sanitize(path: "/api/states", bodyText: body)
+
+        XCTAssertTrue(sanitized.contains(#""entity_id":"sensor.entity_001""#))
+        XCTAssertTrue(sanitized.contains(#""last_changed":"2026-01-01T00:00:00+00:00""#))
+        XCTAssertTrue(sanitized.contains(#""latitude":0"#))
+        XCTAssertTrue(sanitized.contains(#""longitude":0"#))
+        XCTAssertTrue(sanitized.contains(#""gps_accuracy":0"#))
+        XCTAssertTrue(sanitized.contains(#""device_class":"temperature""#))
+        XCTAssertTrue(sanitized.contains(#""friendly_name":"<redacted>""#))
+        XCTAssertTrue(sanitized.contains(#""note":"<redacted>""#))
+        XCTAssertFalse(sanitized.contains("52.52"))
+        XCTAssertFalse(sanitized.contains("13.405"))
+        XCTAssertFalse(sanitized.contains("Office temperature"))
+        XCTAssertFalse(sanitized.contains("desk side"))
+    }
+
+    func testFixtureSanitizerAliasesEntityIDArraysAndKeepsStableSyntheticIDs() throws {
+        var sanitizer = HAMirrorFixtureSanitizer()
+        let body = """
+        {
+          "entity_id": ["sensor.kitchen_temperature", "light.desk", "sensor.entity_999"],
+          "attributes": {
+            "supported_features": 3
+          }
+        }
+        """
+
+        let sanitized = try sanitizer.sanitize(path: "/api/test", bodyText: body)
+
+        XCTAssertTrue(sanitized.contains(#""entity_id":["sensor.entity_001","light.entity_002","sensor.entity_999"]"#))
+        XCTAssertTrue(sanitized.contains(#""supported_features":3"#))
+    }
+
     func testFixtureVerifierAcceptsCompleteSanitizedFixtureSet() throws {
         let fixtureSet = HAMirrorFixtureSet(
             api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
@@ -3925,6 +4508,36 @@ final class PerchHAClientTests: XCTestCase {
         }
     }
 
+    func testFixtureVerifierRejectsManifestWebSocketWithoutFile() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]"),
+            webSocket: HAMirrorWebSocketEvidence(
+                entityRegistryDisplayList: HAMirrorWebSocketCommandEvidence(
+                    command: "config/entity_registry/list_for_display",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                ),
+                subscribeEntities: HAMirrorWebSocketCommandEvidence(
+                    command: "subscribe_entities",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                )
+            )
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.removeItem(at: directory.appendingPathComponent("websocket.json"))
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(error as? HAMirrorFixtureVerificationError, .missingFiles(["websocket.json"]))
+        }
+    }
+
     func testFixtureVerifierRejectsUnknownWebSocketEvidenceFields() throws {
         let fixtureSet = HAMirrorFixtureSet(
             api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
@@ -3970,6 +4583,54 @@ final class PerchHAClientTests: XCTestCase {
                 XCTFail("unexpected error: \(error)")
                 return
             }
+        }
+    }
+
+    func testFixtureVerifierRejectsManifestWebSocketMismatch() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]"),
+            webSocket: HAMirrorWebSocketEvidence(
+                entityRegistryDisplayList: HAMirrorWebSocketCommandEvidence(
+                    command: "config/entity_registry/list_for_display",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                ),
+                subscribeEntities: HAMirrorWebSocketCommandEvidence(
+                    command: "subscribe_entities",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                )
+            )
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let mismatchedWebSocket = """
+        {
+          "entityRegistryDisplayList": {
+            "command": "config/entity_registry/list_for_display",
+            "available": true,
+            "errorCode": null,
+            "errorMessage": null,
+            "eventKeys": []
+          },
+          "subscribeEntities": {
+            "command": "subscribe_entities",
+            "available": false,
+            "errorCode": "unsupported_command",
+            "errorMessage": "Command unavailable",
+            "eventKeys": []
+          }
+        }
+        """
+        try mismatchedWebSocket.write(to: directory.appendingPathComponent("websocket.json"), atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(error as? HAMirrorFixtureVerificationError, .manifestMismatch)
         }
     }
 
@@ -4030,6 +4691,565 @@ final class PerchHAClientTests: XCTestCase {
             XCTAssertEqual(error as? HAMirrorFixtureVerificationError, .malformedFile("api.json"))
         }
     }
+
+    func testFixtureVerifierRejectsMalformedManifestJSON() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]")
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try "{".write(to: directory.appendingPathComponent("manifest.json"), atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(error as? HAMirrorFixtureVerificationError, .malformedFile("manifest.json"))
+        }
+    }
+
+    func testFixtureVerifierAcceptsManifestWithNullWebSocketEvidence() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]")
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let manifestWithNullWebSocket = """
+        {
+          "api": {
+            "method": "GET",
+            "path": "/api/",
+            "statusCode": 200,
+            "headers": {},
+            "bodyText": "{\\"message\\":\\"API running.\\"}"
+          },
+          "states": {
+            "method": "GET",
+            "path": "/api/states",
+            "statusCode": 200,
+            "headers": {},
+            "bodyText": "[]"
+          },
+          "webSocket": null
+        }
+        """
+        try manifestWithNullWebSocket.write(to: directory.appendingPathComponent("manifest.json"), atomically: true, encoding: .utf8)
+
+        XCTAssertEqual(try HAMirrorFixtureVerifier().verify(directory: directory), fixtureSet)
+    }
+
+    func testFixtureVerifierRejectsMissingStatesFile() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]")
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.removeItem(at: directory.appendingPathComponent("states.json"))
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(error as? HAMirrorFixtureVerificationError, .missingFiles(["states.json"]))
+        }
+    }
+
+    func testFixtureVerifierRejectsNonGetEndpointMethod() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "POST", path: "/api/", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]")
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(
+                error as? HAMirrorFixtureVerificationError,
+                .invalidEndpoint(file: "api.json", reason: "method must be GET")
+            )
+        }
+    }
+
+    func testFixtureVerifierRejectsWrongEndpointPath() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "GET", path: "/wrong", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]")
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(
+                error as? HAMirrorFixtureVerificationError,
+                .invalidEndpoint(file: "api.json", reason: "path must be /api/")
+            )
+        }
+    }
+
+    func testFixtureVerifierRejectsNonSuccessStatus() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 503, headers: [:], bodyText: #"{"message":"API running."}"#),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]")
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(
+                error as? HAMirrorFixtureVerificationError,
+                .invalidEndpoint(file: "api.json", reason: "status must be 2xx")
+            )
+        }
+    }
+
+    func testFixtureVerifierRejectsLeakedAuthorizationHeader() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(
+                method: "GET",
+                path: "/api/",
+                statusCode: 200,
+                headers: ["Authorization": "Bearer secret-token"],
+                bodyText: #"{"message":"API running."}"#
+            ),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]")
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(error as? HAMirrorFixtureVerificationError, .leakedHeader(path: "/api/"))
+        }
+    }
+
+    func testFixtureVerifierRejectsEndpointBodyWhenSanitizerThrows() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: "{"),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]")
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(
+                error as? HAMirrorFixtureVerificationError,
+                .invalidEndpoint(file: "api.json", reason: "fixture body for /api/ is not JSON")
+            )
+        }
+    }
+
+    func testFixtureVerifierRejectsManifestWithUnexpectedFields() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]")
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let manifest: [String: Any] = [
+            "api": [
+                "method": "GET",
+                "path": "/api/",
+                "statusCode": 200,
+                "headers": [:],
+                "bodyText": #"{"message":"API running."}"#
+            ],
+            "states": [
+                "method": "GET",
+                "path": "/api/states",
+                "statusCode": 200,
+                "headers": [:],
+                "bodyText": "[]"
+            ],
+            "secret": "nope"
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
+        try data.write(to: directory.appendingPathComponent("manifest.json"))
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(
+                error as? HAMirrorFixtureVerificationError,
+                .invalidWebSocketEvidence(reason: "manifest contains unexpected fields")
+            )
+        }
+    }
+
+    func testFixtureVerifierRejectsWebSocketCommandEvidenceUnexpectedFields() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]"),
+            webSocket: HAMirrorWebSocketEvidence(
+                entityRegistryDisplayList: HAMirrorWebSocketCommandEvidence(
+                    command: "config/entity_registry/list_for_display",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                ),
+                subscribeEntities: HAMirrorWebSocketCommandEvidence(
+                    command: "subscribe_entities",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                )
+            )
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let malformedWebSocket = """
+        {
+          "entityRegistryDisplayList": {
+            "command": "config/entity_registry/list_for_display",
+            "available": true,
+            "eventKeys": [],
+            "extra": true
+          },
+          "subscribeEntities": {
+            "command": "subscribe_entities",
+            "available": true,
+            "eventKeys": []
+          }
+        }
+        """
+        try malformedWebSocket.write(to: directory.appendingPathComponent("websocket.json"), atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(
+                error as? HAMirrorFixtureVerificationError,
+                .invalidWebSocketEvidence(reason: "websocket.json.entityRegistryDisplayList contains unexpected fields")
+            )
+        }
+    }
+
+    func testFixtureVerifierRejectsMalformedWebSocketJSON() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]"),
+            webSocket: HAMirrorWebSocketEvidence(
+                entityRegistryDisplayList: HAMirrorWebSocketCommandEvidence(
+                    command: "config/entity_registry/list_for_display",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                ),
+                subscribeEntities: HAMirrorWebSocketCommandEvidence(
+                    command: "subscribe_entities",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                )
+            )
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try "{".write(to: directory.appendingPathComponent("websocket.json"), atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(error as? HAMirrorFixtureVerificationError, .malformedFile("websocket.json"))
+        }
+    }
+
+    func testFixtureVerifierRejectsNonObjectWebSocketEvidenceFile() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]"),
+            webSocket: HAMirrorWebSocketEvidence(
+                entityRegistryDisplayList: HAMirrorWebSocketCommandEvidence(
+                    command: "config/entity_registry/list_for_display",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                ),
+                subscribeEntities: HAMirrorWebSocketCommandEvidence(
+                    command: "subscribe_entities",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                )
+            )
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try "[]".write(to: directory.appendingPathComponent("websocket.json"), atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(
+                error as? HAMirrorFixtureVerificationError,
+                .invalidWebSocketEvidence(reason: "websocket.json must be an object")
+            )
+        }
+    }
+
+    func testFixtureVerifierRejectsNonObjectWebSocketCommandEvidence() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]"),
+            webSocket: HAMirrorWebSocketEvidence(
+                entityRegistryDisplayList: HAMirrorWebSocketCommandEvidence(
+                    command: "config/entity_registry/list_for_display",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                ),
+                subscribeEntities: HAMirrorWebSocketCommandEvidence(
+                    command: "subscribe_entities",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                )
+            )
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let malformedWebSocket = """
+        {
+          "entityRegistryDisplayList": [],
+          "subscribeEntities": {
+            "command": "subscribe_entities",
+            "available": true,
+            "eventKeys": []
+          }
+        }
+        """
+        try malformedWebSocket.write(to: directory.appendingPathComponent("websocket.json"), atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(
+                error as? HAMirrorFixtureVerificationError,
+                .invalidWebSocketEvidence(reason: "websocket.json.entityRegistryDisplayList must be an object")
+            )
+        }
+    }
+
+    func testFixtureVerifierRejectsWebSocketEvidenceWithInvalidOptionalTypes() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]"),
+            webSocket: HAMirrorWebSocketEvidence(
+                entityRegistryDisplayList: HAMirrorWebSocketCommandEvidence(
+                    command: "config/entity_registry/list_for_display",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                ),
+                subscribeEntities: HAMirrorWebSocketCommandEvidence(
+                    command: "subscribe_entities",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                )
+            )
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let malformedWebSocket = """
+        {
+          "entityRegistryDisplayList": {
+            "command": "config/entity_registry/list_for_display",
+            "available": true,
+            "errorCode": 404,
+            "eventKeys": []
+          },
+          "subscribeEntities": {
+            "command": "subscribe_entities",
+            "available": true,
+            "eventKeys": []
+          }
+        }
+        """
+        try malformedWebSocket.write(to: directory.appendingPathComponent("websocket.json"), atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(
+                error as? HAMirrorFixtureVerificationError,
+                .invalidWebSocketEvidence(reason: "websocket.json.entityRegistryDisplayList.errorCode must be a string or null")
+            )
+        }
+    }
+
+    func testFixtureVerifierRejectsWebSocketCommandEvidenceInvalidFieldTypes() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]"),
+            webSocket: HAMirrorWebSocketEvidence(
+                entityRegistryDisplayList: HAMirrorWebSocketCommandEvidence(
+                    command: "config/entity_registry/list_for_display",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                ),
+                subscribeEntities: HAMirrorWebSocketCommandEvidence(
+                    command: "subscribe_entities",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                )
+            )
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let malformedWebSocket = """
+        {
+          "entityRegistryDisplayList": {
+            "command": 404,
+            "available": true,
+            "eventKeys": []
+          },
+          "subscribeEntities": {
+            "command": "subscribe_entities",
+            "available": true,
+            "eventKeys": []
+          }
+        }
+        """
+        try malformedWebSocket.write(to: directory.appendingPathComponent("websocket.json"), atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(
+                error as? HAMirrorFixtureVerificationError,
+                .invalidWebSocketEvidence(reason: "websocket.json.entityRegistryDisplayList has invalid field types")
+            )
+        }
+    }
+
+    func testFixtureVerifierRejectsUnexpectedWebSocketCommandName() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]"),
+            webSocket: HAMirrorWebSocketEvidence(
+                entityRegistryDisplayList: HAMirrorWebSocketCommandEvidence(
+                    command: "private_dump",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                ),
+                subscribeEntities: HAMirrorWebSocketCommandEvidence(
+                    command: "subscribe_entities",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                )
+            )
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(
+                error as? HAMirrorFixtureVerificationError,
+                .invalidWebSocketEvidence(reason: "unexpected command private_dump")
+            )
+        }
+    }
+
+    func testFixtureVerifierRejectsUnredactedWebSocketErrorMessage() throws {
+        let fixtureSet = HAMirrorFixtureSet(
+            api: HAMirrorCapturedEndpoint(method: "GET", path: "/api/", statusCode: 200, headers: [:], bodyText: #"{"message":"API running."}"#),
+            states: HAMirrorCapturedEndpoint(method: "GET", path: "/api/states", statusCode: 200, headers: [:], bodyText: "[]"),
+            webSocket: HAMirrorWebSocketEvidence(
+                entityRegistryDisplayList: HAMirrorWebSocketCommandEvidence(
+                    command: "config/entity_registry/list_for_display",
+                    available: false,
+                    errorCode: "unsupported_command",
+                    errorMessage: "token=secret-token leaked"
+                ),
+                subscribeEntities: HAMirrorWebSocketCommandEvidence(
+                    command: "subscribe_entities",
+                    available: true,
+                    errorCode: nil,
+                    errorMessage: nil
+                )
+            )
+        )
+        let directory = try writeFixtureSet(fixtureSet)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        XCTAssertThrowsError(try HAMirrorFixtureVerifier().verify(directory: directory)) { error in
+            XCTAssertEqual(
+                error as? HAMirrorFixtureVerificationError,
+                .invalidWebSocketEvidence(reason: "unredacted error message for config/entity_registry/list_for_display")
+            )
+        }
+    }
+
+    func testMirrorErrorDescriptionsStayStable() {
+        XCTAssertEqual(HAMirrorCaptureError.missingToken.description, "missing token in environment file")
+        XCTAssertEqual(HAMirrorCaptureError.nonHTTPResponse.description, "Home Assistant returned a non-HTTP response")
+        XCTAssertEqual(HAMirrorCaptureError.invalidPath("bad").description, "invalid Home Assistant path: bad")
+        XCTAssertEqual(
+            HAMirrorCaptureError.transportFailure(path: "/api/", message: "connection refused").description,
+            "Home Assistant request for /api/ failed: connection refused"
+        )
+        XCTAssertEqual(
+            HAMirrorCaptureError.unexpectedStatus(path: "/api/", statusCode: 418).description,
+            "Home Assistant returned HTTP 418 for /api/"
+        )
+        XCTAssertEqual(
+            HAMirrorCaptureError.primaryAndFallbackFailed(
+                path: "/api/",
+                primaryFailure: "primary down",
+                fallbackFailure: "fallback unauthorized"
+            ).description,
+            "Home Assistant request for /api/ failed on both primary and fallback: primary=primary down; fallback=fallback unauthorized"
+        )
+        XCTAssertEqual(HAMirrorCaptureError.webSocketAuthentication.description, "Home Assistant rejected the WebSocket token")
+        XCTAssertEqual(
+            HAMirrorCaptureError.webSocketProtocol("oops").description,
+            "Home Assistant WebSocket protocol error: oops"
+        )
+        XCTAssertEqual(HAMirrorCaptureError.webSocketTimeout.description, "Home Assistant WebSocket did not respond before the timeout")
+
+        XCTAssertEqual(
+            HAMirrorFixtureVerificationError.missingFiles(["api.json", "states.json"]).description,
+            "missing fixture files: api.json, states.json"
+        )
+        XCTAssertEqual(HAMirrorFixtureVerificationError.malformedFile("api.json").description, "malformed fixture file: api.json")
+        XCTAssertEqual(HAMirrorFixtureVerificationError.manifestMismatch.description, "manifest does not match endpoint fixture files")
+        XCTAssertEqual(
+            HAMirrorFixtureVerificationError.invalidEndpoint(file: "api.json", reason: "method must be GET").description,
+            "invalid fixture endpoint in api.json: method must be GET"
+        )
+        XCTAssertEqual(
+            HAMirrorFixtureVerificationError.invalidWebSocketEvidence(reason: "bad").description,
+            "invalid WebSocket fixture evidence: bad"
+        )
+        XCTAssertEqual(
+            HAMirrorFixtureVerificationError.leakedHeader(path: "/api/").description,
+            "fixture headers for /api/ contain unredacted secrets"
+        )
+        XCTAssertEqual(
+            HAMirrorFixtureVerificationError.unsanitizedBody(path: "/api/").description,
+            "fixture body for /api/ is not sanitized"
+        )
+    }
 }
 
 private func connectionInput() throws -> HAConnectionInput {
@@ -4055,9 +5275,12 @@ actor RecordingHARESTTransport: HARESTTransport {
         guard !responses.isEmpty else {
             throw URLError(.cannotConnectToHost)
         }
-        switch responses.removeFirst() {
-        case let .success(response):
-            return response
+        let response = responses.removeFirst()
+        switch response {
+        case let .success(value):
+            return value
+        case .nonHTTPResponse:
+            throw HAClientTransportError.nonHTTPResponse
         case let .urlError(error):
             throw error
         case let .transportError(message):
@@ -4068,6 +5291,7 @@ actor RecordingHARESTTransport: HARESTTransport {
 
 enum RecordingHARESTTransportResponse: Sendable {
     case success(HARESTResponse)
+    case nonHTTPResponse
     case urlError(URLError)
     case transportError(String)
 }
@@ -4231,9 +5455,867 @@ extension PerchHAClientTests {
         let requests = await transport.requests
         XCTAssertEqual(requests.map { requestPercentEncodedPath($0.url) }, ["/api/states"])
     }
+
+    func testPlannedClientChecksWebSocketConnectionAgainstFakeHA() async throws {
+        let server = try FakeHAWebSocketServer()
+        server.start()
+        defer {
+            server.stop()
+        }
+        _ = try FakeHARawWebSocketProbe().authenticateWithCoalescedUpgrade(baseURL: server.baseURL)
+        let client = PlannedHAClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        await assertEqualAsync(await client.checkWebSocketConnection(input), .success(HAWebSocketCheck(haVersion: "fake-ha")))
+    }
+
+    func testPlannedClientFetchesWebSocketStatesAgainstFakeHA() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[{"entity_id":"sensor.office_temperature","state":"21.4","attributes":{"friendly_name":"Office temperature","unit_of_measurement":"°C"}}]"#
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = PlannedHAClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        await assertEqualAsync(
+            await client.webSocketStates(input),
+            .success([
+                EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "21.4", unit: "°C")
+            ])
+        )
+    }
+
+    func testPlannedClientFetchesNextStateChangedEventAgainstFakeHA() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[]"#,
+            stateChangedEventBody: #"{"entity_id":"sensor.office_temperature","state":"22.0","attributes":{"friendly_name":"Office temperature","unit_of_measurement":"°C"}}"#
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = PlannedHAClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        await assertEqualAsync(
+            await client.nextStateChangedEvent(input),
+            .success(EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "22.0", unit: "°C"))
+        )
+    }
+
+    func testPlannedClientFetchesServicesAgainstFakeHA() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[]"#,
+            servicesBody: """
+            {
+              "script": {
+                "turn_on": {
+                  "name": "Turn on",
+                  "description": "Runs a script.",
+                  "fields": {
+                    "entity_id": {
+                      "name": "Entity",
+                      "description": "Script entity",
+                      "required": true,
+                      "example": "script.air_cleaner_boost",
+                      "selector": {
+                        "entity": {
+                          "domain": "script"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = PlannedHAClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        await assertEqualAsync(
+            await client.services(input),
+            .success([
+                HAServiceMetadata(
+                    domain: "script",
+                    service: "turn_on",
+                    name: "Turn on",
+                    description: "Runs a script.",
+                    fields: [
+                        HAServiceFieldMetadata(
+                            key: "entity_id",
+                            name: "Entity",
+                            description: "Script entity",
+                            required: true,
+                            example: "script.air_cleaner_boost",
+                            selector: .object([
+                                "entity": .object([
+                                    "domain": "script"
+                                ])
+                            ])
+                        )
+                    ]
+                )
+            ])
+        )
+    }
+
+    func testPlannedClientCallsServiceAgainstFakeHA() async throws {
+        let server = try FakeHAWebSocketServer()
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = PlannedHAClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        await assertEqualAsync(
+            await client.callService(
+                input,
+                call: HAServiceCall(domain: "switch", service: "turn_on", targetEntityID: "switch.office_lamp")
+            ),
+            .success(HAServiceCallResult(contextID: "fake-context"))
+        )
+        try await waitForJournalPath(server: server, path: "/api/websocket/call_service")
+    }
+
+    func testPlannedClientFetchesDiscoveryAgainstFakeHA() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: """
+            [
+              {"entity_id":"sensor.office_temperature","state":"21.4","attributes":{"friendly_name":"State name","unit_of_measurement":"°C"}}
+            ]
+            """,
+            areaRegistryBody: #"[{"area_id":"office","name":"Office"}]"#,
+            deviceRegistryBody: #"[]"#,
+            entityRegistryDisplayBody: """
+            {
+              "entities": [
+                {"ei":"sensor.office_temperature","en":"Display name","ai":"office"}
+              ]
+            }
+            """,
+            entityRegistryBody: """
+            [
+              {"entity_id":"sensor.office_temperature","name":"Full registry name","area_id":"office"}
+            ]
+            """
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = PlannedHAClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        await assertEqualAsync(
+            await client.discovery(input),
+            .success(
+                DiscoverySnapshot(
+                    areas: [Area(id: "office", name: "Office")],
+                    devices: [],
+                    entities: [EntityRegistryEntry(id: "sensor.office_temperature", name: "Display name", areaID: "office", deviceID: nil)],
+                    states: [EntityState(id: "sensor.office_temperature", name: "State name", state: "21.4", unit: "°C")]
+                )
+            )
+        )
+    }
+
+    func testPlannedClientFetchesHistoryThroughItsTransport() async throws {
+        let historyBody = """
+        [[
+          {"entity_id":"sensor.office_temperature","state":"21.4","last_changed":"2026-06-27T10:30:00+00:00"},
+          {"state":"22.0","last_changed":"2026-06-27T11:00:00+00:00"}
+        ]]
+        """
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(historyBody.utf8)))
+            ]
+        )
+        let client = PlannedHAClient(transport: transport)
+
+        let result = await client.history(
+            try connectionInput(),
+            entityID: "sensor.office_temperature",
+            range: .hour,
+            end: try historyDate("2026-06-27T12:00:00+00:00")
+        )
+
+        XCTAssertEqual(
+            result,
+            .success(
+                HistorySeries(
+                    entityID: "sensor.office_temperature",
+                    range: .hour,
+                    samples: [
+                        HistorySample(timestamp: try historyDate("2026-06-27T10:30:00+00:00"), state: "21.4", numericValue: 21.4),
+                        HistorySample(timestamp: try historyDate("2026-06-27T11:00:00+00:00"), state: "22.0", numericValue: 22.0)
+                    ]
+                )
+            )
+        )
+    }
+
+    func testPlannedClientFetchesHistoryBatchThroughItsTransport() async throws {
+        let historyBody = """
+        [
+          [
+            {"entity_id":"sensor.a","state":"1.0","last_changed":"2026-06-27T10:00:00+00:00"},
+            {"state":"2.0","last_changed":"2026-06-27T11:00:00+00:00"}
+          ],
+          [
+            {"entity_id":"sensor.b","state":"5.0","last_changed":"2026-06-27T10:30:00+00:00"}
+          ]
+        ]
+        """
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(historyBody.utf8)))
+            ]
+        )
+        let client = PlannedHAClient(transport: transport)
+
+        let result = await client.historyBatch(
+            try connectionInput(),
+            entityIDs: ["sensor.a", "sensor.b"],
+            range: .hour,
+            end: try historyDate("2026-06-27T12:00:00+00:00")
+        )
+
+        guard case let .success(series) = result else {
+            XCTFail("planned client bulk history unexpectedly failed: \(result)")
+            return
+        }
+        XCTAssertEqual(series["sensor.a"]?.samples.count, 2)
+        XCTAssertEqual(series["sensor.b"]?.samples.count, 1)
+    }
+
+    func testOAuthClientWebsiteReportsHTTPStatusWhenFetchFails() async {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .success(HARESTResponse(statusCode: 503, headers: [:], body: Data("offline".utf8)))
+            ]
+        )
+
+        let result = await HomeAssistantClient(transport: transport).verifyOAuthClientWebsite(
+            clientID: "https://perchha.dev/app",
+            redirectURI: "perchha://auth"
+        )
+
+        XCTAssertEqual(result, .failure(.httpStatus(path: "https://perchha.dev/app", statusCode: 503)))
+    }
+
+    func testOAuthClientWebsiteMapsNonHTTPResponseToInvalidResponse() async {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .nonHTTPResponse
+            ]
+        )
+
+        let result = await HomeAssistantClient(transport: transport).verifyOAuthClientWebsite(
+            clientID: "https://perchha.dev/app",
+            redirectURI: "perchha://auth"
+        )
+
+        XCTAssertEqual(result, .failure(.invalidResponse(path: "https://perchha.dev/app")))
+    }
+
+    func testOAuthClientWebsiteMapsTransportURLFailure() async {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .urlError(URLError(.timedOut))
+            ]
+        )
+
+        let result = await HomeAssistantClient(transport: transport).verifyOAuthClientWebsite(
+            clientID: "https://perchha.dev/app",
+            redirectURI: "perchha://auth"
+        )
+
+        XCTAssertEqual(result, .failure(.unreachable(host: "perchha.dev")))
+    }
+
+    func testOAuthClientWebsiteRedactsGenericTransportFailure() async {
+        let transport = RecordingHARESTTransport(
+            responses: [
+                .transportError("site fetch failed for perchha://auth code=secret")
+            ]
+        )
+
+        let result = await HomeAssistantClient(transport: transport).verifyOAuthClientWebsite(
+            clientID: "https://perchha.dev/app",
+            redirectURI: "perchha://auth"
+        )
+
+        XCTAssertEqual(result, .failure(.transport("site fetch failed for perchha://auth code=<redacted>")))
+    }
+
+    func testOAuthCodeExchangeRejectsBlankAuthorizationCodeBeforeNetwork() async throws {
+        let transport = RecordingHARESTTransport(responses: [])
+        let client = HomeAssistantClient(transport: transport)
+
+        let result = await client.exchangeAuthorizationCode(
+            baseURL: try XCTUnwrap(URL(string: "https://homeassistant.local")),
+            code: "   ",
+            clientID: "https://perchha.dev/app"
+        )
+
+        XCTAssertEqual(result, .failure(.invalidPayload(path: "/auth/token", reason: "code is required")))
+        await assertEqualAsync(await transport.requests, [])
+    }
+
+    func testOAuthRefreshRejectsBlankClientIDBeforeNetwork() async throws {
+        let transport = RecordingHARESTTransport(responses: [])
+        let client = HomeAssistantClient(transport: transport)
+
+        let result = await client.refreshAccessToken(
+            baseURL: try XCTUnwrap(URL(string: "https://homeassistant.local")),
+            refreshToken: "refresh-token",
+            clientID: "   "
+        )
+
+        XCTAssertEqual(result, .failure(.invalidPayload(path: "/auth/token", reason: "client_id is required")))
+        await assertEqualAsync(await transport.requests, [])
+    }
+
+    func testOAuthRevokeRejectsBlankRefreshTokenBeforeNetwork() async throws {
+        let transport = RecordingHARESTTransport(responses: [])
+        let client = HomeAssistantClient(transport: transport)
+
+        let result = await client.revokeRefreshToken(
+            baseURL: try XCTUnwrap(URL(string: "https://homeassistant.local")),
+            refreshToken: "   "
+        )
+
+        XCTAssertEqual(result, .failure(.invalidPayload(path: "/auth/token", reason: "token is required")))
+        await assertEqualAsync(await transport.requests, [])
+    }
 }
 
 extension PerchHAClientTests {
+    func testWebSocketStatesRejectMissingGetStatesResult() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"{}"#
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        await assertEqualAsync(
+            await HomeAssistantClient().webSocketStates(input),
+            .failure(.invalidPayload(path: "/api/websocket", reason: "missing get_states result"))
+        )
+    }
+
+    func testDiscoveryRejectsMissingAreaRegistryResult() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[]"#,
+            areaRegistryBody: #"{}"#,
+            deviceRegistryBody: #"[]"#,
+            entityRegistryDisplayBody: #"{"entities":[]}"#,
+            entityRegistryBody: #"[]"#
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        await assertEqualAsync(
+            await HomeAssistantClient().discovery(input),
+            .failure(.invalidPayload(path: "/api/websocket", reason: "missing area registry result"))
+        )
+    }
+
+    func testDiscoveryRejectsMissingDeviceRegistryResult() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[]"#,
+            areaRegistryBody: #"[]"#,
+            deviceRegistryBody: #"{}"#,
+            entityRegistryDisplayBody: #"{"entities":[]}"#,
+            entityRegistryBody: #"[]"#
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        await assertEqualAsync(
+            await HomeAssistantClient().discovery(input),
+            .failure(.invalidPayload(path: "/api/websocket", reason: "missing device registry result"))
+        )
+    }
+
+    func testDiscoveryRejectsMissingEntityRegistryDisplayResult() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[]"#,
+            areaRegistryBody: #"[]"#,
+            deviceRegistryBody: #"[]"#,
+            entityRegistryDisplayBody: #"{}"#,
+            entityRegistryBody: #"[]"#
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        await assertEqualAsync(
+            await HomeAssistantClient().discovery(input),
+            .failure(.invalidPayload(path: "/api/websocket", reason: "missing entity registry display result"))
+        )
+    }
+
+    func testDiscoveryRejectsMissingEntityRegistryFallbackResult() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[]"#,
+            areaRegistryBody: #"[]"#,
+            deviceRegistryBody: #"[]"#,
+            entityRegistryDisplayBody: nil,
+            entityRegistryBody: #"{}"#
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        await assertEqualAsync(
+            await HomeAssistantClient().discovery(input),
+            .failure(.invalidPayload(path: "/api/websocket", reason: "missing entity registry result"))
+        )
+    }
+
+    func testDiscoveryRejectsMissingStatesResult() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"{}"#,
+            areaRegistryBody: #"[]"#,
+            deviceRegistryBody: #"[]"#,
+            entityRegistryDisplayBody: #"{"entities":[]}"#,
+            entityRegistryBody: #"[]"#
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        await assertEqualAsync(
+            await HomeAssistantClient().discovery(input),
+            .failure(.invalidPayload(path: "/api/websocket", reason: "missing get_states result"))
+        )
+    }
+
+    func testServicesRejectMissingServicesResult() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[]"#,
+            servicesBody: #"[]"#
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        await assertEqualAsync(
+            await HomeAssistantClient().services(input),
+            .failure(.invalidPayload(path: "/api/websocket", reason: "missing services result"))
+        )
+    }
+
+    func testNextStateChangedEventDoesNotRetryProtocolFailures() async throws {
+        let server = try FakeHAWebSocketServer(mode: .wrongResultID)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        await assertEqualAsync(
+            await HomeAssistantClient().nextStateChangedEvent(input),
+            .failure(.webSocketProtocol("expected result id 1, received 2"))
+        )
+    }
+
+    func testNextStateChangedEventReturnsAuthenticationWhenWebSocketAuthFails() async throws {
+        let server = try FakeHAWebSocketServer()
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "wrong-token"
+        )
+
+        await assertEqualAsync(await HomeAssistantClient().nextStateChangedEvent(input), .failure(.authentication))
+    }
+
+    func testNextStateChangedEventFallbackRejectsMalformedNewState() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[]"#,
+            stateChangedEventBody: #"{}"#
+        )
+        let server = try FakeHAWebSocketServer(
+            fixtures: fixtures,
+            mode: .unavailableCommands(["subscribe_entities"], code: .unknownCommand)
+        )
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        await assertEqualAsync(
+            await HomeAssistantClient().nextStateChangedEvent(input),
+            .failure(
+                .invalidPayload(
+                    path: "/api/websocket",
+                    reason: #"DecodingError.keyNotFound: Key 'entity_id' not found in keyed decoding container. Path: event.data.new_state. Debug description: No value associated with key CodingKeys(stringValue: "entity_id", intValue: nil) ("entity_id")."#
+                )
+            )
+        )
+    }
+
+    func testCallServiceSurfacesCommandFailure() async throws {
+        let server = try FakeHAWebSocketServer(mode: .commandFailure)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        await assertEqualAsync(
+            await HomeAssistantClient().callService(
+                input,
+                call: HAServiceCall(domain: "switch", service: "turn_on", targetEntityID: "switch.office_lamp")
+            ),
+            .failure(.webSocketCommand(id: 1, code: "failed", message: "Planned command failure"))
+        )
+    }
+
+    func testCallServiceReturnsAuthenticationWhenWebSocketAuthFails() async throws {
+        let server = try FakeHAWebSocketServer()
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "wrong-token"
+        )
+
+        await assertEqualAsync(
+            await HomeAssistantClient().callService(
+                input,
+                call: HAServiceCall(domain: "switch", service: "turn_on", targetEntityID: "switch.office_lamp")
+            ),
+            .failure(.authentication)
+        )
+    }
+
+    func testServicesReturnAuthenticationWhenWebSocketAuthFails() async throws {
+        let server = try FakeHAWebSocketServer()
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "wrong-token"
+        )
+
+        await assertEqualAsync(await HomeAssistantClient().services(input), .failure(.authentication))
+    }
+
+    func testStreamEntityStateChangesReturnsAuthenticationWhenWebSocketAuthFails() async throws {
+        let server = try FakeHAWebSocketServer()
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(urls: [server.baseURL]),
+            token: "wrong-token"
+        )
+
+        let terminal = await HomeAssistantClient().streamEntityStateChanges(input) { _ in
+            XCTFail("authentication failure must stop the stream before any events")
+        }
+
+        XCTAssertEqual(terminal, .authentication)
+    }
+
+    func testMirrorCaptureRejectsMissingTokenBeforeNetwork() async {
+        let service = HAMirrorCaptureService(transport: RecordingMirrorTransport())
+        let environment = HAMirrorEnvironment(
+            primaryURL: URL(string: "http://127.0.0.1:8123")!,
+            fallbackURL: nil,
+            token: nil,
+            user: nil,
+            password: nil
+        )
+
+        do {
+            _ = try await service.capture(environment: environment)
+            XCTFail("capture unexpectedly succeeded without a token")
+        } catch let error as HAMirrorCaptureError {
+            XCTAssertEqual(error, .missingToken)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testMirrorCaptureWithWebSocketEvidenceUsesPublicFixtureCapturePath() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[]"#,
+            entityRegistryDisplayBody: """
+            {
+              "entities": [
+                {"ei":"sensor.office_temperature","en":"Office temperature","ai":"office"}
+              ]
+            }
+            """
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let environment = HAMirrorEnvironment(
+            primaryURL: server.baseURL,
+            fallbackURL: nil,
+            token: "fake-token",
+            user: nil,
+            password: nil
+        )
+
+        let fixtureSet = try await HAMirrorCaptureService().capture(environment: environment, includeWebSocketEvidence: true)
+
+        XCTAssertEqual(fixtureSet.api.path, "/api/")
+        XCTAssertEqual(fixtureSet.states.path, "/api/states")
+        XCTAssertEqual(fixtureSet.webSocket?.entityRegistryDisplayList.command, "config/entity_registry/list_for_display")
+        XCTAssertEqual(fixtureSet.webSocket?.subscribeEntities.command, "subscribe_entities")
+        XCTAssertEqual(fixtureSet.webSocket?.subscribeEntities.eventKeys, [])
+    }
+
+    func testMirrorCaptureOptimizedWebSocketEvidenceRejectsMissingTokenBeforeNetwork() async {
+        let service = HAMirrorCaptureService()
+        let environment = HAMirrorEnvironment(
+            primaryURL: URL(string: "http://127.0.0.1:8123")!,
+            fallbackURL: nil,
+            token: nil,
+            user: nil,
+            password: nil
+        )
+
+        do {
+            _ = try await service.captureOptimizedWebSocketEvidence(environment: environment)
+            XCTFail("optimized WebSocket evidence unexpectedly succeeded without a token")
+        } catch let error as HAMirrorCaptureError {
+            XCTAssertEqual(error, .missingToken)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testMirrorCaptureOptimizedWebSocketEvidenceRecordsUnavailableCommands() async throws {
+        let server = try FakeHAWebSocketServer(
+            mode: .unavailableCommands(
+                ["config/entity_registry/list_for_display", "subscribe_entities"],
+                code: .unsupportedCommand
+            )
+        )
+        server.start()
+        defer {
+            server.stop()
+        }
+        let environment = HAMirrorEnvironment(
+            primaryURL: server.baseURL,
+            fallbackURL: nil,
+            token: "fake-token",
+            user: nil,
+            password: nil
+        )
+
+        let evidence = try await HAMirrorCaptureService().captureOptimizedWebSocketEvidence(environment: environment)
+
+        XCTAssertEqual(
+            evidence.entityRegistryDisplayList,
+            HAMirrorWebSocketCommandEvidence(
+                command: "config/entity_registry/list_for_display",
+                available: false,
+                errorCode: "unsupported_command",
+                errorMessage: "Command unavailable"
+            )
+        )
+        XCTAssertEqual(
+            evidence.subscribeEntities,
+            HAMirrorWebSocketCommandEvidence(
+                command: "subscribe_entities",
+                available: false,
+                errorCode: "unsupported_command",
+                errorMessage: "Command unavailable"
+            )
+        )
+    }
+
+    func testMirrorCaptureOptimizedWebSocketEvidenceReturnsAuthenticationForWrongToken() async throws {
+        let server = try FakeHAWebSocketServer()
+        server.start()
+        defer {
+            server.stop()
+        }
+        let service = HAMirrorCaptureService(
+            transport: RecordingMirrorTransport(
+                apiBody: #"{"message":"API running."}"#,
+                statesBody: #"[]"#
+            )
+        )
+        let environment = HAMirrorEnvironment(
+            primaryURL: server.baseURL,
+            fallbackURL: nil,
+            token: "wrong-token",
+            user: nil,
+            password: nil
+        )
+
+        do {
+            _ = try await service.captureOptimizedWebSocketEvidence(environment: environment)
+            XCTFail("optimized WebSocket evidence unexpectedly succeeded with a wrong token")
+        } catch let error as HAMirrorCaptureError {
+            XCTAssertEqual(error, .webSocketAuthentication)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testMirrorCaptureOptimizedWebSocketEvidenceRejectsInvalidWebSocketBaseURL() async throws {
+        let service = HAMirrorCaptureService(
+            transport: RecordingMirrorTransport(
+                apiBody: #"{"message":"API running."}"#,
+                statesBody: #"[]"#
+            )
+        )
+        let environment = HAMirrorEnvironment(
+            primaryURL: URL(string: "file:///tmp/perchha-homeassistant")!,
+            fallbackURL: nil,
+            token: "secret-token",
+            user: nil,
+            password: nil
+        )
+
+        do {
+            _ = try await service.captureOptimizedWebSocketEvidence(environment: environment)
+            XCTFail("optimized WebSocket evidence unexpectedly succeeded for a file URL")
+        } catch let error as HAMirrorCaptureError {
+            XCTAssertEqual(error, .invalidPath("/api/websocket"))
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testMirrorProbeReportsMalformedAPIBodyAsBlockedMessage() async throws {
+        let transport = RecordingMirrorTransport(apiBody: "{")
+        let service = HAMirrorCaptureService(transport: transport)
+        let environment = HAMirrorEnvironment(
+            primaryURL: try XCTUnwrap(URL(string: "http://127.0.0.1:8123")),
+            fallbackURL: nil,
+            token: "secret-token",
+            user: nil,
+            password: nil
+        )
+
+        let report = await service.probe(environment: environment)
+
+        XCTAssertEqual(report.primary.state, .blocked)
+        XCTAssertEqual(report.primary.message, "fixture body for /api/ is not JSON")
+        XCTAssertNil(report.primary.guidance)
+    }
+
     private func writeTemporaryEnvironmentFile(_ contents: Data) throws -> String {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("perchha-env-test-\(UUID().uuidString)", isDirectory: true)

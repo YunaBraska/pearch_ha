@@ -1221,6 +1221,7 @@ public enum PerchHAReleaseEvidenceScreenshots {
         "history-loaded-light-increased-contrast.png",
         "reconnecting-light.png",
         "review-contact-sheet.png",
+        "settings-about-update-light.png",
         "settings-selection-light.png",
         "signing-in-light.png"
     ]

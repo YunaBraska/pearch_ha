@@ -5771,11 +5771,12 @@ public struct PerchHAHistoryPopoverContent: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("\(entityName) history has no numeric data")
-        case let .stateTimeline(_, segments):
+        case let .stateTimeline(series, segments):
             // Constant height: the state timeline plus its legend occupy a fixed
             // block so hovering the cursor never resizes the popover window.
             PerchHAHistoryStateTimelinePopoverBody(
                 segments: segments,
+                range: series.range,
                 entityName: entityName,
                 labelColor: historyLabelForegroundStyle,
                 valueColor: historyValueForegroundStyle
@@ -5889,42 +5890,32 @@ public struct PerchHAHistoryPopoverContent: View {
         else {
             return nil
         }
-        let value = formattedCursorValue(sample.value)
-        let time = formattedCursorTimestamp(sample.timestamp, range: series.range)
-        return "\(value) · \(time)"
+        return Self.cursorReadout(
+            value: sample.value,
+            unit: unit,
+            timestamp: sample.timestamp,
+            range: series.range
+        )
     }
 
-    private func formattedCursorValue(_ value: Double) -> String {
+    static func cursorReadout(
+        value: Double,
+        unit: String?,
+        timestamp: Date,
+        range: HistoryRange? = nil,
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
+    ) -> String {
         let number = menuBarNumberLabel(value)
         let trimmedUnit = unit?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmedUnit.isEmpty ? number : "\(number) \(trimmedUnit)"
-    }
-
-    /// Cached cursor-timestamp formatters: `DateFormatter` construction is
-    /// expensive and this runs on every chart mouse-move.
-    private static let cursorTimeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale.current
-        formatter.timeStyle = .short
-        formatter.dateStyle = .none
-        return formatter
-    }()
-
-    private static let cursorDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale.current
-        formatter.timeStyle = .none
-        formatter.dateStyle = .short
-        return formatter
-    }()
-
-    private func formattedCursorTimestamp(_ timestamp: Date, range: HistoryRange) -> String {
-        switch range {
-        case .hour, .day:
-            return Self.cursorTimeFormatter.string(from: timestamp)
-        case .week, .month:
-            return Self.cursorDateFormatter.string(from: timestamp)
-        }
+        let formattedValue = trimmedUnit.isEmpty ? number : "\(number) \(trimmedUnit)"
+        let formattedTimestamp = PerchHAHistoryHoverFormatting.timestamp(
+            timestamp,
+            range: range,
+            locale: locale,
+            timeZone: timeZone
+        )
+        return "\(formattedValue) · \(formattedTimestamp)"
     }
 
     private func historyStats(_ statistics: PerchHAHistoryStatistics) -> some View {
@@ -5985,6 +5976,32 @@ func menuBarNumberLabel(_ value: Double?) -> String {
         return "\(Int(value))"
     }
     return String(format: "%.1f", value)
+}
+
+enum PerchHASliderValueFormatting {
+    static func label(for value: Double, unit: String?) -> String {
+        let number = menuBarNumberLabel(value)
+        let trimmedUnit = unit?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmedUnit == "%" {
+            return "\(number)%"
+        }
+        guard !trimmedUnit.isEmpty else {
+            return number
+        }
+        return "\(number) \(trimmedUnit)"
+    }
+
+    static func accessibilityValue(for value: Double, unit: String?) -> String {
+        let number = menuBarNumberLabel(value)
+        let trimmedUnit = unit?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmedUnit == "%" {
+            return "\(number) percent"
+        }
+        guard !trimmedUnit.isEmpty else {
+            return number
+        }
+        return "\(number) \(trimmedUnit)"
+    }
 }
 
 public struct PerchHAPanelView: View {
@@ -6440,9 +6457,12 @@ public struct PerchHAPanelView: View {
                 model.startCustomAction(action.id)
             }
         } label: {
-            Image(systemName: "play.fill")
+            PerchHACircularIconLabel(
+                icon: "play.fill",
+                disabled: model.snapshot.controlActionState.isRunning(for: action.entityID)
+            )
         }
-        .buttonStyle(PerchHAIconButtonStyle())
+        .buttonStyle(.borderless)
         .disabled(model.snapshot.controlActionState.isRunning)
         .help(customActionHelp(action))
         .accessibilityLabel(action.title)
@@ -7064,38 +7084,54 @@ private struct PerchHACoverPositionSlider: View {
     let position: Int
     let disabled: Bool
     let accessibilityName: String
+    let unit: String?
     let onCommit: (Int) -> Void
 
     @State private var draft: Double
     @State private var isEditing = false
 
-    init(position: Int, disabled: Bool, accessibilityName: String, onCommit: @escaping (Int) -> Void) {
+    init(
+        position: Int,
+        disabled: Bool,
+        accessibilityName: String,
+        unit: String? = "%",
+        onCommit: @escaping (Int) -> Void
+    ) {
         self.position = position
         self.disabled = disabled
         self.accessibilityName = accessibilityName
+        self.unit = unit
         self.onCommit = onCommit
         _draft = State(initialValue: Double(position))
     }
 
     var body: some View {
-        Slider(
-            value: $draft,
-            in: 0...100,
-            step: 1,
-            onEditingChanged: { editing in
-                isEditing = editing
-                if !editing {
-                    onCommit(Int(draft.rounded()))
+        HStack(spacing: PerchHASpacing.sm) {
+            Slider(
+                value: $draft,
+                in: 0...100,
+                step: 1,
+                onEditingChanged: { editing in
+                    isEditing = editing
+                    if !editing {
+                        onCommit(Int(draft.rounded()))
+                    }
+                }
+            )
+            .disabled(disabled)
+            .accessibilityLabel(accessibilityName)
+            .accessibilityValue(PerchHASliderValueFormatting.accessibilityValue(for: draft, unit: unit))
+            .onChange(of: position) { newPosition in
+                if !isEditing {
+                    draft = Double(newPosition)
                 }
             }
-        )
-        .disabled(disabled)
-        .accessibilityLabel(accessibilityName)
-        .accessibilityValue("\(Int(draft.rounded())) percent")
-        .onChange(of: position) { newPosition in
-            if !isEditing {
-                draft = Double(newPosition)
-            }
+            Text(PerchHASliderValueFormatting.label(for: draft, unit: unit))
+                .font(PerchHATypography.bodyValue())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(minWidth: 40, maxWidth: 72, alignment: .trailing)
+                .accessibilityHidden(true)
         }
     }
 }

@@ -1242,6 +1242,12 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
                     await MainActor.run {
                         self.rememberConnection(form)
                     }
+                } else {
+                    await MainActor.run {
+                        if self.shouldRememberAttemptedManualToken(form: form, result: result) {
+                            self.rememberAttemptedManualToken(form)
+                        }
+                    }
                 }
                 return result
             },
@@ -1291,7 +1297,44 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             return nil
         }
         return Task { @MainActor in
-            await model.connect()
+            let retryDelays: [UInt64] = [
+                250_000_000,
+                500_000_000,
+                1_000_000_000,
+                2_000_000_000,
+                4_000_000_000
+            ]
+            var attempt = 0
+            while !Task.isCancelled {
+                await model.connect()
+                if shouldStopAutoConnectRetry(model: model, originalForm: form) {
+                    return
+                }
+                let delay = retryDelays[min(attempt, retryDelays.count - 1)]
+                attempt += 1
+                try? await Task.sleep(nanoseconds: delay)
+            }
+        }
+    }
+
+    private func shouldStopAutoConnectRetry(
+        model: PerchHAPanelModel,
+        originalForm: PerchHAConnectionForm
+    ) -> Bool {
+        if model.snapshot.connectionState == .connected {
+            return true
+        }
+        if !model.snapshot.connectionForm.sameConnection(as: originalForm) {
+            return true
+        }
+        if !model.snapshot.connectionForm.usesStoredAuthSession {
+            return true
+        }
+        switch model.snapshot.connectionState {
+        case .failed(.authentication), .failed(.protocolError):
+            return true
+        case .disconnected, .connecting, .connected, .reconnecting, .failed:
+            return false
         }
     }
 
@@ -2275,17 +2318,8 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     }
 
     private func rememberConnection(_ form: PerchHAConnectionForm) {
-        if let authSessionStore, !form.trimmedToken.isEmpty {
-            do {
-                _ = try authSessionStore.saveAccessToken(form.trimmedToken)
-                panelModel?.reportShellPersistenceFailure(nil)
-            } catch {
-                // Losing this write silently would make the user re-enter the
-                // token on every launch with no explanation.
-                panelModel?.reportShellPersistenceFailure(
-                    "Could not remember the session in the Keychain: \(error)"
-                )
-            }
+        if !form.trimmedToken.isEmpty {
+            rememberAccessToken(form.trimmedToken)
         }
         guard let configStore else {
             panelModel?.reportShellPersistenceFailure(
@@ -2317,6 +2351,44 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         } catch {
             configurationPersistenceState = .saveFailed(String(describing: error))
         }
+    }
+
+    private func rememberAccessToken(_ token: String) {
+        guard let authSessionStore else {
+            return
+        }
+        do {
+            _ = try authSessionStore.saveAccessToken(token)
+            panelModel?.reportShellPersistenceFailure(nil)
+        } catch {
+            // Losing this write silently would make the user re-enter the
+            // token on every launch with no explanation.
+            panelModel?.reportShellPersistenceFailure(
+                "Could not remember the session in the Keychain: \(error)"
+            )
+        }
+    }
+
+    private func rememberAttemptedManualToken(_ form: PerchHAConnectionForm) {
+        rememberAccessToken(form.trimmedToken)
+    }
+
+    private func shouldRememberAttemptedManualToken(
+        form: PerchHAConnectionForm,
+        result: PerchHAConnectionAttemptResult
+    ) -> Bool {
+        guard !form.usesStoredAuthSession,
+              !form.trimmedToken.isEmpty,
+              let authSessionStore
+        else {
+            return false
+        }
+        guard case let .failure(failure) = result,
+              failure != .authentication
+        else {
+            return false
+        }
+        return (try? authSessionStore.loadAccessToken()) == nil
     }
 
     private func externalURLEvent(for url: URL) -> PerchHAExternalURLEvent {

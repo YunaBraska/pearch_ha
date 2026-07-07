@@ -312,19 +312,19 @@ final class PerchHAUITests: XCTestCase {
 
     func testConnectionFormNormalizesFrontendURLsToUsableBaseURLs() {
         let form = PerchHAConnectionForm(
-            urlString: " https://HOME.gomoo.io/lovelace/0?dashboard=1#kitchen ",
+            urlString: " https://HA-PRIMARY.example/lovelace/0?dashboard=1#kitchen ",
             fallbackURLString: "https://fallback.example/ha/history?entity=sensor.temp"
         )
 
         XCTAssertEqual(
             PerchHAConnectionForm.normalizedHomeAssistantURLString(form.urlString),
-            "https://home.gomoo.io"
+            "https://ha-primary.example"
         )
         XCTAssertEqual(
             PerchHAConnectionForm.normalizedHomeAssistantURLString(form.fallbackURLString),
             "https://fallback.example/ha"
         )
-        XCTAssertEqual(form.primaryURL()?.absoluteString, "https://home.gomoo.io")
+        XCTAssertEqual(form.primaryURL()?.absoluteString, "https://ha-primary.example")
         XCTAssertEqual(form.fallbackURL()?.absoluteString, "https://fallback.example/ha")
     }
 
@@ -386,6 +386,30 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.connectionForm.token, "")
         XCTAssertFalse(model.snapshot.connectionForm.usesStoredAuthSession)
         XCTAssertFalse(model.snapshot.hasTokenInput)
+    }
+
+    func testConnectionTokenPresentationExplainsSavedKeychainToken() {
+        let presentation = PerchHAConnectionTokenAccessPresentation(
+            usesStoredToken: true,
+            tokenDraft: ""
+        )
+
+        XCTAssertEqual(presentation.fieldPlaceholder, "Paste new token to replace the saved one")
+        XCTAssertEqual(presentation.editableButtonTitle, "Connect with saved token")
+        XCTAssertEqual(presentation.connectedButtonTitle, "Reconnect with saved token")
+        XCTAssertNotNil(presentation.savedTokenGuidance)
+    }
+
+    func testConnectionTokenPresentationTreatsTypedDraftAsReplacementToken() {
+        let presentation = PerchHAConnectionTokenAccessPresentation(
+            usesStoredToken: true,
+            tokenDraft: "replacement-token"
+        )
+
+        XCTAssertEqual(presentation.fieldPlaceholder, "Access token")
+        XCTAssertEqual(presentation.editableButtonTitle, "Connect with token")
+        XCTAssertEqual(presentation.connectedButtonTitle, "Update token and reconnect")
+        XCTAssertNil(presentation.savedTokenGuidance)
     }
 
     func test_t_failed_retry_keeps_token_private_and_reuses_visible_token_presence() async {
@@ -1419,6 +1443,68 @@ final class PerchHAUITests: XCTestCase {
             ]
         )
         XCTAssertNil(PerchHAHistoryPopoverContent.chartPeaks(series: nonNumeric))
+    }
+
+    func testHistoryCursorReadoutIncludesDateAndTimeForDayRange() {
+        let readout = PerchHAHistoryPopoverContent.cursorReadout(
+            value: 53.2,
+            unit: "%",
+            timestamp: Date(timeIntervalSince1970: 0),
+            range: .day,
+            locale: Locale(identifier: "de_DE"),
+            timeZone: TimeZone(secondsFromGMT: 0) ?? .gmt
+        )
+
+        XCTAssertEqual(readout, "53.2 % · 01.01.70, 00:00")
+    }
+
+    func testHistoryCursorReadoutShowsOnlyDateForWeekRange() {
+        let readout = PerchHAHistoryPopoverContent.cursorReadout(
+            value: 53.2,
+            unit: "%",
+            timestamp: Date(timeIntervalSince1970: 0),
+            range: .week,
+            locale: Locale(identifier: "de_DE"),
+            timeZone: TimeZone(secondsFromGMT: 0) ?? .gmt
+        )
+
+        XCTAssertEqual(readout, "53.2 % · 01.01.70")
+    }
+
+    func testHistoryStateTimelineReadoutIncludesTimeForDayRange() {
+        let readout = PerchHAHistoryStateTimelinePopoverBody.readout(
+            state: "bad",
+            start: Date(timeIntervalSince1970: 1_200),
+            duration: 7 * 60 * 60,
+            range: .day,
+            locale: Locale(identifier: "de_DE"),
+            timeZone: TimeZone(secondsFromGMT: 0) ?? .gmt
+        )
+
+        XCTAssertEqual(readout, "Bad · 01.01.70, 00:20 · 7h")
+    }
+
+    func testHistoryStateTimelineReadoutShowsOnlyDateForWeekRange() {
+        let readout = PerchHAHistoryStateTimelinePopoverBody.readout(
+            state: "bad",
+            start: Date(timeIntervalSince1970: 1_200),
+            duration: 7 * 60 * 60,
+            range: .week,
+            locale: Locale(identifier: "de_DE"),
+            timeZone: TimeZone(secondsFromGMT: 0) ?? .gmt
+        )
+
+        XCTAssertEqual(readout, "Bad · 01.01.70 · 7h")
+    }
+
+    func testSliderValueFormattingUsesCompactPercentLabel() {
+        XCTAssertEqual(PerchHASliderValueFormatting.label(for: 42, unit: "%"), "42%")
+        XCTAssertEqual(PerchHASliderValueFormatting.accessibilityValue(for: 42, unit: "%"), "42 percent")
+    }
+
+    func testSliderValueFormattingUsesNumericValueAndUnitWhenPresent() {
+        XCTAssertEqual(PerchHASliderValueFormatting.label(for: 21.4, unit: "°C"), "21.4 °C")
+        XCTAssertEqual(PerchHASliderValueFormatting.accessibilityValue(for: 21.4, unit: "°C"), "21.4 °C")
     }
 
     func testHistoryContentSummaryKeepsNumericHistoryWhenTrailingSampleIsNonNumeric() {
@@ -4256,10 +4342,10 @@ final class PerchHAUITests: XCTestCase {
             return
         }
 
-        try setNativeTextFieldValue("https://home.gomoo.io/lovelace/0", for: urlField, in: window)
+        try setNativeTextFieldValue("https://ha-primary.example/lovelace/0", for: urlField, in: window)
         try setNativeTextFieldValue("https://fallback.example/ha/history?entity=sensor.temp", for: fallbackField, in: window)
 
-        XCTAssertEqual(model.snapshot.connectionForm.urlString, "https://home.gomoo.io")
+        XCTAssertEqual(model.snapshot.connectionForm.urlString, "https://ha-primary.example")
         XCTAssertEqual(model.snapshot.connectionForm.fallbackURLString, "https://fallback.example/ha")
     }
 
@@ -4308,7 +4394,7 @@ final class PerchHAUITests: XCTestCase {
 
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        XCTAssertTrue(pasteboard.setString("https://home.gomoo.io/lovelace/0", forType: .string))
+        XCTAssertTrue(pasteboard.setString("https://ha-primary.example/lovelace/0", forType: .string))
 
         XCTAssertTrue(window.makeFirstResponder(urlField))
         drainPanelRunLoop()
@@ -4343,7 +4429,7 @@ final class PerchHAUITests: XCTestCase {
         window.endEditing(for: nil)
         drainPanelRunLoop()
 
-        XCTAssertEqual(model.snapshot.connectionForm.urlString, "https://home.gomoo.io")
+        XCTAssertEqual(model.snapshot.connectionForm.urlString, "https://ha-primary.example")
     }
 
     func testAppShellBuiltInControlsExposeNativeSwitchAndSlider() {
@@ -4395,6 +4481,147 @@ final class PerchHAUITests: XCTestCase {
             let firstResponder = panel.firstResponder as AnyObject?
             XCTAssertTrue(firstResponder === slider || firstResponder === slider.currentEditor())
         }
+    }
+
+    func testSettingsEntitiesTabExposesNativeSearchPopupsAndKeyViewLoop() async throws {
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        let window = PerchHAApplication.makeSettingsWindow(
+            model: model,
+            initialTab: .entities,
+            initiallyExpandedEntityIDs: ["sensor.office_humidity"]
+        )
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+
+        window.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.recalculateKeyViewLoop()
+
+        let textFields = editableTextFields(in: window.contentView)
+        let popUpButtons = nativePopUpButtons(in: window.contentView)
+        let buttons = nativeButtons(in: window.contentView)
+        let debugSummary = nativeControlDebugSummary(in: window.contentView)
+        let searchField = textFields.first { $0.placeholderString == "Search" }
+        let minField = textFields.first { $0.placeholderString == "0" }
+        let maxField = textFields.first { $0.placeholderString == "100" }
+        let firstPopup = popUpButtons.first
+
+        XCTAssertNotNil(searchField, debugSummary)
+        XCTAssertNotNil(minField, debugSummary)
+        XCTAssertNotNil(maxField, debugSummary)
+        XCTAssertGreaterThanOrEqual(popUpButtons.count, 4, debugSummary)
+        XCTAssertGreaterThanOrEqual(buttons.count, 4, debugSummary)
+
+        if let searchField {
+            XCTAssertTrue(window.makeFirstResponder(searchField), debugSummary)
+            let labels = nativeKeyViewLoopLabels(startingAt: searchField)
+            XCTAssertGreaterThanOrEqual(labels.count, 3, "\(labels)")
+            XCTAssertTrue(labels.contains(where: { $0.contains("placeholder:Search") }), "\(labels)")
+        }
+        if let firstPopup {
+            XCTAssertTrue(firstPopup.acceptsFirstResponder, debugSummary)
+            XCTAssertTrue(window.makeFirstResponder(firstPopup), debugSummary)
+        }
+    }
+
+    func testHistoryPopoverExposesNativeRangeControlAndFocus() {
+        let hostingView = NSHostingView(
+            rootView: PerchHAHistoryPopoverContent(
+                entityID: "sensor.office_humidity",
+                entityName: "Office humidity",
+                valueText: "44%",
+                unit: "%",
+                state: .loaded(
+                    HistorySeries(
+                        entityID: "sensor.office_humidity",
+                        range: .day,
+                        samples: [
+                            HistorySample(
+                                timestamp: Date(timeIntervalSince1970: 1_788_998_400),
+                                state: "44",
+                                numericValue: 44
+                            ),
+                            HistorySample(
+                                timestamp: Date(timeIntervalSince1970: 1_789_002_000),
+                                state: "46",
+                                numericValue: 46
+                            )
+                        ]
+                    )
+                ),
+                onOpenSettings: {},
+                selectedRange: .constant(.day)
+            )
+            .frame(width: 280)
+            .environment(\.colorScheme, .light)
+        )
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: NSSize(width: 320, height: 260)),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: true
+        )
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        hostingView.layoutSubtreeIfNeeded()
+        window.recalculateKeyViewLoop()
+
+        let segmentedControls = nativeSegmentedControls(in: window.contentView)
+        let debugSummary = nativeControlDebugSummary(in: window.contentView)
+        guard let rangeControl = segmentedControls.first else {
+            XCTFail(debugSummary)
+            return
+        }
+
+        let labels = (0..<rangeControl.segmentCount).compactMap { rangeControl.label(forSegment: $0) }
+        XCTAssertEqual(labels, ["Hour", "Day", "Week"])
+        XCTAssertTrue(rangeControl.acceptsFirstResponder, debugSummary)
+        XCTAssertTrue(window.makeFirstResponder(rangeControl), debugSummary)
+    }
+
+    func testAppShellCustomActionRowExposesNativeButtonFocus() async throws {
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        XCTAssertTrue(model.setCustomAction(sensorCustomAction(requiresConfirmation: true)))
+
+        let panel = PerchHAApplication.makePanel(model: model)
+        defer {
+            panel.orderOut(nil)
+            panel.contentViewController = nil
+        }
+
+        panel.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        let buttons = nativeButtons(in: panel.contentView)
+        let debugSummary = nativeControlDebugSummary(in: panel.contentView)
+        guard let actionButton = buttons.first(where: { String(describing: type(of: $0)).contains("SwiftUIAppKitButton") }) else {
+            XCTFail(debugSummary)
+            return
+        }
+
+        XCTAssertTrue(actionButton.acceptsFirstResponder, debugSummary)
+        XCTAssertTrue(panel.makeFirstResponder(actionButton), debugSummary)
+        let firstResponder = panel.firstResponder as AnyObject?
+        XCTAssertTrue(firstResponder === actionButton || firstResponder === actionButton.currentEditor(), debugSummary)
     }
 
     func test_t_app_shell_launch_wires_status_item_panel_and_cleanup() {
@@ -6046,6 +6273,103 @@ final class PerchHAUITests: XCTestCase {
         )
     }
 
+    func testGitHubReleaseUpdateCheckerPrefersPerchHAArtifactWhenOtherDMGsExist() async throws {
+        let checker = PerchHAGitHubReleaseUpdateChecker { request in
+            let payload = """
+            {
+              "tag_name": "2026.7.71500",
+              "html_url": "https://github.com/YunaBraska/pearch_ha/releases/tag/2026.7.71500",
+              "assets": [
+                {
+                  "name": "OtherTool.dmg",
+                  "browser_download_url": "https://github.com/YunaBraska/pearch_ha/releases/download/2026.7.71500/OtherTool.dmg"
+                },
+                {
+                  "name": "PerchHA-2026.7.71500.zip",
+                  "browser_download_url": "https://github.com/YunaBraska/pearch_ha/releases/download/2026.7.71500/PerchHA-2026.7.71500.zip"
+                }
+              ]
+            }
+            """
+            return (
+                Data(payload.utf8),
+                try XCTUnwrap(HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil))
+            )
+        }
+
+        let result = await checker.checkLatest(currentVersion: "1.0")
+
+        XCTAssertEqual(
+            result,
+            .updateAvailable(
+                PerchHAReleaseUpdate(
+                    currentVersion: "1.0",
+                    latestVersion: "2026.7.71500",
+                    releaseURL: try XCTUnwrap(URL(string: "https://github.com/YunaBraska/pearch_ha/releases/tag/2026.7.71500")),
+                    downloadURL: try XCTUnwrap(URL(string: "https://github.com/YunaBraska/pearch_ha/releases/download/2026.7.71500/PerchHA-2026.7.71500.zip"))
+                )
+            )
+        )
+    }
+
+    func testGitHubReleaseUpdateCheckerAcceptsVersionPrefixAndReportsUpToDate() async throws {
+        let checker = PerchHAGitHubReleaseUpdateChecker { request in
+            let payload = """
+            {
+              "tag_name": "v2026.7.71500",
+              "html_url": "https://github.com/YunaBraska/pearch_ha/releases/tag/v2026.7.71500",
+              "assets": []
+            }
+            """
+            return (
+                Data(payload.utf8),
+                try XCTUnwrap(HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil))
+            )
+        }
+
+        let result = await checker.checkLatest(currentVersion: "2026.7.71500")
+
+        XCTAssertEqual(
+            result,
+            .upToDate(
+                currentVersion: "2026.7.71500",
+                latestVersion: "v2026.7.71500",
+                releaseURL: try XCTUnwrap(URL(string: "https://github.com/YunaBraska/pearch_ha/releases/tag/v2026.7.71500"))
+            )
+        )
+    }
+
+    func testGitHubReleaseUpdateCheckerRejectsInvalidLatestReleaseTagExplicitly() async throws {
+        let checker = PerchHAGitHubReleaseUpdateChecker { request in
+            let payload = """
+            {
+              "tag_name": "stable",
+              "html_url": "https://github.com/YunaBraska/pearch_ha/releases/tag/stable",
+              "assets": []
+            }
+            """
+            return (
+                Data(payload.utf8),
+                try XCTUnwrap(HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil))
+            )
+        }
+
+        let result = await checker.checkLatest(currentVersion: "1.0")
+
+        XCTAssertEqual(result, .failed("GitHub latest release tag is invalid: stable"))
+    }
+
+    func testGitHubReleaseUpdateCheckerRejectsInvalidCurrentVersionExplicitly() async throws {
+        let checker = PerchHAGitHubReleaseUpdateChecker { _ in
+            XCTFail("network request should not run for an invalid current version")
+            throw URLError(.badURL)
+        }
+
+        let result = await checker.checkLatest(currentVersion: "stable")
+
+        XCTAssertEqual(result, .failed("current version is invalid: stable"))
+    }
+
     func testGitHubReleaseUpdateCheckerReportsHTTPFailureExplicitly() async throws {
         let checker = PerchHAGitHubReleaseUpdateChecker { request in
             return (
@@ -6681,6 +7005,69 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertFalse(failure.contains("long-lived-token"), "the banner must never carry the token")
     }
 
+    func testAppShellRemembersEnteredTokenAfterUnreachableFailureWhenNoStoredTokenExists() async throws {
+        let url = temporaryConfigURL()
+        let keychain = KeychainSecretStore(service: "dev.perchha.ui.tests.\(UUID().uuidString)")
+        let sessionStore = PerchHAAuthSessionStore(secretStore: keychain)
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+            _ = try? sessionStore.clear()
+        }
+
+        let application = PerchHAApplication(
+            configStore: JSONConfigStore(fileURL: url),
+            authSessionStore: sessionStore,
+            client: RefreshingHAClientRecorder(
+                discoveryResults: [.failure(.unreachable(host: "homeassistant.local"))]
+            )
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        application.updateConnectionForm(
+            urlString: "https://homeassistant.local:8123",
+            token: "long-lived-token"
+        )
+        await application.connect()
+
+        XCTAssertEqual(application.snapshot.connectionState, .failed(.unreachable(host: "homeassistant.local")))
+        XCTAssertEqual(try sessionStore.loadAccessToken(), "long-lived-token")
+    }
+
+    func testAppShellDoesNotOverwriteStoredTokenWhenReplacementAttemptFails() async throws {
+        let url = temporaryConfigURL()
+        let keychain = KeychainSecretStore(service: "dev.perchha.ui.tests.\(UUID().uuidString)")
+        let sessionStore = PerchHAAuthSessionStore(secretStore: keychain)
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+            _ = try? sessionStore.clear()
+        }
+        _ = try sessionStore.saveAccessToken("stored-token")
+
+        let application = PerchHAApplication(
+            configStore: JSONConfigStore(fileURL: url),
+            authSessionStore: sessionStore,
+            client: RefreshingHAClientRecorder(
+                discoveryResults: [.failure(.unreachable(host: "homeassistant.local"))]
+            )
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        application.updateConnectionForm(
+            urlString: "https://homeassistant.local:8123",
+            token: "replacement-token"
+        )
+        await application.connect()
+
+        XCTAssertEqual(application.snapshot.connectionState, .failed(.unreachable(host: "homeassistant.local")))
+        XCTAssertEqual(try sessionStore.loadAccessToken(), "stored-token")
+    }
+
     func test_t_keychain_clear_failure_on_sign_out_surfaces_in_settings() async throws {
         let url = temporaryConfigURL()
         defer {
@@ -6789,6 +7176,53 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(relaunched.snapshot.connectionState, .connected)
         XCTAssertEqual(relaunched.snapshot.connectionForm.token, "")
         XCTAssertTrue(relaunched.snapshot.hasTokenInput)
+    }
+
+    func testAppShellAutoConnectRetriesTransientLaunchFailureUntilStoredSessionSucceeds() async throws {
+        let url = temporaryConfigURL()
+        let keychain = KeychainSecretStore(service: "dev.perchha.ui.tests.\(UUID().uuidString)")
+        let sessionStore = PerchHAAuthSessionStore(secretStore: keychain)
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+            _ = try? sessionStore.clear()
+        }
+
+        let seedApplication = PerchHAApplication(
+            configStore: JSONConfigStore(fileURL: url),
+            authSessionStore: sessionStore,
+            client: RefreshingHAClientRecorder(
+                discoveryResults: [.success(oauthDiscoverySnapshot())]
+            )
+        )
+        seedApplication.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        seedApplication.updateConnectionForm(
+            urlString: "https://homeassistant.local:8123",
+            token: "long-lived-token"
+        )
+        await seedApplication.connect()
+        seedApplication.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+
+        let retryingClient = RefreshingHAClientRecorder(
+            discoveryResults: [
+                .failure(.unreachable(host: "homeassistant.local")),
+                .success(oauthDiscoverySnapshot())
+            ]
+        )
+        let relaunched = PerchHAApplication(
+            configStore: JSONConfigStore(fileURL: url),
+            authSessionStore: sessionStore,
+            client: retryingClient
+        )
+        relaunched.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            relaunched.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        let state = await relaunched.awaitAutoConnect()
+        XCTAssertEqual(state, .connected)
+        XCTAssertEqual(relaunched.snapshot.connectionState, .connected)
+        let tokens = await retryingClient.discoveryTokens()
+        XCTAssertEqual(tokens, ["long-lived-token", "long-lived-token"])
     }
 
     func test_t_app_shell_reports_config_load_failure_and_blocks_save() {
@@ -8131,6 +8565,22 @@ final class PerchHAUITests: XCTestCase {
         return result
     }
 
+    @MainActor
+    private func nativeSegmentedControls(in root: NSView?) -> [NSSegmentedControl] {
+        guard let root else {
+            return []
+        }
+        var result: [NSSegmentedControl] = []
+        func collect(_ view: NSView) {
+            if let control = view as? NSSegmentedControl, !control.isHiddenOrHasHiddenAncestor {
+                result.append(control)
+            }
+            view.subviews.forEach(collect)
+        }
+        collect(root)
+        return result
+    }
+
     private func nativePopUpButtons(in root: NSView?) -> [NSPopUpButton] {
         guard let root else {
             return []
@@ -8169,6 +8619,10 @@ final class PerchHAUITests: XCTestCase {
         }
         if let button = view as? NSButton {
             return "\(type(of: view))(title:\(button.title),label:\(button.accessibilityLabel() ?? ""))"
+        }
+        if let segmented = view as? NSSegmentedControl {
+            let labels = (0..<segmented.segmentCount).compactMap { segmented.label(forSegment: $0) }.joined(separator: "|")
+            return "\(type(of: view))(label:\(segmented.accessibilityLabel() ?? ""),segments:\(labels))"
         }
         return String(describing: type(of: view))
     }

@@ -65,6 +65,7 @@ public struct PerchHAHistoryStateTimeline: View {
 /// popover.
 struct PerchHAHistoryStateTimelinePopoverBody: View {
     let segments: [HistoryStateSegment]
+    let range: HistoryRange
     let entityName: String
     let labelColor: Color
     let valueColor: Color
@@ -163,7 +164,12 @@ struct PerchHAHistoryStateTimelinePopoverBody: View {
         guard let segment = segment(atNormalizedX: normalizedX) else {
             return nil
         }
-        return "\(Self.label(for: segment.state)) · \(Self.durationLabel(segment.duration))"
+        return Self.readout(
+            state: segment.state,
+            start: segment.start,
+            duration: segment.duration,
+            range: range
+        )
     }
 
     private func segment(atNormalizedX normalizedX: Double) -> HistoryStateSegment? {
@@ -194,6 +200,23 @@ struct PerchHAHistoryStateTimelinePopoverBody: View {
         }
         let spaced = trimmed.replacingOccurrences(of: "_", with: " ")
         return spaced.prefix(1).uppercased() + spaced.dropFirst()
+    }
+
+    static func readout(
+        state: String,
+        start: Date,
+        duration: TimeInterval,
+        range: HistoryRange? = nil,
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
+    ) -> String {
+        let timestamp = PerchHAHistoryHoverFormatting.timestamp(
+            start,
+            range: range,
+            locale: locale,
+            timeZone: timeZone
+        )
+        return "\(label(for: state)) · \(timestamp) · \(durationLabel(duration))"
     }
 
     static func durationLabel(_ duration: TimeInterval) -> String {

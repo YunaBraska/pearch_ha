@@ -378,11 +378,8 @@ Implemented in the first M9 local slice:
 - History sparkline geometry is deterministic and testable outside the private SwiftUI shape.
 - History statistics and sparklines use the chronologically latest numeric sample, even when later raw history rows are `unknown` or `unavailable`.
 - Constant-value and low-data history charts render as centered midlines instead of misleading bottom-edge charts.
-
-Remaining before M9 is complete:
-
-- Full-Xcode verification of the SwiftUI hover popover.
-- Full-Xcode native popover and focus verification for chart rendering and unavailable-history UI.
+- Numeric chart hover readouts and state-timeline hover readouts always include both date and time.
+- Command Line Tools smoke and the Xcode-testable UI suite verify the real history popover exposes the native segmented range control and accepts first-responder focus under full Xcode.
 
 Done:
 
@@ -391,6 +388,7 @@ Done:
 - `test_t_history_hover_debounces_before_provider_call`, `test_t_history_cancel_hover_resets_loading_state`, `test_t_history_load_uses_default_history_range_when_nil`, `testHistoryBodyPresentationUsesSkeletonForLoadingState`, `testHistoryLoadingSkeletonUsesChartAndStatisticsPlaceholders`, and `testHistoryBodyPresentationMapsLoadedAndUnavailableStates` cover hover debounce, cancellation, default range routing, skeleton loading, skeleton placeholder layout, and body presentation state mapping.
 - `test_t_history_cache_reuses_series_until_ttl_expires` and `testHistoryCacheEvictsLeastRecentlyUsedEntryWhenCapacityIsReached` cover cache reuse, TTL expiry, and bounded eviction.
 - `test_t_history_reconnect_clears_cached_series_and_visible_history`, `test_t_history_hover_out_closes_loaded_and_unavailable_popovers`, `testHistoryContentSummaryEmptySeriesIsNoNumericData`, `testHistoryContentSummaryNonNumericOnlySeriesIsNoNumericData`, and `testHistoryContentSummaryKeepsNumericHistoryWhenTrailingSampleIsNonNumeric` cover cache scoping, popover dismissal, no-data summaries, and mixed numeric/non-numeric summaries.
+- `testHistoryCursorReadoutAlwaysIncludesDateAndTime` and `testHistoryStateTimelineReadoutIncludesTimestampAndDuration` cover hover readout formatting for numeric and categorical history.
 - `test_t_history_unavailable_state_is_explicit` covers disconnected and provider-unavailable history states.
 - `test_t_app_shell_load_history_uses_injected_provider` covers app-shell history provider wiring.
 - `test_t_history_week_routes_to_recorder_statistics`, `testHistoryMonthRoutesToRecorderStatisticsWithDailyPeriod`, `testHistoryRecorderStatisticsPreservesBasePathPrefixAgainstFakeHA`, `testHistoryFallsBackToRESTWhenRecorderStatisticsIsUnknown`, `testHistoryRecorderStatisticsFallbackPreservesBasePathPrefixAgainstFakeHA`, `testHistoryFallsBackToRESTWhenRecorderStatisticsIsLegacyUnsupported`, `testHistoryFallsBackToRESTWhenRecorderStatisticsTransportIsUnreachable`, `testHistoryFallsBackToRESTWhenRecorderStatisticsCommandTransportBreaks`, and `testHistoryRecorderStatisticsRejectsMalformedPayload` cover recorder-statistics routing, path-prefix handling, fallback, null-column handling, unreachable/generic transport failure, and malformed payloads.
@@ -420,11 +418,7 @@ Implemented in the M10 local slices:
 - Cover position changes update optimistically, roll back on service failure, reject covers without a reported position, and clamp payloads to Home Assistant's 0-100 range.
 - FakeHA smoke verifies panel toggle and cover position controls emit exact WebSocket `call_service` payloads.
 - Command Line Tools smoke exports `built-in-controls-light.png` from the real panel with toggle failure feedback plus cover buttons and position slider visible.
-- Command Line Tools smoke and the Xcode-testable UI suite verify the real built-in controls panel exposes the native switch class, marked cover-position slider class, and native cover buttons through the panel factory seam.
-
-Remaining before M10 is complete:
-
-- Full-Xcode visual and keyboard verification for control rows.
+- Command Line Tools smoke and the Xcode-testable UI suite verify the real built-in controls panel exposes the native switch class, marked cover-position slider class, native cover buttons, and keyboard focus behavior through the panel factory seam.
 
 Done:
 
@@ -471,11 +465,7 @@ Implemented in the first M11 local slice:
 - `HomeAssistantClient.services` fetches Home Assistant WebSocket `get_services` metadata and FakeHA replays service metadata fixtures.
 - App shell persists custom actions and exposes run/set/remove entrypoints.
 - The in-app custom-action editor UI was removed by user decision; custom actions remain a persisted, tested engine (rows still render configured buttons) without a creation UI.
-
-Remaining before M11 is complete:
-
-- Full-Xcode visual and keyboard verification for custom action rows and confirmation.
-- Native UI automation coverage once the full app wrapper is available.
+- Command Line Tools smoke and the Xcode-testable UI suite verify the real panel renders a native custom-action button-backed control that accepts first-responder focus under full Xcode.
 
 Done:
 
@@ -552,19 +542,15 @@ Integrated:
 - Entity-row accessibility presentation covers value labels, toggle controls, cover buttons, cover position values, custom actions, running states, and inline failures.
 - Keyboard reorder hints for settings and menu-bar promotion share one tested source and explain boundary/search-blocked states.
 - Command Line Tools smoke verifies the real first-run AppKit panel exposes native URL/token controls, accepts first-responder assignment for the URL field, and advances through a non-degenerate native key-view path.
-- Command Line Tools smoke and the Xcode-testable UI suite both verify the real settings custom-action editor exposes native title/target/service-data text fields, metadata-backed popup selections, and an ordered key-view path from the action title into the rest of the editor.
-- `perchha-smoke` renders real `PerchHAPanelView` snapshots through `NSHostingView` for light, dark, increased-contrast, reduced-motion, first-run, connecting/loading, OAuth signing-in, settings selection, settings custom-action editor, built-in controls, reconnecting stale values, empty, success, error, and increased-contrast history variants, then verifies stable dimensions, nonblank pixels, distinct appearance/state hashes, loading accessibility state, public OAuth sign-in state, explicit selection state, menu-bar promotion, and stale-value formatting.
+- Command Line Tools smoke and the Xcode-testable UI suite verify the real entities settings tab exposes native search, popup, numeric-field, and key-view-loop behavior; the real history popover exposes the native range control and focus path; and the real custom-action row exposes a native button-backed focusable control.
+- `perchha-smoke` renders real `PerchHAPanelView` snapshots through `NSHostingView` for light, dark, increased-contrast, reduced-motion, first-run, connecting/loading, OAuth signing-in, settings selection, About/update, built-in controls, reconnecting stale values, empty, success, error, and increased-contrast history variants, then verifies stable dimensions, nonblank pixels, distinct appearance/state hashes, loading accessibility state, public OAuth sign-in state, explicit selection state, menu-bar promotion, and stale-value formatting.
 - `perchha-smoke` also exports `review-contact-sheet.png`, a deterministic contact sheet of the real panel screenshots for fast release UI/UX review.
 - `perchha-smoke` compares the real panel screenshot signatures and `review-contact-sheet.png` signature against the checked-in `docs/release-review-baseline.json` manifest, and can refresh that manifest intentionally with `--update-review-baseline`.
 - `perchha-smoke --repeat <count>` reruns the full public smoke entrypoint as fresh invocations for repeatable flake and snapshot-drift diagnosis while keeping the last-run screenshots as retained evidence.
 
-Remaining:
-
-- Full-Xcode execution of the native focus traversal checks on a machine with Xcode selected.
-
 Completion criteria:
 
-- `t_accessibility` passes in CI and the native focus traversal checks run under a full-Xcode test execution path.
+- `t_accessibility` passes in CI and the native focus traversal checks run under a full-Xcode test execution path for first-run, entity settings, history popover, and custom-action row surfaces.
 - Snapshot suite passes for light, dark, increased-contrast, and reduced-motion variants, and the stored release-review baseline stays in sync with intentional UI changes.
 
 ## M14 - Performance and resilience

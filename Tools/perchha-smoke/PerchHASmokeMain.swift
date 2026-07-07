@@ -76,6 +76,9 @@ struct PerchHASmoke {
         try await verifyDiscoveryAndPersistence()
         try await verifyPanelModelAgainstFakeHA()
         try verifyAppShellPanelFactory()
+        try await verifyEntitiesSettingsPanelFactory()
+        try verifyHistoryPopoverPanelFactory()
+        try await verifyCustomActionButtonsPanelFactory()
         try await verifyBuiltInControlsPanelFactory()
         try verifyPanelOpenPerformance()
         try await verifyApplicationLifecycleMemorySoak()
@@ -3010,6 +3013,163 @@ struct PerchHASmoke {
     }
 
     @MainActor
+    private static func verifyEntitiesSettingsPanelFactory() async throws {
+        _ = NSApplication.shared
+        let model = try await panelSnapshotModel(for: .settingsSelectionLight)
+        let window = PerchHAApplication.makeSettingsWindow(
+            model: model,
+            initialTab: .entities,
+            initiallyExpandedEntityIDs: ["sensor.office_humidity"]
+        )
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+
+        window.makeKeyAndOrderFront(nil)
+        drainMainRunLoop()
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.recalculateKeyViewLoop()
+
+        let textFields = nativeTextFields(in: window.contentView)
+        let popUpButtons = nativePopUpButtons(in: window.contentView)
+        let buttons = nativeButtons(in: window.contentView)
+        let focusDebug = nativeControlDebugSummary(in: window.contentView)
+
+        let searchField = textFields.first { $0.placeholderString == "Search" }
+        let minField = textFields.first { $0.placeholderString == "0" }
+        let maxField = textFields.first { $0.placeholderString == "100" }
+        let firstPopup = popUpButtons.first
+        try expect(searchField != nil, "entities settings tab exposes native search field (\(focusDebug))")
+        try expect(minField != nil, "entities settings tab exposes native minimum field for normalized units (\(focusDebug))")
+        try expect(maxField != nil, "entities settings tab exposes native maximum field for normalized units (\(focusDebug))")
+        try expect(popUpButtons.count >= 4, "entities settings tab exposes native popup-backed controls (\(focusDebug))")
+        try expect(buttons.count >= 4, "entities settings tab exposes native buttons for row disclosure and settings controls (\(focusDebug))")
+
+        if let searchField {
+            try expect(window.makeFirstResponder(searchField), "entities settings tab accepts search-field focus")
+            let labels = nativeKeyViewLoopLabels(startingAt: searchField)
+            try expect(labels.count >= 3, "entities settings tab key-view loop contains the visible text-entry controls (\(labels))")
+            try expect(labels.contains(where: { $0.contains("placeholder:Search") }), "entities settings key-view loop keeps the search field reachable (\(labels))")
+        }
+        if let firstPopup {
+            try expect(firstPopup.acceptsFirstResponder, "entities settings popup-backed controls accept first responder (\(focusDebug))")
+            try expect(window.makeFirstResponder(firstPopup), "entities settings tab can focus a popup-backed control")
+        }
+    }
+
+    @MainActor
+    private static func verifyHistoryPopoverPanelFactory() throws {
+        _ = NSApplication.shared
+        var openedSettings = false
+        let view = PerchHAHistoryPopoverContent(
+            entityID: "sensor.office_humidity",
+            entityName: "Office humidity",
+            valueText: "44%",
+            unit: "%",
+            state: .loaded(SmokePanelSnapshotVariant.loadedHistorySeries),
+            onOpenSettings: { openedSettings = true },
+            selectedRange: .constant(.day)
+        )
+        let hostingView = NSHostingView(
+            rootView: view
+                .frame(width: 280)
+                .environment(\.colorScheme, .light)
+        )
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: NSSize(width: 320, height: 260)),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: true
+        )
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        drainMainRunLoop()
+        hostingView.layoutSubtreeIfNeeded()
+        window.recalculateKeyViewLoop()
+
+        let segmentedControls = nativeSegmentedControls(in: window.contentView)
+        let buttons = nativeButtons(in: window.contentView)
+        let focusDebug = nativeControlDebugSummary(in: window.contentView)
+
+        let rangeControl = segmentedControls.first
+        try expect(rangeControl != nil, "history popover exposes a native segmented range control (\(focusDebug))")
+
+        if let rangeControl {
+            let labels = (0..<rangeControl.segmentCount).compactMap { rangeControl.label(forSegment: $0) }
+            try expect(labels == ["Hour", "Day", "Week"], "history popover range control preserves the expected segments (\(labels))")
+            try expect(rangeControl.acceptsFirstResponder, "history popover range control accepts keyboard focus")
+            try expect(window.makeFirstResponder(rangeControl), "history popover installs the range control as first responder")
+        }
+        if let settingsButton = buttons.first {
+            settingsButton.performClick(nil)
+        }
+        _ = openedSettings
+    }
+
+    @MainActor
+    private static func verifyCustomActionButtonsPanelFactory() async throws {
+        _ = NSApplication.shared
+        let model = PerchHAPanelModel(
+            connector: { _ in
+                .success(rooms: [
+                    Room(
+                        id: "office",
+                        name: "Office",
+                        entities: [
+                            DiscoveredEntity(
+                                id: "sensor.office_humidity",
+                                name: "Office humidity",
+                                state: "44",
+                                unit: "%",
+                                areaID: nil,
+                                deviceID: nil
+                            )
+                        ]
+                    )
+                ])
+            }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        try expect(
+            model.setCustomAction(
+                EntityCustomAction(
+                    id: "snapshot-boost-air",
+                    entityID: "sensor.office_humidity",
+                    title: "Boost air",
+                    action: ActionSpec(domain: "script", service: "turn_on", targetEntityID: "script.air_cleaner_boost")
+                )
+            ),
+            "custom-action smoke fixture stores the panel action"
+        )
+        let panel = PerchHAApplication.makePanel(model: model)
+        defer {
+            panel.orderOut(nil)
+            panel.contentViewController = nil
+        }
+
+        panel.makeKeyAndOrderFront(nil)
+        drainMainRunLoop()
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        let buttons = nativeButtons(in: panel.contentView)
+        let focusDebug = nativeControlDebugSummary(in: panel.contentView)
+        let customActionButtons = buttons.filter { String(describing: type(of: $0)).contains("SwiftUIAppKitButton") }
+        try expect(customActionButtons.count >= 1, "custom-action panel exposes a native button-backed action control (\(focusDebug))")
+        if let firstButton = customActionButtons.first {
+            try expect(firstButton.acceptsFirstResponder, "custom-action button accepts keyboard focus (\(focusDebug))")
+            try expect(panel.makeFirstResponder(firstButton), "panel accepts custom-action button focus")
+            let firstResponder = panel.firstResponder as AnyObject?
+            try expect(firstResponder === firstButton, "custom-action button becomes first responder")
+        }
+    }
+
+    @MainActor
     private static func verifyBuiltInControlsPanelFactory() async throws {
         _ = NSApplication.shared
         let model = try await panelSnapshotModel(for: .builtInControlsLight)
@@ -3162,6 +3322,22 @@ struct PerchHASmoke {
     }
 
     @MainActor
+    private static func nativeSegmentedControls(in root: NSView?) -> [NSSegmentedControl] {
+        guard let root else {
+            return []
+        }
+        var result: [NSSegmentedControl] = []
+        func collect(_ view: NSView) {
+            if let control = view as? NSSegmentedControl, !control.isHiddenOrHasHiddenAncestor {
+                result.append(control)
+            }
+            view.subviews.forEach(collect)
+        }
+        collect(root)
+        return result
+    }
+
+    @MainActor
     private static func nativePopUpButtons(in root: NSView?) -> [NSPopUpButton] {
         guard let root else {
             return []
@@ -3204,6 +3380,10 @@ struct PerchHASmoke {
         if let button = view as? NSButton {
             let label = button.accessibilityLabel() ?? ""
             return "\(type(of: view))(title:\(button.title),label:\(label))"
+        }
+        if let segmented = view as? NSSegmentedControl {
+            let labels = (0..<segmented.segmentCount).compactMap { segmented.label(forSegment: $0) }.joined(separator: "|")
+            return "\(type(of: view))(label:\(segmented.accessibilityLabel() ?? ""),segments:\(labels))"
         }
         return String(describing: type(of: view))
     }
@@ -3627,6 +3807,7 @@ struct PerchHASmoke {
               let connecting = signatures[.connectingLight],
               let signingIn = signatures[.signingInLight],
               let settingsSelection = signatures[.settingsSelectionLight],
+              let settingsAboutUpdate = signatures[.settingsAboutUpdateLight],
               let reconnecting = signatures[.reconnectingLight],
               let emptyLight = signatures[.emptyLight],
               let errorDark = signatures[.errorDark]
@@ -3674,6 +3855,10 @@ struct PerchHASmoke {
             settingsSelection.sampledHash != connectedLight.sampledHash,
             "panel settings selection snapshot renders distinct selection state"
         )
+        try expect(
+            settingsAboutUpdate.sampledHash != settingsSelection.sampledHash,
+            "panel settings about snapshot renders distinct update state"
+        )
         let connectingModel = try await panelSnapshotModel(for: .connectingLight)
         try expect(
             connectingModel.snapshot.accessibilityPresentation().contentLabel == "Connecting to Home Assistant",
@@ -3709,6 +3894,14 @@ struct PerchHASmoke {
         try expect(
             settingsSelectionModel.snapshot.menuBarDisplayConfiguration.promotedEntityIDs == ["sensor.office_humidity"],
             "panel settings selection snapshot preserves menu bar promotion"
+        )
+        let settingsAboutUpdateModel = try await panelSnapshotModel(for: .settingsAboutUpdateLight)
+        guard case let .updateAvailable(update) = settingsAboutUpdateModel.releaseUpdateState else {
+            throw SmokeFailure("panel settings about snapshot did not preserve update-available state")
+        }
+        try expect(
+            update.latestVersion == "2026.7.71500",
+            "panel settings about snapshot preserves the loaded release version"
         )
         let reconnectingModel = try await panelSnapshotModel(for: .reconnectingLight)
         guard let reconnectingEntity = reconnectingModel.snapshot.rooms.first?.entities.first else {
@@ -3748,6 +3941,8 @@ struct PerchHASmoke {
         let model = PerchHAPanelModel(
             snapshot: snapshot,
             oauthSignInRunner: variant.oauthSignInRunner,
+            releaseUpdateChecker: variant.releaseUpdateChecker,
+            currentApplicationVersionProvider: variant.currentApplicationVersionProvider,
             selectionConfiguration: snapshot.selectionConfiguration,
             menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
             customActionConfiguration: variant.customActionConfiguration
@@ -3763,6 +3958,16 @@ struct PerchHASmoke {
             try expect(
                 model.oauthSignInState == PerchHAOAuthSignInState.signingIn,
                 "\(variant.rawValue) snapshot reaches OAuth sign-in state"
+            )
+        }
+        if variant.preloadsReleaseUpdateForSnapshot {
+            await model.checkForUpdates()
+            guard case let .updateAvailable(update) = model.releaseUpdateState else {
+                throw SmokeFailure("\(variant.rawValue) snapshot failed to preload release update state")
+            }
+            try expect(
+                update.latestVersion == "2026.7.71500",
+                "\(variant.rawValue) snapshot preloads the expected release version"
             )
         }
         return model
@@ -3851,18 +4056,21 @@ struct PerchHASmoke {
                 .environment(\.colorScheme, variant.colorScheme)
             )
             size = NSSize(width: 360, height: 420)
-        } else if variant == .settingsSelectionLight {
+        } else if variant == .settingsSelectionLight || variant == .settingsAboutUpdateLight {
+            let tab: PerchHASettingsView.Tab = variant == .settingsAboutUpdateLight ? .about : .entities
             view = AnyView(
                 PerchHASettingsView(
                     model: model,
                     accessibilityPreferencesOverride: variant.accessibilityPreferences,
-                    initialTab: .entities,
+                    initialTab: tab,
                     initiallyExpandedEntityIDs: ["sensor.office_humidity"]
                 )
-                .tabContentForSnapshot(.entities)
+                .tabContentForSnapshot(tab)
                 .environment(\.colorScheme, variant.colorScheme)
             )
-            size = NSSize(width: 520, height: 560)
+            size = variant == .settingsAboutUpdateLight
+                ? NSSize(width: 520, height: 620)
+                : NSSize(width: 520, height: 560)
         } else {
             view = AnyView(
                 PerchHAPanelView(
@@ -5096,6 +5304,7 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
     case connectingLight = "connecting-light"
     case signingInLight = "signing-in-light"
     case settingsSelectionLight = "settings-selection-light"
+    case settingsAboutUpdateLight = "settings-about-update-light"
     case reconnectingLight = "reconnecting-light"
     case emptyLight = "empty-light"
     case errorDark = "error-dark"
@@ -5113,6 +5322,7 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
              .connectingLight,
              .signingInLight,
              .settingsSelectionLight,
+             .settingsAboutUpdateLight,
              .reconnectingLight,
              .emptyLight:
             .light
@@ -5238,6 +5448,16 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
                 lastUpdateDescription: "Snapshot ready",
                 canRetry: true
             )
+        case .settingsAboutUpdateLight:
+            PerchHAPanelSnapshot(
+                connectionState: .connected,
+                phase: .connectedData,
+                rooms: Self.connectedRooms,
+                availableRooms: Self.settingsRooms,
+                isSettingsPresented: true,
+                lastUpdateDescription: "Snapshot ready",
+                canRetry: true
+            )
         case .reconnectingLight:
             PerchHAPanelSnapshot(
                 connectionState: .reconnecting(attempt: 1),
@@ -5283,13 +5503,24 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
                     action: ActionSpec(domain: "script", service: "turn_on", targetEntityID: "script.air_cleaner_boost")
                 )
             ])
-        case .builtInControlsLight, .firstRunLight, .connectingLight, .signingInLight, .settingsSelectionLight, .emptyLight, .errorDark:
+        case .builtInControlsLight,
+             .firstRunLight,
+             .connectingLight,
+             .signingInLight,
+             .settingsSelectionLight,
+             .settingsAboutUpdateLight,
+             .emptyLight,
+             .errorDark:
             CustomActionConfiguration()
         }
     }
 
     var startsOAuthSignInForSnapshot: Bool {
         self == .signingInLight
+    }
+
+    var preloadsReleaseUpdateForSnapshot: Bool {
+        self == .settingsAboutUpdateLight
     }
 
     /// Whether this variant warms the inline-history cache so the graph-forward
@@ -5300,7 +5531,7 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
             true
         case .historyLoadedLight, .historyLoadedLightIncreasedContrast,
              .builtInControlsLight, .firstRunLight, .connectingLight, .signingInLight,
-             .settingsSelectionLight, .reconnectingLight, .emptyLight, .errorDark:
+             .settingsSelectionLight, .settingsAboutUpdateLight, .reconnectingLight, .emptyLight, .errorDark:
             false
         }
     }
@@ -5344,6 +5575,35 @@ private enum SmokePanelSnapshotVariant: String, CaseIterable {
             }
         default:
             return { _ in .failed("OAuth sign-in is not configured") }
+        }
+    }
+
+    var releaseUpdateChecker: PerchHAPanelModel.ReleaseUpdateChecker {
+        switch self {
+        case .settingsAboutUpdateLight:
+            return { currentVersion in
+                let releaseURL = URL(string: "https://github.com/YunaBraska/pearch_ha/releases/tag/2026.7.71500")!
+                let downloadURL = URL(string: "https://github.com/YunaBraska/pearch_ha/releases/download/2026.7.71500/PerchHA-2026.7.71500.dmg")!
+                return .updateAvailable(
+                    PerchHAReleaseUpdate(
+                        currentVersion: currentVersion,
+                        latestVersion: "2026.7.71500",
+                        releaseURL: releaseURL,
+                        downloadURL: downloadURL
+                    )
+                )
+            }
+        default:
+            return { _ in .failed("update checker is not configured") }
+        }
+    }
+
+    var currentApplicationVersionProvider: @Sendable () -> String {
+        switch self {
+        case .settingsAboutUpdateLight:
+            return { "1.0" }
+        default:
+            return { PerchHAApplicationVersionInfo.currentBundle().releaseVersion }
         }
     }
 

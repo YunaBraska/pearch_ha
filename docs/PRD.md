@@ -167,7 +167,7 @@ Acceptance: FakeHA service failure causes rollback and a visible error.
 
 - Every requirement maps to a test in `TESTING.md`.
 - Normal tests run against FakeHA, not a live Home Assistant instance.
-- `PerchHACore` keeps at least 95% line coverage. `PerchHAClient` is held at its measured baseline (currently 86%) to prevent regression; raising it to the 95% goal is a tracked follow-up.
+- `PerchHACore` keeps at least 95% line coverage. `PerchHAClient` is held at its current measured baseline (91.56% on the full-Xcode check run) to prevent regression; raising it to the 95% goal is a tracked follow-up.
 - Branch coverage target is at least 90% for core behavior.
 - Real-HA drift checks are opt-in.
 - Performance checks exist for core runtime paths.

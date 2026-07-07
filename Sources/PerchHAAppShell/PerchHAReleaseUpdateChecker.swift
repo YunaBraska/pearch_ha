@@ -23,6 +23,9 @@ public struct PerchHAGitHubReleaseUpdateChecker: Sendable {
         guard !normalizedCurrentVersion.isEmpty else {
             return .failed("current version is unavailable")
         }
+        guard Self.parsedVersionParts(from: normalizedCurrentVersion) != nil else {
+            return .failed("current version is invalid: \(normalizedCurrentVersion)")
+        }
         guard let url = URL(string: "https://api.github.com/repos/\(owner)/\(repository)/releases/latest") else {
             return .failed("update URL is invalid")
         }
@@ -43,6 +46,9 @@ public struct PerchHAGitHubReleaseUpdateChecker: Sendable {
             let latestVersion = release.tagName.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !latestVersion.isEmpty else {
                 return .failed("GitHub latest release did not include a version tag")
+            }
+            guard Self.parsedVersionParts(from: latestVersion) != nil else {
+                return .failed("GitHub latest release tag is invalid: \(latestVersion)")
             }
             let downloadURL = preferredDownloadURL(from: release.assets) ?? release.htmlURL
             if Self.isNewerRelease(currentVersion: normalizedCurrentVersion, latestVersion: latestVersion) {
@@ -70,8 +76,11 @@ public struct PerchHAGitHubReleaseUpdateChecker: Sendable {
     }
 
     public static func isNewerRelease(currentVersion: String, latestVersion: String) -> Bool {
-        let currentParts = versionParts(from: currentVersion)
-        let latestParts = versionParts(from: latestVersion)
+        guard let currentParts = parsedVersionParts(from: currentVersion),
+              let latestParts = parsedVersionParts(from: latestVersion)
+        else {
+            return false
+        }
         let count = max(currentParts.count, latestParts.count)
         for index in 0..<count {
             let current = currentParts.indices.contains(index) ? currentParts[index] : 0
@@ -93,6 +102,15 @@ public struct PerchHAGitHubReleaseUpdateChecker: Sendable {
 
     private func preferredDownloadURL(from assets: [GitHubReleaseAssetDTO]) -> URL? {
         let preferredSuffixes = [".dmg", ".zip"]
+        let appName = "perchha"
+        for suffix in preferredSuffixes {
+            if let asset = assets.first(where: {
+                let name = $0.name.lowercased()
+                return name.contains(appName) && name.hasSuffix(suffix)
+            }) {
+                return asset.browserDownloadURL
+            }
+        }
         for suffix in preferredSuffixes {
             if let asset = assets.first(where: { $0.name.lowercased().hasSuffix(suffix) }) {
                 return asset.browserDownloadURL
@@ -101,11 +119,15 @@ public struct PerchHAGitHubReleaseUpdateChecker: Sendable {
         return nil
     }
 
-    private static func versionParts(from version: String) -> [Int] {
+    private static func parsedVersionParts(from version: String) -> [Int]? {
         let separators = CharacterSet.decimalDigits.inverted
-        return version
+        let parts = version
             .components(separatedBy: separators)
             .compactMap { Int($0) }
+        guard !parts.isEmpty else {
+            return nil
+        }
+        return parts
     }
 
     private static func networkFailureDescription(_ error: URLError) -> String {
