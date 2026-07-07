@@ -783,13 +783,16 @@ final class PerchHAPackagingTests: XCTestCase {
         let workflowURL = rootURL.appendingPathComponent(".github/workflows/release.yml", isDirectory: false)
         let workflow = try String(contentsOf: workflowURL, encoding: .utf8)
 
-        // Manual dispatch with an optional version override; the same shared
-        // checks gate the release build.
+        // A main-branch push cuts a release; manual dispatch also supports a
+        // branch-safe dry-run packaging path with the same shared checks.
+        XCTAssertTrue(workflow.contains("push:"))
+        XCTAssertTrue(workflow.contains("- main"))
         XCTAssertTrue(workflow.contains("workflow_dispatch:"))
         XCTAssertTrue(workflow.contains("Optional version override"))
+        XCTAssertTrue(workflow.contains("Build and package without creating a GitHub release"))
         XCTAssertTrue(workflow.contains("sh scripts/check.sh"))
         // Universal release binary, packaged with manifest + evidence and
-        // verified before anything is published.
+        // verified before anything is published or retained as an artifact.
         XCTAssertTrue(workflow.contains("swift build -c release --arch arm64 --arch x86_64"))
         XCTAssertTrue(workflow.contains("--sign-ad-hoc"))
         XCTAssertTrue(workflow.contains("--package-dmg"))
@@ -799,6 +802,8 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertTrue(workflow.contains("--verify-release-manifest build/perchha-release-manifest.json"))
         XCTAssertTrue(workflow.contains("lipo -info"))
         XCTAssertTrue(workflow.contains("codesign --verify --deep"))
+        XCTAssertTrue(workflow.contains("actions/upload-artifact@v4"))
+        XCTAssertTrue(workflow.contains("RELEASE_TOKEN"))
         // Publishing and the optional Homebrew tap update.
         XCTAssertTrue(workflow.contains("softprops/action-gh-release@v2"))
         XCTAssertTrue(workflow.contains("HOMEBREW_TAP_TOKEN"))
@@ -813,6 +818,8 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertTrue(releaseGuide.contains(".github/workflows/ci.yml"))
         XCTAssertTrue(releaseGuide.contains(".github/workflows/release.yml"))
         XCTAssertTrue(releaseGuide.contains("scripts/check.sh"))
+        XCTAssertTrue(releaseGuide.contains("dry_run"))
+        XCTAssertTrue(releaseGuide.contains("RELEASE_TOKEN"))
         XCTAssertTrue(releaseGuide.contains("HOMEBREW_TAP_TOKEN"))
     }
 

@@ -291,6 +291,34 @@ public enum PerchHAOAuthSignInState: Equatable, Sendable {
     case failed(String)
 }
 
+public struct PerchHAReleaseUpdate: Equatable, Sendable {
+    public let currentVersion: String
+    public let latestVersion: String
+    public let releaseURL: URL
+    public let downloadURL: URL
+
+    public init(currentVersion: String, latestVersion: String, releaseURL: URL, downloadURL: URL) {
+        self.currentVersion = currentVersion
+        self.latestVersion = latestVersion
+        self.releaseURL = releaseURL
+        self.downloadURL = downloadURL
+    }
+}
+
+public enum PerchHAReleaseUpdateCheckResult: Equatable, Sendable {
+    case upToDate(currentVersion: String, latestVersion: String, releaseURL: URL)
+    case updateAvailable(PerchHAReleaseUpdate)
+    case failed(String)
+}
+
+public enum PerchHAReleaseUpdateState: Equatable, Sendable {
+    case idle
+    case checking
+    case upToDate(currentVersion: String, latestVersion: String, releaseURL: URL)
+    case updateAvailable(PerchHAReleaseUpdate)
+    case failed(String)
+}
+
 public enum PerchHACustomActionServiceDataValueKind: String, CaseIterable, Hashable, Sendable {
     case string
     case number
@@ -1612,6 +1640,7 @@ public final class PerchHAPanelModel: ObservableObject {
     ) async -> ConnectionFailure
     public typealias ActionRunner = @Sendable (PerchHAConnectionForm, ActionSpec) async -> PerchHAActionResult
     public typealias OAuthSignInRunner = @MainActor @Sendable (PerchHAConnectionForm) async -> PerchHAOAuthSignInResult
+    public typealias ReleaseUpdateChecker = @Sendable (String) async -> PerchHAReleaseUpdateCheckResult
     public typealias SelectionConfigurationSink = @MainActor (EntitySelectionConfiguration) -> SelectionPersistenceResult
     public typealias MenuBarDisplayConfigurationSink = @MainActor (MenuBarDisplayConfiguration) -> SelectionPersistenceResult
     public typealias CustomActionConfigurationSink = @MainActor (CustomActionConfiguration) -> SelectionPersistenceResult
@@ -1645,6 +1674,7 @@ public final class PerchHAPanelModel: ObservableObject {
     /// shell persistence is healthy. Never carries a secret.
     @Published public private(set) var shellPersistenceFailureDescription: String?
     @Published public private(set) var oauthSignInState = PerchHAOAuthSignInState.idle
+    @Published public private(set) var releaseUpdateState = PerchHAReleaseUpdateState.idle
 
     /// The live dashboard display preferences the panel honors (row density,
     /// default history range, footer timestamp, hidden modules).
@@ -1695,6 +1725,8 @@ public final class PerchHAPanelModel: ObservableObject {
     private let wallClock: @Sendable () -> Date
     private let actionRunner: ActionRunner
     private let oauthSignInRunner: OAuthSignInRunner
+    private let releaseUpdateChecker: ReleaseUpdateChecker
+    private let currentApplicationVersionProvider: @Sendable () -> String
     private let clock: any PerchClock
     private let historyDebounce: PerchDuration
     private let historyHoverGrace: PerchDuration
@@ -1761,6 +1793,8 @@ public final class PerchHAPanelModel: ObservableObject {
         liveUpdateStreamer: LiveUpdateStreamer? = nil,
         actionRunner: @escaping ActionRunner = { _, _ in .failed("action client is not configured") },
         oauthSignInRunner: @escaping OAuthSignInRunner = { _ in .failed("OAuth sign-in is not configured") },
+        releaseUpdateChecker: @escaping ReleaseUpdateChecker = { _ in .failed("update checker is not configured") },
+        currentApplicationVersionProvider: @escaping @Sendable () -> String = { PerchHAApplicationVersionInfo.currentBundle().releaseVersion },
         clock: any PerchClock = SystemPerchClock(),
         wallClock: @escaping @Sendable () -> Date = { Date() },
         historyDebounce: PerchDuration = .milliseconds(150),
@@ -1817,6 +1851,8 @@ public final class PerchHAPanelModel: ObservableObject {
         self.serviceMetadataProvider = serviceMetadataProvider
         self.actionRunner = actionRunner
         self.oauthSignInRunner = oauthSignInRunner
+        self.releaseUpdateChecker = releaseUpdateChecker
+        self.currentApplicationVersionProvider = currentApplicationVersionProvider
         self.clock = clock
         self.wallClock = wallClock
         self.historyDebounce = historyDebounce
@@ -2037,6 +2073,27 @@ public final class PerchHAPanelModel: ObservableObject {
             await connect()
         case let .failed(message):
             oauthSignInState = .failed(message)
+        }
+    }
+
+    public func checkForUpdates() async {
+        releaseUpdateState = .checking
+        let result = await releaseUpdateChecker(currentApplicationVersionProvider())
+        guard !Task.isCancelled else {
+            releaseUpdateState = .idle
+            return
+        }
+        switch result {
+        case let .upToDate(currentVersion, latestVersion, releaseURL):
+            releaseUpdateState = .upToDate(
+                currentVersion: currentVersion,
+                latestVersion: latestVersion,
+                releaseURL: releaseURL
+            )
+        case let .updateAvailable(update):
+            releaseUpdateState = .updateAvailable(update)
+        case let .failed(message):
+            releaseUpdateState = .failed(message)
         }
     }
 

@@ -851,6 +851,66 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.historyState, .loaded(historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4)))
     }
 
+    func test_t_history_load_uses_dashboard_default_history_range_when_entity_inherits() async {
+        let recorder = HistoryProviderRecorder(
+            results: [
+                .success(historySeries(entityID: "sensor.office_temperature", range: .week, value: 21.4))
+            ]
+        )
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { form, entityID, range in
+                await recorder.provide(form: form, entityID: entityID, range: range)
+            }
+        )
+        model.applyDisplayPreferences(.defaults.with(defaultHistoryRange: .week))
+
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        await model.loadHistory("sensor.office_temperature")
+
+        let _hoisted13b = await recorder.ranges()
+        XCTAssertEqual(_hoisted13b, [.week])
+        XCTAssertEqual(
+            model.snapshot.historyState,
+            .loaded(historySeries(entityID: "sensor.office_temperature", range: .week, value: 21.4))
+        )
+    }
+
+    func test_t_history_load_uses_updated_entity_default_history_range_after_settings_change() async {
+        let recorder = HistoryProviderRecorder(
+            results: [
+                .success(historySeries(entityID: "sensor.office_temperature", range: .week, value: 21.4))
+            ]
+        )
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { form, entityID, range in
+                await recorder.provide(form: form, entityID: entityID, range: range)
+            },
+            menuBarDisplayConfiguration: MenuBarDisplayConfiguration(
+                itemConfigurations: [
+                    MenuBarItemConfiguration(entityID: "sensor.office_temperature")
+                ]
+            )
+        )
+        model.applyDisplayPreferences(.defaults.with(defaultHistoryRange: .day))
+
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        XCTAssertTrue(model.setMenuBarDefaultHistoryRange("sensor.office_temperature", defaultHistoryRange: .week))
+
+        await model.loadHistory("sensor.office_temperature")
+
+        let _hoisted13c = await recorder.ranges()
+        XCTAssertEqual(_hoisted13c, [.week])
+        XCTAssertEqual(
+            model.snapshot.historyState,
+            .loaded(historySeries(entityID: "sensor.office_temperature", range: .week, value: 21.4))
+        )
+    }
+
     func test_t_history_cache_reuses_series_until_ttl_expires() async {
         let clock = TestPerchClock()
         let recorder = HistoryProviderRecorder(
@@ -5847,6 +5907,156 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.oauthSignInState, .failed("OAuth sign-in is not configured"))
         XCTAssertFalse(model.snapshot.connectionForm.usesStoredAuthSession)
         XCTAssertFalse(model.snapshot.hasTokenInput)
+    }
+
+    func testPanelCheckForUpdatesPublishesAvailableRelease() async throws {
+        let releaseURL = try XCTUnwrap(URL(string: "https://github.com/YunaBraska/pearch_ha/releases/tag/2026.7.71500"))
+        let downloadURL = try XCTUnwrap(URL(string: "https://github.com/YunaBraska/pearch_ha/releases/download/2026.7.71500/PerchHA-2026.7.71500.dmg"))
+        let model = PerchHAPanelModel(
+            releaseUpdateChecker: { currentVersion in
+                XCTAssertEqual(currentVersion, "1.0")
+                return .updateAvailable(
+                    PerchHAReleaseUpdate(
+                        currentVersion: "1.0",
+                        latestVersion: "2026.7.71500",
+                        releaseURL: releaseURL,
+                        downloadURL: downloadURL
+                    )
+                )
+            },
+            currentApplicationVersionProvider: { "1.0" }
+        )
+
+        await model.checkForUpdates()
+
+        XCTAssertEqual(
+            model.releaseUpdateState,
+            .updateAvailable(
+                PerchHAReleaseUpdate(
+                    currentVersion: "1.0",
+                    latestVersion: "2026.7.71500",
+                    releaseURL: releaseURL,
+                    downloadURL: downloadURL
+                )
+            )
+        )
+    }
+
+    func testGitHubReleaseUpdateCheckerPrefersDMGAssetAndReportsAvailableRelease() async throws {
+        let checker = PerchHAGitHubReleaseUpdateChecker { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/vnd.github+json")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-GitHub-Api-Version"), "2026-03-10")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "PerchHA/1.0")
+            let payload = """
+            {
+              "tag_name": "2026.7.71500",
+              "html_url": "https://github.com/YunaBraska/pearch_ha/releases/tag/2026.7.71500",
+              "assets": [
+                {
+                  "name": "PerchHA-2026.7.71500.zip",
+                  "browser_download_url": "https://github.com/YunaBraska/pearch_ha/releases/download/2026.7.71500/PerchHA-2026.7.71500.zip"
+                },
+                {
+                  "name": "PerchHA-2026.7.71500.dmg",
+                  "browser_download_url": "https://github.com/YunaBraska/pearch_ha/releases/download/2026.7.71500/PerchHA-2026.7.71500.dmg"
+                }
+              ]
+            }
+            """
+            return (
+                Data(payload.utf8),
+                try XCTUnwrap(HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil))
+            )
+        }
+
+        let result = await checker.checkLatest(currentVersion: "1.0")
+
+        XCTAssertEqual(
+            result,
+            .updateAvailable(
+                PerchHAReleaseUpdate(
+                    currentVersion: "1.0",
+                    latestVersion: "2026.7.71500",
+                    releaseURL: try XCTUnwrap(URL(string: "https://github.com/YunaBraska/pearch_ha/releases/tag/2026.7.71500")),
+                    downloadURL: try XCTUnwrap(URL(string: "https://github.com/YunaBraska/pearch_ha/releases/download/2026.7.71500/PerchHA-2026.7.71500.dmg"))
+                )
+            )
+        )
+    }
+
+    func testGitHubReleaseUpdateCheckerReturnsUpToDateWhenLatestReleaseIsInstalled() async throws {
+        let checker = PerchHAGitHubReleaseUpdateChecker { request in
+            let payload = """
+            {
+              "tag_name": "2026.7.71500",
+              "html_url": "https://github.com/YunaBraska/pearch_ha/releases/tag/2026.7.71500",
+              "assets": []
+            }
+            """
+            return (
+                Data(payload.utf8),
+                try XCTUnwrap(HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil))
+            )
+        }
+
+        let result = await checker.checkLatest(currentVersion: "2026.7.71500")
+
+        XCTAssertEqual(
+            result,
+            .upToDate(
+                currentVersion: "2026.7.71500",
+                latestVersion: "2026.7.71500",
+                releaseURL: try XCTUnwrap(URL(string: "https://github.com/YunaBraska/pearch_ha/releases/tag/2026.7.71500"))
+            )
+        )
+    }
+
+    func testGitHubReleaseUpdateCheckerFallsBackToReleasePageWhenNoAssetMatches() async throws {
+        let checker = PerchHAGitHubReleaseUpdateChecker { request in
+            let payload = """
+            {
+              "tag_name": "2026.7.71500",
+              "html_url": "https://github.com/YunaBraska/pearch_ha/releases/tag/2026.7.71500",
+              "assets": [
+                {
+                  "name": "checksums.txt",
+                  "browser_download_url": "https://github.com/YunaBraska/pearch_ha/releases/download/2026.7.71500/checksums.txt"
+                }
+              ]
+            }
+            """
+            return (
+                Data(payload.utf8),
+                try XCTUnwrap(HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil))
+            )
+        }
+
+        let result = await checker.checkLatest(currentVersion: "1.0")
+
+        XCTAssertEqual(
+            result,
+            .updateAvailable(
+                PerchHAReleaseUpdate(
+                    currentVersion: "1.0",
+                    latestVersion: "2026.7.71500",
+                    releaseURL: try XCTUnwrap(URL(string: "https://github.com/YunaBraska/pearch_ha/releases/tag/2026.7.71500")),
+                    downloadURL: try XCTUnwrap(URL(string: "https://github.com/YunaBraska/pearch_ha/releases/tag/2026.7.71500"))
+                )
+            )
+        )
+    }
+
+    func testGitHubReleaseUpdateCheckerReportsHTTPFailureExplicitly() async throws {
+        let checker = PerchHAGitHubReleaseUpdateChecker { request in
+            return (
+                Data("{}".utf8),
+                try XCTUnwrap(HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 503, httpVersion: nil, headerFields: nil))
+            )
+        }
+
+        let result = await checker.checkLatest(currentVersion: "1.0")
+
+        XCTAssertEqual(result, .failed("GitHub release check failed with HTTP 503"))
     }
 
     func test_t_display_settings_apply_live() async throws {

@@ -4,7 +4,7 @@ What is still missing before PerchHA can honestly be called production-ready:
 
 ## External blockers
 
-- [x] Xcode license accepted on this Mac; full-Xcode XCTest now compiles and runs (448 tests) with the coverage gate operational.
+- [x] Xcode first-launch setup is complete; full-Xcode XCTest now runs (744 tests) and the checked-in app project builds locally.
 - [ ] Restore real Home Assistant mirror capture readiness:
   - [ ] Primary `url` must answer `/api/`
   - [ ] Fallback `url2` must accept the configured token instead of returning `401`
@@ -15,8 +15,8 @@ What is still missing before PerchHA can honestly be called production-ready:
 
 ## Native/full-Xcode verification still missing
 
-- [ ] `xcodebuild -project PerchHA.xcodeproj -scheme PerchHA -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build`
-- [x] Full-Xcode XCTest execution with coverage gate (448 tests green under `-warnings-as-errors`; `PerchHACore` 95.77% line / `PerchHAClient` 86.29% line, gate enforced at the measured baseline)
+- [x] `xcodebuild -project PerchHA.xcodeproj -scheme PerchHA -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build`
+- [x] Full-Xcode XCTest execution with coverage gate (744 tests green under `-warnings-as-errors`; `PerchHACore` 99.13% line / `PerchHAClient` 87.36% line, gate enforced at the measured baseline)
 - [ ] Raise `PerchHAClient` line coverage from 86% back to the 95% goal
 - [ ] Full-Xcode verification for:
   - [ ] M5 app shell / first run

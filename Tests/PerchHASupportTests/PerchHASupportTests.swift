@@ -9,6 +9,27 @@ final class PerchHASupportTests: XCTestCase {
         XCTAssertTrue(PerchHASupport.module.responsibility.contains("command-line parsing"))
     }
 
+    func testApplicationVersionInfoUsesOneValueWhenMarketingAndBuildMatch() {
+        let version = PerchHAApplicationVersionInfo(marketingVersion: "2026.7.71500", buildVersion: "2026.7.71500")
+
+        XCTAssertEqual(version.releaseVersion, "2026.7.71500")
+        XCTAssertEqual(version.displayText, "2026.7.71500")
+    }
+
+    func testApplicationVersionInfoIncludesDistinctBuildVersionInDisplayText() {
+        let version = PerchHAApplicationVersionInfo(marketingVersion: "1.2.3", buildVersion: "456")
+
+        XCTAssertEqual(version.releaseVersion, "1.2.3")
+        XCTAssertEqual(version.displayText, "1.2.3 (456)")
+    }
+
+    func testApplicationVersionInfoFallsBackToBuildVersionWhenMarketingVersionIsMissing() {
+        let version = PerchHAApplicationVersionInfo(marketingVersion: nil, buildVersion: "456")
+
+        XCTAssertEqual(version.releaseVersion, "456")
+        XCTAssertEqual(version.displayText, "456")
+    }
+
     func testCommandLineOptionsParseFlagsAndRepeatedValues() throws {
         let options = try PerchHACommandLineOptions(
             arguments: ["--env", ".env.local", "--strict", "--require-screenshot", "one.png", "--require-screenshot", "two.png"],

@@ -1605,14 +1605,14 @@ public struct PerchHASettingsView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("PearchHA")
                         .font(.title2.weight(.semibold))
-                    Text("Version \(Self.applicationVersion)")
+                    Text("Version \(Self.applicationVersion.displayText)")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("PearchHA, version \(Self.applicationVersion)")
+            .accessibilityLabel("PearchHA, version \(Self.applicationVersion.displayText)")
             Text("A calm Home Assistant menu-bar companion for macOS.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -1658,6 +1658,16 @@ public struct PerchHASettingsView: View {
                             .accessibilityLabel("Repository on GitHub, opens in browser")
                             .lineLimit(1)
                             .truncationMode(.middle)
+                    }
+                    settingsControlRow("Updates") {
+                        VStack(alignment: .trailing, spacing: 6) {
+                            aboutUpdateAction
+                            Text(aboutUpdateSummary)
+                                .font(.footnote)
+                                .foregroundStyle(aboutUpdateSummaryColor)
+                                .multilineTextAlignment(.trailing)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
             }
@@ -1705,6 +1715,66 @@ public struct PerchHASettingsView: View {
         .accessibilityLabel("\(title), opens in browser")
     }
 
+    @ViewBuilder
+    private var aboutUpdateAction: some View {
+        switch model.releaseUpdateState {
+        case let .updateAvailable(update):
+            Link(destination: update.downloadURL) {
+                Label("Download \(update.latestVersion)", systemImage: "arrow.down.circle")
+                    .labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(PerchHAIconButtonStyle(prominentOnHover: true))
+            .accessibilityLabel("Download PearchHA \(update.latestVersion), opens in browser")
+        case .checking:
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Checking...")
+                    .font(.callout.weight(.medium))
+            }
+            .foregroundStyle(.secondary)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Checking for updates")
+        case .idle, .upToDate, .failed:
+            Button {
+                Task { @MainActor in
+                    await model.checkForUpdates()
+                }
+            } label: {
+                Label("Check for updates", systemImage: "arrow.trianglehead.clockwise")
+                    .labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(PerchHAIconButtonStyle(prominentOnHover: true))
+            .accessibilityLabel("Check for updates")
+        }
+    }
+
+    private var aboutUpdateSummary: String {
+        switch model.releaseUpdateState {
+        case .idle:
+            "Check GitHub for the newest published release."
+        case .checking:
+            "Looking for a newer published release."
+        case let .upToDate(currentVersion, latestVersion, _):
+            currentVersion == latestVersion ? "PearchHA is up to date." : "Installed \(currentVersion). Latest \(latestVersion)."
+        case let .updateAvailable(update):
+            "Installed \(update.currentVersion). Latest \(update.latestVersion)."
+        case let .failed(message):
+            message
+        }
+    }
+
+    private var aboutUpdateSummaryColor: Color {
+        switch model.releaseUpdateState {
+        case .failed:
+            PerchHATheme.critical
+        case .updateAvailable:
+            PerchHATheme.warn
+        case .idle, .checking, .upToDate:
+            .secondary
+        }
+    }
+
     private static let repositoryURL = URL(string: "https://github.com/YunaBraska/pearch_ha")!
     private static let licenseURL = URL(string: "https://github.com/YunaBraska/pearch_ha/blob/main/LICENSE")!
     private static let issuesURL = URL(string: "https://github.com/YunaBraska/pearch_ha/issues")!
@@ -1719,21 +1789,7 @@ public struct PerchHASettingsView: View {
         NSApp.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
     }
 
-    private static let applicationVersion: String = {
-        let info = Bundle.main.infoDictionary
-        let short = info?["CFBundleShortVersionString"] as? String
-        let build = info?["CFBundleVersion"] as? String
-        switch (short, build) {
-        case let (short?, build?):
-            return "\(short) (\(build))"
-        case let (short?, nil):
-            return short
-        case let (nil, build?):
-            return build
-        case (nil, nil):
-            return "1.0"
-        }
-    }()
+    private static let applicationVersion = PerchHAApplicationVersionInfo.currentBundle()
 
     private var entitiesTab: some View {
         settingsPage(title: "Entities", systemImage: Tab.entities.systemImage) {

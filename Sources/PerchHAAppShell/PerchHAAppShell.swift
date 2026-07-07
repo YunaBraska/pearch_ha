@@ -3,6 +3,7 @@ import AuthenticationServices
 import PerchHACore
 import PerchHAClient
 import PerchHAPersistence
+import PerchHASupport
 import PerchHAUI
 import Security
 import ServiceManagement
@@ -1050,6 +1051,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     private let liveUpdateStreamer: PerchHAPanelModel.LiveUpdateStreamer?
     private let actionRunner: PerchHAPanelModel.ActionRunner
     private let oauthSignInRunner: PerchHAPanelModel.OAuthSignInRunner
+    private let releaseUpdateChecker: PerchHAPanelModel.ReleaseUpdateChecker
     private let protectedActionValueStore: any ProtectedActionValueStore
     private let oauthApplicationConfiguration: PerchHAOAuthApplicationConfiguration?
     private let menuBarPresenter: PerchHAMenuBarPresenter
@@ -1090,6 +1092,9 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             serviceMetadataProvider: gateway.services(form:),
             liveUpdateStreamer: gateway.streamLiveUpdates(form:onEvent:),
             actionRunner: gateway.action(form:action:),
+            releaseUpdateChecker: { currentVersion in
+                await PerchHAGitHubReleaseUpdateChecker().checkLatest(currentVersion: currentVersion)
+            },
             protectedActionValueStore: KeychainProtectedActionValueStore(),
             oauthSignInRunner: oauthSignInRunner,
             oauthApplicationConfiguration: oauthApplicationConfiguration
@@ -1114,6 +1119,9 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             serviceMetadataProvider: gateway.services(form:),
             liveUpdateStreamer: gateway.streamLiveUpdates(form:onEvent:),
             actionRunner: gateway.action(form:action:),
+            releaseUpdateChecker: { currentVersion in
+                await PerchHAGitHubReleaseUpdateChecker().checkLatest(currentVersion: currentVersion)
+            },
             protectedActionValueStore: KeychainProtectedActionValueStore(),
             oauthSignInRunner: { _ in .failed("OAuth sign-in is not configured") },
             oauthApplicationConfiguration: nil
@@ -1153,6 +1161,9 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         serviceMetadataProvider: @escaping PerchHAPanelModel.ServiceMetadataProvider = { _ in .success([]) },
         liveUpdateStreamer: PerchHAPanelModel.LiveUpdateStreamer? = nil,
         actionRunner: @escaping PerchHAPanelModel.ActionRunner = PerchHAApplication.action(form:action:),
+        releaseUpdateChecker: @escaping PerchHAPanelModel.ReleaseUpdateChecker = { currentVersion in
+            await PerchHAGitHubReleaseUpdateChecker().checkLatest(currentVersion: currentVersion)
+        },
         protectedActionValueStore: any ProtectedActionValueStore = KeychainProtectedActionValueStore(),
         oauthSignInRunner: @escaping PerchHAPanelModel.OAuthSignInRunner = { _ in .failed("OAuth sign-in is not configured") },
         oauthApplicationConfiguration: PerchHAOAuthApplicationConfiguration? = nil,
@@ -1167,6 +1178,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         self.serviceMetadataProvider = serviceMetadataProvider
         self.liveUpdateStreamer = liveUpdateStreamer
         self.actionRunner = actionRunner
+        self.releaseUpdateChecker = releaseUpdateChecker
         self.protectedActionValueStore = protectedActionValueStore
         self.oauthSignInRunner = oauthSignInRunner
         self.oauthApplicationConfiguration = oauthApplicationConfiguration
@@ -1239,6 +1251,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             liveUpdateStreamer: liveUpdateStreamer,
             actionRunner: actionRunner,
             oauthSignInRunner: oauthSignInRunner,
+            releaseUpdateChecker: releaseUpdateChecker,
             selectionConfiguration: configuration.selectionConfiguration,
             menuBarDisplayConfiguration: configuration.menuBarDisplayConfiguration,
             customActionConfiguration: configuration.customActionConfiguration,
