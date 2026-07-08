@@ -9572,6 +9572,85 @@ final class PerchHAUITests: XCTestCase {
         )
     }
 
+    func test_t_average_links_apply_symmetrically_to_family_members() async {
+        let rooms = averageRooms()
+        let model = PerchHAPanelModel(connector: { _ in .success(rooms: rooms) })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        XCTAssertTrue(
+            model.setAverageLinkedEntityIDs(
+                "sensor.temperature_office",
+                linkedEntityIDs: ["sensor.temperature_bedroom", "sensor.temperature_living"]
+            )
+        )
+
+        let expectedFamily: [EntityID] = [
+            "sensor.temperature_office",
+            "sensor.temperature_living",
+            "sensor.temperature_bedroom"
+        ]
+        XCTAssertEqual(model.averageFamilyEntityIDs(for: "sensor.temperature_office"), expectedFamily)
+        XCTAssertEqual(
+            model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: "sensor.temperature_bedroom").averageEntityIDs,
+            expectedFamily
+        )
+        XCTAssertEqual(
+            model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: "sensor.temperature_living").averageEntityIDs,
+            expectedFamily
+        )
+    }
+
+    func test_t_average_links_remove_member_from_entire_family() async {
+        let rooms = averageRooms()
+        let model = PerchHAPanelModel(connector: { _ in .success(rooms: rooms) })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        XCTAssertTrue(
+            model.setAverageLinkedEntityIDs(
+                "sensor.temperature_office",
+                linkedEntityIDs: ["sensor.temperature_bedroom", "sensor.temperature_living"]
+            )
+        )
+        XCTAssertTrue(
+            model.setAverageLinkedEntityIDs(
+                "sensor.temperature_bedroom",
+                linkedEntityIDs: ["sensor.temperature_living"]
+            )
+        )
+
+        let expectedFamily: [EntityID] = [
+            "sensor.temperature_bedroom",
+            "sensor.temperature_living"
+        ]
+        XCTAssertEqual(model.averageFamilyEntityIDs(for: "sensor.temperature_bedroom"), expectedFamily)
+        XCTAssertEqual(
+            model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: "sensor.temperature_office").averageEntityIDs,
+            []
+        )
+    }
+
+    func test_t_formatted_value_uses_average_family_value() async {
+        let rooms = averageRooms()
+        let model = PerchHAPanelModel(connector: { _ in .success(rooms: rooms) })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        XCTAssertTrue(
+            model.setAverageLinkedEntityIDs(
+                "sensor.temperature_office",
+                linkedEntityIDs: ["sensor.temperature_bedroom", "sensor.temperature_living"]
+            )
+        )
+
+        let office = rooms[0].entities[0]
+        XCTAssertEqual(
+            model.snapshot.formattedValue(for: office, locale: Locale(identifier: "en_US")).text,
+            "21 °C"
+        )
+    }
+
     func test_t_panel_formatted_value_applies_display_unit_percent() async {
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) }
@@ -10758,6 +10837,55 @@ func selectionRooms() -> [Room] {
                     name: "Kitchen light",
                     state: "off",
                     unit: nil,
+                    areaID: nil,
+                    deviceID: nil
+                )
+            ]
+        )
+    ]
+}
+
+func averageRooms() -> [Room] {
+    [
+        Room(
+            id: "living",
+            name: "Living",
+            entities: [
+                DiscoveredEntity(
+                    id: "sensor.temperature_office",
+                    name: "Office temperature",
+                    state: "20",
+                    unit: "°C",
+                    areaID: nil,
+                    deviceID: nil
+                ),
+                DiscoveredEntity(
+                    id: "sensor.temperature_living",
+                    name: "Living temperature",
+                    state: "21",
+                    unit: "°C",
+                    areaID: nil,
+                    deviceID: nil
+                )
+            ]
+        ),
+        Room(
+            id: "bedroom",
+            name: "Bedroom",
+            entities: [
+                DiscoveredEntity(
+                    id: "sensor.temperature_bedroom",
+                    name: "Bedroom temperature",
+                    state: "22",
+                    unit: "°C",
+                    areaID: nil,
+                    deviceID: nil
+                ),
+                DiscoveredEntity(
+                    id: "sensor.humidity_bedroom",
+                    name: "Bedroom humidity",
+                    state: "48",
+                    unit: "%",
                     areaID: nil,
                     deviceID: nil
                 )

@@ -748,6 +748,8 @@ public struct PerchHASettingsView: View {
     /// a short debounce so typing never rebuilds the whole app state per key.
     @State private var entitySearchText: String = ""
     @State private var searchDebounceTask: Task<Void, Never>?
+    @State private var averagePickerEntityID: EntityID?
+    @State private var averagePickerSearchText: String = ""
     @State private var launchAtLogin: Bool
     @State private var launchAtLoginPermissionDenied = false
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
@@ -2428,6 +2430,7 @@ public struct PerchHASettingsView: View {
         let metadata = PerchHAEntityMetadataPresentation(entity: entity, roomName: roomName)
         let isExpanded = inspectedEntityID == entity.id
         let isPromoted = model.snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
+        let hasAverageLinks = !model.averageLinkedEntityIDs(for: entity.id).isEmpty
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 Toggle("", isOn: selectionBinding(for: entity.id))
@@ -2448,6 +2451,9 @@ public struct PerchHASettingsView: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
+                if hasAverageLinks {
+                    averageLinkedPill
+                }
                 if isPromoted {
                     menuBarVisiblePill
                 }
@@ -2499,12 +2505,37 @@ public struct PerchHASettingsView: View {
 
     /// The compact "shown in menu bar" pill used on a collapsed entity row.
     private var menuBarVisiblePill: some View {
-        StatusPill(
-            "Menu bar",
+        collapsedEntityStatusPill(
             systemImage: "menubar.rectangle",
             color: PerchHATheme.Dashboard.palette(colorScheme).accentPrimary,
             accessibilityLabel: "Shown in menu bar"
         )
+    }
+
+    /// The compact indicator that this entity participates in a linked average.
+    private var averageLinkedPill: some View {
+        collapsedEntityStatusPill(
+            systemImage: "link",
+            color: PerchHATheme.Dashboard.palette(colorScheme).warning,
+            accessibilityLabel: "Linked values"
+        )
+    }
+
+    private func collapsedEntityStatusPill(
+        systemImage: String,
+        color: Color,
+        accessibilityLabel: String
+    ) -> some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(color)
+            .frame(minWidth: 26, minHeight: 18)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(color.opacity(colorScheme == .dark ? 0.22 : 0.14))
+            )
+            .accessibilityLabel(accessibilityLabel)
+            .help(accessibilityLabel)
     }
 
     /// Opens the inspector for `id`, collapsing any other open inspector so only
@@ -2527,6 +2558,7 @@ public struct PerchHASettingsView: View {
         let showsThresholdSection = EntityDisplayDefaults.hasThresholds(
             EntityDisplayDefaults.effectiveThresholds(for: entity, configuration: configuration)
         )
+        let showsAverageSection = model.canAverage(entity.id)
         return VStack(alignment: .leading, spacing: 0) {
             settingsSection(title: "Identity", systemImage: "info.circle") {
                 entityIdentitySection(metadata.inspectorFields, links: links)
@@ -2534,6 +2566,12 @@ public struct PerchHASettingsView: View {
             settingsSectionDivider
             settingsSection(title: "Display", systemImage: "textformat.size") {
                 displaySectionControls(for: entity, configuration: configuration, isPromoted: isPromoted)
+            }
+            if showsAverageSection {
+                settingsSectionDivider
+                settingsSection(title: "Average", systemImage: "sum") {
+                    averageSectionControls(for: entity)
+                }
             }
             settingsSectionDivider
             settingsSection(title: "Menu bar", systemImage: "menubar.rectangle") {
@@ -2715,6 +2753,175 @@ public struct PerchHASettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    @ViewBuilder
+    private func averageSectionControls(for entity: DiscoveredEntity) -> some View {
+        let linkedEntities = model.averageLinkedEntities(for: entity.id)
+        VStack(alignment: .leading, spacing: 8) {
+            settingsControlRow("Linked values") {
+                Text(linkedEntities.isEmpty ? "None" : "\(linkedEntities.count + 1) values")
+                    .foregroundStyle(.secondary)
+            }
+
+            if linkedEntities.isEmpty {
+                Text("No linked values")
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(linkedEntities, id: \.id.rawValue) { linked in
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(linked.name)
+                                Text(averageEntitySecondaryText(linked))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 8)
+                            Button {
+                                removeAverageLink(from: entity.id, linkedID: linked.id)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .frame(width: 18, height: 18)
+                            }
+                            .buttonStyle(PerchHACircularIconButtonStyle())
+                            .controlSize(.small)
+                            .help("Remove \(linked.name) from the shared average")
+                            .accessibilityLabel("Remove \(linked.name) from \(entity.name) average")
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    averagePickerSearchText = ""
+                    averagePickerEntityID = entity.id
+                } label: {
+                    Label("Add value", systemImage: "plus")
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(PerchHAIconButtonStyle())
+                .popover(
+                    isPresented: averagePickerBinding(for: entity.id),
+                    arrowEdge: .bottom
+                ) {
+                    averagePickerPopover(for: entity)
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func averagePickerBinding(for id: EntityID) -> Binding<Bool> {
+        Binding(
+            get: {
+                averagePickerEntityID == id
+            },
+            set: { isPresented in
+                if isPresented {
+                    averagePickerSearchText = ""
+                    averagePickerEntityID = id
+                } else if averagePickerEntityID == id {
+                    averagePickerEntityID = nil
+                    averagePickerSearchText = ""
+                }
+            }
+        )
+    }
+
+    private func averagePickerPopover(for entity: DiscoveredEntity) -> some View {
+        let candidates = filteredAverageCandidates(for: entity)
+        return VStack(alignment: .leading, spacing: 10) {
+            TextField("Search values", text: $averagePickerSearchText)
+                .textFieldStyle(.roundedBorder)
+            if candidates.isEmpty {
+                Text("No matching values")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(candidates.enumerated()), id: \.element.id.rawValue) { index, candidate in
+                            Button {
+                                addAverageLink(from: entity.id, linkedID: candidate.id)
+                            } label: {
+                                HStack(spacing: 8) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(candidate.name)
+                                            .foregroundStyle(.primary)
+                                        Text(averageEntitySecondaryText(candidate))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer(minLength: 8)
+                                    Image(systemName: "plus.circle")
+                                        .foregroundStyle(PerchHATheme.accent)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 6)
+                            }
+                            .buttonStyle(.plain)
+                            if index < candidates.count - 1 {
+                                Divider()
+                            }
+                        }
+                    }
+                }
+                .frame(width: 320, height: 220)
+            }
+        }
+        .padding(12)
+        .frame(width: 344)
+    }
+
+    private func filteredAverageCandidates(for entity: DiscoveredEntity) -> [DiscoveredEntity] {
+        let query = averagePickerSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let candidates = model.averageCandidateEntities(for: entity.id)
+        guard !query.isEmpty else {
+            return candidates
+        }
+        return candidates.filter { candidate in
+            averageSearchFields(for: candidate).contains { field in
+                field.localizedCaseInsensitiveContains(query)
+            }
+        }
+    }
+
+    private func averageSearchFields(for entity: DiscoveredEntity) -> [String] {
+        var fields: [String] = [entity.name, entity.id.rawValue]
+        fields.append(contentsOf: [entity.deviceName, entity.deviceModel, entity.deviceManufacturer].compactMap { value in
+            guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+                return nil
+            }
+            return value
+        })
+        return fields
+    }
+
+    private func averageEntitySecondaryText(_ entity: DiscoveredEntity) -> String {
+        let unit = entity.unit?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let context = entity.deviceName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts: [String] = [context, unit].compactMap { value in
+            guard let value, !value.isEmpty else {
+                return nil
+            }
+            return value
+        }
+        return parts.isEmpty ? entity.id.rawValue : parts.joined(separator: " · ")
+    }
+
+    private func addAverageLink(from id: EntityID, linkedID: EntityID) {
+        let next = model.averageLinkedEntityIDs(for: id) + [linkedID]
+        if model.setAverageLinkedEntityIDs(id, linkedEntityIDs: next) {
+            averagePickerSearchText = ""
+        }
+    }
+
+    private func removeAverageLink(from id: EntityID, linkedID: EntityID) {
+        let next = model.averageLinkedEntityIDs(for: id).filter { $0 != linkedID }
+        _ = model.setAverageLinkedEntityIDs(id, linkedEntityIDs: next)
+    }
+
     /// The entity's icon picker: the custom SF Symbol used everywhere this
     /// value appears (dashboard row and menu bar), or Automatic for the
     /// domain-derived symbol.
@@ -2888,6 +3095,9 @@ public struct PerchHASettingsView: View {
         configuration: MenuBarItemConfiguration,
         detectedLabel: String
     ) -> String {
+        if let selectedOption = selectedUnitSelectionOption(for: entity, configuration: configuration) {
+            return selectedOption.title
+        }
         if let symbol = configuration.displayUnitSymbol {
             return symbol
         }
@@ -2967,6 +3177,16 @@ public struct PerchHASettingsView: View {
                 UnitSelectionOption(title: symbol, displayUnit: displayUnit, displayUnitSymbol: symbol)
             }
         )
+    }
+
+    private func selectedUnitSelectionOption(
+        for entity: DiscoveredEntity,
+        configuration: MenuBarItemConfiguration
+    ) -> UnitSelectionOption? {
+        unitSelectionGroups(for: entity).flatMap(\.options).first { option in
+            option.displayUnit == configuration.displayUnit
+                && option.displayUnitSymbol == configuration.displayUnitSymbol
+        }
     }
 
     private func menuBarTotalControls(

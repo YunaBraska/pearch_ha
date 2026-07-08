@@ -1297,6 +1297,123 @@ public enum ValueUnit: String, CaseIterable, Codable, Equatable, Sendable {
     }
 }
 
+/// Resolves shared averaging families for compatible numeric entities.
+///
+/// A family is stored symmetrically on every participating entity's display
+/// configuration and always includes the entity itself. Rendering uses the
+/// current numeric readings of every compatible available member; unavailable
+/// or non-numeric members simply drop out of the live average instead of
+/// blanking the whole value.
+public enum PerchHAEntityAveraging {
+    /// The family ids stored for an entity, normalized to always include the
+    /// entity itself when averaging is active.
+    public static func familyIDs(for entityID: EntityID, configuration: MenuBarItemConfiguration) -> [EntityID] {
+        var seen: Set<EntityID> = [entityID]
+        var ordered: [EntityID] = [entityID]
+        for id in configuration.averageEntityIDs where !seen.contains(id) {
+            seen.insert(id)
+            ordered.append(id)
+        }
+        return ordered.count > 1 ? ordered : [entityID]
+    }
+
+    /// Whether two entities are eligible to share one average family.
+    public static func areCompatible(_ source: DiscoveredEntity, _ target: DiscoveredEntity) -> Bool {
+        guard source.id != target.id,
+              let sourceUnit = normalizedUnit(source.unit),
+              sourceUnit == normalizedUnit(target.unit)
+        else {
+            return false
+        }
+        return isPotentiallyNumeric(source) && isPotentiallyNumeric(target)
+    }
+
+    /// The entity value to render after applying the shared average family, or
+    /// the base entity unchanged when no active family contributes a numeric
+    /// average right now.
+    public static func averagedEntity(
+        base: DiscoveredEntity,
+        configuration: MenuBarItemConfiguration,
+        availableEntities: [DiscoveredEntity]
+    ) -> DiscoveredEntity {
+        let family = familyMembers(
+            for: base,
+            configuration: configuration,
+            availableEntities: availableEntities
+        )
+        guard family.count > 1 else {
+            return base
+        }
+        let numericMembers = family.compactMap { numericState($0.state) }
+        guard !numericMembers.isEmpty else {
+            return base
+        }
+        let average = numericMembers.reduce(0, +) / Double(numericMembers.count)
+        return DiscoveredEntity(
+            id: base.id,
+            name: base.name,
+            state: String(average),
+            unit: base.unit,
+            areaID: base.areaID,
+            deviceID: base.deviceID,
+            deviceName: base.deviceName,
+            deviceManufacturer: base.deviceManufacturer,
+            deviceModel: base.deviceModel,
+            deviceDomain: base.deviceDomain,
+            currentPosition: base.currentPosition
+        )
+    }
+
+    /// The concrete compatible members currently in an entity's family.
+    public static func familyMembers(
+        for base: DiscoveredEntity,
+        configuration: MenuBarItemConfiguration,
+        availableEntities: [DiscoveredEntity]
+    ) -> [DiscoveredEntity] {
+        let ids = familyIDs(for: base.id, configuration: configuration)
+        guard ids.count > 1 else {
+            return [base]
+        }
+        let entitiesByID = Dictionary(uniqueKeysWithValues: availableEntities.map { ($0.id, $0) })
+        var seen: Set<EntityID> = []
+        var resolved: [DiscoveredEntity] = []
+        for id in ids {
+            let entity = entitiesByID[id] ?? (id == base.id ? base : nil)
+            guard let entity else {
+                continue
+            }
+            guard entity.id == base.id || areCompatible(base, entity) else {
+                continue
+            }
+            guard !seen.contains(entity.id) else {
+                continue
+            }
+            seen.insert(entity.id)
+            resolved.append(entity)
+        }
+        return resolved.count > 1 ? resolved : [base]
+    }
+
+    private static func isPotentiallyNumeric(_ entity: DiscoveredEntity) -> Bool {
+        if numericState(entity.state) != nil {
+            return true
+        }
+        return normalizedUnit(entity.unit) != nil
+    }
+
+    private static func numericState(_ state: String) -> Double? {
+        Double(state.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private static func normalizedUnit(_ unit: String?) -> String? {
+        let trimmed = unit?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
+    }
+}
+
 public struct EntityValueFormatter: Sendable {
     public let localeIdentifier: String
     public let maximumFractionDigits: Int
@@ -1584,6 +1701,7 @@ public enum EntityDisplayDefaults {
             && configuration.showsUnit == defaultConfiguration.showsUnit
             && configuration.absoluteTotal == defaultConfiguration.absoluteTotal
             && configuration.totalEntityID == defaultConfiguration.totalEntityID
+            && configuration.averageEntityIDs == defaultConfiguration.averageEntityIDs
             && configuration.thresholds == defaultConfiguration.thresholds
             && configuration.defaultHistoryRange == defaultConfiguration.defaultHistoryRange
             && configuration.coverControlMode == defaultConfiguration.coverControlMode

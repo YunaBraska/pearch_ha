@@ -1237,6 +1237,7 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
                 locale: locale
             )
             let value = formattedValue(for: entity, locale: locale)
+            let averaged = displayedEntity(for: entity)
             switch presentation {
             case let .gauge(gauge):
                 return PerchHADashboardSummary.PrimaryMetric(
@@ -1246,7 +1247,7 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
                     fraction: gauge.fraction,
                     severity: gauge.severity
                 )
-            case let .value(severity) where value.status == .available && Double(entity.state) != nil:
+            case let .value(severity) where value.status == .available && Double(averaged.state) != nil:
                 return PerchHADashboardSummary.PrimaryMetric(
                     entityID: entity.id,
                     name: entity.name,
@@ -1276,6 +1277,11 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
 
     public func formattedValue(for entity: DiscoveredEntity, locale: Locale = .current) -> FormattedEntityValue {
         let configuration = effectiveMenuBarItemConfiguration(for: entity)
+        let displayedEntity = PerchHAEntityAveraging.averagedEntity(
+            base: entity,
+            configuration: configuration,
+            availableEntities: availableRooms.flatMap(\.entities)
+        )
         return EntityValueFormatter(
             locale: locale,
             displayUnit: configuration.displayUnit,
@@ -1283,7 +1289,15 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
             showsUnit: configuration.showsUnit,
             minValue: configuration.minValue,
             maxValue: configuration.maxValue
-        ).format(entity, isStale: valuesAreStale)
+        ).format(displayedEntity, isStale: valuesAreStale)
+    }
+
+    private func displayedEntity(for entity: DiscoveredEntity) -> DiscoveredEntity {
+        PerchHAEntityAveraging.averagedEntity(
+            base: entity,
+            configuration: effectiveMenuBarItemConfiguration(for: entity),
+            availableEntities: availableRooms.flatMap(\.entities)
+        )
     }
 
     public func accessibilityPresentation(
@@ -2500,6 +2514,71 @@ public final class PerchHAPanelModel: ObservableObject {
             snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id)
                 .settingBounds(minValue: minValue, maxValue: maxValue)
         )
+    }
+
+    /// The full shared averaging family for an entity, always including the
+    /// entity itself. A single-id result means no active family.
+    public func averageFamilyEntityIDs(for id: EntityID) -> [EntityID] {
+        PerchHAEntityAveraging.familyIDs(
+            for: id,
+            configuration: snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id)
+        )
+    }
+
+    /// The linked peer ids contributing to an entity's average, excluding the
+    /// entity itself.
+    public func averageLinkedEntityIDs(for id: EntityID) -> [EntityID] {
+        averageFamilyEntityIDs(for: id).filter { $0 != id }
+    }
+
+    public func averageLinkedEntities(for id: EntityID) -> [DiscoveredEntity] {
+        averageLinkedEntityIDs(for: id).compactMap(entity(for:))
+    }
+
+    public func averageCandidateEntities(for id: EntityID) -> [DiscoveredEntity] {
+        guard let source = entity(for: id) else {
+            return []
+        }
+        let currentFamily = Set(averageFamilyEntityIDs(for: id))
+        return snapshot.availableRooms
+            .flatMap(\.entities)
+            .filter { candidate in
+                !currentFamily.contains(candidate.id)
+                    && PerchHAEntityAveraging.areCompatible(source, candidate)
+            }
+    }
+
+    public func canAverage(_ id: EntityID) -> Bool {
+        !averageCandidateEntities(for: id).isEmpty || !averageLinkedEntityIDs(for: id).isEmpty
+    }
+
+    @discardableResult
+    public func setAverageLinkedEntityIDs(_ id: EntityID, linkedEntityIDs: [EntityID]) -> Bool {
+        guard let source = entity(for: id) else {
+            return false
+        }
+        let requestedPeers = uniqueEntityIDs(linkedEntityIDs).filter { $0 != id }
+        let currentFamily = averageFamilyEntityIDs(for: id)
+        var targetFamily: [EntityID] = [id]
+        for peerID in requestedPeers {
+            guard let peer = entity(for: peerID),
+                  PerchHAEntityAveraging.areCompatible(source, peer) else {
+                return false
+            }
+            targetFamily.append(peerID)
+        }
+        targetFamily = orderedAverageFamilyIDs(targetFamily)
+        let storedTargetFamily = targetFamily.count > 1 ? targetFamily : []
+
+        var displayConfiguration = snapshot.menuBarDisplayConfiguration
+        let affected = Set(currentFamily + targetFamily)
+        for memberID in affected {
+            let memberFamily = storedTargetFamily.contains(memberID) ? storedTargetFamily : []
+            let memberConfiguration = displayConfiguration.itemConfiguration(for: memberID)
+                .settingAverageEntityIDs(memberFamily)
+            displayConfiguration = displayConfiguration.replacingItemConfiguration(memberConfiguration)
+        }
+        return updateMenuBarDisplayConfiguration(displayConfiguration, persist: true)
     }
 
     @discardableResult
@@ -5641,6 +5720,21 @@ public final class PerchHAPanelModel: ObservableObject {
 
     private func canSetThreshold(_ threshold: ValueThreshold?) -> Bool {
         threshold?.value.isFinite ?? true
+    }
+
+    private func orderedAverageFamilyIDs(_ ids: [EntityID]) -> [EntityID] {
+        let unique = Set(ids)
+        return orderedAvailableEntityIDs().filter { unique.contains($0) }
+    }
+
+    private func uniqueEntityIDs(_ ids: [EntityID]) -> [EntityID] {
+        var seen: Set<EntityID> = []
+        var ordered: [EntityID] = []
+        for id in ids where !seen.contains(id) {
+            seen.insert(id)
+            ordered.append(id)
+        }
+        return ordered
     }
 
     private func entity(for id: EntityID) -> DiscoveredEntity? {

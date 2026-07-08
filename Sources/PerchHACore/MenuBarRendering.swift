@@ -290,6 +290,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
     public let maximumFractionDigits: Int
     public let absoluteTotal: Double?
     public let totalEntityID: EntityID?
+    /// The shared averaging family for this entity, including the entity itself.
+    /// Empty means no averaging.
+    public let averageEntityIDs: [EntityID]
     public let thresholds: ValueThresholds
     /// The chart range for this entity's inline preview and history popover,
     /// or `nil` to inherit the global Appearance default.
@@ -321,6 +324,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         maximumFractionDigits: Int = 1,
         absoluteTotal: Double? = nil,
         totalEntityID: EntityID? = nil,
+        averageEntityIDs: [EntityID] = [],
         thresholds: ValueThresholds = ValueThresholds(),
         defaultHistoryRange: HistoryRange? = nil,
         coverControlMode: CoverControlMode = .both,
@@ -339,6 +343,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         self.maximumFractionDigits = max(0, maximumFractionDigits)
         self.absoluteTotal = absoluteTotal
         self.totalEntityID = totalEntityID
+        self.averageEntityIDs = Self.uniqueAverageEntityIDs(averageEntityIDs)
         self.thresholds = thresholds
         self.defaultHistoryRange = defaultHistoryRange
         self.coverControlMode = coverControlMode
@@ -350,6 +355,47 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         self.showsEntityIcon = showsEntityIcon
         let trimmedIcon = customIconName?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.customIconName = (trimmedIcon?.isEmpty ?? true) ? nil : trimmedIcon
+    }
+
+    public init(
+        entityID: EntityID,
+        style: MenuBarDisplayStyle = .text,
+        appearance: PerchHAMenuBarAppearance? = nil,
+        showsLabel: Bool = false,
+        showsUnit: Bool = true,
+        maximumFractionDigits: Int = 1,
+        absoluteTotal: Double? = nil,
+        totalEntityID: EntityID? = nil,
+        averageEntityIDs: [EntityID] = [],
+        thresholds: ValueThresholds = ValueThresholds(),
+        defaultHistoryRange: HistoryRange? = nil,
+        coverControlMode: CoverControlMode = .both,
+        displayUnit: ValueUnit? = nil,
+        minValue: Double? = nil,
+        maxValue: Double? = nil,
+        showsEntityIcon: Bool = true,
+        customIconName: String? = nil
+    ) {
+        self.init(
+            entityID: entityID,
+            style: style,
+            appearance: appearance,
+            showsLabel: showsLabel,
+            showsUnit: showsUnit,
+            maximumFractionDigits: maximumFractionDigits,
+            absoluteTotal: absoluteTotal,
+            totalEntityID: totalEntityID,
+            averageEntityIDs: averageEntityIDs,
+            thresholds: thresholds,
+            defaultHistoryRange: defaultHistoryRange,
+            coverControlMode: coverControlMode,
+            displayUnit: displayUnit,
+            displayUnitSymbol: nil,
+            minValue: minValue,
+            maxValue: maxValue,
+            showsEntityIcon: showsEntityIcon,
+            customIconName: customIconName
+        )
     }
 
     public init(
@@ -379,6 +425,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             maximumFractionDigits: maximumFractionDigits,
             absoluteTotal: absoluteTotal,
             totalEntityID: totalEntityID,
+            averageEntityIDs: [],
             thresholds: thresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
@@ -398,6 +445,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         maximumFractionDigits: Int? = nil,
         absoluteTotal: Double? = nil,
         totalEntityID: EntityID? = nil,
+        averageEntityIDs: [EntityID]? = nil,
         thresholds: ValueThresholds? = nil,
         coverControlMode: CoverControlMode? = nil,
         displayUnit: ValueUnit? = nil,
@@ -414,6 +462,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             maximumFractionDigits: maximumFractionDigits ?? self.maximumFractionDigits,
             absoluteTotal: absoluteTotal ?? self.absoluteTotal,
             totalEntityID: totalEntityID ?? self.totalEntityID,
+            averageEntityIDs: averageEntityIDs ?? self.averageEntityIDs,
             thresholds: thresholds ?? self.thresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode ?? self.coverControlMode,
@@ -441,6 +490,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             maximumFractionDigits: maximumFractionDigits,
             absoluteTotal: absoluteTotal,
             totalEntityID: totalEntityID,
+            averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
@@ -467,6 +517,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             maximumFractionDigits: maximumFractionDigits,
             absoluteTotal: absoluteTotal,
             totalEntityID: totalEntityID,
+            averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
@@ -489,6 +540,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             maximumFractionDigits: maximumFractionDigits,
             absoluteTotal: absoluteTotal,
             totalEntityID: totalEntityID,
+            averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
@@ -517,6 +569,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             maximumFractionDigits: maximumFractionDigits,
             absoluteTotal: absoluteTotal,
             totalEntityID: totalEntityID,
+            averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
@@ -539,6 +592,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             maximumFractionDigits: maximumFractionDigits,
             absoluteTotal: total,
             totalEntityID: nil,
+            averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
@@ -561,6 +615,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             maximumFractionDigits: maximumFractionDigits,
             absoluteTotal: nil,
             totalEntityID: id,
+            averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
@@ -596,6 +651,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             maximumFractionDigits: maximumFractionDigits,
             absoluteTotal: absoluteTotal,
             totalEntityID: totalEntityID,
+            averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
             defaultHistoryRange: range,
             coverControlMode: coverControlMode,
@@ -618,6 +674,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             maximumFractionDigits: maximumFractionDigits,
             absoluteTotal: absoluteTotal,
             totalEntityID: totalEntityID,
+            averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
@@ -644,6 +701,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             maximumFractionDigits: maximumFractionDigits,
             absoluteTotal: absoluteTotal,
             totalEntityID: totalEntityID,
+            averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
@@ -671,6 +729,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             maximumFractionDigits: maximumFractionDigits,
             absoluteTotal: absoluteTotal,
             totalEntityID: totalEntityID,
+            averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
@@ -683,6 +742,29 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         )
     }
 
+    public func settingAverageEntityIDs(_ ids: [EntityID]) -> MenuBarItemConfiguration {
+        MenuBarItemConfiguration(
+            entityID: entityID,
+            style: style,
+            appearance: appearance,
+            showsLabel: showsLabel,
+            showsUnit: showsUnit,
+            maximumFractionDigits: maximumFractionDigits,
+            absoluteTotal: absoluteTotal,
+            totalEntityID: totalEntityID,
+            averageEntityIDs: ids,
+            thresholds: thresholds,
+            defaultHistoryRange: defaultHistoryRange,
+            coverControlMode: coverControlMode,
+            displayUnit: displayUnit,
+            displayUnitSymbol: displayUnitSymbol,
+            minValue: minValue,
+            maxValue: maxValue,
+            showsEntityIcon: showsEntityIcon,
+            customIconName: customIconName
+        )
+    }
+
     private enum CodingKeys: String, CodingKey {
         case entityID
         case style
@@ -692,6 +774,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         case maximumFractionDigits
         case absoluteTotal
         case totalEntityID
+        case averageEntityIDs
         case thresholds
         case defaultHistoryRange
         case coverControlMode
@@ -717,6 +800,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         )
         absoluteTotal = try container.decodeIfPresent(Double.self, forKey: .absoluteTotal)
         totalEntityID = try container.decodeIfPresent(EntityID.self, forKey: .totalEntityID)
+        averageEntityIDs = Self.uniqueAverageEntityIDs(
+            try container.decodeIfPresent([EntityID].self, forKey: .averageEntityIDs) ?? []
+        )
         thresholds = try container.decodeIfPresent(ValueThresholds.self, forKey: .thresholds) ?? ValueThresholds()
         defaultHistoryRange = try container.decodeIfPresent(HistoryRange.self, forKey: .defaultHistoryRange)
         coverControlMode = try container.decodeIfPresent(CoverControlMode.self, forKey: .coverControlMode) ?? .both
@@ -742,6 +828,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         try container.encode(maximumFractionDigits, forKey: .maximumFractionDigits)
         try container.encodeIfPresent(absoluteTotal, forKey: .absoluteTotal)
         try container.encodeIfPresent(totalEntityID, forKey: .totalEntityID)
+        try container.encode(averageEntityIDs, forKey: .averageEntityIDs)
         try container.encode(thresholds, forKey: .thresholds)
         try container.encodeIfPresent(defaultHistoryRange, forKey: .defaultHistoryRange)
         try container.encode(coverControlMode, forKey: .coverControlMode)
@@ -751,6 +838,16 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         try container.encodeIfPresent(maxValue, forKey: .maxValue)
         try container.encode(showsEntityIcon, forKey: .showsEntityIcon)
         try container.encodeIfPresent(customIconName, forKey: .customIconName)
+    }
+
+    private static func uniqueAverageEntityIDs(_ ids: [EntityID]) -> [EntityID] {
+        var seen: Set<EntityID> = []
+        var result: [EntityID] = []
+        for id in ids where !seen.contains(id) {
+            seen.insert(id)
+            result.append(id)
+        }
+        return result
     }
 
     /// Decodes the optional `displayUnit`, mapping legacy payloads to `nil`.
@@ -975,6 +1072,11 @@ public struct MenuBarItemRenderer: Sendable {
         locale: Locale = .current,
         isStale: Bool = false
     ) -> RenderedMenuBarItem {
+        let displayedEntity = PerchHAEntityAveraging.averagedEntity(
+            base: entity,
+            configuration: configuration,
+            availableEntities: availableEntities
+        )
         let value = EntityValueFormatter(
             locale: locale,
             maximumFractionDigits: configuration.maximumFractionDigits,
@@ -983,9 +1085,9 @@ public struct MenuBarItemRenderer: Sendable {
             showsUnit: configuration.showsUnit,
             minValue: configuration.minValue,
             maxValue: configuration.maxValue
-        ).format(entity, isStale: isStale)
-        let gauge = gauge(for: entity, configuration: configuration, availableEntities: availableEntities)
-        let severity = severity(for: entity, gauge: gauge, configuration: configuration)
+        ).format(displayedEntity, isStale: isStale)
+        let gauge = gauge(for: displayedEntity, configuration: configuration, availableEntities: availableEntities)
+        let severity = severity(for: displayedEntity, gauge: gauge, configuration: configuration)
         let textTitle = textTitle(for: entity, value: value, configuration: configuration)
         let title = title(textTitle: textTitle, entity: entity, gauge: gauge, configuration: configuration)
         let accessibilityLabel = accessibilityLabel(

@@ -813,6 +813,7 @@ final class PerchHACoreTests: XCTestCase {
     func test_t_item_configuration_round_trips_new_fields() throws {
         let configuration = MenuBarItemConfiguration(
             entityID: "cover.blinds",
+            averageEntityIDs: ["cover.blinds", "cover.blinds_2"],
             coverControlMode: .slider,
             displayUnit: .bytes,
             displayUnitSymbol: "GB"
@@ -825,6 +826,83 @@ final class PerchHACoreTests: XCTestCase {
         XCTAssertEqual(decoded.coverControlMode, .slider)
         XCTAssertEqual(decoded.displayUnit, .bytes)
         XCTAssertEqual(decoded.displayUnitSymbol, "GB")
+        XCTAssertEqual(decoded.averageEntityIDs, ["cover.blinds", "cover.blinds_2"])
+    }
+
+    func test_t_item_configuration_setting_average_entity_ids() {
+        let configuration = MenuBarItemConfiguration(entityID: "sensor.any")
+            .settingAverageEntityIDs(["sensor.any", "sensor.peer", "sensor.peer"])
+        XCTAssertEqual(configuration.averageEntityIDs, ["sensor.any", "sensor.peer"])
+    }
+
+    func test_t_entity_averaging_uses_compatible_family_members() {
+        let base = DiscoveredEntity(
+            id: "sensor.temp_a",
+            name: "Temp A",
+            state: "20",
+            unit: "°C",
+            areaID: nil,
+            deviceID: nil
+        )
+        let peer = DiscoveredEntity(
+            id: "sensor.temp_b",
+            name: "Temp B",
+            state: "22",
+            unit: "°C",
+            areaID: nil,
+            deviceID: nil
+        )
+        let mismatch = DiscoveredEntity(
+            id: "sensor.humidity",
+            name: "Humidity",
+            state: "50",
+            unit: "%",
+            areaID: nil,
+            deviceID: nil
+        )
+
+        let averaged = PerchHAEntityAveraging.averagedEntity(
+            base: base,
+            configuration: MenuBarItemConfiguration(
+                entityID: base.id,
+                averageEntityIDs: [base.id, peer.id, mismatch.id]
+            ),
+            availableEntities: [base, peer, mismatch]
+        )
+
+        XCTAssertEqual(averaged.state, "21.0")
+        XCTAssertEqual(averaged.unit, "°C")
+    }
+
+    func test_t_menu_bar_renderer_formats_average_value() {
+        let source = DiscoveredEntity(
+            id: "sensor.temp_a",
+            name: "Temp A",
+            state: "20",
+            unit: "°C",
+            areaID: nil,
+            deviceID: nil
+        )
+        let peer = DiscoveredEntity(
+            id: "sensor.temp_b",
+            name: "Temp B",
+            state: "22",
+            unit: "°C",
+            areaID: nil,
+            deviceID: nil
+        )
+
+        let rendered = MenuBarItemRenderer().render(
+            entity: source,
+            configuration: MenuBarItemConfiguration(
+                entityID: source.id,
+                averageEntityIDs: [source.id, peer.id]
+            ),
+            availableEntities: [source, peer],
+            locale: Locale(identifier: "en_US")
+        )
+
+        XCTAssertEqual(rendered.value.text, "21 °C")
     }
 
     func test_t_item_configuration_setting_display_unit() {
