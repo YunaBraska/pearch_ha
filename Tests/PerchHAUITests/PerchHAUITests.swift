@@ -21,6 +21,116 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(snapshot.accessibilitySummary, "PearchHA reconnecting 2, 0 visible values")
     }
 
+    func testSettingsEntityMetadataPresentationSurfacesIdentityFields() {
+        let presentation = PerchHAEntityMetadataPresentation(
+            entity: DiscoveredEntity(
+                id: "sensor.office_co2",
+                name: "Office CO2",
+                state: "650",
+                unit: "ppm",
+                areaID: "office",
+                deviceID: "office_air",
+                deviceName: "O-1PPT",
+                deviceManufacturer: "AirGradient",
+                deviceModel: "AirGradient Open Air",
+                deviceDomain: "bluetooth"
+            ),
+            roomName: "Office"
+        )
+
+        XCTAssertEqual(presentation.rowCaption, "AirGradient Open Air (O-1PPT) · ppm")
+        XCTAssertEqual(presentation.rowIdentifier, "sensor.office_co2 · office_air")
+        XCTAssertEqual(
+            presentation.inspectorFields,
+            [
+                .init(label: "Entity name", value: "Office CO2", usesMonospacedFont: false),
+                .init(label: "Entity ID", value: "sensor.office_co2", usesMonospacedFont: true),
+                .init(label: "Room", value: "Office", usesMonospacedFont: false),
+                .init(label: "Device name", value: "AirGradient Open Air (O-1PPT)", usesMonospacedFont: false),
+                .init(label: "Device manufacturer", value: "AirGradient", usesMonospacedFont: false),
+                .init(label: "Device model", value: "AirGradient Open Air", usesMonospacedFont: false),
+                .init(label: "Device domain", value: "bluetooth", usesMonospacedFont: true),
+                .init(label: "Device ID", value: "office_air", usesMonospacedFont: true)
+            ]
+        )
+    }
+
+    func testSettingsEntityMetadataPresentationFallsBackToRoomNameWhenDeviceNameIsMissing() {
+        let presentation = PerchHAEntityMetadataPresentation(
+            entity: DiscoveredEntity(
+                id: "sensor.kitchen_humidity",
+                name: "Kitchen humidity",
+                state: "44",
+                unit: "%",
+                areaID: "kitchen",
+                deviceID: "kitchen_bridge"
+            ),
+            roomName: "Kitchen"
+        )
+
+        XCTAssertEqual(presentation.rowCaption, "Sensor · %")
+        XCTAssertEqual(presentation.rowIdentifier, "sensor.kitchen_humidity · kitchen_bridge")
+    }
+
+    func testSettingsEntityMetadataPresentationFallsBackToEntityDomainInRowCaption() {
+        let presentation = PerchHAEntityMetadataPresentation(
+            entity: DiscoveredEntity(
+                id: "select.timer",
+                name: "Timer",
+                state: "idle",
+                unit: nil,
+                areaID: "living_room",
+                deviceID: nil,
+                deviceName: nil
+            ),
+            roomName: "Living Room"
+        )
+
+        XCTAssertEqual(presentation.rowCaption, "Select")
+        XCTAssertEqual(presentation.rowIdentifier, "select.timer")
+    }
+
+    func testSettingsEntityMetadataLinksPresentationBuildsEntityAndDeviceURLs() {
+        let presentation = PerchHAEntityMetadataLinksPresentation(
+            baseURL: URL(string: "https://home.gomoo.io/lovelace/0"),
+            entity: DiscoveredEntity(
+                id: "sensor.office_co2",
+                name: "Office CO2",
+                state: "650",
+                unit: "ppm",
+                areaID: "office",
+                deviceID: "f71ad5b98a91caf819ee50ef810efd63",
+                deviceName: "O-1PPT",
+                deviceManufacturer: "AirGradient",
+                deviceModel: "AirGradient Open Air",
+                deviceDomain: "bluetooth"
+            )
+        )
+
+        XCTAssertEqual(presentation.entitiesURL, URL(string: "https://home.gomoo.io/config/entities"))
+        XCTAssertEqual(
+            presentation.deviceURL,
+            URL(string: "https://home.gomoo.io/config/devices/device/f71ad5b98a91caf819ee50ef810efd63")
+        )
+    }
+
+    func testSettingsEntityMetadataLinksPresentationOmitsDeviceURLWithoutDeviceID() {
+        let presentation = PerchHAEntityMetadataLinksPresentation(
+            baseURL: URL(string: "https://home.gomoo.io"),
+            entity: DiscoveredEntity(
+                id: "select.timer",
+                name: "Timer",
+                state: "idle",
+                unit: nil,
+                areaID: "living_room",
+                deviceID: nil
+            )
+        )
+
+        XCTAssertEqual(presentation.entitiesURL, URL(string: "https://home.gomoo.io/config/entities"))
+        XCTAssertNil(presentation.deviceURL)
+    }
+
     func test_t_accessibility_summary_reflects_empty_loading_success_and_error_states() {
         let firstRun = PerchHAPanelSnapshot()
         let connecting = PerchHAPanelSnapshot(connectionState: .connecting, phase: .connecting)
@@ -57,6 +167,35 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(
             stale.accessibilityPresentation().contentLabel,
             "Connection failed: unreachable at ha.local, showing stale values"
+        )
+    }
+
+    func testPanelEntityContextPresentationReflectsMenuBarSettings() {
+        let entityID = EntityID("sensor.office_temperature")
+        let configuration = MenuBarItemConfiguration(entityID: entityID)
+            .settingShowsEntityIcon(false)
+            .updating(showsLabel: true)
+            .updating(showsUnit: false)
+        let snapshot = PerchHAPanelSnapshot(
+            menuBarDisplayConfiguration: MenuBarDisplayConfiguration(
+                promotedEntityIDs: [entityID],
+                itemConfigurations: [configuration]
+            )
+        )
+
+        let presentation = PerchHAPanelView.entityContextPresentation(
+            snapshot: snapshot,
+            entityID: entityID
+        )
+
+        XCTAssertEqual(
+            presentation,
+            PerchHAPanelEntityContextPresentation(
+                isPromotedToMenuBar: true,
+                showsEntityIcon: false,
+                showsLabel: true,
+                showsUnit: false
+            )
         )
     }
 
@@ -804,6 +943,34 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.historyState.entityID, "sensor.office_temperature")
     }
 
+    func test_t_history_hover_waits_for_debounce_before_presenting_popover() async {
+        let clock = TestPerchClock()
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, entityID, range in
+                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
+            },
+            clock: clock,
+            historyDebounce: .seconds(1)
+        )
+
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.startHistoryHover("sensor.office_temperature", range: .hour)
+
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+
+        _ = await clock.advance(by: .seconds(1))
+        await spinUntil {
+            if case .loaded = model.snapshot.historyState {
+                return true
+            }
+            return false
+        }
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+    }
+
     func test_t_history_cancel_hover_resets_loading_state() async {
         let clock = TestPerchClock()
         let recorder = HistoryProviderRecorder(
@@ -1012,6 +1179,34 @@ final class PerchHAUITests: XCTestCase {
             historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4),
             "a failed refetch must not evict the stale-but-displayable series"
         )
+    }
+
+    func test_t_history_cache_diagnostics_report_series_and_sample_counts() async {
+        let recorder = HistoryProviderRecorder(
+            results: [
+                .success(historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4))
+            ]
+        )
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { form, entityID, range in
+                await recorder.provide(form: form, entityID: entityID, range: range)
+            },
+            historyDebounce: .milliseconds(0),
+            historyCacheConfiguration: PerchHAHistoryCacheConfiguration(capacity: 4, ttl: .seconds(60))
+        )
+
+        XCTAssertEqual(model.historyCacheEntryCount(), 0)
+        XCTAssertEqual(model.historyCacheSampleCount(), 0)
+        XCTAssertEqual(model.historyCacheCapacity(), 4)
+
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        await model.loadHistory("sensor.office_temperature", range: .day)
+
+        XCTAssertEqual(model.historyCacheEntryCount(), 1)
+        XCTAssertEqual(model.historyCacheSampleCount(), 1)
+        XCTAssertEqual(model.historyCacheCapacity(), 4)
     }
 
     func test_t_clicking_a_row_pins_the_history_popover_until_unpinned() async {
@@ -1303,6 +1498,203 @@ final class PerchHAUITests: XCTestCase {
         _ = await clock.advance(by: .seconds(5))
         await Task.yield()
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+    }
+
+    func test_t_history_stays_open_while_pointer_remains_inside_panel_surface() async {
+        let clock = TestPerchClock()
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, entityID, range in
+                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
+            },
+            clock: clock,
+            historyDebounce: .milliseconds(0),
+            historyHoverGrace: .milliseconds(300)
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.startHistoryHover("sensor.office_temperature", range: .hour)
+        await spinUntil {
+            if case .loaded = model.snapshot.historyState {
+                return true
+            }
+            return false
+        }
+
+        model.setHistorySurfaceHovering(true)
+        model.cancelHistoryHover()
+
+        _ = await clock.advance(by: .seconds(5))
+        await Task.yield()
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+
+        model.setHistorySurfaceHovering(false)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .milliseconds(300))
+        await spinUntil { model.snapshot.historyPresentationEntityID == nil }
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+    }
+
+    func test_t_history_switches_immediately_between_rows_while_pointer_stays_inside_panel() async {
+        let clock = TestPerchClock()
+        let recorder = HistoryProviderRecorder(
+            results: [
+                .success(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4)),
+                .success(historySeries(entityID: "sensor.office_humidity", range: .hour, value: 46.0))
+            ]
+        )
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { form, entityID, range in
+                await recorder.provide(form: form, entityID: entityID, range: range)
+            },
+            clock: clock,
+            historyDebounce: .seconds(1),
+            historyHoverGrace: .milliseconds(300)
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.startHistoryHover("sensor.office_temperature", range: .hour)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .seconds(1))
+        await spinUntil {
+            if case .loaded = model.snapshot.historyState {
+                return true
+            }
+            return false
+        }
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+
+        model.setHistorySurfaceHovering(true)
+        model.startHistoryHover("sensor.office_humidity", range: .hour)
+
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
+        XCTAssertEqual(model.snapshot.historyState.entityID, "sensor.office_humidity")
+        let callCountBeforeDebounce = await recorder.callCount()
+        XCTAssertEqual(callCountBeforeDebounce, 1)
+
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .seconds(1))
+        await spinUntil {
+            if case let .loaded(series) = model.snapshot.historyState {
+                return series.entityID == "sensor.office_humidity"
+            }
+            return false
+        }
+        let callCountAfterDebounce = await recorder.callCount()
+        XCTAssertEqual(callCountAfterDebounce, 2)
+    }
+
+    func test_t_stale_row_dismissal_does_not_clear_new_history_presentation() async {
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, entityID, range in
+                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
+            },
+            historyDebounce: .milliseconds(0)
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.startHistoryHover("sensor.office_temperature", range: .hour)
+        await spinUntil { model.snapshot.historyPresentationEntityID == "sensor.office_temperature" }
+
+        model.setHistorySurfaceHovering(true)
+        model.startHistoryHover("sensor.office_humidity", range: .hour)
+        await spinUntil { model.snapshot.historyPresentationEntityID == "sensor.office_humidity" }
+
+        model.dismissHistoryPopover(ifPresenting: "sensor.office_temperature")
+
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
+    }
+
+    func test_t_history_stays_stable_while_context_menu_suppresses_hover_events() async {
+        let clock = TestPerchClock()
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, entityID, range in
+                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
+            },
+            clock: clock,
+            historyDebounce: .milliseconds(0),
+            historyHoverGrace: .milliseconds(300)
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.startHistoryHover("sensor.office_temperature", range: .hour)
+        await spinUntil {
+            if case .loaded = model.snapshot.historyState {
+                return true
+            }
+            return false
+        }
+
+        model.beginHistoryHoverSuppression()
+        model.cancelHistoryHover()
+        model.startHistoryHover("sensor.office_humidity", range: .hour)
+
+        _ = await clock.advance(by: .seconds(5))
+        await Task.yield()
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+
+        model.endHistoryHoverSuppression()
+        model.cancelHistoryHover()
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .milliseconds(300))
+        await spinUntil { model.snapshot.historyPresentationEntityID == nil }
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+    }
+
+    func test_t_deactivating_panel_clears_visible_history_state() async {
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, entityID, range in
+                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
+            },
+            historyDebounce: .milliseconds(0)
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.setPanelActive(true)
+
+        model.toggleHistoryPin("sensor.office_temperature")
+        await spinUntil { model.snapshot.historyPresentationEntityID == "sensor.office_temperature" }
+        XCTAssertEqual(model.pinnedHistoryEntityID, "sensor.office_temperature")
+
+        model.setPanelActive(false)
+
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+        XCTAssertNil(model.pinnedHistoryEntityID)
+        XCTAssertEqual(model.snapshot.historyState, .idle)
+    }
+
+    func test_t_transient_ui_tracking_defers_live_state_until_menu_closes() async {
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.beginTransientUITracking()
+        XCTAssertTrue(
+            model.applyLiveState(
+                EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "22.8", unit: "°C")
+            )
+        )
+        XCTAssertEqual(
+            model.snapshot.availableRooms.flatMap(\.entities).first(where: { $0.id == "sensor.office_temperature" })?.state,
+            "21.4"
+        )
+
+        model.endTransientUITracking()
+
+        XCTAssertEqual(
+            model.snapshot.availableRooms.flatMap(\.entities).first(where: { $0.id == "sensor.office_temperature" })?.state,
+            "22.8"
+        )
     }
 
     func test_t_history_empty_loaded_series_produces_empty_state() async {
@@ -4029,6 +4421,45 @@ final class PerchHAUITests: XCTestCase {
         await refreshGate.open()
     }
 
+    func test_t_apply_live_state_preserves_device_metadata() {
+        let rooms = [
+            Room(
+                id: "office",
+                name: "Office",
+                entities: [
+                    DiscoveredEntity(
+                        id: "sensor.office_co2",
+                        name: "CO2",
+                        state: "650",
+                        unit: "ppm",
+                        areaID: "office",
+                        deviceID: "office_air",
+                        deviceName: "O-1PPT",
+                        deviceManufacturer: "AirGradient",
+                        deviceModel: "AirGradient Open Air",
+                        deviceDomain: "bluetooth"
+                    )
+                ]
+            )
+        ]
+        let model = PerchHAPanelModel(
+            snapshot: PerchHAPanelSnapshot(rooms: rooms, availableRooms: rooms)
+        )
+
+        XCTAssertTrue(
+            model.applyLiveState(
+                EntityState(id: "sensor.office_co2", name: "CO2", state: "702", unit: "ppm")
+            )
+        )
+
+        let entity = model.snapshot.rooms.first?.entities.first
+        XCTAssertEqual(entity?.state, "702")
+        XCTAssertEqual(entity?.deviceName, "O-1PPT")
+        XCTAssertEqual(entity?.deviceManufacturer, "AirGradient")
+        XCTAssertEqual(entity?.deviceModel, "AirGradient Open Air")
+        XCTAssertEqual(entity?.deviceDomain, "bluetooth")
+    }
+
     func test_t_refresh_failure_keeps_last_rows_visible_as_stale() async {
         let calls = CallCounter()
         let model = PerchHAPanelModel { _ in
@@ -4650,7 +5081,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(snapshot.menuBarEntityIDs, [])
         XCTAssertEqual(snapshot.roomOrder, [])
         XCTAssertEqual(snapshot.entityOrder, [])
-        XCTAssertFalse(snapshot.isEntitySelectionExplicit)
+        XCTAssertTrue(snapshot.isEntitySelectionExplicit)
         XCTAssertEqual(snapshot.configurationPersistenceState, .unavailable)
 
         application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -4974,8 +5405,18 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(items.count, 2)
         XCTAssertEqual(items[0].title, "44%")
         XCTAssertEqual(items[0].accessibilityLabel, "Office humidity, 44%")
-        XCTAssertEqual(items[1].title, "21 °C")
-        XCTAssertEqual(items[1].accessibilityLabel, "Office temperature, 21 °C")
+        let expectedTemperatureTitle = EntityValueFormatter(locale: .current).format(
+            DiscoveredEntity(
+                id: "sensor.office_temperature",
+                name: "Office temperature",
+                state: "21.4",
+                unit: "°C",
+                areaID: nil,
+                deviceID: nil
+            )
+        ).text
+        XCTAssertEqual(items[1].title, expectedTemperatureTitle)
+        XCTAssertEqual(items[1].accessibilityLabel, "Office temperature, \(expectedTemperatureTitle)")
         for item in items {
             XCTAssertTrue(item.hasAction)
             XCTAssertTrue(item.targetIsApplication)
@@ -5195,14 +5636,24 @@ final class PerchHAUITests: XCTestCase {
         await application.connect()
         XCTAssertEqual(application.snapshot.menuBarItems.count, 1)
         XCTAssertEqual(application.snapshot.menuBarItems[0].title, "44%")
+        let expectedTemperature = EntityValueFormatter(locale: .current, maximumFractionDigits: 1).format(
+            DiscoveredEntity(
+                id: "sensor.office_temperature",
+                name: "Office temperature",
+                state: "21.4",
+                unit: "°C",
+                areaID: nil,
+                deviceID: nil
+            )
+        ).text
 
         XCTAssertTrue(application.setMenuBarEntity("sensor.office_temperature", isVisible: true))
         XCTAssertEqual(application.snapshot.menuBarItems.count, 2)
-        XCTAssertEqual(application.snapshot.menuBarItems[1].title, "21 °C")
+        XCTAssertEqual(application.snapshot.menuBarItems[1].title, expectedTemperature)
 
         XCTAssertTrue(application.setMenuBarEntity("sensor.office_humidity", isVisible: false))
         XCTAssertEqual(application.snapshot.menuBarItems.count, 1)
-        XCTAssertEqual(application.snapshot.menuBarItems[0].title, "21 °C")
+        XCTAssertEqual(application.snapshot.menuBarItems[0].title, expectedTemperature)
 
         // Demoting the last entity collapses back to the single fallback item.
         XCTAssertTrue(application.setMenuBarEntity("sensor.office_temperature", isVisible: false))
@@ -6452,7 +6903,7 @@ final class PerchHAUITests: XCTestCase {
             )
         )
         XCTAssertEqual(gaugeRenderer.renderCount, 2)
-        XCTAssertTrue(application.setMenuBarMaximumFractionDigits("sensor.office_humidity", maximumFractionDigits: 1))
+        XCTAssertFalse(application.setMenuBarMaximumFractionDigits("sensor.office_humidity", maximumFractionDigits: 1))
         XCTAssertEqual(gaugeRenderer.renderCount, 2)
         let expectedDecimalValue = EntityValueFormatter(
             locale: .current,
@@ -6808,7 +7259,7 @@ final class PerchHAUITests: XCTestCase {
 
         XCTAssertEqual(application.snapshot.statusItemTitle, "44%")
         XCTAssertTrue(application.moveMenuBarEntity("sensor.office_humidity", direction: .down))
-        let expectedTemperature = EntityValueFormatter(locale: .current, maximumFractionDigits: 0).format(
+        let expectedTemperature = EntityValueFormatter(locale: .current, maximumFractionDigits: 1).format(
             DiscoveredEntity(
                 id: "sensor.office_temperature",
                 name: "Office temperature",
@@ -7225,6 +7676,254 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(tokens, ["long-lived-token", "long-lived-token"])
     }
 
+    func testAppShellAutoConnectRepairsLegacyDisplayConfigurationAfterLiveDiscovery() async throws {
+        let url = temporaryConfigURL()
+        let keychain = KeychainSecretStore(service: "dev.perchha.ui.tests.\(UUID().uuidString)")
+        let sessionStore = PerchHAAuthSessionStore(secretStore: keychain)
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+            _ = try? sessionStore.clear()
+        }
+
+        let staleConfiguration = PerchHAConfiguration(
+            menuBarEntityIDs: ["sensor.bad_temperature", "sensor.shellyplugsg3_e4b063fa527c_leistung"],
+            menuBarItemConfigurations: [
+                MenuBarItemConfiguration(
+                    entityID: "sensor.bad_temperature",
+                    maximumFractionDigits: 0,
+                    thresholds: ValueThresholds()
+                ),
+                MenuBarItemConfiguration(
+                    entityID: "sensor.shellyplugsg3_e4b063fa527c_leistung",
+                    maximumFractionDigits: 0,
+                    thresholds: ValueThresholds(),
+                    displayUnit: .number
+                )
+            ],
+            connectionProfile: PerchHAConnectionProfile(
+                addresses: [PerchHAConnectionAddress(urlString: "https://homeassistant.local:8123")]
+            )
+        )
+        _ = try JSONConfigStore(fileURL: url).save(staleConfiguration)
+        _ = try sessionStore.saveAccessToken("fake-token")
+
+        let discovery = DiscoverySnapshot(
+            areas: [],
+            devices: [],
+            entities: [],
+            states: [
+                EntityState(
+                    id: "sensor.bad_temperature",
+                    name: "Bad (Tado) Temperatur",
+                    state: "23.59",
+                    unit: "°C"
+                ),
+                EntityState(
+                    id: "sensor.shellyplugsg3_e4b063fa527c_leistung",
+                    name: "Deskyuna Leistung",
+                    state: "51.9",
+                    unit: "W"
+                )
+            ]
+        )
+        let application = PerchHAApplication(
+            configStore: JSONConfigStore(fileURL: url),
+            authSessionStore: sessionStore,
+            client: RefreshingHAClientRecorder(discoveryResults: [.success(discovery)])
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        let state = await application.awaitAutoConnect()
+        XCTAssertEqual(state, .connected)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        let repaired = try JSONConfigStore(fileURL: url).load().menuBarDisplayConfiguration
+        let repairedTemperature = repaired.itemConfiguration(for: "sensor.bad_temperature")
+        let repairedPower = repaired.itemConfiguration(for: "sensor.shellyplugsg3_e4b063fa527c_leistung")
+
+        XCTAssertEqual(repairedTemperature.maximumFractionDigits, 1)
+        XCTAssertEqual(repairedPower.maximumFractionDigits, 1)
+        XCTAssertEqual(
+            repairedTemperature.thresholds,
+            EntityDisplayDefaults.defaultThresholds(
+                for: DiscoveredEntity(
+                    id: "sensor.bad_temperature",
+                    name: "Bad (Tado) Temperatur",
+                    state: "23.59",
+                    unit: "°C",
+                    areaID: nil,
+                    deviceID: nil
+                )
+            )
+        )
+        XCTAssertEqual(
+            repairedPower.thresholds,
+            EntityDisplayDefaults.defaultThresholds(
+                for: DiscoveredEntity(
+                    id: "sensor.shellyplugsg3_e4b063fa527c_leistung",
+                    name: "Deskyuna Leistung",
+                    state: "51.9",
+                    unit: "W",
+                    areaID: nil,
+                    deviceID: nil
+                )
+            )
+        )
+        XCTAssertNil(repairedPower.displayUnit)
+    }
+
+    func testAppShellAutoConnectRepairsLegacyZeroDecimalsAfterThresholdMigration() async throws {
+        let url = temporaryConfigURL()
+        let keychain = KeychainSecretStore(service: "dev.perchha.ui.tests.\(UUID().uuidString)")
+        let sessionStore = PerchHAAuthSessionStore(secretStore: keychain)
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+            _ = try? sessionStore.clear()
+        }
+
+        let entity = DiscoveredEntity(
+            id: "sensor.bad_temperature",
+            name: "Bad (Tado) Temperatur",
+            state: "23.59",
+            unit: "°C",
+            areaID: nil,
+            deviceID: nil
+        )
+        let halfMigratedConfiguration = PerchHAConfiguration(
+            menuBarEntityIDs: [entity.id],
+            menuBarItemConfigurations: [
+                MenuBarItemConfiguration(
+                    entityID: entity.id,
+                    maximumFractionDigits: 0,
+                    thresholds: EntityDisplayDefaults.defaultThresholds(for: entity)
+                )
+            ],
+            connectionProfile: PerchHAConnectionProfile(
+                addresses: [PerchHAConnectionAddress(urlString: "https://homeassistant.local:8123")]
+            )
+        )
+        _ = try JSONConfigStore(fileURL: url).save(halfMigratedConfiguration)
+        _ = try sessionStore.saveAccessToken("fake-token")
+
+        let discovery = DiscoverySnapshot(
+            areas: [],
+            devices: [],
+            entities: [],
+            states: [
+                EntityState(
+                    id: entity.id,
+                    name: entity.name,
+                    state: entity.state,
+                    unit: entity.unit
+                )
+            ]
+        )
+        let application = PerchHAApplication(
+            configStore: JSONConfigStore(fileURL: url),
+            authSessionStore: sessionStore,
+            client: RefreshingHAClientRecorder(discoveryResults: [.success(discovery)])
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        let state = await application.awaitAutoConnect()
+        XCTAssertEqual(state, .connected)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        let repaired = try JSONConfigStore(fileURL: url).load().menuBarDisplayConfiguration
+        XCTAssertEqual(repaired.itemConfiguration(for: entity.id).maximumFractionDigits, 1)
+    }
+
+    func testAppShellAutoConnectRecoversWhenInitialStoredTokenProbeFailsOnce() async throws {
+        let url = temporaryConfigURL()
+        let secretStore = FlakyReadSecretStore()
+        let sessionStore = PerchHAAuthSessionStore(secretStore: secretStore)
+        _ = try secretStore.save("long-lived-token", for: .accessToken)
+        _ = try JSONConfigStore(fileURL: url).save(
+            PerchHAConfiguration(
+                connectionProfile: PerchHAConnectionProfile(
+                    addresses: [PerchHAConnectionAddress(urlString: "https://homeassistant.local:8123")]
+                )
+            )
+        )
+
+        let client = RefreshingHAClientRecorder(
+            discoveryResults: [.success(oauthDiscoverySnapshot())]
+        )
+        let application = PerchHAApplication(
+            configStore: JSONConfigStore(fileURL: url),
+            authSessionStore: sessionStore,
+            client: client
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        let state = await application.awaitAutoConnect()
+
+        XCTAssertEqual(state, .connected)
+        XCTAssertEqual(application.snapshot.connectionState, .connected)
+        XCTAssertTrue(application.snapshot.connectionForm.usesStoredAuthSession)
+        let tokens = await client.discoveryTokens()
+        XCTAssertEqual(tokens, ["long-lived-token"])
+    }
+
+    func testAppShellAutoConnectContinuesWhenDeviceRegistryPayloadIsMissing() async throws {
+        let url = temporaryConfigURL()
+        let keychain = KeychainSecretStore(service: "dev.perchha.ui.tests.\(UUID().uuidString)")
+        let sessionStore = PerchHAAuthSessionStore(secretStore: keychain)
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+            _ = try? sessionStore.clear()
+        }
+
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[{"entity_id":"sensor.office_temperature","state":"21.4","attributes":{"friendly_name":"Office temperature","unit_of_measurement":"°C"}}]"#,
+            areaRegistryBody: #"[]"#,
+            deviceRegistryBody: #"{}"#,
+            entityRegistryDisplayBody: #"{"entities":[]}"#,
+            entityRegistryBody: #"[]"#
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+
+        _ = try JSONConfigStore(fileURL: url).save(
+            PerchHAConfiguration(
+                connectionProfile: PerchHAConnectionProfile(
+                    addresses: [PerchHAConnectionAddress(urlString: server.baseURL.absoluteString)]
+                )
+            )
+        )
+        _ = try sessionStore.saveAccessToken("fake-token")
+
+        let application = PerchHAApplication(
+            configStore: JSONConfigStore(fileURL: url),
+            authSessionStore: sessionStore,
+            client: HomeAssistantClient()
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        let state = await application.awaitAutoConnect()
+
+        XCTAssertEqual(state, .connected)
+        XCTAssertEqual(application.snapshot.connectionState, .connected)
+        XCTAssertTrue(application.snapshot.connectionForm.usesStoredAuthSession)
+        XCTAssertNil(application.snapshot.shellPersistenceFailureDescription)
+    }
+
     func test_t_app_shell_reports_config_load_failure_and_blocks_save() {
         let store = FailingConfigStore(
             loadError: .malformedConfig(URL(fileURLWithPath: "/tmp/perchha-bad-config.json"), message: "bad json")
@@ -7306,7 +8005,7 @@ final class PerchHAUITests: XCTestCase {
         }
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
-            selectionConfiguration: application.snapshotSelectionConfiguration,
+            selectionConfiguration: EntitySelectionConfiguration(),
             selectionSink: { selection in
                 application.persist(selection: selection)
             }
@@ -7338,7 +8037,7 @@ final class PerchHAUITests: XCTestCase {
         }
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
-            selectionConfiguration: application.snapshotSelectionConfiguration,
+            selectionConfiguration: EntitySelectionConfiguration(),
             selectionSink: { selection in
                 application.persist(selection: selection)
             }
@@ -7365,7 +8064,7 @@ final class PerchHAUITests: XCTestCase {
         }
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
-            selectionConfiguration: application.snapshotSelectionConfiguration,
+            selectionConfiguration: EntitySelectionConfiguration(),
             selectionSink: { selection in
                 application.persist(selection: selection)
             }
@@ -7395,7 +8094,7 @@ final class PerchHAUITests: XCTestCase {
         }
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
-            selectionConfiguration: application.snapshotSelectionConfiguration,
+            selectionConfiguration: EntitySelectionConfiguration(),
             selectionSink: { selection in
                 application.persist(selection: selection)
             }
@@ -7425,7 +8124,7 @@ final class PerchHAUITests: XCTestCase {
         }
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
-            selectionConfiguration: application.snapshotSelectionConfiguration,
+            selectionConfiguration: EntitySelectionConfiguration(),
             selectionSink: { selection in
                 application.persist(selection: selection)
             }
@@ -8710,6 +9409,169 @@ final class PerchHAUITests: XCTestCase {
         )
     }
 
+    func test_t_panel_promoting_temperature_entity_seeds_defaults() async {
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        XCTAssertTrue(model.setMenuBarEntity("sensor.office_temperature", isVisible: true))
+        guard let entity = model.snapshot.rooms.flatMap(\.entities).first(where: { $0.id == "sensor.office_temperature" }) else {
+            XCTFail("expected temperature entity")
+            return
+        }
+        let configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: "sensor.office_temperature")
+
+        XCTAssertEqual(configuration.maximumFractionDigits, 1)
+        XCTAssertEqual(configuration.thresholds, EntityDisplayDefaults.defaultThresholds(for: entity))
+    }
+
+    func test_t_connect_normalizes_legacy_empty_thresholds_and_number_unit() async {
+        let sink = MenuBarDisplaySinkRecorder()
+        let legacyPowerConfiguration = MenuBarItemConfiguration(
+            entityID: "sensor.office_power",
+            maximumFractionDigits: 0,
+            thresholds: ValueThresholds(),
+            displayUnit: .number
+        )
+        let legacyTemperatureConfiguration = MenuBarItemConfiguration(
+            entityID: "sensor.office_temperature",
+            maximumFractionDigits: 0,
+            thresholds: ValueThresholds()
+        )
+        let rooms = [
+            Room(
+                id: "office",
+                name: "Office",
+                entities: [
+                    DiscoveredEntity(
+                        id: "sensor.office_temperature",
+                        name: "Office temperature",
+                        state: "21.4",
+                        unit: "°C",
+                        areaID: nil,
+                        deviceID: nil
+                    ),
+                    DiscoveredEntity(
+                        id: "sensor.office_power",
+                        name: "Office power",
+                        state: "120",
+                        unit: "W",
+                        areaID: nil,
+                        deviceID: nil
+                    )
+                ]
+            )
+        ]
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: rooms) },
+            menuBarDisplayConfiguration: MenuBarDisplayConfiguration(
+                promotedEntityIDs: ["sensor.office_temperature", "sensor.office_power"],
+                itemConfigurations: [legacyTemperatureConfiguration, legacyPowerConfiguration]
+            ),
+            menuBarDisplaySink: sink.record
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+
+        await model.connect()
+
+        let temperature = rooms[0].entities[0]
+        let power = rooms[0].entities[1]
+        let normalizedTemperature = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: temperature.id)
+        let normalizedPower = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: power.id)
+
+        XCTAssertEqual(normalizedTemperature.maximumFractionDigits, 1)
+        XCTAssertEqual(normalizedPower.maximumFractionDigits, 1)
+        XCTAssertEqual(normalizedTemperature.thresholds, EntityDisplayDefaults.defaultThresholds(for: temperature))
+        XCTAssertEqual(normalizedPower.thresholds, EntityDisplayDefaults.defaultThresholds(for: power))
+        XCTAssertNil(normalizedPower.displayUnit)
+        XCTAssertEqual(sink.lastDisplayConfiguration?.itemConfiguration(for: temperature.id).maximumFractionDigits, 1)
+        XCTAssertEqual(sink.lastDisplayConfiguration?.itemConfiguration(for: power.id).maximumFractionDigits, 1)
+        XCTAssertEqual(
+            sink.lastDisplayConfiguration?.itemConfiguration(for: temperature.id).thresholds,
+            EntityDisplayDefaults.defaultThresholds(for: temperature)
+        )
+        XCTAssertNil(sink.lastDisplayConfiguration?.itemConfiguration(for: power.id).displayUnit)
+    }
+
+    func test_t_apply_live_state_keeps_descriptive_name_and_unit_when_live_update_is_generic() {
+        let entity = DiscoveredEntity(
+            id: "sensor.office_temperature",
+            name: "Office temperature",
+            state: "21.4",
+            unit: "°C",
+            areaID: nil,
+            deviceID: nil
+        )
+        let rooms = [Room(id: "office", name: "Office", entities: [entity])]
+        let model = PerchHAPanelModel(
+            snapshot: PerchHAPanelSnapshot(
+                connectionState: .connected,
+                phase: .connectedData,
+                rooms: rooms,
+                availableRooms: rooms
+            )
+        )
+
+        XCTAssertTrue(
+            model.applyLiveState(
+                EntityState(
+                    id: entity.id,
+                    name: "Sensor",
+                    state: "22.1",
+                    unit: nil
+                )
+            )
+        )
+
+        let updated = model.snapshot.availableRooms[0].entities[0]
+        XCTAssertEqual(updated.name, "Office temperature")
+        XCTAssertEqual(updated.unit, "°C")
+        XCTAssertEqual(updated.state, "22.1")
+    }
+
+    func test_t_panel_display_unit_switch_reseeds_default_temperature_thresholds() async {
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        XCTAssertTrue(model.setMenuBarEntity("sensor.office_temperature", isVisible: true))
+
+        guard let entity = model.snapshot.rooms.flatMap(\.entities).first(where: { $0.id == "sensor.office_temperature" }) else {
+            XCTFail("expected temperature entity")
+            return
+        }
+        XCTAssertTrue(model.setDisplayUnit("sensor.office_temperature", displayUnit: .fahrenheit))
+
+        XCTAssertEqual(
+            model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: "sensor.office_temperature").thresholds,
+            EntityDisplayDefaults.defaultThresholds(for: entity, selectedUnit: .fahrenheit)
+        )
+    }
+
+    func test_t_panel_display_unit_switch_preserves_custom_temperature_thresholds() async {
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        XCTAssertTrue(model.setMenuBarEntity("sensor.office_temperature", isVisible: true))
+
+        let customThresholds = ValueThresholds(
+            steps: [ThresholdStep(value: 24, color: ValueThresholds.warningColor)],
+            baseColor: ValueThresholds.okColor
+        )
+        XCTAssertTrue(model.setThresholds("sensor.office_temperature", thresholds: customThresholds))
+        XCTAssertTrue(model.setDisplayUnit("sensor.office_temperature", displayUnit: .fahrenheit))
+
+        XCTAssertEqual(
+            model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: "sensor.office_temperature").thresholds,
+            customThresholds
+        )
+    }
+
     func test_t_panel_formatted_value_applies_display_unit_percent() async {
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) }
@@ -9135,6 +9997,36 @@ private final class ScriptableFailureSecretStore: SecretStore, @unchecked Sendab
         if failsDelete {
             throw SecretStoreError.operationFailed(operation: "delete", secret: secret, status: -25299)
         }
+        let result: SecretDeleteResult = values[secret] == nil ? .notFound : .deleted
+        values[secret] = nil
+        return result
+    }
+}
+
+private final class FlakyReadSecretStore: SecretStore, @unchecked Sendable {
+    private var values: [PerchHASecret: String] = [:]
+    private var accessTokenReadFailuresRemaining = 1
+
+    @discardableResult
+    func save(_ value: String, for secret: PerchHASecret) throws -> SecretWriteResult {
+        let result: SecretWriteResult = values[secret] == nil ? .created : .updated
+        values[secret] = value
+        return result
+    }
+
+    func read(_ secret: PerchHASecret) throws -> String {
+        if secret == .accessToken, accessTokenReadFailuresRemaining > 0 {
+            accessTokenReadFailuresRemaining -= 1
+            throw SecretStoreError.operationFailed(operation: "read", secret: secret, status: -25308)
+        }
+        guard let value = values[secret] else {
+            throw SecretStoreError.notFound(secret)
+        }
+        return value
+    }
+
+    @discardableResult
+    func delete(_ secret: PerchHASecret) throws -> SecretDeleteResult {
         let result: SecretDeleteResult = values[secret] == nil ? .notFound : .deleted
         values[secret] = nil
         return result

@@ -48,6 +48,12 @@ jobs:
           xcrun --sdk macosx --show-sdk-version
           swift --version
 
+      - name: Verify native Xcode setup
+        run: swift run perchha-xcode-doctor --json --strict
+
+      - name: List XCTest cases
+        run: swift test --disable-swift-testing --enable-xctest list
+
       - name: Plan release
         id: plan
         shell: bash

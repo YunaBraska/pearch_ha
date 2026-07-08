@@ -16,6 +16,7 @@ final class PerchHAPersistenceTests: XCTestCase {
         let store = JSONConfigStore(fileURL: temporaryConfigURL())
 
         XCTAssertEqual(try store.load(), .empty)
+        XCTAssertTrue(try store.load().isEntitySelectionExplicit)
     }
 
     func testJSONConfigStoreRoundTripsVersionedConfiguration() throws {
@@ -599,8 +600,11 @@ final class PerchHAPersistenceTests: XCTestCase {
         )
 
         XCTAssertEqual(loaded, configuration)
-        XCTAssertEqual(selectedRooms.map(\.id), ["kitchen", "office"])
-        XCTAssertEqual(selectedRooms.flatMap(\.entities).map(\.id), ["switch.kitchen_light", "sensor.office_humidity"])
+        XCTAssertEqual(selectedRooms.map(\.id.rawValue), ["kitchen", "office"])
+        XCTAssertEqual(
+            selectedRooms.flatMap(\.entities).map(\.id.rawValue),
+            ["switch.kitchen_light", "sensor.office_humidity"]
+        )
     }
 
     func test_t_secret_storage_and_redaction() throws {

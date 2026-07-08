@@ -800,6 +800,25 @@ public struct PerchHAPanelRootAccessibilityPresentation: Equatable, Sendable {
     }
 }
 
+public struct PerchHAPanelEntityContextPresentation: Equatable, Sendable {
+    public let isPromotedToMenuBar: Bool
+    public let showsEntityIcon: Bool
+    public let showsLabel: Bool
+    public let showsUnit: Bool
+
+    public init(
+        isPromotedToMenuBar: Bool,
+        showsEntityIcon: Bool,
+        showsLabel: Bool,
+        showsUnit: Bool
+    ) {
+        self.isPromotedToMenuBar = isPromotedToMenuBar
+        self.showsEntityIcon = showsEntityIcon
+        self.showsLabel = showsLabel
+        self.showsUnit = showsUnit
+    }
+}
+
 private extension HistorySeries {
     var chronologicalNumericSamples: [PerchHAHistoryCursorSample] {
         PerchHAHistoryCursor.numericSamples(of: self)
@@ -1213,7 +1232,7 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
         for entity in promotedFirst + allEntities {
             let presentation = PerchHAEntityRowPresentation.resolve(
                 entity: entity,
-                configuration: menuBarDisplayConfiguration.itemConfiguration(for: entity.id),
+                configuration: effectiveMenuBarItemConfiguration(for: entity),
                 availableEntities: allEntities,
                 locale: locale
             )
@@ -1242,11 +1261,25 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
         return nil
     }
 
+    /// The live-effective per-entity display configuration, with legacy saved
+    /// fields repaired from the current entity metadata.
+    ///
+    /// This lets the UI render sensible defaults immediately even when the
+    /// persisted configuration still carries an old `.number` display unit or
+    /// an empty threshold payload from an earlier app version.
+    public func effectiveMenuBarItemConfiguration(for entity: DiscoveredEntity) -> MenuBarItemConfiguration {
+        EntityDisplayDefaults.normalizedConfiguration(
+            for: entity,
+            configuration: menuBarDisplayConfiguration.itemConfiguration(for: entity.id)
+        )
+    }
+
     public func formattedValue(for entity: DiscoveredEntity, locale: Locale = .current) -> FormattedEntityValue {
-        let configuration = menuBarDisplayConfiguration.itemConfiguration(for: entity.id)
+        let configuration = effectiveMenuBarItemConfiguration(for: entity)
         return EntityValueFormatter(
             locale: locale,
             displayUnit: configuration.displayUnit,
+            displayUnitSymbol: configuration.displayUnitSymbol,
             showsUnit: configuration.showsUnit,
             minValue: configuration.minValue,
             maxValue: configuration.maxValue
@@ -1550,6 +1583,16 @@ private struct PerchHAHistoryCache {
     private var entries: [PerchHAHistoryCacheKey: PerchHAHistoryCacheEntry] = [:]
     private var order: [PerchHAHistoryCacheKey] = []
 
+    var entryCount: Int {
+        entries.count
+    }
+
+    var sampleCount: Int {
+        entries.values.reduce(0) { partial, entry in
+            partial + entry.series.samples.count
+        }
+    }
+
     mutating func series(for key: PerchHAHistoryCacheKey, now: PerchInstant) -> HistorySeries? {
         guard let entry = entries[key] else {
             return nil
@@ -1621,6 +1664,54 @@ private struct PendingControlChange {
     let name: String
 }
 
+private struct SettingsSelectionTreeSignature: Equatable {
+    struct RoomSignature: Equatable {
+        let id: RoomID
+        let name: String
+        let entities: [EntitySignature]
+    }
+
+    struct EntitySignature: Equatable {
+        let id: EntityID
+        let name: String
+        let unit: String?
+        let areaID: AreaID?
+        let deviceID: DeviceID?
+        let deviceName: String?
+        let deviceManufacturer: String?
+        let deviceModel: String?
+        let deviceDomain: String?
+    }
+
+    let selectionConfiguration: EntitySelectionConfiguration
+    let selectionQuery: String
+    let rooms: [RoomSignature]
+
+    init(snapshot: PerchHAPanelSnapshot) {
+        self.selectionConfiguration = snapshot.selectionConfiguration
+        self.selectionQuery = snapshot.selectionQuery
+        self.rooms = snapshot.availableRooms.map { room in
+            RoomSignature(
+                id: room.id,
+                name: room.name,
+                entities: room.entities.map { entity in
+                    EntitySignature(
+                        id: entity.id,
+                        name: entity.name,
+                        unit: entity.unit,
+                        areaID: entity.areaID,
+                        deviceID: entity.deviceID,
+                        deviceName: entity.deviceName,
+                        deviceManufacturer: entity.deviceManufacturer,
+                        deviceModel: entity.deviceModel,
+                        deviceDomain: entity.deviceDomain
+                    )
+                }
+            )
+        }
+    }
+}
+
 @MainActor
 public final class PerchHAPanelModel: ObservableObject {
     public typealias Connector = @Sendable (PerchHAConnectionForm) async -> PerchHAConnectionAttemptResult
@@ -1652,7 +1743,7 @@ public final class PerchHAPanelModel: ObservableObject {
         didSet {
             snapshotSink(snapshot)
             refreshRetryBackoffState()
-            settingsSelectionTree = snapshot.selectionTree
+            refreshSettingsSelectionTreeIfNeeded(newSnapshot: snapshot)
         }
     }
 
@@ -1739,6 +1830,7 @@ public final class PerchHAPanelModel: ObservableObject {
     private let protectedActionValueStore: any ProtectedActionValueStore
     private let snapshotSink: SnapshotSink
     private let signOutHandler: SignOutHandler
+    private var settingsSelectionTreeSignature: SettingsSelectionTreeSignature
     private var historyCache = PerchHAHistoryCache()
     private var lastObservedInstant = PerchInstant(nanosecondsSinceStart: 0)
     private var lastConnectedForm: PerchHAConnectionForm?
@@ -1749,6 +1841,11 @@ public final class PerchHAPanelModel: ObservableObject {
     private var historyTask: Task<Void, Never>?
     private var historyCloseTask: Task<Void, Never>?
     private var historyRequestGeneration = 0
+    private var isPointerInsideHistorySurface = false
+    private var historyHoverSuppressionDepth = 0
+    private var transientUITrackingDepth = 0
+    private var deferredLiveStates: [EntityID: EntityState] = [:]
+    private var deferredSilentRefreshRequested = false
     private var protectedValueDrafts: [String: String] = [:]
     /// Whether the panel is currently shown, gating all background fetching.
     /// Set through ``setPanelActive(_:)``; readable so the app shell's
@@ -1797,7 +1894,7 @@ public final class PerchHAPanelModel: ObservableObject {
         currentApplicationVersionProvider: @escaping @Sendable () -> String = { PerchHAApplicationVersionInfo.currentBundle().releaseVersion },
         clock: any PerchClock = SystemPerchClock(),
         wallClock: @escaping @Sendable () -> Date = { Date() },
-        historyDebounce: PerchDuration = .milliseconds(150),
+        historyDebounce: PerchDuration = .milliseconds(120),
         historyHoverGrace: PerchDuration = .milliseconds(300),
         historyCacheConfiguration: PerchHAHistoryCacheConfiguration = PerchHAHistoryCacheConfiguration(),
         bulkSyncConfiguration: PerchHAHistoryBulkSyncConfiguration = PerchHAHistoryBulkSyncConfiguration(),
@@ -1822,7 +1919,7 @@ public final class PerchHAPanelModel: ObservableObject {
             self.customActionConfiguration = customActionConfiguration
             self.customActionPersistenceFailureDescription = nil
         }
-        self.snapshot = PerchHAPanelSnapshot(
+        let initialSnapshot = PerchHAPanelSnapshot(
             connectionState: snapshot.connectionState,
             phase: snapshot.phase,
             rooms: snapshot.rooms,
@@ -1844,6 +1941,7 @@ public final class PerchHAPanelModel: ObservableObject {
             controlActionState: snapshot.controlActionState,
             serviceMetadata: snapshot.serviceMetadata
         )
+        self.snapshot = initialSnapshot
         self.editableForm = snapshot.connectionForm
         self.connector = connector
         self.historyProvider = historyProvider
@@ -1866,7 +1964,8 @@ public final class PerchHAPanelModel: ObservableObject {
         self.menuBarDisplaySink = menuBarDisplaySink
         self.customActionSink = customActionSink
         self.protectedActionValueStore = protectedActionValueStore ?? UnavailableProtectedActionValueStore()
-        self.settingsSelectionTree = self.snapshot.selectionTree
+        self.settingsSelectionTreeSignature = SettingsSelectionTreeSignature(snapshot: initialSnapshot)
+        self.settingsSelectionTree = initialSnapshot.selectionTree
     }
 
     deinit {
@@ -2215,8 +2314,16 @@ public final class PerchHAPanelModel: ObservableObject {
 
     @discardableResult
     public func setMenuBarEntity(_ id: EntityID, isVisible: Bool) -> Bool {
-        updateMenuBarDisplayConfiguration(
-            snapshot.menuBarDisplayConfiguration.settingPromotion(id, isPromoted: isVisible),
+        var configuration = snapshot.menuBarDisplayConfiguration
+        if isVisible,
+           configuration.itemConfigurations.contains(where: { $0.entityID == id }) == false,
+           let entity = entity(for: id) {
+            configuration = configuration.replacingItemConfiguration(
+                EntityDisplayDefaults.configuration(for: entity)
+            )
+        }
+        return updateMenuBarDisplayConfiguration(
+            configuration.settingPromotion(id, isPromoted: isVisible),
             persist: true
         )
     }
@@ -2309,9 +2416,30 @@ public final class PerchHAPanelModel: ObservableObject {
     }
 
     @discardableResult
-    public func setDisplayUnit(_ id: EntityID, displayUnit: ValueUnit?) -> Bool {
-        updateMenuBarItemConfiguration(
-            snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).settingDisplayUnit(displayUnit)
+    public func setDisplayUnit(_ id: EntityID, displayUnit: ValueUnit?, displayUnitSymbol: String? = nil) -> Bool {
+        let configuration = snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id)
+        guard let entity = entity(for: id) else {
+            return updateMenuBarItemConfiguration(
+                configuration
+                    .settingDisplayUnit(displayUnit)
+                    .settingDisplayUnitSymbol(displayUnitSymbol)
+            )
+        }
+
+        let currentDefaultThresholds = EntityDisplayDefaults.defaultThresholds(
+            for: entity,
+            selectedUnit: configuration.displayUnit
+        )
+        let currentThresholds = EntityDisplayDefaults.effectiveThresholds(for: entity, configuration: configuration)
+        let nextThresholds: ValueThresholds? = currentThresholds == currentDefaultThresholds
+            ? EntityDisplayDefaults.defaultThresholds(for: entity, selectedUnit: displayUnit)
+            : nil
+
+        return updateMenuBarItemConfiguration(
+            configuration
+                .settingDisplayUnit(displayUnit)
+                .settingDisplayUnitSymbol(displayUnitSymbol)
+                .settingThresholds(nextThresholds ?? currentThresholds)
         )
     }
 
@@ -2478,7 +2606,14 @@ public final class PerchHAPanelModel: ObservableObject {
     /// - Parameters:
     ///   - id: The entity whose history should be shown.
     ///   - range: An explicit range, or `nil` to use the entity's default.
-    public func startHistoryHover(_ id: EntityID, range: HistoryRange? = nil) {
+    public func startHistoryHover(
+        _ id: EntityID,
+        range: HistoryRange? = nil,
+        immediatePresentation: Bool = false
+    ) {
+        guard historyHoverSuppressionDepth == 0 else {
+            return
+        }
         // While a row is pinned, hovering other rows must not steal the popover.
         guard pinnedHistoryEntityID == nil || pinnedHistoryEntityID == id else {
             return
@@ -2489,7 +2624,13 @@ public final class PerchHAPanelModel: ObservableObject {
         bumpInterest(id)
         cancelPendingHistoryClose()
         historyTask?.cancel()
-        applyHistoryPresentationEntityID(id)
+        let isSwitchingWithinPanelSurface = isPointerInsideHistorySurface && snapshot.historyPresentationEntityID != nil
+        let shouldPresentImmediately = immediatePresentation
+            || snapshot.historyPresentationEntityID == id
+            || isSwitchingWithinPanelSurface
+        if shouldPresentImmediately {
+            primeHistoryPresentation(entityID: id, range: resolvedRange)
+        }
         historyTask = Task { @MainActor [weak self] in
             guard let self else {
                 return
@@ -2499,6 +2640,7 @@ public final class PerchHAPanelModel: ObservableObject {
             } catch {
                 return
             }
+            applyHistoryPresentationEntityID(id)
             await loadHistory(id, range: resolvedRange)
             if !Task.isCancelled {
                 historyTask = nil
@@ -2514,6 +2656,64 @@ public final class PerchHAPanelModel: ObservableObject {
         cancelPendingHistoryClose()
     }
 
+    /// Suspends row-hover driven history changes while a native context menu is open.
+    ///
+    /// The currently shown history stays stable; row enter/exit events received
+    /// while the context menu is active are ignored until the menu closes.
+    public func beginHistoryHoverSuppression() {
+        historyHoverSuppressionDepth += 1
+        cancelPendingHistoryClose()
+    }
+
+    /// Ends one level of context-menu hover suppression.
+    public func endHistoryHoverSuppression() {
+        historyHoverSuppressionDepth = max(0, historyHoverSuppressionDepth - 1)
+    }
+
+    public func beginTransientUITracking() {
+        transientUITrackingDepth += 1
+        beginHistoryHoverSuppression()
+    }
+
+    public func endTransientUITracking() {
+        transientUITrackingDepth = max(0, transientUITrackingDepth - 1)
+        endHistoryHoverSuppression()
+        guard transientUITrackingDepth == 0 else {
+            return
+        }
+        let deferredStates = deferredLiveStates.values.sorted { $0.id.rawValue < $1.id.rawValue }
+        deferredLiveStates = [:]
+        for state in deferredStates {
+            _ = applyLiveState(state)
+        }
+        if deferredSilentRefreshRequested, isPanelActive, lastConnectedForm != nil {
+            deferredSilentRefreshRequested = false
+            startAction { [weak self] in
+                await self?.performRefresh(silent: true)
+            }
+        } else {
+            deferredSilentRefreshRequested = false
+        }
+    }
+
+    /// Marks whether the cursor is still somewhere inside the panel surface.
+    ///
+    /// While true, a row-exit must not dismiss the history popover; the user is
+    /// still navigating the dashboard. Leaving the panel schedules the normal
+    /// hover-grace close so the popover can survive the short trip into its own
+    /// content view.
+    public func setHistorySurfaceHovering(_ isInside: Bool) {
+        guard isPointerInsideHistorySurface != isInside else {
+            return
+        }
+        isPointerInsideHistorySurface = isInside
+        if isInside {
+            cancelPendingHistoryClose()
+        } else {
+            cancelHistoryHover()
+        }
+    }
+
     /// Schedules the history popover to close after the hover grace period.
     ///
     /// Called when the cursor leaves the row or the popover. The close does not
@@ -2526,6 +2726,12 @@ public final class PerchHAPanelModel: ObservableObject {
         // A pinned popover stays open until the user unpins it; hover-out is
         // ignored entirely.
         guard pinnedHistoryEntityID == nil else {
+            return
+        }
+        guard historyHoverSuppressionDepth == 0 else {
+            return
+        }
+        guard !isPointerInsideHistorySurface else {
             return
         }
         let isLoading: Bool
@@ -2560,6 +2766,22 @@ public final class PerchHAPanelModel: ObservableObject {
         historyCloseTask = nil
     }
 
+    /// Keeps the history panel feeling continuous while the cursor moves across
+    /// rows inside the dashboard: switch the presented entity immediately and, if
+    /// a cached series already exists, render it right away instead of waiting
+    /// for the debounce/fetch path to catch up.
+    private func primeHistoryPresentation(entityID: EntityID, range: HistoryRange) {
+        applyHistoryPresentationEntityID(entityID)
+        let cacheKey = PerchHAHistoryCacheKey(entityID: entityID, range: range)
+        if let cachedSeries = historyCache.peekAllowingStale(for: cacheKey) {
+            applyHistoryState(.loaded(cachedSeries))
+            return
+        }
+        if snapshot.historyState.entityID != entityID || snapshot.historyState.range != range {
+            applyHistoryState(.loading(entityID: entityID, range: range))
+        }
+    }
+
     /// Clears the history presentation right away, bypassing the grace period.
     ///
     /// Used by teardown paths (sign-out, reconnect, panel dismissal) where the
@@ -2590,7 +2812,7 @@ public final class PerchHAPanelModel: ObservableObject {
             return
         }
         pinnedHistoryEntityID = nil
-        startHistoryHover(id)
+        startHistoryHover(id, immediatePresentation: true)
         pinnedHistoryEntityID = id
     }
 
@@ -2667,6 +2889,22 @@ public final class PerchHAPanelModel: ObservableObject {
         return historyCache.peekAllowingStale(for: key)
     }
 
+    /// The current number of cached history series kept in memory.
+    public func historyCacheEntryCount() -> Int {
+        historyCache.entryCount
+    }
+
+    /// The current total number of cached history samples kept in memory.
+    public func historyCacheSampleCount() -> Int {
+        historyCache.sampleCount
+    }
+
+    /// The configured maximum number of history series the cache keeps before
+    /// evicting least-recently-used non-visible entries.
+    public func historyCacheCapacity() -> Int {
+        historyCacheConfiguration.capacity
+    }
+
     /// Inserts a series into the history cache and publishes an observable change.
     ///
     /// Every cache write (prefetch warm or hover load) flows through here so the
@@ -2727,8 +2965,11 @@ public final class PerchHAPanelModel: ObservableObject {
             // immediately instead of waiting out the warm-cycle rotation.
             bulkSyncCycle = 0
             startHistoryBulkSync()
-            startPeriodicRefresh()
+            // Opening the panel should render from the current snapshot/cache
+            // first, then let background refresh happen quietly afterward.
+            startPeriodicRefresh(refreshImmediately: false)
         } else {
+            closeHistoryHoverImmediately()
             cancelHistoryBulkSync()
             cancelPeriodicRefresh()
         }
@@ -3097,6 +3338,9 @@ public final class PerchHAPanelModel: ObservableObject {
         guard let form = lastConnectedForm else {
             return
         }
+        guard transientUITrackingDepth == 0 else {
+            return
+        }
         let cycle = bulkSyncCycle
         bulkSyncCycle &+= 1
         pruneInterest()
@@ -3221,15 +3465,45 @@ public final class PerchHAPanelModel: ObservableObject {
         }
         let now = await clock.now()
         lastObservedInstant = now
+        var insertedAny = false
         for (entityID, series) in results {
             let key = PerchHAHistoryCacheKey(entityID: entityID, range: series.range)
-            insertHistory(series, for: key, now: now)
+            historyCache.insert(
+                series,
+                for: key,
+                now: now,
+                configuration: historyCacheConfiguration,
+                protecting: protectedHistoryKeys()
+            )
+            insertedAny = true
             entityLastSyncedAt[entityID] = now
+        }
+        if insertedAny {
+            historyRevision &+= 1
         }
     }
 
-    public func dismissHistoryPopover() {
+    /// Dismisses the visible history popover, optionally only when it still
+    /// belongs to a specific entity anchor.
+    ///
+    /// SwiftUI may send a dismissal callback from the previously presented row
+    /// while the model has already switched the shared history surface to a new
+    /// row. Guarding by `entityID` stops the stale row from clearing the newer
+    /// presentation.
+    public func dismissHistoryPopover(ifPresenting entityID: EntityID? = nil) {
+        if let entityID, snapshot.historyPresentationEntityID != entityID {
+            return
+        }
         closeHistoryHoverImmediately()
+    }
+
+    private func refreshSettingsSelectionTreeIfNeeded(newSnapshot: PerchHAPanelSnapshot) {
+        let newSignature = SettingsSelectionTreeSignature(snapshot: newSnapshot)
+        guard settingsSelectionTreeSignature != newSignature else {
+            return
+        }
+        settingsSelectionTreeSignature = newSignature
+        settingsSelectionTree = newSnapshot.selectionTree
     }
 
     public func customActions(for entity: DiscoveredEntity) -> [EntityCustomAction] {
@@ -4509,6 +4783,10 @@ public final class PerchHAPanelModel: ObservableObject {
                         unit: entity.unit,
                         areaID: entity.areaID,
                         deviceID: entity.deviceID,
+                        deviceName: entity.deviceName,
+                        deviceManufacturer: entity.deviceManufacturer,
+                        deviceModel: entity.deviceModel,
+                        deviceDomain: entity.deviceDomain,
                         currentPosition: currentPosition
                     )
                 }
@@ -4634,6 +4912,10 @@ public final class PerchHAPanelModel: ObservableObject {
         guard let form = lastConnectedForm else {
             return
         }
+        if transientUITrackingDepth > 0, silent {
+            deferredSilentRefreshRequested = true
+            return
+        }
         lastObservedInstant = await clock.now()
 
         let nextRefreshCount = snapshot.refreshCount + 1
@@ -4683,6 +4965,15 @@ public final class PerchHAPanelModel: ObservableObject {
 
     @discardableResult
     public func applyLiveState(_ state: EntityState) -> Bool {
+        if transientUITrackingDepth > 0 {
+            let exists = snapshot.availableRooms.contains { room in
+                room.entities.contains { $0.id == state.id }
+            }
+            if exists {
+                deferredLiveStates[state.id] = state
+            }
+            return exists
+        }
         var didUpdate = false
         let availableRooms = snapshot.availableRooms.map { room in
             Room(
@@ -4695,11 +4986,15 @@ public final class PerchHAPanelModel: ObservableObject {
                     didUpdate = true
                     return DiscoveredEntity(
                         id: entity.id,
-                        name: state.name == state.id.rawValue ? entity.name : state.name,
+                        name: Self.preferredLiveEntityName(state.name, existing: entity),
                         state: state.state,
-                        unit: state.unit,
+                        unit: Self.preferredLiveEntityUnit(state.unit, existing: entity),
                         areaID: entity.areaID,
                         deviceID: entity.deviceID,
+                        deviceName: entity.deviceName,
+                        deviceManufacturer: entity.deviceManufacturer,
+                        deviceModel: entity.deviceModel,
+                        deviceDomain: entity.deviceDomain,
                         currentPosition: state.currentPosition
                     )
                 }
@@ -4745,6 +5040,82 @@ public final class PerchHAPanelModel: ObservableObject {
         return true
     }
 
+    private static func preferredLiveEntityName(_ candidate: String, existing: DiscoveredEntity) -> String {
+        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return existing.name
+        }
+        let lowered = trimmed.lowercased()
+        let genericNames: Set<String> = [
+            existing.id.rawValue.lowercased(),
+            existing.id.domain.lowercased(),
+            existing.id.domain.replacingOccurrences(of: "_", with: " ").lowercased(),
+            "sensor",
+            "select",
+            "switch",
+            "binary sensor",
+            "number"
+        ]
+        return genericNames.contains(lowered) ? existing.name : trimmed
+    }
+
+    private static func preferredLiveEntityUnit(_ candidate: String?, existing: DiscoveredEntity) -> String? {
+        let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else {
+            return existing.unit
+        }
+        return trimmed
+    }
+
+    private func normalizedMenuBarDisplayConfiguration(
+        _ configuration: MenuBarDisplayConfiguration,
+        availableRooms: [Room]
+    ) -> MenuBarDisplayConfiguration {
+        let availableEntities = availableRooms.flatMap(\.entities)
+        let entitiesByID = Dictionary(uniqueKeysWithValues: availableEntities.map { ($0.id, $0) })
+        var itemConfigurations = configuration.itemConfigurations.map { item in
+            guard let entity = entitiesByID[item.entityID] else {
+                return item
+            }
+            return normalizedMenuBarItemConfiguration(item, entity: entity)
+        }
+        let existingIDs = Set(itemConfigurations.map(\.entityID))
+        for promotedID in configuration.promotedEntityIDs where !existingIDs.contains(promotedID) {
+            guard let entity = entitiesByID[promotedID] else {
+                continue
+            }
+            itemConfigurations.append(EntityDisplayDefaults.configuration(for: entity))
+        }
+        return MenuBarDisplayConfiguration(
+            promotedEntityIDs: configuration.promotedEntityIDs,
+            itemConfigurations: itemConfigurations
+        )
+    }
+
+    private func normalizedMenuBarItemConfiguration(
+        _ configuration: MenuBarItemConfiguration,
+        entity: DiscoveredEntity
+    ) -> MenuBarItemConfiguration {
+        EntityDisplayDefaults.normalizedConfiguration(for: entity, configuration: configuration)
+    }
+
+    /// Repairs the current menu-bar display configuration against the entities
+    /// present in ``snapshot.availableRooms`` and persists the repaired value.
+    ///
+    /// Safe to call repeatedly: when no repair is needed it is a no-op and
+    /// returns `false`.
+    @discardableResult
+    public func normalizeDisplayConfigurationForAvailableEntities() -> Bool {
+        guard !snapshot.availableRooms.isEmpty else {
+            return false
+        }
+        let normalized = normalizedMenuBarDisplayConfiguration(
+            snapshot.menuBarDisplayConfiguration,
+            availableRooms: snapshot.availableRooms
+        )
+        return updateMenuBarDisplayConfiguration(normalized, persist: true)
+    }
+
     private func apply(result: PerchHAConnectionAttemptResult, form: PerchHAConnectionForm, refreshCount: Int) async {
         switch result {
         case let .success(rooms):
@@ -4768,6 +5139,25 @@ public final class PerchHAPanelModel: ObservableObject {
             }
             lastConnectedForm = form
             editableForm = form
+            let normalizedDisplayConfiguration = normalizedMenuBarDisplayConfiguration(
+                snapshot.menuBarDisplayConfiguration,
+                availableRooms: rooms
+            )
+            let nextDisplayConfiguration: MenuBarDisplayConfiguration
+            let nextDisplayPersistenceFailureDescription: String?
+            if normalizedDisplayConfiguration != snapshot.menuBarDisplayConfiguration {
+                switch menuBarDisplaySink(normalizedDisplayConfiguration) {
+                case .saved:
+                    nextDisplayConfiguration = normalizedDisplayConfiguration
+                    nextDisplayPersistenceFailureDescription = nil
+                case let .failed(message):
+                    nextDisplayConfiguration = snapshot.menuBarDisplayConfiguration
+                    nextDisplayPersistenceFailureDescription = message
+                }
+            } else {
+                nextDisplayConfiguration = snapshot.menuBarDisplayConfiguration
+                nextDisplayPersistenceFailureDescription = snapshot.displayPersistenceFailureDescription
+            }
             let visibleRooms = selectedRooms(from: rooms, using: snapshot.selectionConfiguration)
             snapshot = PerchHAPanelSnapshot(
                 connectionState: .connected,
@@ -4775,7 +5165,7 @@ public final class PerchHAPanelModel: ObservableObject {
                 rooms: visibleRooms,
                 availableRooms: rooms,
                 selectionConfiguration: snapshot.selectionConfiguration,
-                menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
+                menuBarDisplayConfiguration: nextDisplayConfiguration,
                 selectionQuery: snapshot.selectionQuery,
                 isSettingsPresented: snapshot.isSettingsPresented,
                 connectionForm: nonSecretForm(form),
@@ -4784,7 +5174,7 @@ public final class PerchHAPanelModel: ObservableObject {
                 canRetry: true,
                 hasTokenInput: hasToken(in: form),
                 selectionPersistenceFailureDescription: snapshot.selectionPersistenceFailureDescription,
-                displayPersistenceFailureDescription: snapshot.displayPersistenceFailureDescription,
+                displayPersistenceFailureDescription: nextDisplayPersistenceFailureDescription,
                 serviceMetadataFailureDescription: snapshot.serviceMetadataFailureDescription,
                 historyState: connectionChanged ? .idle : snapshot.historyState,
                 historyPresentationEntityID: connectionChanged ? nil : snapshot.historyPresentationEntityID,
@@ -5668,8 +6058,10 @@ public struct PerchHAHistoryPopoverContent: View {
     private let onOpenSettings: (() -> Void)?
     @Binding private var selectedRange: HistoryRange
     @State private var cursorNormalizedX: Double?
+    @State private var hoverReadout: String?
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
+    private static let bodyMinHeight: CGFloat = 118
 
     public init(
         entityID: EntityID,
@@ -5726,7 +6118,9 @@ public struct PerchHAHistoryPopoverContent: View {
             .controlSize(.small)
             .tint(palette.accentPrimary)
             .accessibilityLabel("\(entityName) history range")
+            historyHoverReadout
             historyBody
+                .frame(minHeight: Self.bodyMinHeight, alignment: .topLeading)
         }
         .padding(14)
         .frame(width: 280)
@@ -5750,6 +6144,17 @@ public struct PerchHAHistoryPopoverContent: View {
             options.append(selectedRange)
         }
         return options
+    }
+
+    @ViewBuilder
+    private var historyHoverReadout: some View {
+        let readout = hoverReadout ?? " "
+        Text(readout)
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(hoverReadout == nil ? historyLabelForegroundStyle.opacity(0) : historyLabelForegroundStyle)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, minHeight: 14, alignment: .trailing)
+            .accessibilityHidden(true)
     }
 
     @ViewBuilder
@@ -5779,7 +6184,8 @@ public struct PerchHAHistoryPopoverContent: View {
                 range: series.range,
                 entityName: entityName,
                 labelColor: historyLabelForegroundStyle,
-                valueColor: historyValueForegroundStyle
+                valueColor: historyValueForegroundStyle,
+                onHoverReadoutChange: { hoverReadout = $0 }
             )
         case let .statistics(series, statistics):
             // Keep a constant height: always show the chart and stats, and float
@@ -5845,18 +6251,6 @@ public struct PerchHAHistoryPopoverContent: View {
                         .frame(width: 1)
                         .frame(maxHeight: .infinity)
                         .offset(x: x)
-                    if let readout = cursorReadout(for: series) {
-                        Text(readout)
-                            .font(.caption2)
-                            .monospacedDigit()
-                            .foregroundStyle(historyValueForegroundStyle)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
-                            .fixedSize()
-                            .offset(x: min(max(x - 30, 0), max(proxy.size.width - 60, 0)))
-                            .accessibilityHidden(true)
-                    }
                 }
             }
             .contentShape(Rectangle())
@@ -5864,14 +6258,20 @@ public struct PerchHAHistoryPopoverContent: View {
                 switch phase {
                 case let .active(location):
                     let width = proxy.size.width
-                    cursorNormalizedX = width > 0 ? Double(location.x / width) : nil
+                    let normalizedX = width > 0 ? Double(location.x / width) : nil
+                    cursorNormalizedX = normalizedX
+                    hoverReadout = normalizedX.flatMap { _ in cursorReadout(for: series) }
                 case .ended:
                     cursorNormalizedX = nil
+                    hoverReadout = nil
                 }
             }
         }
         .frame(height: chartHeight)
         .accessibilityHidden(true)
+        .onDisappear {
+            hoverReadout = nil
+        }
     }
 
     /// The formatted minimum and maximum of a series for the chart corner
@@ -6009,7 +6409,6 @@ public struct PerchHAPanelView: View {
     private let accessibilityPreferencesOverride: PerchHAAccessibilityPreferences?
     private let onOpenSettings: (() -> Void)?
     @State private var pendingCustomActionID: CustomActionID?
-    @State private var visibleEntityIDs: Set<EntityID> = []
     @State private var expandedModuleIDs: Set<String> = []
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
@@ -6052,7 +6451,10 @@ public struct PerchHAPanelView: View {
         .frame(width: 384, height: 468, alignment: .top)
         .environment(\.dashboardPalette, palette)
         .environment(\.dashboardRowDensity, model.displayPreferences.dashboardRowDensity)
-        .background(dashboardBackground(palette))
+        .background(
+            dashboardBackground(palette)
+                .overlay(historySurfaceHoverRegion)
+        )
         .clipShape(shape)
         .overlay {
             shape.strokeBorder(
@@ -6088,6 +6490,12 @@ public struct PerchHAPanelView: View {
                 pendingCustomActionID = nil
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+            model.beginTransientUITracking()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+            model.endTransientUITracking()
+        }
     }
 
     public static func rootAccessibilityPresentation(
@@ -6096,6 +6504,19 @@ public struct PerchHAPanelView: View {
     ) -> PerchHAPanelRootAccessibilityPresentation {
         PerchHAPanelRootAccessibilityPresentation(
             panel: snapshot.accessibilityPresentation(preferences: preferences)
+        )
+    }
+
+    public static func entityContextPresentation(
+        snapshot: PerchHAPanelSnapshot,
+        entityID: EntityID
+    ) -> PerchHAPanelEntityContextPresentation {
+        let configuration = snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entityID)
+        return PerchHAPanelEntityContextPresentation(
+            isPromotedToMenuBar: snapshot.menuBarDisplayConfiguration.isPromoted(entityID),
+            showsEntityIcon: configuration.showsEntityIcon,
+            showsLabel: configuration.showsLabel,
+            showsUnit: configuration.showsUnit
         )
     }
 
@@ -6199,6 +6620,18 @@ public struct PerchHAPanelView: View {
                 .padding(.top, 4)
                 .padding(.bottom, 14)
             }
+            .onAppear {
+                syncWarmedEntityIDs()
+            }
+            .onChange(of: warmedEntityIDs) { ids in
+                syncWarmedEntityIDs(ids)
+            }
+        }
+    }
+
+    private var historySurfaceHoverRegion: some View {
+        PerchHAHoverRegion { isInside in
+            model.setHistorySurfaceHovering(isInside)
         }
     }
 
@@ -6221,6 +6654,16 @@ public struct PerchHAPanelView: View {
     /// place; every entity is still reachable via Settings.
     private var curatedRowCap: Int? {
         model.displayPreferences.dashboardRoomRowCap
+    }
+
+    private var warmedEntityIDs: [EntityID] {
+        visibleModules.flatMap { room in
+            let isExpanded = expandedModuleIDs.contains(room.id.rawValue)
+            let visibleEntities = (isExpanded || curatedRowCap == nil)
+                ? room.entities
+                : Array(room.entities.prefix(curatedRowCap ?? room.entities.count))
+            return visibleEntities.map(\.id)
+        }
     }
 
     private var loadingState: some View {
@@ -6281,15 +6724,53 @@ public struct PerchHAPanelView: View {
         let hiddenCount = total - visibleEntities.count
         return ModuleBlock(title: room.name) {
             ForEach(Array(visibleEntities.enumerated()), id: \.element.id.rawValue) { index, entity in
-                telemetryRow(entity)
-                if index < visibleEntities.count - 1 {
-                    TelemetryRowSeparator()
-                }
+                entityRowBlock(entity, showsSeparator: index < visibleEntities.count - 1)
             }
             if let cap, total > cap {
                 TelemetryRowSeparator()
                 moreAffordance(roomID: room.id.rawValue, isExpanded: isExpanded, hiddenCount: hiddenCount)
             }
+        }
+    }
+
+    private func entityRowBlock(_ entity: DiscoveredEntity, showsSeparator: Bool) -> some View {
+        let value = entityValue(entity)
+        let contextPresentation = Self.entityContextPresentation(snapshot: model.snapshot, entityID: entity.id)
+        return VStack(spacing: 0) {
+            telemetryRow(entity)
+            if showsSeparator {
+                TelemetryRowSeparator()
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { isInside in
+            if isInside {
+                model.startHistoryHover(entity.id)
+            }
+        }
+        .onTapGesture {
+            model.toggleHistoryPin(entity.id)
+        }
+        .popover(isPresented: historyPopoverBinding(for: entity.id), arrowEdge: .trailing) {
+            historyPopover(for: entity)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(entity.name), \(value.text)")
+        .accessibilityAction(named: "Show history") {
+            model.toggleHistoryPin(entity.id)
+        }
+        .accessibilityAction(named: "Hide history") {
+            model.dismissHistoryPopover()
+        }
+        .modifier(
+            HistoryRowKeyboardAccess(
+                isPresented: model.pinnedHistoryEntityID == entity.id,
+                open: { model.toggleHistoryPin(entity.id) },
+                close: { model.dismissHistoryPopover() }
+            )
+        )
+        .contextMenu {
+            entityContextMenu(for: entity, contextPresentation: contextPresentation)
         }
     }
 
@@ -6334,6 +6815,7 @@ public struct PerchHAPanelView: View {
     private func telemetryRow(_ entity: DiscoveredEntity) -> some View {
         let value = entityValue(entity)
         let presentation = rowPresentation(for: entity)
+        let contextPresentation = Self.entityContextPresentation(snapshot: model.snapshot, entityID: entity.id)
         // A row with a real switch reads as `[icon] name ………… [switch]`: the
         // switch alone communicates the on/off state, so the redundant ON/OFF
         // pill and the meaningless meter band are dropped. Mixing those in was
@@ -6343,6 +6825,8 @@ public struct PerchHAPanelView: View {
             icon: entityIconName(for: entity),
             iconActive: value.status == .available,
             label: entity.name,
+            labelAccessorySystemImage: contextPresentation.isPromotedToMenuBar ? "menubar.rectangle" : nil,
+            labelAccessoryAccessibilityLabel: "Shown in bar",
             subtitle: rowSubtitle(for: entity, value: value),
             secondLine: rowSecondLine(for: entity),
             preview: {
@@ -6357,43 +6841,130 @@ public struct PerchHAPanelView: View {
             },
             control: { rowControls(for: entity) }
         )
-        .onAppear {
-            markEntityVisible(entity.id, isVisible: true)
-        }
-        .onDisappear {
-            markEntityVisible(entity.id, isVisible: false)
-        }
-        .onHover { isInside in
-            if isInside {
-                model.startHistoryHover(entity.id)
-            } else {
-                model.cancelHistoryHover()
+    }
+
+    @ViewBuilder
+    private func entityContextMenu(
+        for entity: DiscoveredEntity,
+        contextPresentation: PerchHAPanelEntityContextPresentation
+    ) -> some View {
+        Toggle("Show in Bar", isOn: panelMenuBarVisibilityBinding(for: entity.id))
+        Divider()
+        Menu("Set icon") {
+            Button {
+                model.setCustomEntityIcon(entity.id, symbolName: nil)
+            } label: {
+                Label("Automatic icon", systemImage: entityIconName(for: entity) ?? "questionmark.circle")
+            }
+            Divider()
+            ForEach(PerchHAEntityIconCatalog.sections, id: \.title) { section in
+                Menu(section.title) {
+                    ForEach(section.symbols, id: \.self) { symbol in
+                        Button {
+                            model.setCustomEntityIcon(entity.id, symbolName: symbol)
+                        } label: {
+                            Label(symbol, systemImage: symbol)
+                        }
+                    }
+                }
             }
         }
-        .onTapGesture {
-            model.toggleHistoryPin(entity.id)
+        if contextPresentation.isPromotedToMenuBar {
+            Divider()
+            Toggle("Show Icon", isOn: panelEntityIconVisibilityBinding(for: entity.id))
+            Toggle("Show Label", isOn: panelMenuBarLabelBinding(for: entity.id))
+            Toggle("Show Unit", isOn: panelMenuBarUnitBinding(for: entity.id))
         }
-        .popover(isPresented: historyPopoverBinding(for: entity.id), arrowEdge: .trailing) {
-            historyPopover(for: entity)
+    }
+
+    private func makeEntityContextMenu(
+        for entity: DiscoveredEntity,
+        contextPresentation: PerchHAPanelEntityContextPresentation
+    ) -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(toggleMenuItem(
+            title: "Show in Bar",
+            isOn: model.snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
+        ) {
+            model.setMenuBarEntity(entity.id, isVisible: !model.snapshot.menuBarDisplayConfiguration.isPromoted(entity.id))
+        })
+        menu.addItem(.separator())
+
+        let iconMenuItem = NSMenuItem(title: "Set icon", action: nil, keyEquivalent: "")
+        iconMenuItem.submenu = iconSelectionMenu(for: entity)
+        menu.addItem(iconMenuItem)
+
+        if contextPresentation.isPromotedToMenuBar {
+            menu.addItem(.separator())
+            menu.addItem(toggleMenuItem(
+                title: "Show Icon",
+                isOn: model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entity.id).showsEntityIcon
+            ) {
+                let configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entity.id)
+                model.setShowsEntityIcon(entity.id, showsEntityIcon: !configuration.showsEntityIcon)
+            })
+            menu.addItem(toggleMenuItem(
+                title: "Show Label",
+                isOn: model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entity.id).showsLabel
+            ) {
+                let configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entity.id)
+                model.setMenuBarShowsLabel(entity.id, showsLabel: !configuration.showsLabel)
+            })
+            menu.addItem(toggleMenuItem(
+                title: "Show Unit",
+                isOn: model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entity.id).showsUnit
+            ) {
+                let configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entity.id)
+                model.setMenuBarShowsUnit(entity.id, showsUnit: !configuration.showsUnit)
+            })
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(entity.name), \(value.text)")
-        // Hover is a pointer-only affordance; history must also open without a
-        // mouse. VoiceOver gets a named action, and (macOS 14+) a focused row
-        // toggles the popover with Space.
-        .accessibilityAction(named: "Show history") {
-            model.toggleHistoryPin(entity.id)
+
+        return menu
+    }
+
+    private func iconSelectionMenu(for entity: DiscoveredEntity) -> NSMenu {
+        let menu = NSMenu()
+        let automaticSymbol = entityIconName(for: entity) ?? "questionmark.circle"
+        menu.addItem(actionMenuItem(
+            title: "Automatic icon",
+            systemImage: automaticSymbol
+        ) {
+            model.setCustomEntityIcon(entity.id, symbolName: nil)
+        })
+        menu.addItem(.separator())
+        for section in PerchHAEntityIconCatalog.sections {
+            let sectionItem = NSMenuItem(title: section.title, action: nil, keyEquivalent: "")
+            let submenu = NSMenu(title: section.title)
+            for symbol in section.symbols {
+                submenu.addItem(actionMenuItem(title: symbol, systemImage: symbol) {
+                    model.setCustomEntityIcon(entity.id, symbolName: symbol)
+                })
+            }
+            sectionItem.submenu = submenu
+            menu.addItem(sectionItem)
         }
-        .accessibilityAction(named: "Hide history") {
-            model.dismissHistoryPopover()
+        return menu
+    }
+
+    private func toggleMenuItem(title: String, isOn: Bool, action: @escaping () -> Void) -> NSMenuItem {
+        let item = actionMenuItem(title: title, action: action)
+        item.state = isOn ? .on : .off
+        return item
+    }
+
+    private func actionMenuItem(
+        title: String,
+        systemImage: String? = nil,
+        action: @escaping () -> Void
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: #selector(PerchHAMenuActionTarget.performAction(_:)), keyEquivalent: "")
+        let target = PerchHAMenuActionTarget(action: action)
+        item.target = target
+        item.representedObject = target
+        if let systemImage, let image = NSImage(systemSymbolName: systemImage, accessibilityDescription: title) {
+            item.image = image
         }
-        .modifier(
-            HistoryRowKeyboardAccess(
-                isPresented: model.pinnedHistoryEntityID == entity.id,
-                open: { model.toggleHistoryPin(entity.id) },
-                close: { model.dismissHistoryPopover() }
-            )
-        )
+        return item
     }
 
     /// The optional compact second line: a cover control row, then any failure
@@ -6421,18 +6992,10 @@ public struct PerchHAPanelView: View {
         )
     }
 
-    /// Tracks a row's on-screen visibility and reports the visible set to the
-    /// model in display order. Scrolling only mutates local state and hands the
-    /// model a settled set; the model's debounce decides whether to fetch, so
-    /// scrolling itself never triggers history requests.
-    private func markEntityVisible(_ id: EntityID, isVisible: Bool) {
-        if isVisible {
-            visibleEntityIDs.insert(id)
-        } else {
-            visibleEntityIDs.remove(id)
-        }
-        let ordered = model.snapshot.rooms.flatMap(\.entities).map(\.id).filter { visibleEntityIDs.contains($0) }
-        model.updateVisibleEntities(ordered)
+    /// Reports the rows currently rendered in the panel so background history
+    /// warming happens from layout state, not per-row scroll churn.
+    private func syncWarmedEntityIDs(_ ids: [EntityID]? = nil) {
+        model.updateVisibleEntities(ids ?? warmedEntityIDs)
     }
 
     private func entityIconName(for entity: DiscoveredEntity) -> String? {
@@ -6440,6 +7003,50 @@ public struct PerchHAPanelView: View {
         // "Show icon" toggle only affects the status item, never the row.
         let configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entity.id)
         return configuration.customIconName ?? perchHAEntityIconName(for: entity)
+    }
+
+    private func panelMenuBarVisibilityBinding(for id: EntityID) -> Binding<Bool> {
+        Binding(
+            get: {
+                model.snapshot.menuBarDisplayConfiguration.isPromoted(id)
+            },
+            set: { isVisible in
+                model.setMenuBarEntity(id, isVisible: isVisible)
+            }
+        )
+    }
+
+    private func panelEntityIconVisibilityBinding(for id: EntityID) -> Binding<Bool> {
+        Binding(
+            get: {
+                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).showsEntityIcon
+            },
+            set: { showsEntityIcon in
+                model.setShowsEntityIcon(id, showsEntityIcon: showsEntityIcon)
+            }
+        )
+    }
+
+    private func panelMenuBarLabelBinding(for id: EntityID) -> Binding<Bool> {
+        Binding(
+            get: {
+                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).showsLabel
+            },
+            set: { showsLabel in
+                model.setMenuBarShowsLabel(id, showsLabel: showsLabel)
+            }
+        )
+    }
+
+    private func panelMenuBarUnitBinding(for id: EntityID) -> Binding<Bool> {
+        Binding(
+            get: {
+                model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).showsUnit
+            },
+            set: { showsUnit in
+                model.setMenuBarShowsUnit(id, showsUnit: showsUnit)
+            }
+        )
     }
 
     private func entityControlHelp(for entity: DiscoveredEntity, control: PerchHAEntityControl) -> String {
@@ -6549,7 +7156,7 @@ public struct PerchHAPanelView: View {
             },
             set: { isPresented in
                 if !isPresented {
-                    model.dismissHistoryPopover()
+                    model.dismissHistoryPopover(ifPresenting: id)
                 }
             }
         )
@@ -6615,7 +7222,7 @@ public struct PerchHAPanelView: View {
     private func rowPresentation(for entity: DiscoveredEntity) -> PerchHAEntityRowPresentation {
         PerchHAEntityRowPresentation.resolve(
             entity: entity,
-            configuration: model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entity.id),
+            configuration: model.snapshot.effectiveMenuBarItemConfiguration(for: entity),
             availableEntities: model.snapshot.rooms.flatMap(\.entities)
         )
     }
@@ -6779,7 +7386,10 @@ public struct PerchHAPanelView: View {
             return nil
         }
         let unit = (entity.unit ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !unit.isEmpty, !value.text.contains(unit) else {
+        let valueAlreadyShowsAUnit = value.text.contains(unit) || value.text.contains { character in
+            character.isLetter || character == "%" || character == "°" || character == "/"
+        }
+        guard !unit.isEmpty, !valueAlreadyShowsAUnit else {
             return nil
         }
         return unit
@@ -6849,6 +7459,78 @@ public func perchHAEntityIconName(for entity: DiscoveredEntity) -> String {
             return "sensor"
         }
         return "gauge.medium"
+    }
+}
+
+@MainActor
+private struct PerchHAHoverRegion: NSViewRepresentable {
+    let onChange: (Bool) -> Void
+
+    func makeNSView(context: Context) -> HoverTrackingView {
+        let view = HoverTrackingView()
+        view.onChange = onChange
+        return view
+    }
+
+    func updateNSView(_ nsView: HoverTrackingView, context: Context) {
+        nsView.onChange = onChange
+    }
+}
+
+@MainActor
+private final class HoverTrackingView: NSView {
+    var onChange: ((Bool) -> Void)?
+    private var trackingArea: NSTrackingArea?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = false
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        return nil
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea {
+            removeTrackingArea(trackingArea)
+        }
+        let options: NSTrackingArea.Options = [
+            .mouseEnteredAndExited,
+            .activeInKeyWindow,
+            .inVisibleRect,
+            .enabledDuringMouseDrag
+        ]
+        let trackingArea = NSTrackingArea(rect: .zero, options: options, owner: self, userInfo: nil)
+        addTrackingArea(trackingArea)
+        self.trackingArea = trackingArea
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onChange?(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onChange?(false)
+    }
+}
+
+@MainActor
+private final class PerchHAMenuActionTarget: NSObject {
+    private let action: () -> Void
+
+    init(action: @escaping () -> Void) {
+        self.action = action
+    }
+
+    @objc func performAction(_ sender: Any?) {
+        action()
     }
 }
 

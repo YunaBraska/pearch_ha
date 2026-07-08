@@ -788,11 +788,24 @@ public struct Area: Equatable, Codable, Sendable {
 public struct Device: Equatable, Codable, Sendable {
     public let id: DeviceID
     public let name: String?
+    public let manufacturer: String?
+    public let model: String?
+    public let domain: String?
     public let areaID: AreaID?
 
-    public init(id: DeviceID, name: String?, areaID: AreaID?) {
+    public init(
+        id: DeviceID,
+        name: String?,
+        manufacturer: String? = nil,
+        model: String? = nil,
+        domain: String? = nil,
+        areaID: AreaID?
+    ) {
         self.id = id
         self.name = name
+        self.manufacturer = manufacturer
+        self.model = model
+        self.domain = domain
         self.areaID = areaID
     }
 }
@@ -832,16 +845,60 @@ public struct DiscoveredEntity: Equatable, Codable, Sendable {
     public let unit: String?
     public let areaID: AreaID?
     public let deviceID: DeviceID?
+    public let deviceName: String?
+    public let deviceManufacturer: String?
+    public let deviceModel: String?
+    public let deviceDomain: String?
     public let currentPosition: Int?
 
-    public init(id: EntityID, name: String, state: String, unit: String?, areaID: AreaID?, deviceID: DeviceID?, currentPosition: Int? = nil) {
+    public init(
+        id: EntityID,
+        name: String,
+        state: String,
+        unit: String?,
+        areaID: AreaID?,
+        deviceID: DeviceID?,
+        deviceName: String? = nil,
+        deviceManufacturer: String? = nil,
+        deviceModel: String? = nil,
+        deviceDomain: String? = nil,
+        currentPosition: Int? = nil
+    ) {
         self.id = id
         self.name = name
         self.state = state
         self.unit = unit
         self.areaID = areaID
         self.deviceID = deviceID
+        self.deviceName = deviceName
+        self.deviceManufacturer = deviceManufacturer
+        self.deviceModel = deviceModel
+        self.deviceDomain = deviceDomain
         self.currentPosition = currentPosition
+    }
+
+    public init(
+        id: EntityID,
+        name: String,
+        state: String,
+        unit: String?,
+        areaID: AreaID?,
+        deviceID: DeviceID?,
+        currentPosition: Int? = nil
+    ) {
+        self.init(
+            id: id,
+            name: name,
+            state: state,
+            unit: unit,
+            areaID: areaID,
+            deviceID: deviceID,
+            deviceName: nil,
+            deviceManufacturer: nil,
+            deviceModel: nil,
+            deviceDomain: nil,
+            currentPosition: currentPosition
+        )
     }
 }
 
@@ -929,6 +986,10 @@ public struct RoomResolver: Sendable {
                 unit: state.unit,
                 areaID: resolvedAreaID,
                 deviceID: registryEntry?.deviceID,
+                deviceName: registryEntry?.deviceID.flatMap { devicesByID[$0]?.name },
+                deviceManufacturer: registryEntry?.deviceID.flatMap { devicesByID[$0]?.manufacturer },
+                deviceModel: registryEntry?.deviceID.flatMap { devicesByID[$0]?.model },
+                deviceDomain: registryEntry?.deviceID.flatMap { devicesByID[$0]?.domain },
                 currentPosition: state.currentPosition
             )
             groupedEntities[roomID, default: []].append(entity)

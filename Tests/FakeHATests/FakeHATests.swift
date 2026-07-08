@@ -43,7 +43,7 @@ final class FakeHATests: XCTestCase {
         }
 
         let url = server.baseURL.appendingPathComponent("api/states")
-        let (_, response) = try await URLSession.shared.data(from: url)
+        let (_, response) = try await dataEventually(from: url)
         let http = try XCTUnwrap(response as? HTTPURLResponse)
 
         XCTAssertEqual(http.statusCode, 401)
@@ -430,6 +430,17 @@ final class FakeHATests: XCTestCase {
         @unknown default:
             return ""
         }
+    }
+
+    private func dataEventually(from url: URL) async throws -> (Data, URLResponse) {
+        for attempt in 0..<50 {
+            do {
+                return try await URLSession.shared.data(from: url)
+            } catch let error as URLError where error.code == .cannotConnectToHost && attempt < 49 {
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+        }
+        return try await URLSession.shared.data(from: url)
     }
 }
 #endif

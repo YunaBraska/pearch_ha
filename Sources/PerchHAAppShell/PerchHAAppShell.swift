@@ -1273,6 +1273,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             protectedActionValueStore: protectedActionValueStore,
             snapshotSink: { [weak self] snapshot in
                 self?.updateStatusItems(from: snapshot)
+                self?.scheduleDisplayConfigurationRepairIfNeeded(after: snapshot)
             },
             signOutHandler: { [weak self] in
                 self?.clearStoredAuthSession()
@@ -1293,10 +1294,23 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     /// `nil` when no stored session is available to reconnect with.
     @discardableResult
     private func startAutoConnect(form: PerchHAConnectionForm, model: PerchHAPanelModel) -> Task<Void, Never>? {
-        guard form.usesStoredAuthSession, form.primaryURL() != nil else {
+        guard form.primaryURL() != nil else {
+            return nil
+        }
+        guard let autoConnectForm = storedSessionFormIfAvailable(for: form) else {
             return nil
         }
         return Task { @MainActor in
+            if !model.snapshot.connectionForm.sameConnection(as: autoConnectForm)
+                || !model.snapshot.connectionForm.usesStoredAuthSession {
+                model.updateConnectionForm(
+                    urlString: autoConnectForm.urlString,
+                    addresses: autoConnectForm.addresses,
+                    token: "",
+                    usesStoredAuthSession: true,
+                    allowsSelfSignedCertificates: autoConnectForm.allowsSelfSignedCertificates
+                )
+            }
             let retryDelays: [UInt64] = [
                 250_000_000,
                 500_000_000,
@@ -1307,13 +1321,39 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             var attempt = 0
             while !Task.isCancelled {
                 await model.connect()
-                if shouldStopAutoConnectRetry(model: model, originalForm: form) {
+                if shouldStopAutoConnectRetry(model: model, originalForm: autoConnectForm) {
                     return
                 }
                 let delay = retryDelays[min(attempt, retryDelays.count - 1)]
                 attempt += 1
                 try? await Task.sleep(nanoseconds: delay)
             }
+        }
+    }
+
+    private func storedSessionFormIfAvailable(for form: PerchHAConnectionForm) -> PerchHAConnectionForm? {
+        if form.usesStoredAuthSession {
+            return form
+        }
+        guard let authSessionStore else {
+            return nil
+        }
+        do {
+            _ = try authSessionStore.loadAccessToken()
+            return PerchHAConnectionForm(
+                urlString: form.urlString,
+                addresses: form.addresses,
+                token: "",
+                usesStoredAuthSession: true,
+                allowsSelfSignedCertificates: form.allowsSelfSignedCertificates
+            )
+        } catch SecretStoreError.notFound(_) {
+            return nil
+        } catch {
+            panelModel?.reportShellPersistenceFailure(
+                "Could not load the stored session from the Keychain: \(error)"
+            )
+            return nil
         }
     }
 
@@ -1336,6 +1376,42 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         case .disconnected, .connecting, .connected, .reconnecting, .failed:
             return false
         }
+    }
+
+    private func scheduleDisplayConfigurationRepairIfNeeded(after snapshot: PerchHAPanelSnapshot) {
+        guard displayConfigurationRepairIsNeeded(after: snapshot) else {
+            return
+        }
+        Task { @MainActor [weak self] in
+            _ = self?.panelModel?.normalizeDisplayConfigurationForAvailableEntities()
+        }
+    }
+
+    private func displayConfigurationRepairIsNeeded(after snapshot: PerchHAPanelSnapshot) -> Bool {
+        guard !snapshot.availableRooms.isEmpty else {
+            return false
+        }
+        let entitiesByID = Dictionary(
+            uniqueKeysWithValues: snapshot.availableRooms.flatMap(\.entities).map { ($0.id, $0) }
+        )
+        var normalizedItems = snapshot.menuBarDisplayConfiguration.itemConfigurations.map { item in
+            guard let entity = entitiesByID[item.entityID] else {
+                return item
+            }
+            return EntityDisplayDefaults.normalizedConfiguration(for: entity, configuration: item)
+        }
+        let existingIDs = Set(normalizedItems.map(\.entityID))
+        for promotedID in snapshot.menuBarDisplayConfiguration.promotedEntityIDs where !existingIDs.contains(promotedID) {
+            guard let entity = entitiesByID[promotedID] else {
+                continue
+            }
+            normalizedItems.append(EntityDisplayDefaults.configuration(for: entity))
+        }
+        let normalized = MenuBarDisplayConfiguration(
+            promotedEntityIDs: snapshot.menuBarDisplayConfiguration.promotedEntityIDs,
+            itemConfigurations: normalizedItems
+        )
+        return normalized != snapshot.menuBarDisplayConfiguration
     }
 
     /// Awaits any in-flight launch auto-connect and reports the resulting

@@ -338,6 +338,8 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
     private let icon: String?
     private let iconActive: Bool
     private let label: String
+    private let labelAccessorySystemImage: String?
+    private let labelAccessoryAccessibilityLabel: String?
     private let subtitle: String?
     private let secondLine: AnyView?
     private let preview: Preview
@@ -366,6 +368,8 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
         icon: String?,
         iconActive: Bool,
         label: String,
+        labelAccessorySystemImage: String? = nil,
+        labelAccessoryAccessibilityLabel: String? = nil,
         subtitle: String? = nil,
         secondLine: AnyView? = nil,
         @ViewBuilder preview: () -> Preview,
@@ -375,6 +379,8 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
         self.icon = icon
         self.iconActive = iconActive
         self.label = label
+        self.labelAccessorySystemImage = labelAccessorySystemImage
+        self.labelAccessoryAccessibilityLabel = labelAccessoryAccessibilityLabel
         self.subtitle = subtitle
         self.secondLine = secondLine
         self.preview = preview()
@@ -397,11 +403,20 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
                 .frame(width: TelemetryRowMetrics.iconWidth, height: 16, alignment: .center)
                 .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(label)
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(palette.textPrimary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
+                    HStack(spacing: 5) {
+                        Text(label)
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(palette.textPrimary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                        if let labelAccessorySystemImage {
+                            Image(systemName: labelAccessorySystemImage)
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundStyle(palette.accentPrimary)
+                                .accessibilityHidden(labelAccessoryAccessibilityLabel == nil)
+                                .help(labelAccessoryAccessibilityLabel ?? "")
+                        }
+                    }
                     if let subtitle {
                         Text(subtitle)
                             .font(.system(size: 10))

@@ -299,6 +299,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
     /// The selected unit that converts and formats this entity's value, or `nil`
     /// to use the unit detected from the entity's Home Assistant unit.
     public let displayUnit: ValueUnit?
+    /// A concrete target unit symbol within the chosen family, or `nil` to let
+    /// the formatter auto-scale within the effective unit family.
+    public let displayUnitSymbol: String?
     /// The optional lower bound mapped to `0` for percentage/icon units.
     public let minValue: Double?
     /// The optional upper bound mapped to `1` for percentage/icon units.
@@ -315,13 +318,14 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         appearance: PerchHAMenuBarAppearance? = nil,
         showsLabel: Bool = false,
         showsUnit: Bool = true,
-        maximumFractionDigits: Int = 0,
+        maximumFractionDigits: Int = 1,
         absoluteTotal: Double? = nil,
         totalEntityID: EntityID? = nil,
         thresholds: ValueThresholds = ValueThresholds(),
         defaultHistoryRange: HistoryRange? = nil,
         coverControlMode: CoverControlMode = .both,
         displayUnit: ValueUnit? = nil,
+        displayUnitSymbol: String? = nil,
         minValue: Double? = nil,
         maxValue: Double? = nil,
         showsEntityIcon: Bool = true,
@@ -339,11 +343,52 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         self.defaultHistoryRange = defaultHistoryRange
         self.coverControlMode = coverControlMode
         self.displayUnit = displayUnit
+        let trimmedDisplayUnitSymbol = displayUnitSymbol?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.displayUnitSymbol = (trimmedDisplayUnitSymbol?.isEmpty ?? true) ? nil : trimmedDisplayUnitSymbol
         self.minValue = minValue
         self.maxValue = maxValue
         self.showsEntityIcon = showsEntityIcon
         let trimmedIcon = customIconName?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.customIconName = (trimmedIcon?.isEmpty ?? true) ? nil : trimmedIcon
+    }
+
+    public init(
+        entityID: EntityID,
+        style: MenuBarDisplayStyle = .text,
+        appearance: PerchHAMenuBarAppearance? = nil,
+        showsLabel: Bool = false,
+        showsUnit: Bool = true,
+        maximumFractionDigits: Int = 1,
+        absoluteTotal: Double? = nil,
+        totalEntityID: EntityID? = nil,
+        thresholds: ValueThresholds = ValueThresholds(),
+        defaultHistoryRange: HistoryRange? = nil,
+        coverControlMode: CoverControlMode = .both,
+        displayUnit: ValueUnit? = nil,
+        minValue: Double? = nil,
+        maxValue: Double? = nil,
+        showsEntityIcon: Bool = true,
+        customIconName: String? = nil
+    ) {
+        self.init(
+            entityID: entityID,
+            style: style,
+            appearance: appearance,
+            showsLabel: showsLabel,
+            showsUnit: showsUnit,
+            maximumFractionDigits: maximumFractionDigits,
+            absoluteTotal: absoluteTotal,
+            totalEntityID: totalEntityID,
+            thresholds: thresholds,
+            defaultHistoryRange: defaultHistoryRange,
+            coverControlMode: coverControlMode,
+            displayUnit: displayUnit,
+            displayUnitSymbol: nil,
+            minValue: minValue,
+            maxValue: maxValue,
+            showsEntityIcon: showsEntityIcon,
+            customIconName: customIconName
+        )
     }
 
     public func updating(
@@ -356,6 +401,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         thresholds: ValueThresholds? = nil,
         coverControlMode: CoverControlMode? = nil,
         displayUnit: ValueUnit? = nil,
+        displayUnitSymbol: String? = nil,
         minValue: Double? = nil,
         maxValue: Double? = nil
     ) -> MenuBarItemConfiguration {
@@ -372,6 +418,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode ?? self.coverControlMode,
             displayUnit: displayUnit ?? self.displayUnit,
+            displayUnitSymbol: displayUnitSymbol ?? self.displayUnitSymbol,
             minValue: minValue ?? self.minValue,
             maxValue: maxValue ?? self.maxValue,
             showsEntityIcon: showsEntityIcon,
@@ -398,6 +445,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
+            displayUnitSymbol: displayUnitSymbol,
             minValue: minValue,
             maxValue: maxValue,
             showsEntityIcon: showsEntityIcon,
@@ -423,6 +471,29 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: unit,
+            displayUnitSymbol: displayUnitSymbol,
+            minValue: minValue,
+            maxValue: maxValue,
+            showsEntityIcon: showsEntityIcon,
+            customIconName: customIconName
+        )
+    }
+
+    public func settingDisplayUnitSymbol(_ symbol: String?) -> MenuBarItemConfiguration {
+        MenuBarItemConfiguration(
+            entityID: entityID,
+            style: style,
+            appearance: appearance,
+            showsLabel: showsLabel,
+            showsUnit: showsUnit,
+            maximumFractionDigits: maximumFractionDigits,
+            absoluteTotal: absoluteTotal,
+            totalEntityID: totalEntityID,
+            thresholds: thresholds,
+            defaultHistoryRange: defaultHistoryRange,
+            coverControlMode: coverControlMode,
+            displayUnit: displayUnit,
+            displayUnitSymbol: symbol,
             minValue: minValue,
             maxValue: maxValue,
             showsEntityIcon: showsEntityIcon,
@@ -450,6 +521,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
+            displayUnitSymbol: displayUnitSymbol,
             minValue: minValue,
             maxValue: maxValue,
             showsEntityIcon: showsEntityIcon,
@@ -471,6 +543,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
+            displayUnitSymbol: displayUnitSymbol,
             minValue: minValue,
             maxValue: maxValue,
             showsEntityIcon: showsEntityIcon,
@@ -492,6 +565,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
+            displayUnitSymbol: displayUnitSymbol,
             minValue: minValue,
             maxValue: maxValue,
             showsEntityIcon: showsEntityIcon,
@@ -526,6 +600,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             defaultHistoryRange: range,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
+            displayUnitSymbol: displayUnitSymbol,
             minValue: minValue,
             maxValue: maxValue,
             showsEntityIcon: showsEntityIcon,
@@ -547,6 +622,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
+            displayUnitSymbol: displayUnitSymbol,
             minValue: minValue,
             maxValue: maxValue,
             showsEntityIcon: showsEntityIcon,
@@ -572,6 +648,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
+            displayUnitSymbol: displayUnitSymbol,
             minValue: minValue,
             maxValue: maxValue,
             showsEntityIcon: shows,
@@ -598,6 +675,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
+            displayUnitSymbol: displayUnitSymbol,
             minValue: minValue,
             maxValue: maxValue,
             showsEntityIcon: showsEntityIcon,
@@ -618,6 +696,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         case defaultHistoryRange
         case coverControlMode
         case displayUnit
+        case displayUnitSymbol
         case minValue
         case maxValue
         case temperatureUnit
@@ -634,7 +713,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         showsUnit = try container.decodeIfPresent(Bool.self, forKey: .showsUnit) ?? true
         maximumFractionDigits = max(
             0,
-            try container.decodeIfPresent(Int.self, forKey: .maximumFractionDigits) ?? 0
+            try container.decodeIfPresent(Int.self, forKey: .maximumFractionDigits) ?? 1
         )
         absoluteTotal = try container.decodeIfPresent(Double.self, forKey: .absoluteTotal)
         totalEntityID = try container.decodeIfPresent(EntityID.self, forKey: .totalEntityID)
@@ -642,6 +721,9 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         defaultHistoryRange = try container.decodeIfPresent(HistoryRange.self, forKey: .defaultHistoryRange)
         coverControlMode = try container.decodeIfPresent(CoverControlMode.self, forKey: .coverControlMode) ?? .both
         displayUnit = Self.decodeDisplayUnit(from: container)
+        let decodedDisplayUnitSymbol = try container.decodeIfPresent(String.self, forKey: .displayUnitSymbol)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        displayUnitSymbol = (decodedDisplayUnitSymbol?.isEmpty ?? true) ? nil : decodedDisplayUnitSymbol
         minValue = try container.decodeIfPresent(Double.self, forKey: .minValue)
         maxValue = try container.decodeIfPresent(Double.self, forKey: .maxValue)
         showsEntityIcon = try container.decodeIfPresent(Bool.self, forKey: .showsEntityIcon) ?? true
@@ -664,6 +746,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         try container.encodeIfPresent(defaultHistoryRange, forKey: .defaultHistoryRange)
         try container.encode(coverControlMode, forKey: .coverControlMode)
         try container.encodeIfPresent(displayUnit, forKey: .displayUnit)
+        try container.encodeIfPresent(displayUnitSymbol, forKey: .displayUnitSymbol)
         try container.encodeIfPresent(minValue, forKey: .minValue)
         try container.encodeIfPresent(maxValue, forKey: .maxValue)
         try container.encode(showsEntityIcon, forKey: .showsEntityIcon)
@@ -896,6 +979,7 @@ public struct MenuBarItemRenderer: Sendable {
             locale: locale,
             maximumFractionDigits: configuration.maximumFractionDigits,
             displayUnit: configuration.displayUnit,
+            displayUnitSymbol: configuration.displayUnitSymbol,
             showsUnit: configuration.showsUnit,
             minValue: configuration.minValue,
             maxValue: configuration.maxValue
@@ -1045,7 +1129,7 @@ public struct MenuBarItemRenderer: Sendable {
         guard let metric else {
             return .normal
         }
-        return configuration.thresholds.severity(for: metric)
+        return EntityDisplayDefaults.effectiveThresholds(for: entity, configuration: configuration).severity(for: metric)
     }
 
     private func numericState(_ state: String) -> Double? {

@@ -122,7 +122,14 @@ final class PerchHACoreTests: XCTestCase {
                     Area(id: "office", name: "Office")
                 ],
                 devices: [
-                    Device(id: "air_sensor", name: "Air sensor", areaID: "office")
+                    Device(
+                        id: "air_sensor",
+                        name: "O-1PPT",
+                        manufacturer: "AirGradient",
+                        model: "AirGradient Open Air",
+                        domain: "bluetooth",
+                        areaID: "office"
+                    )
                 ],
                 entities: [
                     EntityRegistryEntry(id: "sensor.co2", name: nil, areaID: nil, deviceID: "air_sensor")
@@ -135,6 +142,10 @@ final class PerchHACoreTests: XCTestCase {
 
         XCTAssertEqual(rooms.map(\.name), ["Office"])
         XCTAssertEqual(rooms.first?.entities.first?.name, "CO2")
+        XCTAssertEqual(rooms.first?.entities.first?.deviceName, "O-1PPT")
+        XCTAssertEqual(rooms.first?.entities.first?.deviceManufacturer, "AirGradient")
+        XCTAssertEqual(rooms.first?.entities.first?.deviceModel, "AirGradient Open Air")
+        XCTAssertEqual(rooms.first?.entities.first?.deviceDomain, "bluetooth")
     }
 
     func testRoomResolverPlacesUnassignedEntitiesLast() {
@@ -199,6 +210,79 @@ final class PerchHACoreTests: XCTestCase {
         XCTAssertEqual(tree.map(\.name), ["Office"])
         XCTAssertEqual(tree.first?.entities.map(\.entity.id), ["sensor.office_temperature", "sensor.office_humidity"])
         XCTAssertEqual(tree.first?.entities.map(\.isSelected), [true, false])
+    }
+
+    func testSelectionProjectorSearchMatchesDeviceMetadata() {
+        let tree = EntitySelectionProjector().selectionTree(
+            rooms: [
+                Room(
+                    id: "office",
+                    name: "Office",
+                    entities: [
+                        DiscoveredEntity(
+                            id: "sensor.office_co2",
+                            name: "CO2",
+                            state: "650",
+                            unit: "ppm",
+                            areaID: "office",
+                            deviceID: "office_air",
+                            deviceName: "O-1PPT",
+                            deviceManufacturer: "AirGradient",
+                            deviceModel: "AirGradient Open Air",
+                            deviceDomain: "bluetooth"
+                        )
+                    ]
+                )
+            ],
+            configuration: EntitySelectionConfiguration(isExplicit: true),
+            query: "o-1ppt"
+        )
+
+        XCTAssertEqual(tree.map(\.name), ["Office"])
+        XCTAssertEqual(tree.first?.entities.map(\.entity.id), ["sensor.office_co2"])
+    }
+
+    func testSelectionProjectorSearchMatchesDeviceManufacturerModelAndDomain() {
+        let rooms = [
+            Room(
+                id: "office",
+                name: "Office",
+                entities: [
+                    DiscoveredEntity(
+                        id: "sensor.office_co2",
+                        name: "CO2",
+                        state: "650",
+                        unit: "ppm",
+                        areaID: "office",
+                        deviceID: "office_air",
+                        deviceName: "O-1PPT",
+                        deviceManufacturer: "AirGradient",
+                        deviceModel: "AirGradient Open Air",
+                        deviceDomain: "bluetooth"
+                    )
+                ]
+            )
+        ]
+
+        let modelTree = EntitySelectionProjector().selectionTree(
+            rooms: rooms,
+            configuration: EntitySelectionConfiguration(isExplicit: true),
+            query: "airgradient"
+        )
+        let manufacturerTree = EntitySelectionProjector().selectionTree(
+            rooms: rooms,
+            configuration: EntitySelectionConfiguration(isExplicit: true),
+            query: "o-1ppt"
+        )
+        let domainTree = EntitySelectionProjector().selectionTree(
+            rooms: rooms,
+            configuration: EntitySelectionConfiguration(isExplicit: true),
+            query: "bluetooth"
+        )
+
+        XCTAssertEqual(modelTree.first?.entities.map(\.entity.id), ["sensor.office_co2"])
+        XCTAssertEqual(manufacturerTree.first?.entities.map(\.entity.id), ["sensor.office_co2"])
+        XCTAssertEqual(domainTree.first?.entities.map(\.entity.id), ["sensor.office_co2"])
     }
 
     func testSelectionProjectorAppliesRoomAndEntityOrderToSelectedRooms() {
@@ -621,6 +705,7 @@ final class PerchHACoreTests: XCTestCase {
         XCTAssertNil(configuration.minValue)
         XCTAssertNil(configuration.maxValue)
         XCTAssertEqual(configuration.style, .text)
+        XCTAssertEqual(configuration.maximumFractionDigits, 1)
     }
 
     func test_t_item_configuration_decodes_legacy_payload_without_new_fields() throws {
@@ -633,6 +718,37 @@ final class PerchHACoreTests: XCTestCase {
         XCTAssertEqual(decoded.style, .ring)
         XCTAssertEqual(decoded.coverControlMode, .both)
         XCTAssertNil(decoded.displayUnit)
+        XCTAssertEqual(decoded.maximumFractionDigits, 1)
+    }
+
+    func testEntityDisplayDefaultsApplyTemperatureThresholdScale() {
+        let entity = DiscoveredEntity(
+            id: "sensor.office_temperature",
+            name: "Office temperature",
+            state: "21.4",
+            unit: "°C",
+            areaID: nil,
+            deviceID: nil
+        )
+
+        let configuration = EntityDisplayDefaults.configuration(for: entity)
+
+        XCTAssertEqual(configuration.maximumFractionDigits, 1)
+        XCTAssertEqual(
+            configuration.thresholds,
+            ValueThresholds(
+                steps: [
+                    ThresholdStep(
+                        value: 18,
+                        color: PerchHAAccentColor(red: 0.12, green: 0.72, blue: 0.83, alpha: 1)
+                    ),
+                    ThresholdStep(value: 21, color: ValueThresholds.okColor),
+                    ThresholdStep(value: 25, color: ValueThresholds.warningColor),
+                    ThresholdStep(value: 28, color: ValueThresholds.criticalColor)
+                ],
+                baseColor: PerchHAAccentColor(red: 0.19, green: 0.49, blue: 0.96, alpha: 1)
+            )
+        )
     }
 
     func test_t_item_configuration_decodes_legacy_temperature_unit() throws {
@@ -698,7 +814,8 @@ final class PerchHACoreTests: XCTestCase {
         let configuration = MenuBarItemConfiguration(
             entityID: "cover.blinds",
             coverControlMode: .slider,
-            displayUnit: .bytes
+            displayUnit: .bytes,
+            displayUnitSymbol: "GB"
         )
 
         let data = try JSONEncoder().encode(configuration)
@@ -707,6 +824,7 @@ final class PerchHACoreTests: XCTestCase {
         XCTAssertEqual(decoded, configuration)
         XCTAssertEqual(decoded.coverControlMode, .slider)
         XCTAssertEqual(decoded.displayUnit, .bytes)
+        XCTAssertEqual(decoded.displayUnitSymbol, "GB")
     }
 
     func test_t_item_configuration_setting_display_unit() {
@@ -850,6 +968,13 @@ final class PerchHACoreTests: XCTestCase {
         XCTAssertEqual(
             formatter(.dataRate).format(entity("sensor.net", state: "1536", unit: "B/s")),
             FormattedEntityValue(text: "1.5 KB/s", status: .available)
+        )
+    }
+
+    func test_t_value_unit_data_rate_respects_reported_scaled_input_unit() {
+        XCTAssertEqual(
+            formatter(.dataRate).format(entity("sensor.net", state: "1536", unit: "KB/s")),
+            FormattedEntityValue(text: "1.5 MB/s", status: .available)
         )
     }
 
@@ -1037,13 +1162,19 @@ final class PerchHACoreTests: XCTestCase {
         XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "GiB"), .bytes)
     }
 
-    func test_t_display_defaults_scalar_units_are_not_auto_detected() {
-        // Scalar units reinterpret magnitude, so the reported unit string is kept
-        // verbatim under `.number` instead of being rescaled automatically.
-        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "lx"), .number)
-        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "W"), .number)
-        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "kWh"), .number)
-        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "kg"), .number)
+    func test_t_display_defaults_safe_scalar_base_units_are_auto_detected() {
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "lx"), .illuminance)
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "W"), .power)
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "Wh"), .energy)
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "g"), .mass)
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "s"), .duration)
+    }
+
+    func test_t_display_defaults_scaled_scalar_units_stay_in_their_family() {
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "kWh"), .energy)
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "kg"), .mass)
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "min"), .duration)
+        XCTAssertEqual(EntityDisplayDefaults.detectedUnit(haUnit: "KB/s"), .dataRate)
     }
 
     func test_t_display_defaults_unknown_unit_uses_number() {
@@ -1054,6 +1185,115 @@ final class PerchHACoreTests: XCTestCase {
     func test_t_display_defaults_effective_unit_prefers_selection() {
         XCTAssertEqual(EntityDisplayDefaults.effectiveUnit(.bytes, haUnit: "%"), .bytes)
         XCTAssertEqual(EntityDisplayDefaults.effectiveUnit(nil, haUnit: "%"), .percent)
+    }
+
+    func testEntityDisplayDefaultsApplyHumidityThresholdScale() {
+        let entity = DiscoveredEntity(
+            id: "sensor.office_humidity",
+            name: "Office humidity",
+            state: "52",
+            unit: "%",
+            areaID: nil,
+            deviceID: nil
+        )
+
+        XCTAssertEqual(
+            EntityDisplayDefaults.defaultThresholds(for: entity),
+            ValueThresholds(
+                steps: [
+                    ThresholdStep(value: 35, color: PerchHAAccentColor(red: 0.12, green: 0.72, blue: 0.83, alpha: 1)),
+                    ThresholdStep(value: 40, color: ValueThresholds.okColor),
+                    ThresholdStep(value: 60, color: ValueThresholds.warningColor),
+                    ThresholdStep(value: 70, color: ValueThresholds.criticalColor)
+                ],
+                baseColor: ValueThresholds.warningColor
+            )
+        )
+    }
+
+    func testEntityDisplayDefaultsApplyPM25ThresholdScale() {
+        let entity = DiscoveredEntity(
+            id: "sensor.queen_pm2_5",
+            name: "Queen PM2.5",
+            state: "8",
+            unit: "µg/m³",
+            areaID: nil,
+            deviceID: nil
+        )
+
+        XCTAssertEqual(
+            EntityDisplayDefaults.defaultThresholds(for: entity),
+            ValueThresholds(
+                steps: [
+                    ThresholdStep(value: 12, color: PerchHAAccentColor(red: 0.12, green: 0.72, blue: 0.83, alpha: 1)),
+                    ThresholdStep(value: 35, color: ValueThresholds.warningColor),
+                    ThresholdStep(value: 55, color: ValueThresholds.criticalColor)
+                ],
+                baseColor: ValueThresholds.okColor
+            )
+        )
+    }
+
+    func testEntityDisplayDefaultsApplyPowerThresholdScale() {
+        let entity = DiscoveredEntity(
+            id: "sensor.deskyuna_power",
+            name: "Deskyuna Leistung",
+            state: "87.7",
+            unit: "W",
+            areaID: nil,
+            deviceID: nil
+        )
+
+        XCTAssertEqual(
+            EntityDisplayDefaults.defaultThresholds(for: entity),
+            ValueThresholds(
+                steps: [
+                    ThresholdStep(value: 150, color: PerchHAAccentColor(red: 0.12, green: 0.72, blue: 0.83, alpha: 1)),
+                    ThresholdStep(value: 500, color: ValueThresholds.warningColor),
+                    ThresholdStep(value: 1_200, color: ValueThresholds.criticalColor)
+                ],
+                baseColor: ValueThresholds.okColor
+            )
+        )
+    }
+
+    func testEntityDisplayDefaultsApplyImplicitThresholdsToExistingConfiguration() {
+        let entity = DiscoveredEntity(
+            id: "sensor.office_temperature",
+            name: "Office temperature",
+            state: "21.4",
+            unit: "°C",
+            areaID: nil,
+            deviceID: nil
+        )
+
+        let effective = EntityDisplayDefaults.effectiveThresholds(
+            for: entity,
+            configuration: MenuBarItemConfiguration(entityID: entity.id)
+        )
+
+        XCTAssertEqual(effective, EntityDisplayDefaults.defaultThresholds(for: entity))
+    }
+
+    func testEntityDisplayDefaultsMergesLegacyBaseColorOnlyThresholdsWithKnownDefaults() {
+        let entity = DiscoveredEntity(
+            id: "sensor.office_temperature",
+            name: "Office temperature",
+            state: "21.4",
+            unit: "°C",
+            areaID: nil,
+            deviceID: nil
+        )
+        let defaults = EntityDisplayDefaults.defaultThresholds(for: entity)
+        let configuration = MenuBarItemConfiguration(
+            entityID: entity.id,
+            thresholds: ValueThresholds(steps: [], baseColor: defaults.baseColor)
+        )
+
+        XCTAssertEqual(
+            EntityDisplayDefaults.effectiveThresholds(for: entity, configuration: configuration),
+            defaults
+        )
     }
 
     func test_t_display_defaults_battery_sensor_uses_battery_style() {
@@ -1800,6 +2040,83 @@ extension PerchHACoreTests {
                 "non-numeric passthrough for \(unit.rawValue)"
             )
         }
+    }
+
+    func test_t_value_unit_number_auto_scales_power_family_using_reported_unit() {
+        XCTAssertEqual(
+            formatter(.number).format(entity("sensor.power", state: "1530", unit: "W")),
+            FormattedEntityValue(text: "1.53 kW", status: .available)
+        )
+        XCTAssertEqual(
+            formatter(.number).format(entity("sensor.energy", state: "1500", unit: "kWh")),
+            FormattedEntityValue(text: "1.5 MWh", status: .available)
+        )
+    }
+
+    func test_t_value_unit_number_auto_scales_common_ha_measurement_families() {
+        XCTAssertEqual(
+            formatter(.number).format(entity("sensor.current", state: "2500", unit: "mA")),
+            FormattedEntityValue(text: "2.5 A", status: .available)
+        )
+        XCTAssertEqual(
+            formatter(.number).format(entity("sensor.voltage", state: "2500", unit: "mV")),
+            FormattedEntityValue(text: "2.5 V", status: .available)
+        )
+        XCTAssertEqual(
+            formatter(.number).format(entity("sensor.frequency", state: "2500", unit: "Hz")),
+            FormattedEntityValue(text: "2.5 kHz", status: .available)
+        )
+        XCTAssertEqual(
+            formatter(.number).format(entity("sensor.pressure", state: "1013", unit: "hPa")),
+            FormattedEntityValue(text: "101.3 kPa", status: .available)
+        )
+        XCTAssertEqual(
+            formatter(.number).format(entity("sensor.uptime", state: "90", unit: "min")),
+            FormattedEntityValue(text: "90 min", status: .available)
+        )
+        XCTAssertEqual(
+            formatter(.number).format(entity("sensor.pm", state: "1500", unit: "µg/m³")),
+            FormattedEntityValue(text: "1.5 mg/m³", status: .available)
+        )
+        XCTAssertEqual(
+            formatter(.number).format(entity("sensor.storage", state: "1536", unit: "MB")),
+            FormattedEntityValue(text: "1.5 GB", status: .available)
+        )
+    }
+
+    func test_t_value_unit_number_auto_scales_down_to_smaller_measurement_units() {
+        XCTAssertEqual(
+            formatter(.number).format(entity("sensor.current", state: "0.3", unit: "A")),
+            FormattedEntityValue(text: "300 mA", status: .available)
+        )
+        XCTAssertEqual(
+            formatter(.number).format(entity("sensor.volume", state: "0.5", unit: "L")),
+            FormattedEntityValue(text: "500 mL", status: .available)
+        )
+    }
+
+    func test_t_value_unit_explicit_symbol_overrides_auto_scaling_target() {
+        let formatter = EntityValueFormatter(
+            locale: Locale(identifier: "en_US"),
+            maximumFractionDigits: 1,
+            displayUnit: .power,
+            displayUnitSymbol: "W"
+        )
+        XCTAssertEqual(
+            formatter.format(entity("sensor.power", state: "1.53", unit: "kW")),
+            FormattedEntityValue(text: "1530 W", status: .available)
+        )
+    }
+
+    func test_t_value_unit_number_preserves_reported_unit_for_zero_values() {
+        XCTAssertEqual(
+            formatter(.number).format(entity("sensor.current", state: "0", unit: "A")),
+            FormattedEntityValue(text: "0 A", status: .available)
+        )
+        XCTAssertEqual(
+            formatter(.number).format(entity("sensor.power", state: "0", unit: "W")),
+            FormattedEntityValue(text: "0 W", status: .available)
+        )
     }
 
     func test_t_value_unit_illuminance_trims_trailing_decimal_point() {

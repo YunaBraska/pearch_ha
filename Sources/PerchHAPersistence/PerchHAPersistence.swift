@@ -88,7 +88,7 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
     }
 
     public static var empty: PerchHAConfiguration {
-        PerchHAConfiguration()
+        PerchHAConfiguration(isEntitySelectionExplicit: true)
     }
 
     /// Returns a copy replacing only the given selection/menu-bar/action/

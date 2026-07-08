@@ -2365,6 +2365,96 @@ final class PerchHAClientTests: XCTestCase {
         XCTAssertEqual(journal.first?.path, "/ha/api/websocket")
     }
 
+    func testWebSocketDiscoveryPreservesDeviceModelAndDomainFromRegistry() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[{"entity_id":"sensor.office_temperature","state":"21.4","attributes":{"friendly_name":"Office temperature","unit_of_measurement":"°C"}}]"#,
+            areaRegistryBody: #"[{"area_id":"office","name":"Office"}]"#,
+            deviceRegistryBody: """
+            [
+              {
+                "id":"office_air",
+                "name":"Office air",
+                "manufacturer":"AirGradient",
+                "model":"Airthings Wave Plus",
+                "identifiers":[["bluetooth","office-air"]],
+                "area_id":"office"
+              }
+            ]
+            """,
+            entityRegistryBody: #"[{"entity_id":"sensor.office_temperature","name":"Office temperature","device_id":"office_air"}]"#
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = HomeAssistantClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        let result = await client.discovery(input)
+
+        XCTAssertEqual(
+            result,
+            .success(
+                DiscoverySnapshot(
+                    areas: [Area(id: "office", name: "Office")],
+                    devices: [Device(id: "office_air", name: "Office air", manufacturer: "AirGradient", model: "Airthings Wave Plus", domain: "bluetooth", areaID: "office")],
+                    entities: [EntityRegistryEntry(id: "sensor.office_temperature", name: "Office temperature", areaID: nil, deviceID: "office_air")],
+                    states: [EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "21.4", unit: "°C")]
+                )
+            )
+        )
+    }
+
+    func testWebSocketDiscoveryToleratesNonStringDeviceIdentifierMembers() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[{"entity_id":"sensor.office_temperature","state":"21.4","attributes":{"friendly_name":"Office temperature","unit_of_measurement":"°C"}}]"#,
+            areaRegistryBody: #"[{"area_id":"office","name":"Office"}]"#,
+            deviceRegistryBody: """
+            [
+              {
+                "id":"office_air",
+                "name":"Office air",
+                "manufacturer":"AirGradient",
+                "model":"Airthings Wave Plus",
+                "identifiers":[["bluetooth",118003]],
+                "area_id":"office"
+              }
+            ]
+            """,
+            entityRegistryBody: #"[{"entity_id":"sensor.office_temperature","name":"Office temperature","device_id":"office_air"}]"#
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = HomeAssistantClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        let result = await client.discovery(input)
+
+        XCTAssertEqual(
+            result,
+            .success(
+                DiscoverySnapshot(
+                    areas: [Area(id: "office", name: "Office")],
+                    devices: [Device(id: "office_air", name: "Office air", manufacturer: "AirGradient", model: "Airthings Wave Plus", domain: "bluetooth", areaID: "office")],
+                    entities: [EntityRegistryEntry(id: "sensor.office_temperature", name: "Office temperature", areaID: nil, deviceID: "office_air")],
+                    states: [EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "21.4", unit: "°C")]
+                )
+            )
+        )
+    }
+
     func testWebSocketAuthFailureIsTyped() async throws {
         let server = try FakeHAWebSocketServer()
         server.start()
@@ -3786,7 +3876,7 @@ final class PerchHAClientTests: XCTestCase {
 
         // The optimized subscription delivers the pushed update...
         var received: [EntityState] = []
-        for _ in 0..<200 {
+        for _ in 0..<500 {
             received = await collector.states
             if !received.isEmpty {
                 break
@@ -5361,21 +5451,21 @@ actor RecordingMirrorTransport: HAMirrorTransport {
 }
 
 private func waitForJournalCount(server: FakeHAWebSocketServer, count: Int) async throws {
-    for _ in 0..<100 {
+    for _ in 0..<500 {
         if await server.journal.snapshot().count >= count {
             return
         }
-        await Task.yield()
+        try await Task.sleep(nanoseconds: 10_000_000)
     }
     throw ClientTestFailure("FakeHA WebSocket journal did not reach \(count)")
 }
 
 private func waitForJournalPath(server: FakeHAWebSocketServer, path: String) async throws {
-    for _ in 0..<100 {
+    for _ in 0..<500 {
         if await server.journal.snapshot().contains(where: { $0.path == path }) {
             return
         }
-        await Task.yield()
+        try await Task.sleep(nanoseconds: 10_000_000)
     }
     throw ClientTestFailure("FakeHA WebSocket journal did not contain \(path)")
 }
@@ -5848,10 +5938,10 @@ extension PerchHAClientTests {
         )
     }
 
-    func testDiscoveryRejectsMissingAreaRegistryResult() async throws {
+    func testDiscoveryContinuesWhenAreaRegistryResultIsMissing() async throws {
         let fixtures = FakeHAFixtures(
             apiBody: #"{"message":"API running."}"#,
-            statesBody: #"[]"#,
+            statesBody: #"[{"entity_id":"sensor.office_temperature","state":"21.4","attributes":{"friendly_name":"Office temperature","unit_of_measurement":"°C"}}]"#,
             areaRegistryBody: #"{}"#,
             deviceRegistryBody: #"[]"#,
             entityRegistryDisplayBody: #"{"entities":[]}"#,
@@ -5869,14 +5959,28 @@ extension PerchHAClientTests {
 
         await assertEqualAsync(
             await HomeAssistantClient().discovery(input),
-            .failure(.invalidPayload(path: "/api/websocket", reason: "missing area registry result"))
+            .success(
+                DiscoverySnapshot(
+                    areas: [],
+                    devices: [],
+                    entities: [],
+                    states: [
+                        EntityState(
+                            id: "sensor.office_temperature",
+                            name: "Office temperature",
+                            state: "21.4",
+                            unit: "°C"
+                        )
+                    ]
+                )
+            )
         )
     }
 
-    func testDiscoveryRejectsMissingDeviceRegistryResult() async throws {
+    func testDiscoveryContinuesWhenDeviceRegistryResultIsMissing() async throws {
         let fixtures = FakeHAFixtures(
             apiBody: #"{"message":"API running."}"#,
-            statesBody: #"[]"#,
+            statesBody: #"[{"entity_id":"sensor.office_temperature","state":"21.4","attributes":{"friendly_name":"Office temperature","unit_of_measurement":"°C"}}]"#,
             areaRegistryBody: #"[]"#,
             deviceRegistryBody: #"{}"#,
             entityRegistryDisplayBody: #"{"entities":[]}"#,
@@ -5894,14 +5998,28 @@ extension PerchHAClientTests {
 
         await assertEqualAsync(
             await HomeAssistantClient().discovery(input),
-            .failure(.invalidPayload(path: "/api/websocket", reason: "missing device registry result"))
+            .success(
+                DiscoverySnapshot(
+                    areas: [],
+                    devices: [],
+                    entities: [],
+                    states: [
+                        EntityState(
+                            id: "sensor.office_temperature",
+                            name: "Office temperature",
+                            state: "21.4",
+                            unit: "°C"
+                        )
+                    ]
+                )
+            )
         )
     }
 
-    func testDiscoveryRejectsMissingEntityRegistryDisplayResult() async throws {
+    func testDiscoveryFallsBackWhenEntityRegistryDisplayResultIsMissing() async throws {
         let fixtures = FakeHAFixtures(
             apiBody: #"{"message":"API running."}"#,
-            statesBody: #"[]"#,
+            statesBody: #"[{"entity_id":"sensor.office_temperature","state":"21.4","attributes":{"friendly_name":"Office temperature","unit_of_measurement":"°C"}}]"#,
             areaRegistryBody: #"[]"#,
             deviceRegistryBody: #"[]"#,
             entityRegistryDisplayBody: #"{}"#,
@@ -5919,14 +6037,28 @@ extension PerchHAClientTests {
 
         await assertEqualAsync(
             await HomeAssistantClient().discovery(input),
-            .failure(.invalidPayload(path: "/api/websocket", reason: "missing entity registry display result"))
+            .success(
+                DiscoverySnapshot(
+                    areas: [],
+                    devices: [],
+                    entities: [],
+                    states: [
+                        EntityState(
+                            id: "sensor.office_temperature",
+                            name: "Office temperature",
+                            state: "21.4",
+                            unit: "°C"
+                        )
+                    ]
+                )
+            )
         )
     }
 
-    func testDiscoveryRejectsMissingEntityRegistryFallbackResult() async throws {
+    func testDiscoveryContinuesWhenEntityRegistryFallbackResultIsMissing() async throws {
         let fixtures = FakeHAFixtures(
             apiBody: #"{"message":"API running."}"#,
-            statesBody: #"[]"#,
+            statesBody: #"[{"entity_id":"sensor.office_temperature","state":"21.4","attributes":{"friendly_name":"Office temperature","unit_of_measurement":"°C"}}]"#,
             areaRegistryBody: #"[]"#,
             deviceRegistryBody: #"[]"#,
             entityRegistryDisplayBody: nil,
@@ -5944,7 +6076,21 @@ extension PerchHAClientTests {
 
         await assertEqualAsync(
             await HomeAssistantClient().discovery(input),
-            .failure(.invalidPayload(path: "/api/websocket", reason: "missing entity registry result"))
+            .success(
+                DiscoverySnapshot(
+                    areas: [],
+                    devices: [],
+                    entities: [],
+                    states: [
+                        EntityState(
+                            id: "sensor.office_temperature",
+                            name: "Office temperature",
+                            state: "21.4",
+                            unit: "°C"
+                        )
+                    ]
+                )
+            )
         )
     }
 

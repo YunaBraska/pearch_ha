@@ -61,6 +61,185 @@ struct PerchHAConnectionTokenAccessPresentation: Equatable {
     }
 }
 
+struct PerchHAEntityMetadataPresentation: Equatable {
+    struct Field: Equatable {
+        let label: String
+        let value: String
+        let usesMonospacedFont: Bool
+    }
+
+    let rowCaption: String
+    let rowIdentifier: String
+    let inspectorFields: [Field]
+
+    init(entity: DiscoveredEntity, roomName: String) {
+        let trimmedUnit = Self.nonEmpty(entity.unit)
+        let trimmedDeviceName = Self.formattedDeviceDisplayName(
+            manufacturer: entity.deviceManufacturer,
+            name: entity.deviceName,
+            model: entity.deviceModel
+        )
+        let trimmedManufacturer = Self.nonEmpty(entity.deviceManufacturer)
+        let trimmedRawDeviceName = Self.nonEmpty(entity.deviceName)
+        let trimmedDeviceDomain = Self.nonEmpty(entity.deviceDomain)
+        let rowPrimaryContext = trimmedDeviceName ?? Self.humanizedEntityDomain(entity.id.domain)
+        let rowCaptionParts = Self.uniqueNonEmptyValues([rowPrimaryContext, trimmedUnit])
+        self.rowCaption = rowCaptionParts.joined(separator: " · ")
+
+        let identifierParts = [entity.id.rawValue, entity.deviceID?.rawValue].compactMap { $0 }
+        self.rowIdentifier = identifierParts.joined(separator: " · ")
+
+        var fields: [Field] = [
+            Field(label: "Entity name", value: entity.name, usesMonospacedFont: false),
+            Field(label: "Entity ID", value: entity.id.rawValue, usesMonospacedFont: true),
+            Field(label: "Room", value: roomName, usesMonospacedFont: false)
+        ]
+        if let areaID = entity.areaID?.rawValue,
+           !Self.matchesIgnoringCaseAndPunctuation(areaID, roomName) {
+            fields.append(Field(label: "Area ID", value: areaID, usesMonospacedFont: true))
+        }
+        if let deviceName = trimmedDeviceName {
+            fields.append(Field(label: "Device name", value: deviceName, usesMonospacedFont: false))
+        }
+        if let manufacturer = trimmedManufacturer {
+            fields.append(Field(label: "Device manufacturer", value: manufacturer, usesMonospacedFont: false))
+        }
+        if let deviceModel = Self.nonEmpty(entity.deviceModel) {
+            fields.append(Field(label: "Device model", value: deviceModel, usesMonospacedFont: false))
+        }
+        if let rawDeviceName = trimmedRawDeviceName,
+           !Self.matchesIgnoringCaseAndPunctuation(rawDeviceName, trimmedDeviceName),
+           !Self.containsIgnoringCaseAndPunctuation(trimmedDeviceName, rawDeviceName) {
+            fields.append(Field(label: "Device registry name", value: rawDeviceName, usesMonospacedFont: false))
+        }
+        if let deviceDomain = trimmedDeviceDomain {
+            fields.append(Field(label: "Device domain", value: deviceDomain, usesMonospacedFont: true))
+        }
+        if let deviceID = entity.deviceID?.rawValue {
+            fields.append(Field(label: "Device ID", value: deviceID, usesMonospacedFont: true))
+        }
+        self.inspectorFields = fields
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private static func uniqueNonEmptyValues(_ values: [String?]) -> [String] {
+        var result: [String] = []
+        var seen: Set<String> = []
+        for value in values {
+            guard let normalized = nonEmpty(value) else {
+                continue
+            }
+            let key = normalized.lowercased()
+            guard seen.insert(key).inserted else {
+                continue
+            }
+            result.append(normalized)
+        }
+        return result
+    }
+
+    private static func humanizedEntityDomain(_ domain: String) -> String {
+        domain.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+
+    private static func matchesIgnoringCaseAndPunctuation(_ lhs: String?, _ rhs: String?) -> Bool {
+        normalizedSearchKey(lhs) == normalizedSearchKey(rhs)
+    }
+
+    private static func containsIgnoringCaseAndPunctuation(_ container: String?, _ candidate: String?) -> Bool {
+        guard let container = normalizedSearchKey(container),
+              let candidate = normalizedSearchKey(candidate) else {
+            return false
+        }
+        return container.contains(candidate)
+    }
+
+    private static func normalizedSearchKey(_ value: String?) -> String? {
+        guard let value = nonEmpty(value) else {
+            return nil
+        }
+        let filtered = value.lowercased().filter { $0.isLetter || $0.isNumber }
+        return filtered.isEmpty ? nil : filtered
+    }
+
+    private static func formattedDeviceDisplayName(
+        manufacturer: String?,
+        name: String?,
+        model: String?
+    ) -> String? {
+        let trimmedManufacturer = nonEmpty(manufacturer)
+        let trimmedName = nonEmpty(name)
+        let trimmedModel = nonEmpty(model)
+        let normalizedManufacturer = trimmedManufacturer?.lowercased()
+        let nameIncludesManufacturer = normalizedManufacturer.map { trimmedName?.lowercased().contains($0) == true } ?? false
+        let modelIncludesManufacturer = normalizedManufacturer.map { trimmedModel?.lowercased().contains($0) == true } ?? false
+
+        if let name = trimmedName, let model = trimmedModel, modelIncludesManufacturer, !nameIncludesManufacturer {
+            let normalizedVerboseName = model.lowercased()
+            let normalizedCode = name.lowercased()
+            if normalizedVerboseName == normalizedCode || normalizedVerboseName.contains("(\(normalizedCode))") {
+                return model
+            }
+            return "\(model) (\(name))"
+        }
+
+        var baseName = trimmedName
+        if let manufacturer = trimmedManufacturer {
+            if let name = baseName {
+                if !name.lowercased().hasPrefix(manufacturer.lowercased() + " ") && name.lowercased() != manufacturer.lowercased() {
+                    baseName = "\(manufacturer) \(name)"
+                }
+            } else {
+                baseName = manufacturer
+            }
+        }
+
+        guard let baseName else {
+            return trimmedModel
+        }
+        guard let model = trimmedModel else {
+            return baseName
+        }
+
+        let normalizedBase = baseName.lowercased()
+        let normalizedModel = model.lowercased()
+        if normalizedBase == normalizedModel || normalizedBase.contains("(\(normalizedModel))") {
+            return baseName
+        }
+        return "\(baseName) (\(model))"
+    }
+}
+
+struct PerchHAEntityMetadataLinksPresentation: Equatable {
+    let entitiesURL: URL?
+    let deviceURL: URL?
+
+    init(baseURL: URL?, entity: DiscoveredEntity) {
+        self.entitiesURL = Self.resolvedURL(baseURL: baseURL, path: "/config/entities")
+        if let deviceID = entity.deviceID?.rawValue.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) {
+            self.deviceURL = Self.resolvedURL(baseURL: baseURL, path: "/config/devices/device/\(deviceID)")
+        } else {
+            self.deviceURL = nil
+        }
+    }
+
+    private static func resolvedURL(baseURL: URL?, path: String) -> URL? {
+        guard let baseURL, var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        components.path = path
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+}
+
 /// Connection form field stack shared by the menu-bar panel's first-run view and
 /// the Settings window's Connection tab.
 ///
@@ -639,6 +818,12 @@ public struct PerchHASettingsView: View {
             if accessibility.motionPolicy == .reduced {
                 transaction.animation = nil
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+            model.beginTransientUITracking()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+            model.endTransientUITracking()
         }
     }
 
@@ -1490,6 +1675,9 @@ public struct PerchHASettingsView: View {
 
     private var diagnosticsHistorySyncContent: some View {
         let sync = PerchHAHistoryBulkSyncConfiguration()
+        let cacheEntries = model.historyCacheEntryCount()
+        let cacheSamples = model.historyCacheSampleCount()
+        let cacheCapacity = model.historyCacheCapacity()
         return VStack(alignment: .leading, spacing: 6) {
             settingsControlRow("Cycle interval") {
                 Text("\(sync.interval.nanoseconds / 1_000_000_000) s")
@@ -1502,6 +1690,11 @@ public struct PerchHASettingsView: View {
             settingsControlRow("Batch size") {
                 Text("\(sync.batchSize) values per request")
                     .foregroundStyle(.secondary)
+            }
+            settingsControlRow("Cache size") {
+                Text("\(cacheEntries) series · \(cacheSamples) samples · cap \(cacheCapacity)")
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             Text("While the panel is open, inline charts refresh in bulk on this cadence — visible rows every cycle, the rest periodically. These are tuned defaults shown for reference.")
                 .font(.caption)
@@ -2124,6 +2317,7 @@ public struct PerchHASettingsView: View {
         let isLast = rowIndex == room.entities.index(before: room.entities.endIndex)
         return selectionDragDrop(
             selectionEntityRow(
+                roomName: room.name,
                 selectable,
                 canMoveUp: canReorderSelection && !isFirst,
                 canMoveDown: canReorderSelection && !isLast
@@ -2224,12 +2418,14 @@ public struct PerchHASettingsView: View {
     /// (or the disclosure) opens the single inspector inline beneath the row;
     /// only one inspector is open at a time.
     private func selectionEntityRow(
+        roomName: String,
         _ selectable: SelectableEntity,
         canMoveUp: Bool,
         canMoveDown: Bool
     ) -> some View {
         let palette = PerchHATheme.Dashboard.palette(colorScheme)
         let entity = selectable.entity
+        let metadata = PerchHAEntityMetadataPresentation(entity: entity, roomName: roomName)
         let isExpanded = inspectedEntityID == entity.id
         let isPromoted = model.snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
         return VStack(alignment: .leading, spacing: 8) {
@@ -2246,7 +2442,7 @@ public struct PerchHASettingsView: View {
                     Text(entity.name)
                         .foregroundStyle(palette.textPrimary)
                         .lineLimit(1)
-                    Text(entityTypeCaption(for: entity))
+                    Text(metadata.rowCaption)
                         .font(PerchHATypography.caption().weight(.regular))
                         .foregroundStyle(palette.textTertiary)
                         .lineLimit(1)
@@ -2287,7 +2483,7 @@ public struct PerchHASettingsView: View {
             }
             if isExpanded {
                 settingsInsetGroup {
-                    entityDetailSections(for: entity)
+                    entityDetailSections(for: entity, roomName: roomName)
                 }
             }
         }
@@ -2311,16 +2507,6 @@ public struct PerchHASettingsView: View {
         )
     }
 
-    /// A short type/unit caption for a collapsed entity row, e.g. "Sensor · °C".
-    private func entityTypeCaption(for entity: DiscoveredEntity) -> String {
-        let domain = entity.id.domain.replacingOccurrences(of: "_", with: " ").capitalized
-        let unit = entity.unit?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let unit, !unit.isEmpty {
-            return "\(domain) · \(unit)"
-        }
-        return domain
-    }
-
     /// Opens the inspector for `id`, collapsing any other open inspector so only
     /// one is ever open; tapping the open row collapses it.
     private func toggleEntityInspector(_ id: EntityID) {
@@ -2330,10 +2516,22 @@ public struct PerchHASettingsView: View {
     /// The bespoke detail pane shown when an entity row is expanded: clearly
     /// labelled Display, Menu bar, Alerts, and Buttons sections with
     /// accent-tinted headers and accent-tinted controls, separated by hairlines.
-    private func entityDetailSections(for entity: DiscoveredEntity) -> some View {
-        let configuration = model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entity.id)
+    private func entityDetailSections(for entity: DiscoveredEntity, roomName: String) -> some View {
+        let configuration = model.snapshot.effectiveMenuBarItemConfiguration(for: entity)
+        let metadata = PerchHAEntityMetadataPresentation(entity: entity, roomName: roomName)
+        let links = PerchHAEntityMetadataLinksPresentation(
+            baseURL: model.snapshot.connectionForm.primaryURL(),
+            entity: entity
+        )
         let isPromoted = model.snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
+        let showsThresholdSection = EntityDisplayDefaults.hasThresholds(
+            EntityDisplayDefaults.effectiveThresholds(for: entity, configuration: configuration)
+        )
         return VStack(alignment: .leading, spacing: 0) {
+            settingsSection(title: "Identity", systemImage: "info.circle") {
+                entityIdentitySection(metadata.inspectorFields, links: links)
+            }
+            settingsSectionDivider
             settingsSection(title: "Display", systemImage: "textformat.size") {
                 displaySectionControls(for: entity, configuration: configuration, isPromoted: isPromoted)
             }
@@ -2341,7 +2539,7 @@ public struct PerchHASettingsView: View {
             settingsSection(title: "Menu bar", systemImage: "menubar.rectangle") {
                 menuBarSectionControls(for: entity, isPromoted: isPromoted)
             }
-            if isPromoted {
+            if showsThresholdSection {
                 settingsSectionDivider
                 settingsSection(title: "Thresholds", systemImage: "bell.badge") {
                     menuBarThresholdControls(for: entity, configuration: configuration)
@@ -2351,6 +2549,74 @@ public struct PerchHASettingsView: View {
         .font(.caption)
         .controlSize(.small)
         .tint(PerchHATheme.accent)
+    }
+
+    private func entityIdentitySection(
+        _ fields: [PerchHAEntityMetadataPresentation.Field],
+        links: PerchHAEntityMetadataLinksPresentation
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(fields.enumerated()), id: \.offset) { _, field in
+                settingsControlRow(field.label) {
+                    VStack(alignment: .trailing, spacing: 3) {
+                        if let destination = metadataLink(for: field, links: links) {
+                            Link(destination: destination) {
+                                Label {
+                                    metadataFieldValueText(field)
+                                } icon: {
+                                    Image(systemName: "arrow.up.right.square")
+                                        .font(.system(size: 10, weight: .semibold))
+                                }
+                            }
+                            .accessibilityLabel(accessibilityLabel(for: field))
+                            .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            metadataFieldValueText(field)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func metadataFieldValueText(_ field: PerchHAEntityMetadataPresentation.Field) -> some View {
+        Text(field.value)
+            .font(
+                field.usesMonospacedFont
+                    ? .system(size: 11.5, weight: .regular, design: .monospaced)
+                    : PerchHATypography.caption()
+            )
+            .foregroundStyle(.primary)
+            .multilineTextAlignment(.trailing)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func metadataLink(
+        for field: PerchHAEntityMetadataPresentation.Field,
+        links: PerchHAEntityMetadataLinksPresentation
+    ) -> URL? {
+        switch field.label {
+        case "Entity ID":
+            return links.entitiesURL
+        case "Device ID":
+            return links.deviceURL
+        default:
+            return nil
+        }
+    }
+
+    private func accessibilityLabel(for field: PerchHAEntityMetadataPresentation.Field) -> String {
+        switch field.label {
+        case "Entity ID":
+            return "Open Home Assistant entities page for \(field.value)"
+        case "Device ID":
+            return "Open Home Assistant device page for \(field.value)"
+        default:
+            return field.value
+        }
     }
 
     /// A single labelled settings section with a small accent-tinted leading SF
@@ -2536,20 +2802,41 @@ public struct PerchHASettingsView: View {
         for entity: DiscoveredEntity,
         configuration: MenuBarItemConfiguration
     ) -> some View {
-        let detected = EntityDisplayDefaults.detectedUnit(haUnit: entity.unit, state: entity.state)
+        let detected = EntityDisplayDefaults.detectedUnit(for: entity)
+        let detectedLabel = detectedUnitLabel(for: entity, detected: detected)
         let effectiveUnit = configuration.displayUnit ?? detected
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Text("Unit")
                     .foregroundStyle(.secondary)
-                Picker("Unit", selection: displayUnitBinding(for: entity.id)) {
-                    Text("Detected · \(detected.displayName)").tag(ValueUnit?.none)
-                    ForEach(ValueUnit.allCases, id: \.rawValue) { unit in
-                        Text(unit.displayName).tag(ValueUnit?.some(unit))
+                Menu {
+                    Button("Detected · \(detectedLabel)") {
+                        model.setDisplayUnit(entity.id, displayUnit: nil, displayUnitSymbol: nil)
                     }
+                    Divider()
+                    ForEach(unitSelectionGroups(for: entity), id: \.title) { group in
+                        Menu(group.title) {
+                            ForEach(group.options, id: \.title) { option in
+                                Button(option.title) {
+                                    model.setDisplayUnit(
+                                        entity.id,
+                                        displayUnit: option.displayUnit,
+                                        displayUnitSymbol: option.displayUnitSymbol
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(unitSelectionTitle(for: entity, configuration: configuration, detectedLabel: detectedLabel))
+                            .lineLimit(1)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                    }
+                    .frame(width: 160, alignment: .leading)
                 }
-                .labelsHidden()
-                .frame(width: 160)
+                .menuStyle(.borderlessButton)
                 .accessibilityLabel("\(entity.name) unit")
                 Spacer(minLength: 0)
             }
@@ -2575,6 +2862,111 @@ public struct PerchHASettingsView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func detectedUnitLabel(for entity: DiscoveredEntity, detected: ValueUnit) -> String {
+        if detected != .number {
+            return detected.displayName
+        }
+        let trimmedUnit = entity.unit?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmedUnit.isEmpty ? detected.displayName : trimmedUnit
+    }
+
+    private struct UnitSelectionOption: Equatable {
+        let title: String
+        let displayUnit: ValueUnit
+        let displayUnitSymbol: String?
+    }
+
+    private struct UnitSelectionGroup: Equatable {
+        let title: String
+        let options: [UnitSelectionOption]
+    }
+
+    private func unitSelectionTitle(
+        for entity: DiscoveredEntity,
+        configuration: MenuBarItemConfiguration,
+        detectedLabel: String
+    ) -> String {
+        if let symbol = configuration.displayUnitSymbol {
+            return symbol
+        }
+        if let displayUnit = configuration.displayUnit {
+            return displayUnit.displayName
+        }
+        return "Detected · \(detectedLabel)"
+    }
+
+    private func unitSelectionGroups(for entity: DiscoveredEntity) -> [UnitSelectionGroup] {
+        let detected = EntityDisplayDefaults.detectedUnit(for: entity)
+        let trimmedUnit = entity.unit?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let hasUnit = !trimmedUnit.isEmpty
+        var groups: [UnitSelectionGroup] = []
+
+        groups.append(
+            UnitSelectionGroup(
+                title: "General",
+                options: [
+                    UnitSelectionOption(title: "Number", displayUnit: .number, displayUnitSymbol: nil),
+                    UnitSelectionOption(title: "Compact (SI)", displayUnit: .compact, displayUnitSymbol: nil),
+                    UnitSelectionOption(title: "Percent", displayUnit: .percent, displayUnitSymbol: nil),
+                    UnitSelectionOption(title: "Duration", displayUnit: .duration, displayUnitSymbol: nil),
+                    UnitSelectionOption(title: "Illuminance (lx)", displayUnit: .illuminance, displayUnitSymbol: hasUnit ? "lx" : nil),
+                    UnitSelectionOption(title: "Bytes", displayUnit: .bytes, displayUnitSymbol: nil),
+                    UnitSelectionOption(title: "Data rate", displayUnit: .dataRate, displayUnitSymbol: nil)
+                ]
+            )
+        )
+        groups.append(
+            UnitSelectionGroup(
+                title: "Temperature",
+                options: [
+                    UnitSelectionOption(title: "Celsius", displayUnit: .celsius, displayUnitSymbol: nil),
+                    UnitSelectionOption(title: "Fahrenheit", displayUnit: .fahrenheit, displayUnitSymbol: nil),
+                    UnitSelectionOption(title: "Kelvin", displayUnit: .kelvin, displayUnitSymbol: nil)
+                ]
+            )
+        )
+        groups.append(
+            UnitSelectionGroup(
+                title: "Icons",
+                options: [
+                    UnitSelectionOption(title: "Battery icon", displayUnit: .batteryIcon, displayUnitSymbol: nil),
+                    UnitSelectionOption(title: "Signal icon", displayUnit: .signalIcon, displayUnitSymbol: nil),
+                    UnitSelectionOption(title: "Sound icon", displayUnit: .soundIcon, displayUnitSymbol: nil),
+                    UnitSelectionOption(title: "Brightness icon", displayUnit: .brightnessIcon, displayUnitSymbol: nil),
+                    UnitSelectionOption(title: "Thermometer icon", displayUnit: .thermometerIcon, displayUnitSymbol: nil)
+                ]
+            )
+        )
+
+        let scaledGroups: [UnitSelectionGroup] = [
+            unitScaleGroup(title: "Power", displayUnit: .power, symbols: ["nW", "µW", "mW", "W", "kW", "MW", "GW"]),
+            unitScaleGroup(title: "Energy", displayUnit: .energy, symbols: ["nWh", "µWh", "mWh", "Wh", "kWh", "MWh", "GWh"]),
+            unitScaleGroup(title: "Current", displayUnit: .number, symbols: ["nA", "µA", "mA", "A", "kA", "MA", "GA"]),
+            unitScaleGroup(title: "Voltage", displayUnit: .number, symbols: ["nV", "µV", "mV", "V", "kV", "MV", "GV"]),
+            unitScaleGroup(title: "Frequency", displayUnit: .number, symbols: ["nHz", "µHz", "mHz", "Hz", "kHz", "MHz", "GHz"]),
+            unitScaleGroup(title: "Volume", displayUnit: .number, symbols: ["nL", "µL", "mL", "L", "kL", "ML", "GL"]),
+            unitScaleGroup(title: "Pressure", displayUnit: .number, symbols: ["nPa", "µPa", "mPa", "Pa", "hPa", "kPa", "MPa", "GPa"]),
+            unitScaleGroup(title: "Storage", displayUnit: .bytes, symbols: ["B", "KB", "MB", "GB", "TB", "PB", "EB"]),
+            unitScaleGroup(title: "Transfer rate", displayUnit: .dataRate, symbols: ["B/s", "KB/s", "MB/s", "GB/s", "TB/s", "PB/s"]),
+            unitScaleGroup(title: "Concentration", displayUnit: .number, symbols: ["ng/m³", "µg/m³", "mg/m³", "g/m³", "kg/m³"]),
+            unitScaleGroup(title: "Parts", displayUnit: .number, symbols: ["ppb", "ppm"])
+        ]
+
+        if detected == .number || hasUnit {
+            groups.append(contentsOf: scaledGroups)
+        }
+        return groups
+    }
+
+    private func unitScaleGroup(title: String, displayUnit: ValueUnit, symbols: [String]) -> UnitSelectionGroup {
+        UnitSelectionGroup(
+            title: title,
+            options: symbols.map { symbol in
+                UnitSelectionOption(title: symbol, displayUnit: displayUnit, displayUnitSymbol: symbol)
+            }
+        )
     }
 
     private func menuBarTotalControls(
@@ -2612,14 +3004,30 @@ public struct PerchHASettingsView: View {
         for entity: DiscoveredEntity,
         configuration: MenuBarItemConfiguration
     ) -> some View {
-        let thresholds = configuration.thresholds
+        let thresholds = EntityDisplayDefaults.effectiveThresholds(for: entity, configuration: configuration)
         let steps = thresholds.steps.sorted { $0.value > $1.value }
+        let defaultThresholds = EntityDisplayDefaults.defaultThresholds(
+            for: entity,
+            selectedUnit: configuration.displayUnit
+        )
+        let hasThresholdDefaults = EntityDisplayDefaults.hasThresholds(defaultThresholds)
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text("From each step's value upward the value wears the step's color; Base applies below every step.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
+                if hasThresholdDefaults {
+                    Button {
+                        model.setThresholds(entity.id, thresholds: defaultThresholds)
+                    } label: {
+                        Label("Reset defaults", systemImage: "arrow.counterclockwise")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(PerchHAIconButtonStyle())
+                    .disabled(thresholds == defaultThresholds)
+                    .accessibilityLabel("Reset \(entity.name) threshold colors to defaults")
+                }
                 Button {
                     let highest = steps.first?.value ?? 0
                     var next = thresholds.steps

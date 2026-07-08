@@ -69,6 +69,7 @@ struct PerchHAHistoryStateTimelinePopoverBody: View {
     let entityName: String
     let labelColor: Color
     let valueColor: Color
+    let onHoverReadoutChange: (String?) -> Void
 
     @State private var cursorNormalizedX: Double?
 
@@ -110,22 +111,13 @@ struct PerchHAHistoryStateTimelinePopoverBody: View {
         GeometryReader { proxy in
             ZStack(alignment: .topLeading) {
                 PerchHAHistoryStateTimeline(segments: segments)
-                if let normalizedX = cursorNormalizedX,
-                   let readout = readout(forNormalizedX: normalizedX) {
+                if let normalizedX = cursorNormalizedX {
                     let x = proxy.size.width * CGFloat(min(max(normalizedX, 0), 1))
                     Rectangle()
                         .fill(Color.primary.opacity(0.5))
                         .frame(width: 1)
                         .frame(maxHeight: .infinity)
                         .offset(x: x)
-                    Text(readout)
-                        .font(.caption2)
-                        .foregroundStyle(valueColor)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
-                        .fixedSize()
-                        .offset(x: min(max(x - 30, 0), max(proxy.size.width - 90, 0)), y: -2)
                 }
             }
             .contentShape(Rectangle())
@@ -133,13 +125,19 @@ struct PerchHAHistoryStateTimelinePopoverBody: View {
                 switch phase {
                 case let .active(location):
                     let width = proxy.size.width
-                    cursorNormalizedX = width > 0 ? Double(location.x / width) : nil
+                    let normalizedX = width > 0 ? Double(location.x / width) : nil
+                    cursorNormalizedX = normalizedX
+                    onHoverReadoutChange(normalizedX.flatMap(readout))
                 case .ended:
                     cursorNormalizedX = nil
+                    onHoverReadoutChange(nil)
                 }
             }
         }
         .frame(height: Self.timelineHeight)
+        .onDisappear {
+            onHoverReadoutChange(nil)
+        }
     }
 
     private var legend: some View {
@@ -164,12 +162,7 @@ struct PerchHAHistoryStateTimelinePopoverBody: View {
         guard let segment = segment(atNormalizedX: normalizedX) else {
             return nil
         }
-        return Self.readout(
-            state: segment.state,
-            start: segment.start,
-            duration: segment.duration,
-            range: range
-        )
+        return Self.readout(state: segment.state, start: segment.start, duration: segment.duration, range: range)
     }
 
     private func segment(atNormalizedX normalizedX: Double) -> HistoryStateSegment? {

@@ -1854,7 +1854,7 @@ public struct HomeAssistantClient: HAClient {
         switch displayList {
         case .success:
             return displayList
-        case let .failure(failure) where failure.isUnavailableCommand:
+        case let .failure(failure) where failure.shouldFallbackToEntityRegistryList:
             return registryValuesOrEmptyIfUnavailable(
                 await sendEntityRegistryList(on: task, id: 4)
             )
@@ -1867,7 +1867,7 @@ public struct HomeAssistantClient: HAClient {
         switch result {
         case .success:
             return result
-        case let .failure(failure) where failure.isUnavailableCommand:
+        case let .failure(failure) where failure.isUnavailableCommand || failure.isMissingOptionalRegistryResult:
             return .success([])
         case .failure:
             return result
@@ -2337,20 +2337,45 @@ private struct HADeviceDTO: Decodable {
     let id: String
     let name: String?
     let nameByUser: String?
+    let manufacturer: String?
+    let model: String?
+    let identifiers: [[HAJSONValue]]?
     let areaID: String?
 
     var device: Device {
         Device(
             id: DeviceID(id),
             name: nonEmpty(nameByUser) ?? nonEmpty(name),
+            manufacturer: nonEmpty(manufacturer),
+            model: nonEmpty(model),
+            domain: integrationDomain,
             areaID: nonEmpty(areaID).map { AreaID($0) }
         )
+    }
+
+    private var integrationDomain: String? {
+        guard let identifiers else {
+            return nil
+        }
+        for identifier in identifiers {
+            guard let candidateValue = identifier.first else {
+                continue
+            }
+            guard case let .string(candidate) = candidateValue, let normalized = nonEmpty(candidate) else {
+                continue
+            }
+            return normalized
+        }
+        return nil
     }
 
     private enum CodingKeys: String, CodingKey {
         case id
         case name
         case nameByUser = "name_by_user"
+        case manufacturer
+        case model
+        case identifiers
         case areaID = "area_id"
     }
 }
@@ -2762,6 +2787,27 @@ private extension HAClientFailure {
         case .authentication, .unreachable, .tlsRejected, .invalidURL, .invalidResponse, .invalidPayload, .httpStatus, .webSocketProtocol, .transport:
             false
         }
+    }
+
+    var isMissingOptionalRegistryResult: Bool {
+        switch self {
+        case let .invalidPayload(path, reason):
+            guard path == "/api/websocket" else {
+                return false
+            }
+            return [
+                "missing area registry result",
+                "missing device registry result",
+                "missing entity registry display result",
+                "missing entity registry result"
+            ].contains(reason)
+        case .authentication, .unreachable, .tlsRejected, .invalidURL, .invalidResponse, .httpStatus, .webSocketProtocol, .webSocketCommand, .transport:
+            return false
+        }
+    }
+
+    var shouldFallbackToEntityRegistryList: Bool {
+        isUnavailableCommand || self == .invalidPayload(path: "/api/websocket", reason: "missing entity registry display result")
     }
 
     var shouldRetryLiveSubscription: Bool {
