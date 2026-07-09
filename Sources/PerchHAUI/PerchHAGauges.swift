@@ -121,14 +121,9 @@ public struct PerchHAEntityGaugeView: View {
 }
 
 private struct InlineSparklinePath: Shape {
-    let series: HistorySeries
-
-    /// The fixed mini-chart sample budget for inline previews. Caps redraw cost
-    /// and keeps the tiny sparkline legible.
-    private static let inlineSampleBudget = 48
+    let geometry: PerchHAHistorySparklineGeometry
 
     func path(in rect: CGRect) -> Path {
-        let geometry = PerchHAHistorySparklineGeometry(series: series, maxSamples: Self.inlineSampleBudget)
         return Path { path in
             for (index, point) in geometry.points.enumerated() {
                 let cgPoint = CGPoint(
@@ -155,26 +150,26 @@ private struct InlineSparklinePath: Shape {
 /// When the series has fewer than two numeric samples it draws a muted baseline
 /// dash instead of a fake trace.
 public struct MicroSparkline: View {
-    private let series: HistorySeries
+    private let geometry: PerchHAHistorySparklineGeometry
     private let color: Color
     private let muted: Color
 
     /// Creates the sparkline.
     ///
     /// - Parameters:
-    ///   - series: The already-resolved numeric history series.
+    ///   - geometry: The already-prepared numeric sparkline geometry.
     ///   - color: The stroke and fill tint.
     ///   - muted: The dash color used when there is not enough data.
-    public init(series: HistorySeries, color: Color, muted: Color) {
-        self.series = series
+    public init(geometry: PerchHAHistorySparklineGeometry, color: Color, muted: Color) {
+        self.geometry = geometry
         self.color = color
         self.muted = muted
     }
 
     public var body: some View {
-        if PerchHAHistoryCursor.numericSamples(of: series).count > 1 {
+        if geometry.hasTrace {
             ZStack {
-                InlineSparklineArea(series: series)
+                InlineSparklineArea(geometry: geometry)
                     .fill(
                         LinearGradient(
                             colors: [color.opacity(0.22), color.opacity(0.0)],
@@ -182,7 +177,7 @@ public struct MicroSparkline: View {
                             endPoint: .bottom
                         )
                     )
-                InlineSparklinePath(series: series)
+                InlineSparklinePath(geometry: geometry)
                     .stroke(color, style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
             }
             .accessibilityHidden(true)
@@ -195,11 +190,9 @@ public struct MicroSparkline: View {
 /// A closed area under the inline sparkline trace, used for the faint gradient
 /// fill. Shares the same downsampled geometry as ``InlineSparklinePath``.
 private struct InlineSparklineArea: Shape {
-    let series: HistorySeries
-    private static let inlineSampleBudget = 48
+    let geometry: PerchHAHistorySparklineGeometry
 
     func path(in rect: CGRect) -> Path {
-        let geometry = PerchHAHistorySparklineGeometry(series: series, maxSamples: Self.inlineSampleBudget)
         let points = geometry.points
         guard points.count > 1 else {
             return Path()

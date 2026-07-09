@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 import PerchHACore
@@ -237,6 +238,115 @@ struct PerchHAEntityMetadataLinksPresentation: Equatable {
         components.query = nil
         components.fragment = nil
         return components.url
+    }
+}
+
+private struct PerchHASettingsEntityPresentation: Equatable {
+    let metadata: PerchHAEntityMetadataPresentation
+    let hasAverageLinks: Bool
+    let canAverage: Bool
+}
+
+@MainActor
+private final class PerchHASettingsViewState: ObservableObject {
+    @Published private(set) var snapshot: PerchHAPanelSnapshot
+    @Published private(set) var settingsSelectionTree: [SelectableRoom]
+    @Published private(set) var customActionPersistenceFailureDescription: String?
+    @Published private(set) var shellPersistenceFailureDescription: String?
+    @Published private(set) var oauthSignInState: PerchHAOAuthSignInState
+    @Published private(set) var releaseUpdateState: PerchHAReleaseUpdateState
+    @Published private(set) var retryBackoffState: PerchHARetryBackoffState
+    @Published private(set) var diagnosticEvents: [PerchHADiagnosticEvent]
+    @Published private(set) var diagnosticsReferenceInstant: PerchInstant
+    @Published private(set) var entityPresentations: [EntityID: PerchHASettingsEntityPresentation]
+
+    private var cancellables: Set<AnyCancellable> = []
+    private weak var model: PerchHAPanelModel?
+
+    init(model: PerchHAPanelModel) {
+        self.model = model
+        self.snapshot = model.snapshot
+        self.settingsSelectionTree = model.settingsSelectionTree
+        self.customActionPersistenceFailureDescription = model.customActionPersistenceFailureDescription
+        self.shellPersistenceFailureDescription = model.shellPersistenceFailureDescription
+        self.oauthSignInState = model.oauthSignInState
+        self.releaseUpdateState = model.releaseUpdateState
+        self.retryBackoffState = model.retryBackoffState
+        self.diagnosticEvents = model.diagnosticEvents
+        self.diagnosticsReferenceInstant = model.diagnosticsReferenceInstant
+        self.entityPresentations = [:]
+        rebuildEntityPresentations(using: model, tree: model.settingsSelectionTree)
+
+        model.$snapshot
+            .receive(on: RunLoop.main)
+            .sink { [weak self, weak model] snapshot in
+                let previousSnapshot = self?.snapshot
+                self?.snapshot = snapshot
+                if let model,
+                   (
+                    previousSnapshot?.availableRooms != snapshot.availableRooms
+                        || previousSnapshot?.menuBarDisplayConfiguration != snapshot.menuBarDisplayConfiguration
+                   ) {
+                    self?.rebuildEntityPresentations(using: model, tree: self?.settingsSelectionTree ?? [])
+                }
+            }
+            .store(in: &cancellables)
+        model.$settingsSelectionTree
+            .receive(on: RunLoop.main)
+            .sink { [weak self, weak model] tree in
+                self?.settingsSelectionTree = tree
+                if let model {
+                    self?.rebuildEntityPresentations(using: model, tree: tree)
+                }
+            }
+            .store(in: &cancellables)
+        model.$customActionPersistenceFailureDescription
+            .receive(on: RunLoop.main)
+            .assign(to: &$customActionPersistenceFailureDescription)
+        model.$shellPersistenceFailureDescription
+            .receive(on: RunLoop.main)
+            .assign(to: &$shellPersistenceFailureDescription)
+        model.$oauthSignInState
+            .receive(on: RunLoop.main)
+            .assign(to: &$oauthSignInState)
+        model.$releaseUpdateState
+            .receive(on: RunLoop.main)
+            .assign(to: &$releaseUpdateState)
+        model.$retryBackoffState
+            .receive(on: RunLoop.main)
+            .assign(to: &$retryBackoffState)
+        model.$diagnosticEvents
+            .receive(on: RunLoop.main)
+            .assign(to: &$diagnosticEvents)
+        model.$diagnosticsReferenceInstant
+            .receive(on: RunLoop.main)
+            .assign(to: &$diagnosticsReferenceInstant)
+    }
+
+    func presentation(for entity: DiscoveredEntity, roomName: String) -> PerchHASettingsEntityPresentation {
+        entityPresentations[entity.id]
+            ?? PerchHASettingsEntityPresentation(
+                metadata: PerchHAEntityMetadataPresentation(entity: entity, roomName: roomName),
+                hasAverageLinks: !(model?.averageLinkedEntityIDs(for: entity.id).isEmpty ?? true),
+                canAverage: model?.canAverage(entity.id) ?? false
+            )
+    }
+
+    private func rebuildEntityPresentations(using model: PerchHAPanelModel, tree: [SelectableRoom]) {
+        entityPresentations = Dictionary(
+            uniqueKeysWithValues: tree.flatMap { room in
+                room.entities.map { selectable in
+                    (
+                        selectable.entity.id,
+                        PerchHASettingsEntityPresentation(
+                            metadata: PerchHAEntityMetadataPresentation(entity: selectable.entity, roomName: room.name),
+                            hasAverageLinks: !model.averageLinkedEntityIDs(for: selectable.entity.id).isEmpty,
+                            canAverage: model.canAverage(selectable.entity.id)
+                        )
+                    )
+                }
+            }
+        )
     }
 }
 
@@ -724,7 +834,8 @@ public struct PerchHASettingsView: View {
         }
     }
 
-    @ObservedObject private var model: PerchHAPanelModel
+    private let model: PerchHAPanelModel
+    @StateObject private var viewState: PerchHASettingsViewState
     private let accessibilityPreferencesOverride: PerchHAAccessibilityPreferences?
     private let displayPreferencesProvider: () -> PerchHADisplayPreferences
     private let displayPreferencesSink: (PerchHADisplayPreferences) -> Void
@@ -744,6 +855,7 @@ public struct PerchHASettingsView: View {
     /// default, so every room starts collapsed.
     @State private var expandedRooms: Set<String> = []
     @State private var displayPreferences: PerchHADisplayPreferences
+    @State private var pendingDisplayPreferencesSave: Task<Void, Never>?
     /// View-local echo of the Entities search field; pushed to the model after
     /// a short debounce so typing never rebuilds the whole app state per key.
     @State private var entitySearchText: String = ""
@@ -780,6 +892,7 @@ public struct PerchHASettingsView: View {
         launchAtLoginSink: @escaping (Bool) -> Bool = { _ in false }
     ) {
         self.model = model
+        _viewState = StateObject(wrappedValue: PerchHASettingsViewState(model: model))
         self.accessibilityPreferencesOverride = accessibilityPreferencesOverride
         self.displayPreferencesProvider = displayPreferencesProvider
         self.displayPreferencesSink = displayPreferencesSink
@@ -793,9 +906,37 @@ public struct PerchHASettingsView: View {
         _launchAtLogin = State(initialValue: launchAtLoginProvider())
     }
 
+    private var snapshot: PerchHAPanelSnapshot {
+        viewState.snapshot
+    }
+
+    private var settingsTree: [SelectableRoom] {
+        viewState.settingsSelectionTree
+    }
+
+    private var oauthState: PerchHAOAuthSignInState {
+        viewState.oauthSignInState
+    }
+
+    private var releaseState: PerchHAReleaseUpdateState {
+        viewState.releaseUpdateState
+    }
+
+    private var retryState: PerchHARetryBackoffState {
+        viewState.retryBackoffState
+    }
+
+    private var diagnosticsEvents: [PerchHADiagnosticEvent] {
+        viewState.diagnosticEvents
+    }
+
+    private var diagnosticsReferenceInstant: PerchInstant {
+        viewState.diagnosticsReferenceInstant
+    }
+
     public var body: some View {
         let accessibility = PerchHAPanelView.rootAccessibilityPresentation(
-            snapshot: model.snapshot,
+            snapshot: snapshot,
             preferences: accessibilityPreferences
         )
         let palette = PerchHATheme.Dashboard.palette(colorScheme)
@@ -820,6 +961,9 @@ public struct PerchHASettingsView: View {
             if accessibility.motionPolicy == .reduced {
                 transaction.animation = nil
             }
+        }
+        .onDisappear {
+            flushPendingDisplayPreferencesSave()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
             model.beginTransientUITracking()
@@ -1471,7 +1615,7 @@ public struct PerchHASettingsView: View {
     /// The retry/backoff diagnostic: a single calm line derived from the live
     /// connection state and the periodic-refresh backoff posture. No secret.
     private var diagnosticsRetryContent: some View {
-        let state = model.retryBackoffState
+        let state = retryState
         let isHealthy: Bool = {
             switch state {
             case .connected: return true
@@ -1503,7 +1647,7 @@ public struct PerchHASettingsView: View {
     /// is ever shown.
     @ViewBuilder
     private var diagnosticsRecentIssuesContent: some View {
-        let events = model.diagnosticEvents
+        let events = diagnosticsEvents
         let visibleCap = 8
         if events.isEmpty {
             PerchHAStateView(
@@ -1791,7 +1935,21 @@ public struct PerchHASettingsView: View {
 
     private func updateDisplayPreferences(_ preferences: PerchHADisplayPreferences) {
         displayPreferences = preferences
-        displayPreferencesSink(preferences)
+        pendingDisplayPreferencesSave?.cancel()
+        pendingDisplayPreferencesSave = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard !Task.isCancelled else {
+                return
+            }
+            displayPreferencesSink(preferences)
+            pendingDisplayPreferencesSave = nil
+        }
+    }
+
+    private func flushPendingDisplayPreferencesSave() {
+        pendingDisplayPreferencesSave?.cancel()
+        pendingDisplayPreferencesSave = nil
+        displayPreferencesSink(displayPreferences)
     }
 
     private var stableMenuBarWidthBinding: Binding<Bool> {
@@ -1999,7 +2157,7 @@ public struct PerchHASettingsView: View {
 
     @ViewBuilder
     private var aboutUpdateAction: some View {
-        switch model.releaseUpdateState {
+        switch releaseState {
         case let .updateAvailable(update):
             Link(destination: update.downloadURL) {
                 Label("Download \(update.latestVersion)", systemImage: "arrow.down.circle")
@@ -2032,7 +2190,7 @@ public struct PerchHASettingsView: View {
     }
 
     private var aboutUpdateSummary: String {
-        switch model.releaseUpdateState {
+        switch releaseState {
         case .idle:
             "Check GitHub for the newest published release."
         case .checking:
@@ -2047,7 +2205,7 @@ public struct PerchHASettingsView: View {
     }
 
     private var aboutUpdateSummaryColor: Color {
-        switch model.releaseUpdateState {
+        switch releaseState {
         case .failed:
             PerchHATheme.critical
         case .updateAvailable:
@@ -2128,14 +2286,14 @@ public struct PerchHASettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("Service metadata error: \(serviceMetadataFailure)")
             }
-            if let customActionPersistenceFailure = model.customActionPersistenceFailureDescription {
+            if let customActionPersistenceFailure = viewState.customActionPersistenceFailureDescription {
                 Text(customActionPersistenceFailure)
                     .font(.callout)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("Action settings error: \(customActionPersistenceFailure)")
             }
-            if let shellPersistenceFailure = model.shellPersistenceFailureDescription {
+            if let shellPersistenceFailure = viewState.shellPersistenceFailureDescription {
                 Text(shellPersistenceFailure)
                     .font(.callout)
                     .foregroundStyle(.red)
@@ -2206,12 +2364,8 @@ public struct PerchHASettingsView: View {
         }
     }
 
-    private var settingsTree: [SelectableRoom] {
-        model.settingsSelectionTree
-    }
-
     private var canReorderSelection: Bool {
-        model.snapshot.canReorderSelectionWithKeyboard
+        snapshot.canReorderSelectionWithKeyboard
     }
 
     /// True while the user is filtering the entity tree. During a search every
@@ -2219,7 +2373,7 @@ public struct PerchHASettingsView: View {
     /// collapsed header; the stored ``expandedRooms`` set is left untouched so
     /// clearing the search restores the prior state.
     private var isSelectionSearching: Bool {
-        !model.snapshot.selectionQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !snapshot.selectionQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// Whether `room` should show its entity rows. Rooms default to collapsed;
@@ -2427,10 +2581,9 @@ public struct PerchHASettingsView: View {
     ) -> some View {
         let palette = PerchHATheme.Dashboard.palette(colorScheme)
         let entity = selectable.entity
-        let metadata = PerchHAEntityMetadataPresentation(entity: entity, roomName: roomName)
+        let presentation = viewState.presentation(for: entity, roomName: roomName)
         let isExpanded = inspectedEntityID == entity.id
-        let isPromoted = model.snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
-        let hasAverageLinks = !model.averageLinkedEntityIDs(for: entity.id).isEmpty
+        let isPromoted = snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 Toggle("", isOn: selectionBinding(for: entity.id))
@@ -2445,13 +2598,13 @@ public struct PerchHASettingsView: View {
                     Text(entity.name)
                         .foregroundStyle(palette.textPrimary)
                         .lineLimit(1)
-                    Text(metadata.rowCaption)
+                    Text(presentation.metadata.rowCaption)
                         .font(PerchHATypography.caption().weight(.regular))
                         .foregroundStyle(palette.textTertiary)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
-                if hasAverageLinks {
+                if presentation.hasAverageLinks {
                     averageLinkedPill
                 }
                 if isPromoted {
@@ -2548,17 +2701,17 @@ public struct PerchHASettingsView: View {
     /// labelled Display, Menu bar, Alerts, and Buttons sections with
     /// accent-tinted headers and accent-tinted controls, separated by hairlines.
     private func entityDetailSections(for entity: DiscoveredEntity, roomName: String) -> some View {
-        let configuration = model.snapshot.effectiveMenuBarItemConfiguration(for: entity)
-        let metadata = PerchHAEntityMetadataPresentation(entity: entity, roomName: roomName)
+        let configuration = snapshot.effectiveMenuBarItemConfiguration(for: entity)
+        let metadata = viewState.presentation(for: entity, roomName: roomName).metadata
         let links = PerchHAEntityMetadataLinksPresentation(
-            baseURL: model.snapshot.connectionForm.primaryURL(),
+            baseURL: snapshot.connectionForm.primaryURL(),
             entity: entity
         )
-        let isPromoted = model.snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
+        let isPromoted = snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
         let showsThresholdSection = EntityDisplayDefaults.hasThresholds(
             EntityDisplayDefaults.effectiveThresholds(for: entity, configuration: configuration)
         )
-        let showsAverageSection = model.canAverage(entity.id)
+        let showsAverageSection = viewState.presentation(for: entity, roomName: roomName).canAverage
         return VStack(alignment: .leading, spacing: 0) {
             settingsSection(title: "Identity", systemImage: "info.circle") {
                 entityIdentitySection(metadata.inspectorFields, links: links)

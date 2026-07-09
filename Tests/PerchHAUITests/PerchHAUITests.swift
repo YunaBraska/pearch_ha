@@ -1648,6 +1648,49 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
     }
 
+    func test_t_scroll_activity_closes_history_and_blocks_reopen_until_scroll_settles() async {
+        let clock = TestPerchClock()
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, entityID, range in
+                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
+            },
+            clock: clock,
+            historyDebounce: .milliseconds(0),
+            historyHoverGrace: .milliseconds(300)
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.startHistoryHover("sensor.office_temperature", range: .hour)
+        await spinUntil {
+            if case .loaded = model.snapshot.historyState {
+                return true
+            }
+            return false
+        }
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+
+        model.notePanelScrollActivity()
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+
+        model.startHistoryHover("sensor.office_humidity", range: .hour)
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .milliseconds(180))
+        await spinUntil { await clock.sleepingTaskCount() == 0 }
+
+        model.startHistoryHover("sensor.office_humidity", range: .hour)
+        await spinUntil {
+            if case let .loaded(series) = model.snapshot.historyState {
+                return series.entityID == "sensor.office_humidity"
+            }
+            return false
+        }
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
+    }
+
     func test_t_deactivating_panel_clears_visible_history_state() async {
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },

@@ -1,5 +1,6 @@
 import AppKit
 import AuthenticationServices
+import OSLog
 import PerchHACore
 import PerchHAClient
 import PerchHAPersistence
@@ -14,10 +15,23 @@ private enum AppShellLayout {
     static let settingsMinContentSize = NSSize(width: 660, height: 560)
 }
 
+private final class PerchHAFirstMouseHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+}
+
+private final class PerchHAFirstMouseHostingController<Content: View>: NSHostingController<Content> {
+    override func loadView() {
+        view = PerchHAFirstMouseHostingView(rootView: rootView)
+    }
+}
+
 public final class PerchHAStatusPanel: NSPanel {
     /// Invoked when the user presses Cmd+, inside the panel, routing to the
     /// app shell's open-settings path. Set by the owning ``PerchHAApplication``.
     public var onOpenSettings: (() -> Void)?
+    public var onScrollWheelEvent: (() -> Void)?
 
     /// Creates a status panel with the menu-bar drop-down style mask used by the
     /// app shell. Exposed so the interaction behavior (Escape to close, Cmd+, to
@@ -79,6 +93,11 @@ public final class PerchHAStatusPanel: NSPanel {
     public override func makeKeyAndOrderFront(_ sender: Any?) {
         super.makeKeyAndOrderFront(sender)
         reportVisibilityIfChanged()
+    }
+
+    public override func scrollWheel(with event: NSEvent) {
+        onScrollWheelEvent?()
+        super.scrollWheel(with: event)
     }
 
     public override init(
@@ -1057,6 +1076,9 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     private let menuBarPresenter: PerchHAMenuBarPresenter
     private let gaugeImageRenderer: any PerchHAStatusItemGaugeImageRendering
     private let logoImageRenderer = PerchHAStatusItemLogoImageRenderer()
+    private let performanceSignposter = OSSignposter(
+        logger: Logger(subsystem: "dev.yuna.perchha", category: "Performance")
+    )
     private var statusItemLogoImageCache: NSImage?
     private var configuration = PerchHAConfiguration.empty
     private var configurationPersistenceState = PerchHAConfigurationPersistenceState.unavailable
@@ -1750,13 +1772,16 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             entityOrder: selection.entityOrder,
             isEntitySelectionExplicit: selection.isExplicit
         )
+        let interval = performanceSignposter.beginInterval("PersistSelectionConfiguration")
         do {
             configuration = try configStore.save(nextConfiguration)
             configurationPersistenceState = .ready
+            performanceSignposter.endInterval("PersistSelectionConfiguration", interval)
             return .saved
         } catch {
             let message = String(describing: error)
             configurationPersistenceState = .saveFailed(message)
+            performanceSignposter.endInterval("PersistSelectionConfiguration", interval)
             return .failed(message)
         }
     }
@@ -1775,13 +1800,16 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             menuBarEntityIDs: displayConfiguration.promotedEntityIDs,
             menuBarItemConfigurations: displayConfiguration.itemConfigurations
         )
+        let interval = performanceSignposter.beginInterval("PersistMenuBarDisplayConfiguration")
         do {
             configuration = try configStore.save(nextConfiguration)
             configurationPersistenceState = .ready
+            performanceSignposter.endInterval("PersistMenuBarDisplayConfiguration", interval)
             return .saved
         } catch {
             let message = String(describing: error)
             configurationPersistenceState = .saveFailed(message)
+            performanceSignposter.endInterval("PersistMenuBarDisplayConfiguration", interval)
             return .failed(message)
         }
     }
@@ -1804,13 +1832,16 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         let nextConfiguration = configuration.replacing(
             customActions: customActionConfiguration.actions
         )
+        let interval = performanceSignposter.beginInterval("PersistCustomActionConfiguration")
         do {
             configuration = try configStore.save(nextConfiguration)
             configurationPersistenceState = .ready
+            performanceSignposter.endInterval("PersistCustomActionConfiguration", interval)
             return .saved
         } catch {
             let message = String(describing: error)
             configurationPersistenceState = .saveFailed(message)
+            performanceSignposter.endInterval("PersistCustomActionConfiguration", interval)
             return .failed(message)
         }
     }
@@ -1857,6 +1888,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         }
 
         let nextConfiguration = configuration.applying(displayPreferences: preferences)
+        let interval = performanceSignposter.beginInterval("PersistDisplayPreferences")
         do {
             configuration = try configStore.save(nextConfiguration)
             configurationPersistenceState = .ready
@@ -1865,10 +1897,12 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
                 updateStatusItems(from: panelModel.snapshot)
                 panelModel.applyDisplayPreferences(preferences)
             }
+            performanceSignposter.endInterval("PersistDisplayPreferences", interval)
             return .saved
         } catch {
             let message = String(describing: error)
             configurationPersistenceState = .saveFailed(message)
+            performanceSignposter.endInterval("PersistDisplayPreferences", interval)
             return .failed(message)
         }
     }
@@ -1924,7 +1958,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
-        let hostingController = NSHostingController(
+        let hostingController = PerchHAFirstMouseHostingController(
             rootView: PerchHAPanelView(model: model, onOpenSettings: onOpenSettings)
         )
         hostingController.view.wantsLayer = true
@@ -1937,6 +1971,9 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         // model's sync loops, not just the explicit toggle.
         panel.onVisibilityChange = { [weak model] visible in
             model?.setPanelActive(visible)
+        }
+        panel.onScrollWheelEvent = { [weak model] in
+            model?.notePanelScrollActivity()
         }
         // Size to the fixed SwiftUI content so the borderless window matches the
         // rounded surface exactly (no chrome inset). The root paints at this size.
@@ -1974,7 +2011,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         // Host the SwiftUI tree through a hosting controller (not a bare
         // contentView) so the responder chain is wired and text fields accept
         // keyboard input and paste.
-        window.contentViewController = NSHostingController(
+        window.contentViewController = PerchHAFirstMouseHostingController(
             rootView: PerchHASettingsView(
                 model: model,
                 initialTab: initialTab,
@@ -1993,6 +2030,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         guard let panelModel else {
             return
         }
+        panelModel.dismissHistoryPopover()
         // Opening Settings dismisses the drop-down panel so the two windows do
         // not overlap.
         panel?.orderOut(nil)
@@ -2076,6 +2114,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         guard let panel else {
             return
         }
+        panelModel?.dismissHistoryPopover()
         if panel.isVisible {
             panel.orderOut(sender)
             panelModel?.setPanelActive(false)
@@ -2097,7 +2136,8 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         let buttonFrame = window.convertToScreen(sender.frame)
         let size = panel.frame.size
         let x = min(max(buttonFrame.midX - size.width / 2, screenFrame.minX + 8), screenFrame.maxX - size.width - 8)
-        let y = buttonFrame.minY - size.height - 8
+        let anchorY = max(buttonFrame.minY, window.frame.minY)
+        let y = anchorY - size.height + 2
         panel.setFrameOrigin(NSPoint(x: x, y: max(y, screenFrame.minY + 8)))
     }
 
@@ -2130,6 +2170,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     /// place so each item keeps the same toggle target/action and a per-entity
     /// image cache, preserving gauge-redraw throttling.
     private func updateStatusItems(from snapshot: PerchHAPanelSnapshot) {
+        let interval = performanceSignposter.beginInterval("UpdateStatusItems")
         let presentations = menuBarPresenter.presentations(
             configuration: configuration,
             panelSnapshot: snapshot
@@ -2146,12 +2187,14 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         for (index, presentation) in presentations.enumerated() {
             apply(presentation, to: &statusItems[index])
         }
+        performanceSignposter.endInterval("UpdateStatusItems", interval)
     }
 
     private func makeStatusItem() -> NSStatusItem {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
         item.button?.action = #selector(togglePanel(_:))
+        item.button?.sendAction(on: [.leftMouseDown])
         return item
     }
 
