@@ -792,7 +792,7 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertTrue(workflow.contains("workflow_dispatch:"))
         XCTAssertTrue(workflow.contains("Optional version override"))
         XCTAssertTrue(workflow.contains("Build and package without creating a GitHub release"))
-        XCTAssertTrue(workflow.contains("date -u '+%Y.%m.%j%H%M'"))
+        XCTAssertTrue(workflow.contains("date -u '+%Y.%m.%d.%H%M'"))
         XCTAssertTrue(workflow.contains("^[0-9]{4}(\\.[0-9]{1,4}){2,4}$"))
         XCTAssertTrue(workflow.contains("swift run perchha-xcode-doctor --json --strict"))
         XCTAssertTrue(workflow.contains("swift test --disable-swift-testing --enable-xctest list"))

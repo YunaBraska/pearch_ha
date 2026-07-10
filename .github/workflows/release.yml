@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Optional version override (default: UTC date %Y.%m.%j%H%M)"
+        description: "Optional version override (default: UTC date %Y.%m.%d.%H%M)"
         required: false
         type: string
       dry_run:
@@ -82,7 +82,7 @@ jobs:
           if [[ -n "${INPUT_VERSION}" ]]; then
             tag="${INPUT_VERSION}"
           else
-            tag="$(date -u '+%Y.%m.%j%H%M')"
+            tag="$(date -u '+%Y.%m.%d.%H%M')"
           fi
 
           if ! [[ "${tag}" =~ ^[0-9]{4}(\.[0-9]{1,4}){2,4}$ ]]; then
