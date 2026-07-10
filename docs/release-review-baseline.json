@@ -3,7 +3,7 @@
     "name" : "review-contact-sheet.png",
     "pixelsHigh" : 1346,
     "pixelsWide" : 672,
-    "sampledHashHex" : "f2b316d7da3bc9ca",
+    "sampledHashHex" : "5b12696f5fb349ff",
     "visiblePixelCount" : 904496
   },
   "renderEnvironment" : "macos-26.5.1-arm64",
@@ -41,14 +41,14 @@
       "name" : "history-loaded-light.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "509fee5b031f65ba",
+      "sampledHashHex" : "5caae71a4ddb8c8e",
       "visiblePixelCount" : 604800
     },
     {
       "name" : "history-loaded-light-increased-contrast.png",
       "pixelsHigh" : 840,
       "pixelsWide" : 720,
-      "sampledHashHex" : "bfd4c77bb6242daf",
+      "sampledHashHex" : "71c6d45f709f52eb",
       "visiblePixelCount" : 604800
     },
     {
@@ -83,7 +83,7 @@
       "name" : "settings-selection-light.png",
       "pixelsHigh" : 1120,
       "pixelsWide" : 1040,
-      "sampledHashHex" : "29ca59d88e56e522",
+      "sampledHashHex" : "8d0ef7993bfb596d",
       "visiblePixelCount" : 1164800
     },
     {

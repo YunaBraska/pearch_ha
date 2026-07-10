@@ -3087,7 +3087,7 @@ struct PerchHASmoke {
 
         if let rangeControl {
             let labels = (0..<rangeControl.segmentCount).compactMap { rangeControl.label(forSegment: $0) }
-            try expect(labels == ["Hour", "Day", "Week"], "history popover range control preserves the expected segments (\(labels))")
+            try expect(labels == ["Hour", "Day", "Week", "Month"], "history popover range control preserves the expected segments (\(labels))")
             try expect(rangeControl.acceptsFirstResponder, "history popover range control accepts keyboard focus")
             try expect(window.makeFirstResponder(rangeControl), "history popover installs the range control as first responder")
         }
@@ -4959,6 +4959,7 @@ struct PerchHASmoke {
         }
         reconnecting.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await reconnecting.connect()
+        reconnecting.setPanelActive(true)
         reconnecting.startRefresh()
         for _ in 0..<100 {
             if reconnecting.snapshot.connectionState == .reconnecting(attempt: 1) {
@@ -4991,6 +4992,7 @@ struct PerchHASmoke {
         }
         failed.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await failed.connect()
+        failed.setPanelActive(true)
         await failed.refresh()
         try expect(
             failed.applyLiveState(EntityState(id: "sensor.office_humidity", name: "Office humidity", state: "49", unit: "%")),
@@ -5041,8 +5043,8 @@ struct PerchHASmoke {
         )
         try expect(gaugeRenderer.renderCount == 2, "menu bar redraws gauge image when gauge value changes")
         try expect(
-            application.setMenuBarMaximumFractionDigits("sensor.office_humidity", maximumFractionDigits: 1),
-            "app shell persists menu bar decimal precision"
+            !application.setMenuBarMaximumFractionDigits("sensor.office_humidity", maximumFractionDigits: 1),
+            "app shell treats unchanged menu bar decimal precision as a no-op"
         )
         try expect(gaugeRenderer.renderCount == 2, "menu bar reuses gauge image when decimal text changes")
         let expectedHumidityValue = EntityValueFormatter(
@@ -5077,20 +5079,23 @@ struct PerchHASmoke {
             "default history range leaves status item value title stable"
         )
         let savedDisplayConfiguration = try store.load()
+        let savedOfficeHumidityConfiguration = savedDisplayConfiguration.menuBarItemConfigurations.first {
+            $0.entityID == "sensor.office_humidity"
+        }
         try expect(
-            savedDisplayConfiguration.menuBarItemConfigurations.first?.style == .battery,
+            savedOfficeHumidityConfiguration?.style == .battery,
             "display style survives JSON save"
         )
         try expect(
-            savedDisplayConfiguration.menuBarItemConfigurations.first?.showsLabel == true,
+            savedOfficeHumidityConfiguration?.showsLabel == true,
             "display label visibility survives JSON save"
         )
         try expect(
-            savedDisplayConfiguration.menuBarItemConfigurations.first?.maximumFractionDigits == 1,
+            savedOfficeHumidityConfiguration?.maximumFractionDigits == 1,
             "display decimal precision survives JSON save"
         )
         try expect(
-            savedDisplayConfiguration.menuBarItemConfigurations.first?.defaultHistoryRange == .week,
+            savedOfficeHumidityConfiguration?.defaultHistoryRange == .week,
             "default history range survives JSON save"
         )
 
