@@ -231,12 +231,15 @@ private final class HAServerTrustPolicyURLSessionDelegate: NSObject, URLSessionD
         // has been evaluated at least once. The result is irrelevant here — an
         // unknown self-signed certificate is expected to fail this pass.
         _ = SecTrustEvaluateWithError(trust, nil)
-        guard let certificateChain = SecTrustCopyCertificateChain(trust) as? [SecCertificate] else {
+        guard let certificateChain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+              !certificateChain.isEmpty
+        else {
             debugLog("no certificate chain available for \(host)")
             return false
         }
-        guard certificateChain.count == 1 else {
-            debugLog("chain for \(host) has \(certificateChain.count) certificates; only a single self-signed leaf is allowed")
+        let distinctCertificates = Set(certificateChain.map { SecCertificateCopyData($0) as Data })
+        guard distinctCertificates.count == 1 else {
+            debugLog("chain for \(host) has \(certificateChain.count) certificates with \(distinctCertificates.count) distinct entries; only a self-issued leaf is allowed")
             return false
         }
         guard isSelfIssued(certificateChain[0]) else {

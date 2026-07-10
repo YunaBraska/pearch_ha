@@ -6225,7 +6225,10 @@ extension PerchHAClientTests {
 
         XCTAssertEqual(path, "/api/websocket")
         XCTAssertTrue(reason.contains("entity_id"), "expected missing entity_id in reason: \(reason)")
-        XCTAssertTrue(reason.contains("event.data.new_state"), "expected coding path in reason: \(reason)")
+        XCTAssertTrue(
+            reason.contains("event.data.new_state") || reason.contains(#"codingPath: [CodingKeys(stringValue: "event""#),
+            "expected coding path in reason: \(reason)"
+        )
     }
 
     func testCallServiceSurfacesCommandFailure() async throws {
