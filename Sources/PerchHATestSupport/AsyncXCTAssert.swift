@@ -1,7 +1,7 @@
 #if canImport(XCTest)
 import XCTest
 
-func assertEqualAsync<T: Equatable>(
+public func assertEqualAsync<T: Equatable>(
     _ expression1: @autoclosure () async throws -> T,
     _ expression2: @autoclosure () async throws -> T,
     _ message: @autoclosure () -> String = "",
@@ -13,7 +13,7 @@ func assertEqualAsync<T: Equatable>(
     XCTAssertEqual(value1, value2, message(), file: file, line: line)
 }
 
-func assertTrueAsync(
+public func assertTrueAsync(
     _ expression: @autoclosure () async throws -> Bool,
     _ message: @autoclosure () -> String = "",
     file: StaticString = #filePath,
@@ -23,7 +23,7 @@ func assertTrueAsync(
     XCTAssertTrue(value, message(), file: file, line: line)
 }
 
-func assertFalseAsync(
+public func assertFalseAsync(
     _ expression: @autoclosure () async throws -> Bool,
     _ message: @autoclosure () -> String = "",
     file: StaticString = #filePath,

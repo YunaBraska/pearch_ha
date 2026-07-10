@@ -4,6 +4,7 @@ import FakeHA
 import XCTest
 import PerchHACore
 import PerchHAClient
+import PerchHATestSupport
 
 func requestPercentEncodedPath(_ url: URL) -> String {
     URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath ?? url.path

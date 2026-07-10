@@ -1,6 +1,7 @@
 #if canImport(XCTest)
 import XCTest
 import PerchHASupport
+import PerchHATestSupport
 
 final class PerchHASupportTests: XCTestCase {
     func testModuleDeclaresResponsibility() {

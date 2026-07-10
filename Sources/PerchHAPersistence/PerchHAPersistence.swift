@@ -477,6 +477,9 @@ public struct JSONConfigStore: ConfigStore {
         guard !existingCandidates.isEmpty else {
             return nil
         }
+        // Prefer the newest readable config among the canonical path and any
+        // historical Application Support variants so restarts keep the latest
+        // saved state even after the app-support directory name changed.
         return existingCandidates.max { lhs, rhs in
             modificationDate(of: lhs, fileManager: fileManager) < modificationDate(of: rhs, fileManager: fileManager)
         }

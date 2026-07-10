@@ -10,6 +10,7 @@ import PerchHAClient
 import PerchHAAppShell
 import PerchHAPersistence
 import PerchHASupport
+import PerchHATestSupport
 @testable import PerchHAUI
 
 @MainActor
@@ -3730,8 +3731,8 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(application.snapshot.customActionConfiguration.actions, [renamedAction, secondAction])
         XCTAssertTrue(application.moveCustomAction(action.id, direction: .down))
         XCTAssertEqual(application.snapshot.customActionConfiguration.actions, [secondAction, renamedAction])
-        let _hoisted54 = await application.runCustomAction(action.id)
-        XCTAssertTrue(_hoisted54)
+        let didRunAction = await application.runCustomAction(action.id)
+        XCTAssertTrue(didRunAction)
         let storedProtectedAction = try XCTUnwrap(application.snapshot.customActionConfiguration.action(id: action.id))
         guard case let .protectedString(reference) = storedProtectedAction.action.serviceData["pin"] else {
             return XCTFail("expected protected pin reference")
@@ -3742,9 +3743,9 @@ final class PerchHAUITests: XCTestCase {
         let persistedText = try String(contentsOf: url, encoding: .utf8)
         XCTAssertFalse(persistedText.contains("1234"))
 
-        let _mlHoisted1008 = await runner.actions()
+        let executedActions = await runner.actions()
         XCTAssertEqual(
-            _mlHoisted1008,
+            executedActions,
             [
                 ActionSpec(
                     domain: action.action.domain,
@@ -9070,9 +9071,9 @@ final class PerchHAUITests: XCTestCase {
         var model: PerchHAPanelModel? = PerchHAPanelModel(
             connector: { _ in
                 let n = await calls.next()
-                // The initial connect is call 1; the immediate background periodic
-                // tick is call 2 — hold it in flight so the test can observe the UI
-                // state while a healthy session is syncing.
+                // The initial connect is call 1; the first scheduled periodic
+                // refresh is call 2. Hold that refresh in flight so the test can
+                // observe a healthy session while the background sync runs.
                 if n >= 2 {
                     await entered.open()
                     await release.wait()

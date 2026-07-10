@@ -80,6 +80,9 @@ let package = Package(
             dependencies: ["PerchHASupport"]
         ),
         .target(
+            name: "PerchHATestSupport"
+        ),
+        .target(
             name: "PerchHARepoAudit",
             dependencies: ["PerchHASupport"]
         ),
@@ -147,7 +150,8 @@ let package = Package(
             dependencies: [
                 "FakeHA",
                 "PerchHACore",
-                "PerchHAClient"
+                "PerchHAClient",
+                "PerchHATestSupport"
             ]
         ),
         .testTarget(
@@ -160,7 +164,10 @@ let package = Package(
         ),
         .testTarget(
             name: "PerchHASupportTests",
-            dependencies: ["PerchHASupport"]
+            dependencies: [
+                "PerchHASupport",
+                "PerchHATestSupport"
+            ]
         ),
         .testTarget(
             name: "PerchHAUITests",
@@ -169,7 +176,8 @@ let package = Package(
                 "PerchHAClient",
                 "PerchHAAppShell",
                 "PerchHAPersistence",
-                "PerchHAUI"
+                "PerchHAUI",
+                "PerchHATestSupport"
             ]
         ),
         .testTarget(
