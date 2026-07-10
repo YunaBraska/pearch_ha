@@ -293,6 +293,7 @@ private struct PerchHAHistoryPopoverRootView: View {
             onOpenSettings: {
                 onOpenEntitySettings?(entity.id)
             },
+            disabledRanges: model.knownUnavailableHistoryRanges(for: entity.id),
             selectedRange: Binding(
                 get: {
                     model.snapshot.historyState.range ?? model.historyRange(for: entity.id)

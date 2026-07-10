@@ -2808,6 +2808,7 @@ final class PerchHAClientTests: XCTestCase {
         defer {
             server.stop()
         }
+        try await waitForRESTServerReady(baseURL: server.baseURL)
         let client = HomeAssistantClient()
         let input = HAConnectionInput(
             endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
@@ -5469,6 +5470,22 @@ private func waitForJournalPath(server: FakeHAWebSocketServer, path: String) asy
         try await Task.sleep(nanoseconds: 10_000_000)
     }
     throw ClientTestFailure("FakeHA WebSocket journal did not contain \(path)")
+}
+
+private func waitForRESTServerReady(baseURL: URL) async throws {
+    let url = baseURL.appendingPathComponent("api/")
+    let session = URLSession(configuration: .ephemeral)
+    for _ in 0..<200 {
+        do {
+            let (_, response) = try await session.data(from: url)
+            if let http = response as? HTTPURLResponse, (200..<500).contains(http.statusCode) {
+                return
+            }
+        } catch {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+    throw ClientTestFailure("FakeHA REST server did not become ready at \(url.absoluteString)")
 }
 
 struct ClientTestFailure: Error, CustomStringConvertible {

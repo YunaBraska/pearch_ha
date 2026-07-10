@@ -1543,6 +1543,13 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         )
     }
 
+    private func forceStatusItemRefreshIfNeeded(after changed: Bool) {
+        guard changed, let panelModel else {
+            return
+        }
+        scheduleStatusItemRefresh(from: panelModel.snapshot, force: true)
+    }
+
     public func connect() async {
         await panelModel?.connect()
         if let panelModel {
@@ -1579,17 +1586,23 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
 
     @discardableResult
     public func setEntityControl(_ id: EntityID, isOn: Bool) async -> Bool {
-        await panelModel?.setEntityControl(id, isOn: isOn) ?? false
+        let changed = await panelModel?.setEntityControl(id, isOn: isOn) ?? false
+        forceStatusItemRefreshIfNeeded(after: changed)
+        return changed
     }
 
     @discardableResult
     public func setCoverControl(_ id: EntityID, command: PerchHACoverCommand) async -> Bool {
-        await panelModel?.setCoverControl(id, command: command) ?? false
+        let changed = await panelModel?.setCoverControl(id, command: command) ?? false
+        forceStatusItemRefreshIfNeeded(after: changed)
+        return changed
     }
 
     @discardableResult
     public func setCoverPosition(_ id: EntityID, position: Int) async -> Bool {
-        await panelModel?.setCoverPosition(id, position: position) ?? false
+        let changed = await panelModel?.setCoverPosition(id, position: position) ?? false
+        forceStatusItemRefreshIfNeeded(after: changed)
+        return changed
     }
 
     @discardableResult
@@ -1699,7 +1712,9 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
 
     @discardableResult
     public func applyLiveState(_ state: EntityState) -> Bool {
-        panelModel?.applyLiveState(state) ?? false
+        let changed = panelModel?.applyLiveState(state) ?? false
+        forceStatusItemRefreshIfNeeded(after: changed)
+        return changed
     }
 
     @discardableResult
@@ -1713,52 +1728,72 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
 
     @discardableResult
     public func moveMenuBarEntity(_ id: EntityID, direction: SelectionMoveDirection) -> Bool {
-        panelModel?.moveMenuBarEntity(id, direction: direction) ?? false
+        let changed = panelModel?.moveMenuBarEntity(id, direction: direction) ?? false
+        forceStatusItemRefreshIfNeeded(after: changed)
+        return changed
     }
 
     @discardableResult
     public func moveMenuBarEntity(_ id: EntityID, relativeTo targetID: EntityID, placement: SelectionDropPlacement) -> Bool {
-        panelModel?.moveMenuBarEntity(id, relativeTo: targetID, placement: placement) ?? false
+        let changed = panelModel?.moveMenuBarEntity(id, relativeTo: targetID, placement: placement) ?? false
+        forceStatusItemRefreshIfNeeded(after: changed)
+        return changed
     }
 
     @discardableResult
     public func setMenuBarDisplayStyle(_ id: EntityID, style: MenuBarDisplayStyle) -> Bool {
-        panelModel?.setMenuBarDisplayStyle(id, style: style) ?? false
+        let changed = panelModel?.setMenuBarDisplayStyle(id, style: style) ?? false
+        forceStatusItemRefreshIfNeeded(after: changed)
+        return changed
     }
 
     @discardableResult
     public func setMenuBarShowsLabel(_ id: EntityID, showsLabel: Bool) -> Bool {
-        panelModel?.setMenuBarShowsLabel(id, showsLabel: showsLabel) ?? false
+        let changed = panelModel?.setMenuBarShowsLabel(id, showsLabel: showsLabel) ?? false
+        forceStatusItemRefreshIfNeeded(after: changed)
+        return changed
     }
 
     @discardableResult
     public func setMenuBarAppearance(_ id: EntityID, appearance: PerchHAMenuBarAppearance?) -> Bool {
-        panelModel?.setMenuBarAppearance(id, appearance: appearance) ?? false
+        let changed = panelModel?.setMenuBarAppearance(id, appearance: appearance) ?? false
+        forceStatusItemRefreshIfNeeded(after: changed)
+        return changed
     }
 
     @discardableResult
     public func setMenuBarShowsUnit(_ id: EntityID, showsUnit: Bool) -> Bool {
-        panelModel?.setMenuBarShowsUnit(id, showsUnit: showsUnit) ?? false
+        let changed = panelModel?.setMenuBarShowsUnit(id, showsUnit: showsUnit) ?? false
+        forceStatusItemRefreshIfNeeded(after: changed)
+        return changed
     }
 
     @discardableResult
     public func setMenuBarMaximumFractionDigits(_ id: EntityID, maximumFractionDigits: Int) -> Bool {
-        panelModel?.setMenuBarMaximumFractionDigits(id, maximumFractionDigits: maximumFractionDigits) ?? false
+        let changed = panelModel?.setMenuBarMaximumFractionDigits(id, maximumFractionDigits: maximumFractionDigits) ?? false
+        forceStatusItemRefreshIfNeeded(after: changed)
+        return changed
     }
 
     @discardableResult
     public func setMenuBarDefaultHistoryRange(_ id: EntityID, defaultHistoryRange: HistoryRange?) -> Bool {
-        panelModel?.setMenuBarDefaultHistoryRange(id, defaultHistoryRange: defaultHistoryRange) ?? false
+        let changed = panelModel?.setMenuBarDefaultHistoryRange(id, defaultHistoryRange: defaultHistoryRange) ?? false
+        forceStatusItemRefreshIfNeeded(after: changed)
+        return changed
     }
 
     @discardableResult
     public func setMenuBarAbsoluteTotal(_ id: EntityID, total: Double?) -> Bool {
-        panelModel?.setMenuBarAbsoluteTotal(id, total: total) ?? false
+        let changed = panelModel?.setMenuBarAbsoluteTotal(id, total: total) ?? false
+        forceStatusItemRefreshIfNeeded(after: changed)
+        return changed
     }
 
     @discardableResult
     public func setMenuBarTotalEntityID(_ id: EntityID, totalEntityID: EntityID?) -> Bool {
-        panelModel?.setMenuBarTotalEntityID(id, totalEntityID: totalEntityID) ?? false
+        let changed = panelModel?.setMenuBarTotalEntityID(id, totalEntityID: totalEntityID) ?? false
+        forceStatusItemRefreshIfNeeded(after: changed)
+        return changed
     }
 
     @discardableResult
@@ -1773,12 +1808,16 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
 
     @discardableResult
     public func setMenuBarWarningThreshold(_ id: EntityID, threshold: ValueThreshold?) -> Bool {
-        panelModel?.setMenuBarWarningThreshold(id, threshold: threshold) ?? false
+        let changed = panelModel?.setMenuBarWarningThreshold(id, threshold: threshold) ?? false
+        forceStatusItemRefreshIfNeeded(after: changed)
+        return changed
     }
 
     @discardableResult
     public func setMenuBarCriticalThreshold(_ id: EntityID, threshold: ValueThreshold?) -> Bool {
-        panelModel?.setMenuBarCriticalThreshold(id, threshold: threshold) ?? false
+        let changed = panelModel?.setMenuBarCriticalThreshold(id, threshold: threshold) ?? false
+        forceStatusItemRefreshIfNeeded(after: changed)
+        return changed
     }
 
     @discardableResult

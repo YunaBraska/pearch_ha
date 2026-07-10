@@ -178,6 +178,7 @@ public struct PerchHAHistoryPopoverContent: View {
     private let state: PerchHAHistoryPanelState
     private let increaseContrastOverride: Bool?
     private let onOpenSettings: (() -> Void)?
+    private let disabledRanges: Set<HistoryRange>
     @Binding private var selectedRange: HistoryRange
     @State private var cursorNormalizedX: Double?
     @State private var hoverReadout: String?
@@ -193,6 +194,7 @@ public struct PerchHAHistoryPopoverContent: View {
         state: PerchHAHistoryPanelState,
         increaseContrastOverride: Bool? = nil,
         onOpenSettings: (() -> Void)? = nil,
+        disabledRanges: Set<HistoryRange> = [],
         selectedRange: Binding<HistoryRange>
     ) {
         self.entityID = entityID
@@ -202,6 +204,7 @@ public struct PerchHAHistoryPopoverContent: View {
         self.state = state
         self.increaseContrastOverride = increaseContrastOverride
         self.onOpenSettings = onOpenSettings
+        self.disabledRanges = disabledRanges
         _selectedRange = selectedRange
     }
 
@@ -230,16 +233,12 @@ public struct PerchHAHistoryPopoverContent: View {
                     .accessibilityLabel("\(entityName) settings")
                 }
             }
-            Picker("Range", selection: $selectedRange) {
-                ForEach(rangeOptions, id: \.rawValue) { range in
-                    Text(range.displayName).tag(range)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .controlSize(.small)
-            .tint(palette.accentPrimary)
-            .accessibilityLabel("\(entityName) history range")
+            PerchHAHistoryRangeSegmentedControl(
+                options: rangeOptions,
+                selection: $selectedRange,
+                disabledRanges: disabledRanges,
+                accessibilityLabel: "\(entityName) history range"
+            )
             historyHoverReadout
             historyBody
                 .frame(minHeight: Self.bodyMinHeight, alignment: .topLeading)
@@ -485,6 +484,66 @@ public struct PerchHAHistoryPopoverContent: View {
 
     private var isIncreasedContrast: Bool {
         increaseContrastOverride ?? (colorSchemeContrast == .increased)
+    }
+}
+
+private struct PerchHAHistoryRangeSegmentedControl: NSViewRepresentable {
+    let options: [HistoryRange]
+    @Binding var selection: HistoryRange
+    let disabledRanges: Set<HistoryRange>
+    let accessibilityLabel: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(selection: $selection, options: options)
+    }
+
+    func makeNSView(context: Context) -> NSSegmentedControl {
+        let control = NSSegmentedControl(labels: options.map(\.displayName), trackingMode: .selectOne, target: nil, action: nil)
+        control.segmentStyle = .rounded
+        control.controlSize = .small
+        control.target = context.coordinator
+        control.action = #selector(Coordinator.selectionChanged(_:))
+        control.setAccessibilityLabel(accessibilityLabel)
+        sync(control)
+        return control
+    }
+
+    func updateNSView(_ nsView: NSSegmentedControl, context: Context) {
+        context.coordinator.selection = $selection
+        context.coordinator.options = options
+        if nsView.segmentCount != options.count {
+            nsView.segmentCount = options.count
+            for (index, range) in options.enumerated() {
+                nsView.setLabel(range.displayName, forSegment: index)
+            }
+        }
+        nsView.setAccessibilityLabel(accessibilityLabel)
+        sync(nsView)
+    }
+
+    private func sync(_ control: NSSegmentedControl) {
+        for (index, range) in options.enumerated() {
+            control.setSelected(range == selection, forSegment: index)
+            control.setEnabled(!disabledRanges.contains(range), forSegment: index)
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var selection: Binding<HistoryRange>
+        var options: [HistoryRange]
+
+        init(selection: Binding<HistoryRange>, options: [HistoryRange]) {
+            self.selection = selection
+            self.options = options
+        }
+
+        @MainActor @objc func selectionChanged(_ sender: NSSegmentedControl) {
+            let index = sender.selectedSegment
+            guard index >= 0, index < options.count else {
+                return
+            }
+            selection.wrappedValue = options[index]
+        }
     }
 }
 

@@ -1395,6 +1395,20 @@ public final class PerchHAPanelModel: ObservableObject {
         return cachedHistorySeries(for: id, range: range)
     }
 
+    func knownUnavailableHistoryRanges(for id: EntityID) -> Set<HistoryRange> {
+        Set(
+            HistoryRange.uiSelectable.filter { range in
+                if let series = cachedHistorySeries(for: id, range: range) {
+                    return series.samples.isEmpty
+                }
+                if case let .unavailable(entityID, unavailableRange, _) = snapshot.historyState {
+                    return entityID == id && unavailableRange == range
+                }
+                return false
+            }
+        )
+    }
+
     func cachedHistorySeries(for id: EntityID, range: HistoryRange) -> HistorySeries? {
         let key = PerchHAHistoryCacheKey(entityID: id, range: range)
         // Display uses the stale-tolerant peek so the inline sparkline keeps
@@ -2895,6 +2909,18 @@ public final class PerchHAPanelModel: ObservableObject {
                 lastUpdateDescription: "Control unavailable"
             )
             return false
+        }
+
+        if let roomIndex = availableEntityLocations[id]?.roomIndex,
+           let entityIndex = availableEntityLocations[id]?.entityIndex,
+           availableRooms.indices.contains(roomIndex),
+           availableRooms[roomIndex].entities.indices.contains(entityIndex) {
+            let updatedEntity = availableRooms[roomIndex].entities[entityIndex]
+            availableEntitiesByID[id] = updatedEntity
+            if let flatIndex = availableEntities.firstIndex(where: { $0.id == id }) {
+                availableEntities[flatIndex] = updatedEntity
+            }
+            invalidateDisplayCaches(affectedBy: id)
         }
 
         let visibleRooms = selectedRooms(from: availableRooms, using: snapshot.selectionConfiguration)

@@ -924,13 +924,15 @@ final class PerchHAUITests: XCTestCase {
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         let _hoisted9 = await recorder.callCount()
         XCTAssertEqual(_hoisted9, 0)
-        XCTAssertEqual(model.snapshot.historyState, .idle)
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+        XCTAssertEqual(model.snapshot.historyState, .loading(entityID: "sensor.office_temperature", range: .hour))
 
         _ = await clock.advance(by: .milliseconds(999))
         await Task.yield()
         let _hoisted10 = await recorder.callCount()
         XCTAssertEqual(_hoisted10, 0)
-        XCTAssertEqual(model.snapshot.historyState, .idle)
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+        XCTAssertEqual(model.snapshot.historyState, .loading(entityID: "sensor.office_temperature", range: .hour))
 
         _ = await clock.advance(by: .milliseconds(1))
         await spinUntil {
@@ -961,7 +963,8 @@ final class PerchHAUITests: XCTestCase {
         await model.connect()
         model.startHistoryHover("sensor.office_temperature", range: .hour)
 
-        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+        XCTAssertEqual(model.snapshot.historyState, .loading(entityID: "sensor.office_temperature", range: .hour))
         await spinUntil { await clock.sleepingTaskCount() == 1 }
 
         _ = await clock.advance(by: .seconds(1))
@@ -1257,7 +1260,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.historyCacheCapacity(), 4)
     }
 
-    func test_t_clicking_a_row_pins_the_history_popover_until_unpinned() async {
+    func test_t_clicking_a_row_selects_history_until_dismissed() async {
         let clock = TestPerchClock()
         let recorder = HistoryProviderRecorder(
             results: [
@@ -1276,25 +1279,14 @@ final class PerchHAUITests: XCTestCase {
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
-        // Click pins the popover open.
         model.toggleHistoryPin("sensor.office_temperature")
         await spinUntil { model.snapshot.historyPresentationEntityID == "sensor.office_temperature" }
         XCTAssertEqual(model.pinnedHistoryEntityID, "sensor.office_temperature")
 
-        // Hover-out is ignored while pinned: no grace close is even scheduled.
-        model.cancelHistoryHover()
-        _ = await clock.advance(by: .seconds(2))
-        for _ in 0..<20 {
-            await Task.yield()
-        }
-        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
-
-        // Hovering another row must not steal a pinned popover.
         model.startHistoryHover("sensor.office_humidity")
-        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
 
-        // Clicking again unpins and closes immediately.
-        model.toggleHistoryPin("sensor.office_temperature")
+        model.cancelHistoryHover()
         XCTAssertNil(model.pinnedHistoryEntityID)
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
     }
@@ -1341,7 +1333,7 @@ final class PerchHAUITests: XCTestCase {
                 .success(historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4)),
                 .success(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.8)),
                 .success(historySeries(entityID: "sensor.office_temperature", range: .week, value: 21.9)),
-                .success(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 22.0))
+                .success(historySeries(entityID: "sensor.office_temperature", range: .day, value: 22.0))
             ]
         )
         let model = PerchHAPanelModel(
@@ -1356,27 +1348,26 @@ final class PerchHAUITests: XCTestCase {
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
-        // .day is the displayed default range — its key backs the inline
-        // preview and is exempt from eviction. The hover ranges compete for the
-        // remaining capacity: loading .week over a full cache evicts .hour (the
-        // least recently used evictable entry), never the .day preview key.
+        // With no visible row and no opened detail, nothing is protected.
+        // Capacity pressure therefore behaves like plain LRU across the loaded
+        // ranges, even if one of them happens to be the entity's preview range.
         await model.loadHistory("sensor.office_temperature", range: .day)
         await model.loadHistory("sensor.office_temperature", range: .hour)
         await model.loadHistory("sensor.office_temperature", range: .week)
 
-        // .hour was evicted, so it refetches; .day is still cached.
+        // .day was the least recently used entry, so it refetches when asked
+        // for again; .hour stays cached.
         await model.loadHistory("sensor.office_temperature", range: .hour)
         await model.loadHistory("sensor.office_temperature", range: .day)
 
         let _hoisted19 = await recorder.callCount()
         XCTAssertEqual(_hoisted19, 4)
         let _hoisted20 = await recorder.ranges()
-        XCTAssertEqual(_hoisted20, [.day, .hour, .week, .hour])
-        XCTAssertEqual(model.snapshot.historyState, .loaded(historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4)))
+        XCTAssertEqual(_hoisted20, [.day, .hour, .week, .day])
+        XCTAssertEqual(model.snapshot.historyState, .loaded(historySeries(entityID: "sensor.office_temperature", range: .day, value: 22.0)))
         XCTAssertEqual(
             model.cachedHistorySeries(for: "sensor.office_temperature"),
-            historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4),
-            "the displayed preview key must survive capacity pressure"
+            historySeries(entityID: "sensor.office_temperature", range: .day, value: 22.0)
         )
     }
     func test_t_history_hover_out_closes_loaded_and_unavailable_popovers() async {
@@ -1445,7 +1436,7 @@ final class PerchHAUITests: XCTestCase {
         )
     }
 
-    func test_t_history_hover_out_keeps_presentation_until_grace_elapses() async {
+    func test_t_history_hover_out_closes_immediately() async {
         let clock = TestPerchClock()
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
@@ -1468,18 +1459,14 @@ final class PerchHAUITests: XCTestCase {
         }
 
         model.cancelHistoryHover()
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
-
-        _ = await clock.advance(by: .milliseconds(299))
-        await Task.yield()
-        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
-
-        _ = await clock.advance(by: .milliseconds(1))
-        await spinUntil { model.snapshot.historyPresentationEntityID == nil }
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
+        XCTAssertEqual(
+            model.snapshot.historyState,
+            .loaded(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4))
+        )
     }
 
-    func test_t_history_keep_alive_cancels_pending_grace_close() async {
+    func test_t_history_keep_alive_is_a_no_op_under_explicit_selection() async {
         let clock = TestPerchClock()
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
@@ -1502,13 +1489,12 @@ final class PerchHAUITests: XCTestCase {
         }
 
         model.cancelHistoryHover()
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
         model.keepHistoryHoverAlive()
-        await spinUntil { await clock.sleepingTaskCount() == 0 }
-
-        _ = await clock.advance(by: .seconds(5))
-        await Task.yield()
-        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+        XCTAssertEqual(
+            model.snapshot.historyState,
+            .loaded(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4))
+        )
     }
 
     func test_t_history_re_entering_row_cancels_pending_grace_close() async {
@@ -1548,7 +1534,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
     }
 
-    func test_t_history_stays_open_while_pointer_remains_inside_panel_surface() async {
+    func test_t_history_surface_tracking_only_closes_when_surface_leaves() async {
         let clock = TestPerchClock()
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
@@ -1571,17 +1557,14 @@ final class PerchHAUITests: XCTestCase {
         }
 
         model.setHistorySurfaceHovering(true)
-        model.cancelHistoryHover()
-
-        _ = await clock.advance(by: .seconds(5))
-        await Task.yield()
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
 
         model.setHistorySurfaceHovering(false)
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
-        _ = await clock.advance(by: .milliseconds(300))
-        await spinUntil { model.snapshot.historyPresentationEntityID == nil }
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
+        XCTAssertEqual(
+            model.snapshot.historyState,
+            .loaded(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4))
+        )
     }
 
     func test_t_history_switches_immediately_between_rows_while_pointer_stays_inside_panel() async {
@@ -1658,7 +1641,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
     }
 
-    func test_t_history_stays_stable_while_context_menu_suppresses_hover_events() async {
+    func test_t_history_context_menu_suppression_ignores_hover_switches() async {
         let clock = TestPerchClock()
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
@@ -1681,19 +1664,12 @@ final class PerchHAUITests: XCTestCase {
         }
 
         model.beginHistoryHoverSuppression()
-        model.cancelHistoryHover()
         model.startHistoryHover("sensor.office_humidity", range: .hour)
-
-        _ = await clock.advance(by: .seconds(5))
-        await Task.yield()
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
 
         model.endHistoryHoverSuppression()
-        model.cancelHistoryHover()
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
-        _ = await clock.advance(by: .milliseconds(300))
-        await spinUntil { model.snapshot.historyPresentationEntityID == nil }
-        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+        model.startHistoryHover("sensor.office_humidity", range: .hour)
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
     }
 
     func test_t_scroll_activity_closes_history_and_blocks_reopen_until_scroll_settles() async {
@@ -1723,7 +1699,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
 
         model.startHistoryHover("sensor.office_humidity", range: .hour)
-        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
 
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: .milliseconds(180))
@@ -1768,6 +1744,7 @@ final class PerchHAUITests: XCTestCase {
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
+        model.setPanelActive(true)
 
         model.beginTransientUITracking()
         XCTAssertTrue(
@@ -2365,6 +2342,7 @@ final class PerchHAUITests: XCTestCase {
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
+        model.setPanelActive(true)
 
         XCTAssertTrue(model.startEntityControlToggle("switch.office_lamp", isOn: true))
         await spinUntil {
@@ -2482,7 +2460,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(_hoisted23, 2)
     }
 
-    func testBuiltInControlSuccessReassertsTargetStateAfterStaleLiveUpdateDuringInFlightAction() async {
+    func testBuiltInControlSuccessIgnoresStaleLiveUpdateWhileActionIsInFlight() async {
         let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: controlRooms()) },
@@ -2504,7 +2482,7 @@ final class PerchHAUITests: XCTestCase {
                 EntityState(id: "switch.office_lamp", name: "Office lamp", state: "off", unit: nil)
             )
         )
-        XCTAssertEqual(model.entityState("switch.office_lamp"), "off")
+        XCTAssertEqual(model.entityState("switch.office_lamp"), "on")
         await runner.releaseNext()
         await spinUntil {
             model.snapshot.controlActionState == .idle
@@ -2583,6 +2561,7 @@ final class PerchHAUITests: XCTestCase {
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
+        model.setPanelActive(true)
 
         XCTAssertTrue(model.startCoverPositionChange("cover.office_blinds", position: 75))
         await spinUntil {
@@ -2703,7 +2682,7 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(_hoisted30, 2)
     }
 
-    func testBuiltInCoverPositionSuccessReassertsTargetAfterStaleLiveUpdateDuringInFlightAction() async {
+    func testBuiltInCoverPositionSuccessIgnoresStaleLiveUpdateWhileActionIsInFlight() async {
         let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: controlRooms()) },
@@ -2731,7 +2710,7 @@ final class PerchHAUITests: XCTestCase {
                 )
             )
         )
-        XCTAssertEqual(model.entityPosition("cover.office_blinds"), 10)
+        XCTAssertEqual(model.entityPosition("cover.office_blinds"), 75)
         await runner.releaseNext()
         await spinUntil {
             model.snapshot.controlActionState == .idle
@@ -4023,6 +4002,7 @@ final class PerchHAUITests: XCTestCase {
 
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
+        sink.clear()
         model.toggleSettings()
         model.updateSelectionQuery("humidity")
 
@@ -4488,6 +4468,7 @@ final class PerchHAUITests: XCTestCase {
 
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
+        model.setPanelActive(true)
         model.startRefresh()
         await spinUntil { model.snapshot.connectionState == .reconnecting(attempt: 1) }
 
@@ -4536,6 +4517,7 @@ final class PerchHAUITests: XCTestCase {
         let model = PerchHAPanelModel(
             snapshot: PerchHAPanelSnapshot(rooms: rooms, availableRooms: rooms)
         )
+        model.setPanelActive(true)
 
         XCTAssertTrue(
             model.applyLiveState(
@@ -4664,6 +4646,7 @@ final class PerchHAUITests: XCTestCase {
 
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
+        model.setPanelActive(true)
         await model.refresh()
 
         XCTAssertTrue(
@@ -5110,9 +5093,65 @@ final class PerchHAUITests: XCTestCase {
         }
 
         let labels = (0..<rangeControl.segmentCount).compactMap { rangeControl.label(forSegment: $0) }
-        XCTAssertEqual(labels, ["Hour", "Day", "Week"])
+        XCTAssertEqual(labels, ["Hour", "Day", "Week", "Month"])
         XCTAssertTrue(rangeControl.acceptsFirstResponder, debugSummary)
         XCTAssertTrue(window.makeFirstResponder(rangeControl), debugSummary)
+    }
+
+    func testHistoryPopoverDisablesKnownUnavailableRangeSegments() {
+        let hostingView = NSHostingView(
+            rootView: PerchHAHistoryPopoverContent(
+                entityID: "sensor.office_humidity",
+                entityName: "Office humidity",
+                valueText: "44%",
+                unit: "%",
+                state: .loaded(
+                    HistorySeries(
+                        entityID: "sensor.office_humidity",
+                        range: .day,
+                        samples: [
+                            HistorySample(
+                                timestamp: Date(timeIntervalSince1970: 1_788_998_400),
+                                state: "44",
+                                numericValue: 44
+                            )
+                        ]
+                    )
+                ),
+                disabledRanges: [.week, .month],
+                selectedRange: .constant(.day)
+            )
+            .frame(width: 280)
+            .environment(\.colorScheme, .light)
+        )
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: NSSize(width: 320, height: 260)),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: true
+        )
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        hostingView.layoutSubtreeIfNeeded()
+
+        let segmentedControls = nativeSegmentedControls(in: window.contentView)
+        let debugSummary = nativeControlDebugSummary(in: window.contentView)
+        guard let rangeControl = segmentedControls.first else {
+            XCTFail(debugSummary)
+            return
+        }
+
+        XCTAssertEqual(rangeControl.segmentCount, 4, debugSummary)
+        XCTAssertTrue(rangeControl.isEnabled(forSegment: 0), debugSummary)
+        XCTAssertTrue(rangeControl.isEnabled(forSegment: 1), debugSummary)
+        XCTAssertFalse(rangeControl.isEnabled(forSegment: 2), debugSummary)
+        XCTAssertFalse(rangeControl.isEnabled(forSegment: 3), debugSummary)
     }
 
     func testAppShellCustomActionRowExposesNativeButtonFocus() async throws {
@@ -7023,12 +7062,13 @@ final class PerchHAUITests: XCTestCase {
         )
         XCTAssertEqual(gaugeRenderer.renderCount, 1)
 
-        // Show label renders as the stacked style: caps label above the value.
         XCTAssertTrue(application.setMenuBarShowsLabel("sensor.office_humidity", showsLabel: true))
         XCTAssertEqual(application.snapshot.statusItemTitle, "OFFICE HUMIDITY\n44%")
+        XCTAssertEqual(application.snapshot.statusItemAccessibilityLabel, "Office humidity, 44%, 44 percent, battery")
         XCTAssertEqual(gaugeRenderer.renderCount, 1)
 
         XCTAssertTrue(application.setMenuBarShowsUnit("sensor.office_humidity", showsUnit: false))
+        XCTAssertEqual(application.snapshot.statusItemTitle, "OFFICE HUMIDITY\n44")
         XCTAssertEqual(application.snapshot.statusItemAccessibilityLabel, "Office humidity, 44, 44 percent, battery")
         XCTAssertEqual(gaugeRenderer.renderCount, 1)
 
@@ -7058,15 +7098,19 @@ final class PerchHAUITests: XCTestCase {
                 deviceID: nil
             )
         ).text
+        XCTAssertEqual(application.snapshot.statusItemTitle, "OFFICE HUMIDITY\n\(expectedDecimalValue)")
         XCTAssertEqual(
             application.snapshot.statusItemAccessibilityLabel,
             "Office humidity, \(expectedDecimalValue), 44 percent, battery"
         )
-        XCTAssertEqual(application.snapshot.statusItemTitle, "OFFICE HUMIDITY\n\(expectedDecimalValue)")
 
         XCTAssertTrue(application.setMenuBarDefaultHistoryRange("sensor.office_humidity", defaultHistoryRange: .week))
         XCTAssertEqual(gaugeRenderer.renderCount, 2)
         XCTAssertEqual(application.snapshot.statusItemTitle, "OFFICE HUMIDITY\n\(expectedDecimalValue)")
+        XCTAssertEqual(
+            application.snapshot.statusItemAccessibilityLabel,
+            "Office humidity, \(expectedDecimalValue), 44 percent, battery"
+        )
         XCTAssertEqual(
             application.snapshot.menuBarDisplayConfiguration
                 .itemConfiguration(for: "sensor.office_humidity")
@@ -7082,6 +7126,31 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(saved.menuBarItemConfigurations.first?.showsUnit, false)
         XCTAssertEqual(saved.menuBarItemConfigurations.first?.maximumFractionDigits, 1)
         XCTAssertEqual(saved.menuBarItemConfigurations.first?.defaultHistoryRange, .week)
+    }
+
+    func testHistoryKnownUnavailableRangesMarksCachedEmptyAndUnavailableRanges() async throws {
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, entityID, range in
+                switch range {
+                case .week:
+                    return .success(HistorySeries(entityID: entityID, range: range, samples: []))
+                case .month:
+                    return .unavailable("history unavailable")
+                default:
+                    return .success(historySeriesFixture(entityID: entityID, range: range, value: 44))
+                }
+            }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        await model.loadHistory("sensor.office_humidity", range: .week)
+        XCTAssertEqual(model.knownUnavailableHistoryRanges(for: "sensor.office_humidity"), [.week])
+
+        await model.loadHistory("sensor.office_humidity", range: .month)
+        XCTAssertEqual(model.knownUnavailableHistoryRanges(for: "sensor.office_humidity"), [.month, .week])
+        XCTAssertFalse(model.knownUnavailableHistoryRanges(for: "sensor.office_humidity").contains(.day))
     }
 
     func test_t_status_item_gauge_image_renderer_draws_severity_colors() {
@@ -8668,28 +8737,27 @@ final class PerchHAUITests: XCTestCase {
 
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
+        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 2)
         let afterFirstCycle = await recorder.batchCount()
-        XCTAssertEqual(afterFirstCycle, 1)
+        XCTAssertEqual(afterFirstCycle, 2)
         // Wait for the cycle's results to land in the cache — re-arming while
         // the apply is still in flight would cancel it and drop the sync marks.
         await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0") != nil }
 
-        // A scroll pause that narrows the visible set to an already-synced row
-        // must not refetch that row immediately.
+        // Narrowing the visible set rearms the loop, but the row's cached hour
+        // and day stay fresh enough that only the long-range maintenance layers
+        // are due.
         model.updateVisibleEntities(["sensor.prefetch_0"])
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: settleDelay)
-        for _ in 0..<50 {
-            await Task.yield()
-        }
+        await spinUntil { await recorder.batchCount() >= 2 }
         let afterRearm = await recorder.batchCount()
-        XCTAssertEqual(afterRearm, 1, "a re-arm within the interval must not refetch just-synced entities")
+        XCTAssertEqual(afterRearm, 3, "a re-arm within the interval should add only one maintenance batch")
 
         // After a full interval the same visible entity is due again.
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: interval)
-        await spinUntil { await recorder.batchCount() >= 2 }
+        await spinUntil { await recorder.batchCount() >= 4 }
         model.setPanelActive(false)
     }
 
@@ -9377,20 +9445,17 @@ final class PerchHAUITests: XCTestCase {
         await model.connect()
         XCTAssertEqual(model.snapshot.refreshCount, 0)
 
-        // Activating the panel refreshes immediately (safety net on open), then
-        // settles into the interval loop on the injected clock. Activation also
-        // arms the bulk history sync loop on the same clock, so wait for BOTH
-        // sleepers before advancing — advancing after only one is armed can
-        // wake just the bulk loop and leave the refresh loop sleeping forever.
+        // Activating the panel arms the periodic safety net, but a successful
+        // connect has already delivered fresh data, so there is no eager tick.
         model.setPanelActive(true)
-        await spinUntil { model.snapshot.refreshCount == 1 }
-        await spinUntil { await clock.sleepingTaskCount() == 2 }
-        XCTAssertEqual(model.snapshot.refreshCount, 1)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        XCTAssertEqual(model.snapshot.refreshCount, 0)
 
-        // Firing the interval performs one more refresh and re-arms the loop.
+        // Firing the interval performs the first periodic refresh and re-arms
+        // the loop.
         _ = await clock.advance(by: interval)
-        await spinUntil { model.snapshot.refreshCount == 2 }
-        await spinUntil { await clock.sleepingTaskCount() == 2 }
+        await spinUntil { model.snapshot.refreshCount == 1 }
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
 
         // Deactivating pauses the loop: advancing the clock performs no refresh.
         model.setPanelActive(false)
@@ -9399,7 +9464,7 @@ final class PerchHAUITests: XCTestCase {
         for _ in 0..<20 {
             await Task.yield()
         }
-        XCTAssertEqual(model.snapshot.refreshCount, 2)
+        XCTAssertEqual(model.snapshot.refreshCount, 1)
     }
 
     func test_t_model_with_active_background_loops_deallocates_when_released() async {
@@ -10466,6 +10531,8 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(model.retryBackoffState, .connected)
 
         model.setPanelActive(true)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: interval)
         await spinUntil {
             if case .backingOff = model.retryBackoffState { return true } else { return false }
         }
@@ -10499,6 +10566,8 @@ final class PerchHAUITests: XCTestCase {
         await model.connect()
 
         model.setPanelActive(true)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: interval)
         await spinUntil { model.diagnosticEvents.contains { $0.kind == .refreshFailed } }
         await spinUntil { await clock.sleepingTaskCount() == 1 }
 
@@ -11161,6 +11230,10 @@ private final class MenuBarDisplaySinkRecorder {
     func record(_ displayConfiguration: MenuBarDisplayConfiguration) -> SelectionPersistenceResult {
         lastDisplayConfiguration = displayConfiguration
         return .saved
+    }
+
+    func clear() {
+        lastDisplayConfiguration = nil
     }
 }
 
