@@ -268,6 +268,7 @@ final class PerchHAPackagingTests: XCTestCase {
         // toolchain, and fails if the checks dirty the working tree.
         XCTAssertTrue(workflow.contains("maxim-lobanov/setup-xcode@v1"))
         XCTAssertTrue(workflow.contains("xcode-version: latest-stable"))
+        XCTAssertTrue(workflow.contains("group: ci-${{ github.event.pull_request.head.ref || github.ref_name }}"))
         XCTAssertTrue(workflow.contains("swift run perchha-xcode-doctor --json --strict"))
         XCTAssertTrue(workflow.contains("swift test --disable-swift-testing --enable-xctest list"))
         XCTAssertTrue(workflow.contains("sh scripts/check.sh"))
