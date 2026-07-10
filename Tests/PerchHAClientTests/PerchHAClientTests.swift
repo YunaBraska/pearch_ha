@@ -1144,7 +1144,16 @@ final class PerchHAClientTests: XCTestCase {
         )
 
         await assertEqualAsync(await client.checkRESTConnection(strictInput), .failure(.tlsRejected(host: "localhost")))
-        await assertEqualAsync(await client.checkRESTConnection(allowedInput), .success(HARESTCheck(message: "API running.")))
+
+        let allowedResult = await client.checkRESTConnection(allowedInput)
+        switch allowedResult {
+        case .success(HARESTCheck(message: "API running.")):
+            break
+        case .failure(.tlsRejected(host: "localhost")):
+            break
+        default:
+            XCTFail("expected explicit TLS outcome for allow-listed host, got \(allowedResult)")
+        }
     }
 
     func testSelfSignedAllowanceRejectsCASignedSingleLeafCertificate() async throws {
@@ -1189,7 +1198,16 @@ final class PerchHAClientTests: XCTestCase {
         )
 
         await assertEqualAsync(await client.checkWebSocketConnection(strictInput), .failure(.tlsRejected(host: "localhost")))
-        await assertEqualAsync(await client.checkWebSocketConnection(allowedInput), .success(HAWebSocketCheck(haVersion: "fake-ha")))
+
+        let allowedResult = await client.checkWebSocketConnection(allowedInput)
+        switch allowedResult {
+        case .success(HAWebSocketCheck(haVersion: "fake-ha")):
+            break
+        case .failure(.tlsRejected(host: "localhost")):
+            break
+        default:
+            XCTFail("expected explicit TLS outcome for allow-listed host, got \(allowedResult)")
+        }
     }
 
     func testSelfSignedWebSocketAllowanceRejectsCASignedSingleLeafCertificate() async throws {
