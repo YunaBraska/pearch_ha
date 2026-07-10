@@ -26,7 +26,7 @@ public struct PerchHAAppBundleManifest: Equatable, Sendable {
     public let iconFileName: String?
 
     public init(
-        appName: String = "PerchHA",
+        appName: String = "PearchHA",
         bundleIdentifier: String = "dev.perchha.app",
         executableName: String = "PerchHA",
         version: String = "0.1.0",
@@ -182,7 +182,7 @@ public struct PerchHAOAuthClientWebsiteManifest: Equatable, Sendable {
     public init(
         clientID: String,
         redirectURI: String,
-        appName: String = "PerchHA"
+        appName: String = "PearchHA"
     ) throws {
         let normalizedClientID = try Self.required(clientID, name: "clientID")
         let normalizedRedirectURI = try Self.required(redirectURI, name: "redirectURI")
@@ -2616,7 +2616,7 @@ public struct PerchHADMGBuildConfiguration: Equatable, Sendable {
     public init(
         appURL: URL,
         outputURL: URL,
-        volumeName: String = "PerchHA",
+        volumeName: String = "PearchHA",
         replaceExisting: Bool = false,
         includeApplicationsShortcut: Bool = true
     ) {

@@ -13,7 +13,7 @@ final class PerchHAPackagingTests: XCTestCase {
 
         let plist = try propertyList(from: manifest.propertyListData())
 
-        XCTAssertEqual(plist["CFBundleName"] as? String, "PerchHA")
+        XCTAssertEqual(plist["CFBundleName"] as? String, "PearchHA")
         XCTAssertEqual(plist["CFBundleExecutable"] as? String, "PerchHA")
         XCTAssertEqual(plist["CFBundleIdentifier"] as? String, "dev.perchha.app")
         XCTAssertEqual(plist["CFBundlePackageType"] as? String, "APPL")
@@ -132,7 +132,7 @@ final class PerchHAPackagingTests: XCTestCase {
 
         XCTAssertTrue(html.contains(#"<link rel="canonical" href="https://perchha.dev/app">"#))
         XCTAssertTrue(html.contains(#"<link rel="redirect_uri" href="perchha://auth">"#))
-        XCTAssertTrue(html.contains("PerchHA OAuth Redirect"))
+        XCTAssertTrue(html.contains("PearchHA OAuth Redirect"))
     }
 
     func testOAuthClientWebsiteBuilderCreatesArtifactAndVerifierAcceptsIt() throws {
@@ -232,7 +232,7 @@ final class PerchHAPackagingTests: XCTestCase {
         let swiftPMEntrypointURL = rootURL.appendingPathComponent("Sources/PerchHAApp/main.swift", isDirectory: false)
 
         let plist = try propertyList(from: Data(contentsOf: infoPlistURL))
-        XCTAssertEqual(plist["CFBundleName"] as? String, "PerchHA")
+        XCTAssertEqual(plist["CFBundleName"] as? String, "PearchHA")
         XCTAssertEqual(plist["CFBundlePackageType"] as? String, "APPL")
         XCTAssertEqual(plist["LSMinimumSystemVersion"] as? String, "13.0")
         XCTAssertEqual(plist["LSUIElement"] as? Bool, true)
@@ -1536,7 +1536,7 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertEqual(decoded, manifest)
         XCTAssertEqual(manifest.schemaVersion, 1)
         XCTAssertEqual(manifest.app.path, "PerchHA.app")
-        XCTAssertEqual(manifest.app.name, "PerchHA")
+        XCTAssertEqual(manifest.app.name, "PearchHA")
         XCTAssertEqual(manifest.app.bundleIdentifier, "dev.perchha.tests.release")
         XCTAssertEqual(manifest.app.version, "0.1.0")
         XCTAssertEqual(manifest.app.buildVersion, "1")

@@ -37,6 +37,9 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
     public let menuBarAppearance: PerchHAMenuBarAppearance
     public let stableMenuBarWidth: Bool
     public let themeMode: PerchHAThemeMode
+    public let menuBarRefreshInterval: PerchHAMenuBarRefreshInterval
+    public let dataSyncInterval: PerchHAMenuBarRefreshInterval
+    public let historyDetailRefreshInterval: PerchHAMenuBarRefreshInterval
     public let accentColor: PerchHAAccentColor
     public let dashboardRowDensity: PerchHADashboardRowDensity
     public let dashboardDefaultHistoryRange: HistoryRange
@@ -58,6 +61,9 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         menuBarAppearance: PerchHAMenuBarAppearance = .defaultAppearance,
         stableMenuBarWidth: Bool = false,
         themeMode: PerchHAThemeMode = .defaultMode,
+        menuBarRefreshInterval: PerchHAMenuBarRefreshInterval = .defaultInterval,
+        dataSyncInterval: PerchHAMenuBarRefreshInterval = .fiveSeconds,
+        historyDetailRefreshInterval: PerchHAMenuBarRefreshInterval = .thirtySeconds,
         accentColor: PerchHAAccentColor = .homeAssistantBlue,
         dashboardRowDensity: PerchHADashboardRowDensity = .defaultDensity,
         dashboardDefaultHistoryRange: HistoryRange = .day,
@@ -78,6 +84,9 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         self.menuBarAppearance = menuBarAppearance
         self.stableMenuBarWidth = stableMenuBarWidth
         self.themeMode = themeMode
+        self.menuBarRefreshInterval = menuBarRefreshInterval
+        self.dataSyncInterval = dataSyncInterval
+        self.historyDetailRefreshInterval = historyDetailRefreshInterval
         self.accentColor = accentColor
         self.dashboardRowDensity = dashboardRowDensity
         self.dashboardDefaultHistoryRange = dashboardDefaultHistoryRange
@@ -126,6 +135,9 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
             menuBarAppearance: menuBarAppearance,
             stableMenuBarWidth: stableMenuBarWidth,
             themeMode: themeMode,
+            menuBarRefreshInterval: menuBarRefreshInterval,
+            dataSyncInterval: dataSyncInterval,
+            historyDetailRefreshInterval: historyDetailRefreshInterval,
             accentColor: accentColor,
             dashboardRowDensity: dashboardRowDensity,
             dashboardDefaultHistoryRange: dashboardDefaultHistoryRange,
@@ -169,6 +181,9 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         case menuBarAppearance
         case stableMenuBarWidth
         case themeMode
+        case menuBarRefreshInterval
+        case dataSyncInterval
+        case historyDetailRefreshInterval
         case accentColor
         case dashboardRowDensity
         case dashboardDefaultHistoryRange
@@ -200,6 +215,9 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
         menuBarAppearance = try container.decodeIfPresent(PerchHAMenuBarAppearance.self, forKey: .menuBarAppearance) ?? .defaultAppearance
         stableMenuBarWidth = try container.decodeIfPresent(Bool.self, forKey: .stableMenuBarWidth) ?? false
         themeMode = try container.decodeIfPresent(PerchHAThemeMode.self, forKey: .themeMode) ?? .defaultMode
+        menuBarRefreshInterval = try container.decodeIfPresent(PerchHAMenuBarRefreshInterval.self, forKey: .menuBarRefreshInterval) ?? .defaultInterval
+        dataSyncInterval = try container.decodeIfPresent(PerchHAMenuBarRefreshInterval.self, forKey: .dataSyncInterval) ?? .fiveSeconds
+        historyDetailRefreshInterval = try container.decodeIfPresent(PerchHAMenuBarRefreshInterval.self, forKey: .historyDetailRefreshInterval) ?? .thirtySeconds
         accentColor = try container.decodeIfPresent(PerchHAAccentColor.self, forKey: .accentColor) ?? .homeAssistantBlue
         dashboardRowDensity = try container.decodeIfPresent(PerchHADashboardRowDensity.self, forKey: .dashboardRowDensity) ?? .defaultDensity
         dashboardDefaultHistoryRange = try container.decodeIfPresent(HistoryRange.self, forKey: .dashboardDefaultHistoryRange) ?? .day
@@ -221,6 +239,9 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
             menuBarAppearance: menuBarAppearance,
             stableMenuBarWidth: stableMenuBarWidth,
             themeMode: themeMode,
+            menuBarRefreshInterval: menuBarRefreshInterval,
+            dataSyncInterval: dataSyncInterval,
+            historyDetailRefreshInterval: historyDetailRefreshInterval,
             accentColor: accentColor,
             dashboardRowDensity: dashboardRowDensity,
             defaultHistoryRange: dashboardDefaultHistoryRange,
@@ -248,6 +269,9 @@ public struct PerchHAConfiguration: Equatable, Codable, Sendable {
             menuBarAppearance: displayPreferences.menuBarAppearance,
             stableMenuBarWidth: displayPreferences.stableMenuBarWidth,
             themeMode: displayPreferences.themeMode,
+            menuBarRefreshInterval: displayPreferences.menuBarRefreshInterval,
+            dataSyncInterval: displayPreferences.dataSyncInterval,
+            historyDetailRefreshInterval: displayPreferences.historyDetailRefreshInterval,
             accentColor: displayPreferences.accentColor,
             dashboardRowDensity: displayPreferences.dashboardRowDensity,
             dashboardDefaultHistoryRange: displayPreferences.defaultHistoryRange,
@@ -370,13 +394,22 @@ public protocol ConfigStore: Sendable {
 
 public struct JSONConfigStore: ConfigStore {
     public let fileURL: URL
+    public let legacyFallbackFileURLs: [URL]
 
-    public init(fileURL: URL) {
+    public init(fileURL: URL, legacyFallbackFileURLs: [URL] = []) {
         self.fileURL = fileURL
+        self.legacyFallbackFileURLs = legacyFallbackFileURLs
     }
 
     public init(location: ConfigLocation = ConfigLocation(), fileManager: FileManager = .default) throws {
         fileURL = try location.fileURL(fileManager: fileManager)
+        let applicationSupport = fileURL.deletingLastPathComponent().deletingLastPathComponent()
+        let legacyDirectoryNames = ["perchha", "PearchHA", "pearchha"]
+        legacyFallbackFileURLs = legacyDirectoryNames.map {
+            applicationSupport
+                .appendingPathComponent($0, isDirectory: true)
+                .appendingPathComponent(location.fileName, isDirectory: false)
+        }
     }
 
     public func describe() -> PerchHAModule {
@@ -384,15 +417,15 @@ public struct JSONConfigStore: ConfigStore {
     }
 
     public func load() throws -> PerchHAConfiguration {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+        guard let readableFileURL = resolvedReadableFileURL() else {
             return .empty
         }
 
         let data: Data
         do {
-            data = try Data(contentsOf: fileURL)
+            data = try Data(contentsOf: readableFileURL)
         } catch {
-            throw ConfigStoreError.readFailed(fileURL, message: String(describing: error))
+            throw ConfigStoreError.readFailed(readableFileURL, message: String(describing: error))
         }
 
         do {
@@ -404,7 +437,7 @@ public struct JSONConfigStore: ConfigStore {
         } catch let error as ConfigStoreError {
             throw error
         } catch {
-            throw ConfigStoreError.malformedConfig(fileURL, message: String(describing: error))
+            throw ConfigStoreError.malformedConfig(readableFileURL, message: String(describing: error))
         }
     }
 
@@ -436,6 +469,27 @@ public struct JSONConfigStore: ConfigStore {
         } catch {
             throw ConfigStoreError.writeFailed(fileURL, message: String(describing: error))
         }
+    }
+
+    private func resolvedReadableFileURL(fileManager: FileManager = .default) -> URL? {
+        let candidates = [fileURL] + legacyFallbackFileURLs.filter { $0 != fileURL }
+        let existingCandidates = candidates.filter { fileManager.fileExists(atPath: $0.path) }
+        guard !existingCandidates.isEmpty else {
+            return nil
+        }
+        return existingCandidates.max { lhs, rhs in
+            modificationDate(of: lhs, fileManager: fileManager) < modificationDate(of: rhs, fileManager: fileManager)
+        }
+    }
+
+    private func modificationDate(of url: URL, fileManager: FileManager) -> Date {
+        guard
+            let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+            let date = attributes[.modificationDate] as? Date
+        else {
+            return .distantPast
+        }
+        return date
     }
 }
 

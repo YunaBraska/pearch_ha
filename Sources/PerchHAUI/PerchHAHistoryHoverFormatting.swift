@@ -19,7 +19,7 @@ enum PerchHAHistoryHoverFormatting {
         locale: Locale = .current,
         timeZone: TimeZone = .current
     ) -> String {
-        let showsTime = range != .week
+        let showsTime = range != .week && range != .month
         if locale == .current && timeZone == .current {
             return (showsTime ? currentDateTimeFormatter : currentDateOnlyFormatter).string(from: timestamp)
         }

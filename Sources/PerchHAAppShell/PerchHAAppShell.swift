@@ -189,6 +189,7 @@ public struct PerchHAMenuBarStatusItemSnapshot: Equatable, Sendable {
     public let title: String?
     public let accessibilityLabel: String?
     public let hasImage: Bool
+    public let showsLoadingIndicator: Bool
     public let imageWidth: Int?
     public let imageHeight: Int?
     public let imageIsTemplate: Bool?
@@ -199,6 +200,7 @@ public struct PerchHAMenuBarStatusItemSnapshot: Equatable, Sendable {
         title: String?,
         accessibilityLabel: String?,
         hasImage: Bool,
+        showsLoadingIndicator: Bool,
         imageWidth: Int?,
         imageHeight: Int?,
         imageIsTemplate: Bool?,
@@ -208,6 +210,7 @@ public struct PerchHAMenuBarStatusItemSnapshot: Equatable, Sendable {
         self.title = title
         self.accessibilityLabel = accessibilityLabel
         self.hasImage = hasImage
+        self.showsLoadingIndicator = showsLoadingIndicator
         self.imageWidth = imageWidth
         self.imageHeight = imageHeight
         self.imageIsTemplate = imageIsTemplate
@@ -220,6 +223,7 @@ public struct PerchHAApplicationSnapshot: Equatable, Sendable {
     public let statusItemTitle: String?
     public let statusItemAccessibilityLabel: String?
     public let statusItemHasImage: Bool
+    public let statusItemShowsLoadingIndicator: Bool
     public let statusItemImageWidth: Int?
     public let statusItemImageHeight: Int?
     public let statusItemImageIsTemplate: Bool?
@@ -1055,6 +1059,9 @@ public final class PerchHAASWebAuthenticationSessionPresenter: NSObject, PerchHA
 @MainActor
 public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     private var statusItems: [PerchHAStatusItemEntry] = []
+    private var pendingStatusItemSnapshot: PerchHAPanelSnapshot?
+    private var statusItemRefreshTask: Task<Void, Never>?
+    private var lastStatusItemRefreshAt: Date?
     private var panel: NSPanel?
     private var settingsWindow: NSWindow?
     /// Restores the accessory activation policy when Settings closes.
@@ -1211,6 +1218,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
 
     public static func main() {
         let application = NSApplication.shared
+        ProcessInfo.processInfo.processName = "PearchHA"
         let delegate = PerchHAApplication(configStore: try? JSONConfigStore())
         application.delegate = delegate
         application.setActivationPolicy(.accessory)
@@ -1294,7 +1302,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             },
             protectedActionValueStore: protectedActionValueStore,
             snapshotSink: { [weak self] snapshot in
-                self?.updateStatusItems(from: snapshot)
+                self?.scheduleStatusItemRefresh(from: snapshot)
                 self?.scheduleDisplayConfigurationRepairIfNeeded(after: snapshot)
             },
             signOutHandler: { [weak self] in
@@ -1303,10 +1311,19 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         )
         model.applyDisplayPreferences(configuration.displayPreferences)
         panelModel = model
-        panel = Self.makePanel(model: model) { [weak self] in
-            self?.openSettingsWindow()
-        }
-        updateStatusItems(from: model.snapshot)
+        panel = Self.makePanel(
+            model: model,
+            onOpenSettings: { [weak self] in
+                self?.openSettingsWindow()
+            },
+            onOpenEntitySettings: { [weak self] entityID in
+                self?.openSettingsWindow(
+                    initialTab: .entities,
+                    initiallyExpandedEntityIDs: [entityID]
+                )
+            }
+        )
+        scheduleStatusItemRefresh(from: model.snapshot, force: true)
         autoConnectTask = startAutoConnect(form: rememberedForm, model: model)
     }
 
@@ -1469,6 +1486,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             statusItemTitle: first?.title,
             statusItemAccessibilityLabel: first?.accessibilityLabel,
             statusItemHasImage: first?.hasImage ?? false,
+            statusItemShowsLoadingIndicator: first?.showsLoadingIndicator ?? false,
             statusItemImageWidth: first?.imageWidth,
             statusItemImageHeight: first?.imageHeight,
             statusItemImageIsTemplate: first?.imageIsTemplate,
@@ -1527,6 +1545,9 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
 
     public func connect() async {
         await panelModel?.connect()
+        if let panelModel {
+            scheduleStatusItemRefresh(from: panelModel.snapshot, force: true)
+        }
     }
 
     /// Signs the user out, clearing the stored Keychain session while keeping the
@@ -1683,7 +1704,11 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
 
     @discardableResult
     public func setMenuBarEntity(_ id: EntityID, isVisible: Bool) -> Bool {
-        panelModel?.setMenuBarEntity(id, isVisible: isVisible) ?? false
+        let changed = panelModel?.setMenuBarEntity(id, isVisible: isVisible) ?? false
+        if changed, let panelModel {
+            scheduleStatusItemRefresh(from: panelModel.snapshot, force: true)
+        }
+        return changed
     }
 
     @discardableResult
@@ -1894,8 +1919,8 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             configurationPersistenceState = .ready
             applyAppearancePreferences()
             if let panelModel {
-                updateStatusItems(from: panelModel.snapshot)
                 panelModel.applyDisplayPreferences(preferences)
+                scheduleStatusItemRefresh(from: panelModel.snapshot, force: true)
             }
             performanceSignposter.endInterval("PersistDisplayPreferences", interval)
             return .saved
@@ -1942,7 +1967,8 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
 
     public static func makePanel(
         model: PerchHAPanelModel,
-        onOpenSettings: (() -> Void)? = nil
+        onOpenSettings: (() -> Void)? = nil,
+        onOpenEntitySettings: ((EntityID) -> Void)? = nil
     ) -> NSPanel {
         let panel = PerchHAStatusPanel(
             contentRect: NSRect(origin: .zero, size: AppShellLayout.panelContentSize),
@@ -1959,7 +1985,11 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         panel.backgroundColor = .clear
         panel.hasShadow = false
         let hostingController = PerchHAFirstMouseHostingController(
-            rootView: PerchHAPanelView(model: model, onOpenSettings: onOpenSettings)
+            rootView: PerchHAPanelView(
+                model: model,
+                onOpenSettings: onOpenSettings,
+                onOpenEntitySettings: onOpenEntitySettings
+            )
         )
         hostingController.view.wantsLayer = true
         hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
@@ -2026,7 +2056,10 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         return window
     }
 
-    private func openSettingsWindow() {
+    private func openSettingsWindow(
+        initialTab: PerchHASettingsView.Tab = .connection,
+        initiallyExpandedEntityIDs: Set<EntityID> = []
+    ) {
         guard let panelModel else {
             return
         }
@@ -2037,6 +2070,8 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         panelModel.setPanelActive(false)
         let window = settingsWindow ?? Self.makeSettingsWindow(
             model: panelModel,
+            initialTab: initialTab,
+            initiallyExpandedEntityIDs: initiallyExpandedEntityIDs,
             displayPreferencesProvider: { [weak self] in
                 self?.displayPreferences ?? .defaults
             },
@@ -2050,16 +2085,46 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
                 self?.setLaunchAtLogin(enabled) ?? false
             }
         )
+        if settingsWindow != nil {
+            window.contentViewController = PerchHAFirstMouseHostingController(
+                rootView: PerchHASettingsView(
+                    model: panelModel,
+                    initialTab: initialTab,
+                    initiallyExpandedEntityIDs: initiallyExpandedEntityIDs,
+                    displayPreferencesProvider: { [weak self] in
+                        self?.displayPreferences ?? .defaults
+                    },
+                    displayPreferencesSink: { [weak self] preferences in
+                        self?.persist(displayPreferences: preferences)
+                    },
+                    launchAtLoginProvider: { [weak self] in
+                        self?.launchesAtLogin ?? false
+                    },
+                    launchAtLoginSink: { [weak self] enabled in
+                        self?.setLaunchAtLogin(enabled) ?? false
+                    }
+                )
+            )
+        }
         settingsWindow = window
         if settingsWindowCloseObserver == nil {
             settingsWindowCloseObserver = NotificationCenter.default.addObserver(
                 forName: NSWindow.willCloseNotification,
                 object: window,
                 queue: .main
-            ) { _ in
+            ) { [weak self] _ in
                 // Back to a pure menu-bar presence once Settings closes.
                 Task { @MainActor in
                     NSApp.setActivationPolicy(.accessory)
+                    guard let self else {
+                        return
+                    }
+                    self.settingsWindow?.contentViewController = nil
+                    self.settingsWindow = nil
+                    if let observer = self.settingsWindowCloseObserver {
+                        NotificationCenter.default.removeObserver(observer)
+                        self.settingsWindowCloseObserver = nil
+                    }
                 }
             }
         }
@@ -2073,8 +2138,8 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         // the app was still an accessory does not reliably survive the switch,
         // so it is (re)applied here every time.
         Self.applyPearchApplicationIcon()
-        window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
     }
 
     /// Applies the bundled Pearch mark as the application icon for unbundled
@@ -2142,6 +2207,10 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     }
 
     private func releaseShell() {
+        statusItemRefreshTask?.cancel()
+        statusItemRefreshTask = nil
+        pendingStatusItemSnapshot = nil
+        lastStatusItemRefreshAt = nil
         autoConnectTask?.cancel()
         autoConnectTask = nil
         panelModel?.cancelInFlightAction()
@@ -2162,6 +2231,52 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             NSStatusBar.system.removeStatusItem(entry.item)
         }
         statusItems = []
+    }
+
+    private func scheduleStatusItemRefresh(
+        from snapshot: PerchHAPanelSnapshot,
+        force: Bool = false
+    ) {
+        pendingStatusItemSnapshot = snapshot
+        let interval = displayPreferences.menuBarRefreshInterval.timeInterval
+        let now = Date()
+        let lastRefreshAt = lastStatusItemRefreshAt ?? .distantPast
+        let elapsed = now.timeIntervalSince(lastRefreshAt)
+
+        if force || elapsed >= interval {
+            flushScheduledStatusItemRefresh()
+            return
+        }
+
+        guard statusItemRefreshTask == nil else {
+            return
+        }
+
+        let remaining = max(0, interval - elapsed)
+        statusItemRefreshTask = Task { [weak self] in
+            let duration = UInt64((remaining * 1_000_000_000).rounded())
+            if duration > 0 {
+                try? await Task.sleep(nanoseconds: duration)
+            }
+            await MainActor.run {
+                guard let self else {
+                    return
+                }
+                self.statusItemRefreshTask = nil
+                self.flushScheduledStatusItemRefresh()
+            }
+        }
+    }
+
+    private func flushScheduledStatusItemRefresh() {
+        statusItemRefreshTask?.cancel()
+        statusItemRefreshTask = nil
+        guard let snapshot = pendingStatusItemSnapshot else {
+            return
+        }
+        pendingStatusItemSnapshot = nil
+        lastStatusItemRefreshAt = Date()
+        updateStatusItems(from: snapshot)
     }
 
     /// Reconciles the live menu-bar status items against the presenter output:
@@ -2185,9 +2300,37 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         }
 
         for (index, presentation) in presentations.enumerated() {
+            if statusItems[index].presentation == presentation,
+               statusItemAlreadyRendered(statusItems[index]) {
+                updateLoadingIndicator(
+                    shouldShow: index == 0 && shouldShowStatusItemLoadingIndicator(for: snapshot),
+                    for: &statusItems[index]
+                )
+                continue
+            }
             apply(presentation, to: &statusItems[index])
+            updateLoadingIndicator(
+                shouldShow: index == 0 && shouldShowStatusItemLoadingIndicator(for: snapshot),
+                for: &statusItems[index]
+            )
+        }
+
+        if presentations.isEmpty == false {
+            for index in presentations.count..<statusItems.count {
+                updateLoadingIndicator(shouldShow: false, for: &statusItems[index])
+            }
         }
         performanceSignposter.endInterval("UpdateStatusItems", interval)
+    }
+
+    private func statusItemAlreadyRendered(_ entry: PerchHAStatusItemEntry) -> Bool {
+        guard let button = entry.item.button else {
+            return false
+        }
+        return button.image != nil
+            || !button.title.isEmpty
+            || !button.attributedTitle.string.isEmpty
+            || entry.loadingIndicator != nil
     }
 
     private func makeStatusItem() -> NSStatusItem {
@@ -2265,6 +2408,74 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         button?.setAccessibilityLabel(presentation.accessibilityLabel)
     }
 
+    private func shouldShowStatusItemLoadingIndicator(for snapshot: PerchHAPanelSnapshot) -> Bool {
+        switch snapshot.phase {
+        case .connecting:
+            true
+        case .firstRun:
+            snapshot.connectionForm.primaryURL() != nil
+                && snapshot.connectionForm.usesStoredAuthSession
+                && snapshot.availableRooms.isEmpty
+        case .connectedEmpty, .connectedData, .reconnecting, .failed, .failedStale:
+            false
+        }
+    }
+
+    private func updateLoadingIndicator(
+        shouldShow: Bool,
+        for entry: inout PerchHAStatusItemEntry
+    ) {
+        guard let button = entry.item.button else {
+            return
+        }
+        if shouldShow {
+            let indicator = entry.loadingIndicator ?? makeStatusItemLoadingIndicator()
+            if indicator.superview !== button {
+                button.addSubview(indicator)
+            }
+            entry.loadingIndicator = indicator
+            button.image = nil
+            button.imagePosition = .noImage
+            button.title = ""
+            button.attributedTitle = NSAttributedString(string: "")
+            button.toolTip = "PearchHA is starting"
+            button.setAccessibilityLabel("PearchHA is starting")
+            positionLoadingIndicator(indicator, in: button)
+            indicator.startAnimation(nil)
+            return
+        }
+
+        entry.loadingIndicator?.stopAnimation(nil)
+        entry.loadingIndicator?.removeFromSuperview()
+        entry.loadingIndicator = nil
+    }
+
+    private func makeStatusItemLoadingIndicator() -> NSProgressIndicator {
+        let indicator = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: 14, height: 14))
+        indicator.style = .spinning
+        indicator.controlSize = .small
+        indicator.isDisplayedWhenStopped = false
+        indicator.usesThreadedAnimation = false
+        return indicator
+    }
+
+    private func positionLoadingIndicator(_ indicator: NSProgressIndicator, in button: NSStatusBarButton) {
+        indicator.sizeToFit()
+        let frame = indicator.frame
+        indicator.frame = NSRect(
+            x: floor((button.bounds.width - frame.width) / 2),
+            y: floor((button.bounds.height - frame.height) / 2),
+            width: frame.width,
+            height: frame.height
+        )
+        indicator.autoresizingMask = [
+            .minXMargin,
+            .maxXMargin,
+            .minYMargin,
+            .maxYMargin
+        ]
+    }
+
     /// Sets a two-line status-item title in the iStat Menus stacked style: a
     /// tiny tracked caps label above a monospaced-digit value, centered, sized
     /// so both lines fit the standard menu-bar height.
@@ -2336,10 +2547,25 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
 
     private func statusItemSnapshot(for item: NSStatusItem) -> PerchHAMenuBarStatusItemSnapshot {
         let button = item.button
+        let title = {
+            let plain = button?.title ?? ""
+            if plain.isEmpty == false {
+                return plain
+            }
+            let attributed = button?.attributedTitle.string ?? ""
+            return attributed
+        }()
+        let showsLoadingIndicator = button?.subviews.contains(where: {
+            guard let indicator = $0 as? NSProgressIndicator else {
+                return false
+            }
+            return indicator.isHidden == false
+        }) ?? false
         return PerchHAMenuBarStatusItemSnapshot(
-            title: button?.title,
+            title: title,
             accessibilityLabel: button?.accessibilityLabel(),
             hasImage: button?.image != nil,
+            showsLoadingIndicator: showsLoadingIndicator,
             imageWidth: button?.image.map { Int($0.size.width.rounded()) },
             imageHeight: button?.image.map { Int($0.size.height.rounded()) },
             imageIsTemplate: button?.image?.isTemplate,
@@ -2563,6 +2789,7 @@ private struct PerchHAStatusItemEntry {
     let item: NSStatusItem
     var presentation: PerchHAMenuBarPresentation = .fallback
     var imageCache: (key: PerchHAStatusItemImageCacheKey, image: NSImage?)?
+    weak var loadingIndicator: NSProgressIndicator?
 }
 
 private struct PerchHAStatusItemImageCacheKey: Equatable {

@@ -8,6 +8,7 @@ let package = Package(
         .macOS(.v13)
     ],
     products: [
+        .executable(name: "PearchHA", targets: ["PerchHAApp"]),
         .executable(name: "PerchHA", targets: ["PerchHAApp"]),
         .executable(name: "hamirror", targets: ["hamirror"]),
         .executable(name: "perchha-smoke", targets: ["perchha-smoke"]),

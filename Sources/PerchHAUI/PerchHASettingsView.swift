@@ -251,6 +251,7 @@ private struct PerchHASettingsEntityPresentation: Equatable {
 private final class PerchHASettingsViewState: ObservableObject {
     @Published private(set) var snapshot: PerchHAPanelSnapshot
     @Published private(set) var settingsSelectionTree: [SelectableRoom]
+    @Published private(set) var snapshotRevision: UInt64 = 0
     @Published private(set) var customActionPersistenceFailureDescription: String?
     @Published private(set) var shellPersistenceFailureDescription: String?
     @Published private(set) var oauthSignInState: PerchHAOAuthSignInState
@@ -258,10 +259,11 @@ private final class PerchHASettingsViewState: ObservableObject {
     @Published private(set) var retryBackoffState: PerchHARetryBackoffState
     @Published private(set) var diagnosticEvents: [PerchHADiagnosticEvent]
     @Published private(set) var diagnosticsReferenceInstant: PerchInstant
-    @Published private(set) var entityPresentations: [EntityID: PerchHASettingsEntityPresentation]
 
     private var cancellables: Set<AnyCancellable> = []
     private weak var model: PerchHAPanelModel?
+    private var averageLinkPresenceCache: [EntityID: Bool] = [:]
+    private var averageAvailabilityCache: [EntityID: Bool] = [:]
 
     init(model: PerchHAPanelModel) {
         self.model = model
@@ -274,29 +276,26 @@ private final class PerchHASettingsViewState: ObservableObject {
         self.retryBackoffState = model.retryBackoffState
         self.diagnosticEvents = model.diagnosticEvents
         self.diagnosticsReferenceInstant = model.diagnosticsReferenceInstant
-        self.entityPresentations = [:]
-        rebuildEntityPresentations(using: model, tree: model.settingsSelectionTree)
 
         model.$snapshot
             .receive(on: RunLoop.main)
-            .sink { [weak self, weak model] snapshot in
-                let previousSnapshot = self?.snapshot
-                self?.snapshot = snapshot
-                if let model,
-                   (
-                    previousSnapshot?.availableRooms != snapshot.availableRooms
-                        || previousSnapshot?.menuBarDisplayConfiguration != snapshot.menuBarDisplayConfiguration
-                   ) {
-                    self?.rebuildEntityPresentations(using: model, tree: self?.settingsSelectionTree ?? [])
+            .sink { [weak self] snapshot in
+                guard let self else {
+                    return
                 }
-            }
-            .store(in: &cancellables)
-        model.$settingsSelectionTree
-            .receive(on: RunLoop.main)
-            .sink { [weak self, weak model] tree in
-                self?.settingsSelectionTree = tree
-                if let model {
-                    self?.rebuildEntityPresentations(using: model, tree: tree)
+                let previousSnapshot = self.snapshot
+                guard self.shouldAcceptSnapshotUpdate(from: previousSnapshot, to: snapshot) else {
+                    return
+                }
+                self.snapshot = snapshot
+                self.snapshotRevision &+= 1
+                if previousSnapshot.selectionConfiguration != snapshot.selectionConfiguration
+                    || previousSnapshot.selectionQuery != snapshot.selectionQuery {
+                    self.settingsSelectionTree = snapshot.selectionTree
+                    self.clearDerivedEntityPresentationCaches()
+                }
+                if previousSnapshot.menuBarDisplayConfiguration != snapshot.menuBarDisplayConfiguration {
+                    self.clearDerivedEntityPresentationCaches()
                 }
             }
             .store(in: &cancellables)
@@ -324,29 +323,51 @@ private final class PerchHASettingsViewState: ObservableObject {
     }
 
     func presentation(for entity: DiscoveredEntity, roomName: String) -> PerchHASettingsEntityPresentation {
-        entityPresentations[entity.id]
-            ?? PerchHASettingsEntityPresentation(
-                metadata: PerchHAEntityMetadataPresentation(entity: entity, roomName: roomName),
-                hasAverageLinks: !(model?.averageLinkedEntityIDs(for: entity.id).isEmpty ?? true),
-                canAverage: model?.canAverage(entity.id) ?? false
-            )
+        PerchHASettingsEntityPresentation(
+            metadata: PerchHAEntityMetadataPresentation(entity: entity, roomName: roomName),
+            hasAverageLinks: hasAverageLinks(for: entity.id),
+            canAverage: canAverage(entity.id)
+        )
     }
 
-    private func rebuildEntityPresentations(using model: PerchHAPanelModel, tree: [SelectableRoom]) {
-        entityPresentations = Dictionary(
-            uniqueKeysWithValues: tree.flatMap { room in
-                room.entities.map { selectable in
-                    (
-                        selectable.entity.id,
-                        PerchHASettingsEntityPresentation(
-                            metadata: PerchHAEntityMetadataPresentation(entity: selectable.entity, roomName: room.name),
-                            hasAverageLinks: !model.averageLinkedEntityIDs(for: selectable.entity.id).isEmpty,
-                            canAverage: model.canAverage(selectable.entity.id)
-                        )
-                    )
-                }
-            }
-        )
+    private func clearDerivedEntityPresentationCaches() {
+        averageLinkPresenceCache.removeAll(keepingCapacity: true)
+        averageAvailabilityCache.removeAll(keepingCapacity: true)
+    }
+
+    private func hasAverageLinks(for id: EntityID) -> Bool {
+        if let cached = averageLinkPresenceCache[id] {
+            return cached
+        }
+        let resolved = !(model?.averageLinkedEntityIDs(for: id).isEmpty ?? true)
+        averageLinkPresenceCache[id] = resolved
+        return resolved
+    }
+
+    private func canAverage(_ id: EntityID) -> Bool {
+        if let cached = averageAvailabilityCache[id] {
+            return cached
+        }
+        let resolved = model?.canAverage(id) ?? false
+        averageAvailabilityCache[id] = resolved
+        return resolved
+    }
+
+    private func shouldAcceptSnapshotUpdate(
+        from previous: PerchHAPanelSnapshot,
+        to next: PerchHAPanelSnapshot
+    ) -> Bool {
+        previous.connectionState != next.connectionState
+            || previous.phase != next.phase
+            || previous.connectionForm != next.connectionForm
+            || previous.canRetry != next.canRetry
+            || previous.selectionConfiguration != next.selectionConfiguration
+            || previous.menuBarDisplayConfiguration != next.menuBarDisplayConfiguration
+            || previous.selectionQuery != next.selectionQuery
+            || previous.isSettingsPresented != next.isSettingsPresented
+            || previous.selectionPersistenceFailureDescription != next.selectionPersistenceFailureDescription
+            || previous.displayPersistenceFailureDescription != next.displayPersistenceFailureDescription
+            || previous.failureDescription != next.failureDescription
     }
 }
 
@@ -358,7 +379,9 @@ private final class PerchHASettingsViewState: ObservableObject {
 /// self-signed certificate opt-in scoped to the entered HTTPS hosts.
 /// Certificate validation stays strict unless the user opts in.
 struct PerchHAConnectionFormFields: View {
-    @ObservedObject var model: PerchHAPanelModel
+    let model: PerchHAPanelModel
+    let snapshot: PerchHAPanelSnapshot
+    let oauthSignInState: PerchHAOAuthSignInState
 
     var body: some View {
         if showsConnectedState {
@@ -462,7 +485,7 @@ struct PerchHAConnectionFormFields: View {
                 )
             }
 
-            ForEach(Array(model.snapshot.connectionForm.addresses.enumerated()), id: \.element.id) { index, address in
+            ForEach(Array(snapshot.connectionForm.addresses.enumerated()), id: \.element.id) { index, address in
                 alternativeAddressRow(address, index: index)
             }
 
@@ -491,7 +514,7 @@ struct PerchHAConnectionFormFields: View {
             Toggle(
                 "Trust self-signed certificates for these addresses",
                 isOn: Binding(
-                    get: { model.snapshot.connectionForm.allowsSelfSignedCertificates },
+                    get: { snapshot.connectionForm.allowsSelfSignedCertificates },
                     set: { model.updateConnectionForm(allowsSelfSignedCertificates: $0) }
                 )
             )
@@ -506,7 +529,7 @@ struct PerchHAConnectionFormFields: View {
     }
 
     private func alternativeAddressRow(_ address: PerchHAConnectionAddressField, index: Int) -> some View {
-        let count = model.snapshot.connectionForm.addresses.count
+        let count = snapshot.connectionForm.addresses.count
         let invalid = !address.urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && address.validURL == nil
         return VStack(alignment: .leading, spacing: 4) {
@@ -566,10 +589,10 @@ struct PerchHAConnectionFormFields: View {
     /// the form should present the compact connected state instead of blank
     /// login fields.
     private var showsConnectedState: Bool {
-        if model.snapshot.showsConnectedContent {
+        if snapshot.showsConnectedContent {
             return true
         }
-        switch model.snapshot.connectionState {
+        switch snapshot.connectionState {
         case .connected, .reconnecting:
             return true
         case .connecting, .disconnected, .failed:
@@ -580,7 +603,7 @@ struct PerchHAConnectionFormFields: View {
     /// The host shown in the connected state, derived from the real stored
     /// connection URL (not a blanked editing binding).
     private var connectedHost: String? {
-        let urlString = model.snapshot.connectionForm.urlString
+        let urlString = snapshot.connectionForm.urlString
         if let host = URL(string: urlString)?.host, !host.isEmpty {
             return host
         }
@@ -659,7 +682,7 @@ struct PerchHAConnectionFormFields: View {
 
     @ViewBuilder
     private var connectionStatusBanner: some View {
-        if let failureDescription = model.snapshot.failureDescription {
+        if let failureDescription = snapshot.failureDescription {
             connectionMessage(
                 failureDescription,
                 hint: connectionFailureHint(failureDescription),
@@ -721,33 +744,33 @@ struct PerchHAConnectionFormFields: View {
     }
 
     private var oauthFailureDescription: String? {
-        if case let .failed(message) = model.oauthSignInState {
+        if case let .failed(message) = oauthSignInState {
             return message
         }
         return nil
     }
 
     private var oauthSignInButtonTitle: String {
-        model.oauthSignInState == .signingIn ? "Signing in..." : "Sign in"
+        oauthSignInState == .signingIn ? "Signing in..." : "Sign in"
     }
 
     private var connectionProgressMessage: String? {
-        if model.oauthSignInState == .signingIn {
+        if oauthSignInState == .signingIn {
             return "Signing in"
         }
-        if model.snapshot.connectionState == .connecting {
+        if snapshot.connectionState == .connecting {
             return "Connecting to Home Assistant"
         }
         return nil
     }
 
     private var isConnectionBusy: Bool {
-        model.snapshot.connectionState == .connecting || model.oauthSignInState == .signingIn
+        snapshot.connectionState == .connecting || oauthSignInState == .signingIn
     }
 
     private var urlBinding: Binding<String> {
         Binding(
-            get: { model.snapshot.connectionForm.urlString },
+            get: { snapshot.connectionForm.urlString },
             set: { value in
                 model.updateConnectionForm(urlString: value)
             }
@@ -756,7 +779,7 @@ struct PerchHAConnectionFormFields: View {
 
     private func labelBinding(id: PerchHAConnectionAddressField.ID) -> Binding<String> {
         Binding(
-            get: { model.snapshot.connectionForm.addresses.first { $0.id == id }?.label ?? "" },
+            get: { snapshot.connectionForm.addresses.first { $0.id == id }?.label ?? "" },
             set: { value in
                 model.updateConnectionAddress(id: id, label: value)
             }
@@ -765,7 +788,7 @@ struct PerchHAConnectionFormFields: View {
 
     private func addressURLBinding(id: PerchHAConnectionAddressField.ID) -> Binding<String> {
         Binding(
-            get: { model.snapshot.connectionForm.addresses.first { $0.id == id }?.urlString ?? "" },
+            get: { snapshot.connectionForm.addresses.first { $0.id == id }?.urlString ?? "" },
             set: { value in
                 model.updateConnectionAddress(id: id, urlString: value)
             }
@@ -783,7 +806,7 @@ struct PerchHAConnectionFormFields: View {
 
     private var tokenAccessPresentation: PerchHAConnectionTokenAccessPresentation {
         PerchHAConnectionTokenAccessPresentation(
-            usesStoredToken: model.snapshot.connectionForm.usesStoredAuthSession,
+            usesStoredToken: snapshot.connectionForm.usesStoredAuthSession,
             tokenDraft: model.tokenInputForView
         )
     }
@@ -1098,7 +1121,11 @@ public struct PerchHASettingsView: View {
             }
             settingsCard {
                 settingsSection(title: "Addresses & access", systemImage: "network") {
-                    PerchHAConnectionFormFields(model: model)
+                    PerchHAConnectionFormFields(
+                        model: model,
+                        snapshot: snapshot,
+                        oauthSignInState: oauthState
+                    )
                         .textFieldStyle(.roundedBorder)
                 }
             }
@@ -1131,7 +1158,7 @@ public struct PerchHASettingsView: View {
                 }
             }
             settingsControlRow("Last update") {
-                Text(model.snapshot.lastUpdateDescription)
+                Text(snapshot.lastUpdateDescription)
                     .font(PerchHATypography.bodyValue())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -1143,7 +1170,7 @@ public struct PerchHASettingsView: View {
     /// The connected server host shown in the Connection status card, derived
     /// from the stored connection URL. Never exposes the access token.
     private var connectionSummaryHost: String? {
-        let urlString = model.snapshot.connectionForm.urlString
+        let urlString = snapshot.connectionForm.urlString
         if let host = URL(string: urlString)?.host, !host.isEmpty {
             return host
         }
@@ -1796,15 +1823,26 @@ public struct PerchHASettingsView: View {
     private var diagnosticsUpdatesContent: some View {
         VStack(alignment: .leading, spacing: 8) {
             settingsControlRow("Last updated") {
-                Text(model.snapshot.lastUpdateDescription)
+                Text(snapshot.lastUpdateDescription)
                     .font(PerchHATypography.bodyValue())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            Text("Values update live while the panel is open and refresh automatically in the background.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            diagnosticsRefreshSlider(
+                title: "Menu Bar Refresh",
+                value: displayPreferences.menuBarRefreshInterval.displayName,
+                binding: menuBarRefreshIntervalIndexBinding
+            )
+            diagnosticsRefreshSlider(
+                title: "Data Sync",
+                value: displayPreferences.dataSyncInterval.displayName,
+                binding: dataSyncIntervalIndexBinding
+            )
+            diagnosticsRefreshSlider(
+                title: "History Detail Refresh",
+                value: displayPreferences.historyDetailRefreshInterval.displayName,
+                binding: historyDetailRefreshIntervalIndexBinding
+            )
             Button {
                 model.startRefresh()
             } label: {
@@ -1820,34 +1858,48 @@ public struct PerchHASettingsView: View {
     }
 
     private var diagnosticsHistorySyncContent: some View {
-        let sync = PerchHAHistoryBulkSyncConfiguration()
         let cacheEntries = model.historyCacheEntryCount()
         let cacheSamples = model.historyCacheSampleCount()
         let cacheCapacity = model.historyCacheCapacity()
         return VStack(alignment: .leading, spacing: 6) {
-            settingsControlRow("Cycle interval") {
-                Text("\(sync.interval.nanoseconds / 1_000_000_000) s")
-                    .foregroundStyle(.secondary)
-            }
-            settingsControlRow("Settle delay") {
-                Text("\(sync.settleDelay.nanoseconds / 1_000_000) ms")
-                    .foregroundStyle(.secondary)
-            }
-            settingsControlRow("Batch size") {
-                Text("\(sync.batchSize) values per request")
-                    .foregroundStyle(.secondary)
-            }
             settingsControlRow("Cache size") {
                 Text("\(cacheEntries) series · \(cacheSamples) samples · cap \(cacheCapacity)")
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            Text("While the panel is open, inline charts refresh in bulk on this cadence — visible rows every cycle, the rest periodically. These are tuned defaults shown for reference.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            settingsControlRow("Policy") {
+                Text("day on sync · week/month TTL 24h")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func diagnosticsRefreshSlider(
+        title: String,
+        value: String,
+        binding: Binding<Double>
+    ) -> some View {
+        settingsControlRow(title) {
+            Text(value)
+                .font(PerchHATypography.bodyValue())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        Slider(
+            value: binding,
+            in: 0...Double(Self.refreshIntervalOptions.count - 1),
+            step: 1
+        )
+        HStack {
+            Text(Self.refreshIntervalOptions.first?.displayName ?? "1s")
+            Spacer(minLength: 8)
+            Text(Self.refreshIntervalOptions.last?.displayName ?? "300s")
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 
     /// A resolved connection status for the Diagnostics pill, mapped from the
@@ -1963,6 +2015,47 @@ public struct PerchHASettingsView: View {
         Binding(
             get: { displayPreferences.menuBarAppearance },
             set: { updateDisplayPreferences(displayPreferences.with(menuBarAppearance: $0)) }
+        )
+    }
+
+    private var menuBarRefreshIntervalIndexBinding: Binding<Double> {
+        refreshIntervalIndexBinding(
+            get: { displayPreferences.menuBarRefreshInterval },
+            set: { updateDisplayPreferences(displayPreferences.with(menuBarRefreshInterval: $0)) }
+        )
+    }
+
+    private var dataSyncIntervalIndexBinding: Binding<Double> {
+        refreshIntervalIndexBinding(
+            get: { displayPreferences.dataSyncInterval },
+            set: { updateDisplayPreferences(displayPreferences.with(dataSyncInterval: $0)) }
+        )
+    }
+
+    private var historyDetailRefreshIntervalIndexBinding: Binding<Double> {
+        refreshIntervalIndexBinding(
+            get: { displayPreferences.historyDetailRefreshInterval },
+            set: { updateDisplayPreferences(displayPreferences.with(historyDetailRefreshInterval: $0)) }
+        )
+    }
+
+    private func refreshIntervalIndexBinding(
+        get currentValue: @escaping () -> PerchHAMenuBarRefreshInterval,
+        set apply: @escaping (PerchHAMenuBarRefreshInterval) -> Void
+    ) -> Binding<Double> {
+        Binding(
+            get: {
+                Double(
+                    Self.refreshIntervalOptions.firstIndex(of: currentValue()) ?? 0
+                )
+            },
+            set: { newValue in
+                let index = min(
+                    max(Int(newValue.rounded()), Self.refreshIntervalOptions.startIndex),
+                    Self.refreshIntervalOptions.index(before: Self.refreshIntervalOptions.endIndex)
+                )
+                apply(Self.refreshIntervalOptions[index])
+            }
         )
     }
 
@@ -2230,10 +2323,19 @@ public struct PerchHASettingsView: View {
     }
 
     private static let applicationVersion = PerchHAApplicationVersionInfo.currentBundle()
+    private static let refreshIntervalOptions = PerchHAMenuBarRefreshInterval.allCases
 
     private var entitiesTab: some View {
-        settingsPage(title: "Entities", systemImage: Tab.entities.systemImage) {
-            settingsContent
+        ScrollViewReader { scrollProxy in
+            settingsPage(title: "Entities", systemImage: Tab.entities.systemImage) {
+                settingsContent
+            }
+            .onAppear {
+                scheduleInspectedEntityReveal(using: scrollProxy)
+            }
+            .onChange(of: inspectedEntityID) { _ in
+                scheduleInspectedEntityReveal(using: scrollProxy)
+            }
         }
     }
 
@@ -2329,7 +2431,7 @@ public struct PerchHASettingsView: View {
                         if isRoomExpanded(room) {
                             ForEach(Array(room.entities.enumerated()), id: \.element.entity.id.rawValue) { rowIndex, selectable in
                                 selectionEntityRowSegment(room: room, rowIndex: rowIndex, selectable: selectable)
-                                    .transition(.opacity)
+                                    .id(selectable.entity.id.rawValue)
                             }
                         }
                     }
@@ -2697,6 +2799,23 @@ public struct PerchHASettingsView: View {
         inspectedEntityID = (inspectedEntityID == id) ? nil : id
     }
 
+    private func revealInspectedEntity(using scrollProxy: ScrollViewProxy) {
+        guard let inspectedEntityID else {
+            return
+        }
+        scrollProxy.scrollTo(inspectedEntityID.rawValue, anchor: .center)
+    }
+
+    private func scheduleInspectedEntityReveal(using scrollProxy: ScrollViewProxy) {
+        guard inspectedEntityID != nil else {
+            return
+        }
+        Task { @MainActor in
+            await Task.yield()
+            revealInspectedEntity(using: scrollProxy)
+        }
+    }
+
     /// The bespoke detail pane shown when an entity row is expanded: clearly
     /// labelled Display, Menu bar, Alerts, and Buttons sections with
     /// accent-tinted headers and accent-tinted controls, separated by hairlines.
@@ -2708,9 +2827,6 @@ public struct PerchHASettingsView: View {
             entity: entity
         )
         let isPromoted = snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
-        let showsThresholdSection = EntityDisplayDefaults.hasThresholds(
-            EntityDisplayDefaults.effectiveThresholds(for: entity, configuration: configuration)
-        )
         let showsAverageSection = viewState.presentation(for: entity, roomName: roomName).canAverage
         return VStack(alignment: .leading, spacing: 0) {
             settingsSection(title: "Identity", systemImage: "info.circle") {
@@ -2730,11 +2846,9 @@ public struct PerchHASettingsView: View {
             settingsSection(title: "Menu bar", systemImage: "menubar.rectangle") {
                 menuBarSectionControls(for: entity, isPromoted: isPromoted)
             }
-            if showsThresholdSection {
-                settingsSectionDivider
-                settingsSection(title: "Thresholds", systemImage: "bell.badge") {
-                    menuBarThresholdControls(for: entity, configuration: configuration)
-                }
+            settingsSectionDivider
+            settingsSection(title: "Thresholds", systemImage: "bell.badge") {
+                menuBarThresholdControls(for: entity, configuration: configuration)
             }
         }
         .font(.caption)
@@ -3229,7 +3343,11 @@ public struct PerchHASettingsView: View {
             return detected.displayName
         }
         let trimmedUnit = entity.unit?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmedUnit.isEmpty ? detected.displayName : trimmedUnit
+        if !trimmedUnit.isEmpty {
+            return trimmedUnit
+        }
+        let trimmedState = entity.state.trimmingCharacters(in: .whitespacesAndNewlines)
+        return Double(trimmedState) == nil ? "String" : detected.displayName
     }
 
     private struct UnitSelectionOption: Equatable {
@@ -3376,7 +3494,10 @@ public struct PerchHASettingsView: View {
     private func menuBarThresholdControls(
         for entity: DiscoveredEntity,
         configuration: MenuBarItemConfiguration
-    ) -> some View {
+    ) -> AnyView {
+        guard entitySupportsNumericThresholdEditing(entity, configuration: configuration) else {
+            return AnyView(semanticStateThresholdControls(for: entity))
+        }
         let thresholds = EntityDisplayDefaults.effectiveThresholds(for: entity, configuration: configuration)
         let steps = thresholds.steps.sorted { $0.value > $1.value }
         let defaultThresholds = EntityDisplayDefaults.defaultThresholds(
@@ -3384,12 +3505,9 @@ public struct PerchHASettingsView: View {
             selectedUnit: configuration.displayUnit
         )
         let hasThresholdDefaults = EntityDisplayDefaults.hasThresholds(defaultThresholds)
-        return VStack(alignment: .leading, spacing: 8) {
+        return AnyView(VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text("From each step's value upward the value wears the step's color; Base applies below every step.")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 8)
+                Spacer(minLength: 0)
                 if hasThresholdDefaults {
                     Button {
                         model.setThresholds(entity.id, thresholds: defaultThresholds)
@@ -3447,6 +3565,192 @@ public struct PerchHASettingsView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading))
+    }
+
+    private func entitySupportsNumericThresholdEditing(
+        _ entity: DiscoveredEntity,
+        configuration: MenuBarItemConfiguration
+    ) -> Bool {
+        if Double(entity.state.trimmingCharacters(in: .whitespacesAndNewlines)) != nil {
+            return true
+        }
+        let thresholds = EntityDisplayDefaults.effectiveThresholds(for: entity, configuration: configuration)
+        return EntityDisplayDefaults.hasThresholds(thresholds)
+    }
+
+    private func semanticStateThresholdControls(for entity: DiscoveredEntity) -> some View {
+        let configuration = snapshot.effectiveMenuBarItemConfiguration(for: entity)
+        let thresholds = EntityDisplayDefaults.effectiveStateThresholds(for: entity, configuration: configuration)
+        let currentColor = EntityDisplayDefaults.semanticStateColor(
+            for: entity.state,
+            entity: entity,
+            configuration: configuration
+        )
+        let hasDefaultThresholds = EntityDisplayDefaults.hasStateThresholds(
+            EntityDisplayDefaults.defaultStateThresholds(for: entity)
+        )
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Spacer(minLength: 0)
+                if hasDefaultThresholds {
+                    Button {
+                        model.setStateThresholds(entity.id, thresholds: .inheritingDefaults)
+                    } label: {
+                        Label("Reset defaults", systemImage: "arrow.counterclockwise")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(PerchHAIconButtonStyle())
+                    .disabled(configuration.stateThresholds.inheritsDefaults)
+                    .accessibilityLabel("Reset \(entity.name) state threshold colors to defaults")
+                }
+                Button {
+                    let currentState = entity.state.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let stem = currentState.isEmpty ? "match" : currentState.uppercased()
+                    let existingMatches = Set(
+                        thresholds.rules.map { $0.match.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                    )
+                    var nextMatch = stem
+                    var suffix = 2
+                    while existingMatches.contains(nextMatch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) {
+                        nextMatch = "\(stem) \(suffix)"
+                        suffix += 1
+                    }
+                    var next = thresholds.rules
+                    next.append(StateThresholdRule(match: nextMatch, color: ValueThresholds.warningColor))
+                    model.setStateThresholds(
+                        entity.id,
+                        thresholds: StateThresholds(rules: next, baseColor: thresholds.baseColor)
+                    )
+                } label: {
+                    Label("Add threshold", systemImage: "plus.circle.fill")
+                        .labelStyle(.titleAndIcon)
+                        .lineLimit(1)
+                }
+                .buttonStyle(PerchHAIconButtonStyle(prominentOnHover: true))
+                .accessibilityLabel("Add state threshold for \(entity.name)")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 8) {
+                semanticThresholdSwatch(currentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entity.state.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Current state" : entity.state)
+                    Text("Current value")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            ForEach(Array(thresholds.rules.enumerated()), id: \.offset) { index, rule in
+                stateThresholdRuleRow(
+                    entity: entity,
+                    thresholds: thresholds,
+                    rule: rule,
+                    index: index
+                )
+            }
+            HStack(spacing: 8) {
+                ColorPicker(
+                    "Base color",
+                    selection: stateThresholdBaseColorBinding(for: entity.id, thresholds: thresholds),
+                    supportsOpacity: false
+                )
+                .labelsHidden()
+                .frame(width: 34)
+                .accessibilityLabel("\(entity.name) base state threshold color")
+
+                Text("Base")
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 0)
+
+                if thresholds.baseColor != nil {
+                    Button {
+                        model.setStateThresholds(
+                            entity.id,
+                            thresholds: StateThresholds(rules: thresholds.rules, baseColor: nil)
+                        )
+                    } label: {
+                        Image(systemName: "arrow.counterclockwise")
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(PerchHACircularIconButtonStyle())
+                    .controlSize(.small)
+                    .help("Reset base to automatic semantic fallback")
+                    .accessibilityLabel("Reset \(entity.name) base state threshold color")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func semanticThresholdSwatch(_ accent: PerchHAAccentColor) -> some View {
+        RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(PerchHATheme.color(for: accent))
+            .frame(width: 28, height: 16)
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+            )
+    }
+
+    private func stateThresholdRuleRow(
+        entity: DiscoveredEntity,
+        thresholds: StateThresholds,
+        rule: StateThresholdRule,
+        index: Int
+    ) -> some View {
+        HStack(spacing: 8) {
+            ColorPicker(
+                "Threshold color",
+                selection: stateThresholdRuleColorBinding(for: entity.id, thresholds: thresholds, rule: rule),
+                supportsOpacity: false
+            )
+            .labelsHidden()
+            .frame(width: 34)
+            .accessibilityLabel("\(entity.name) state threshold \(index + 1) color")
+
+            ThresholdMatchField(
+                placeholder: "state",
+                value: rule.match
+            ) { newValue in
+                guard !newValue.isEmpty else {
+                    return
+                }
+                var next = thresholds.rules
+                if let position = next.firstIndex(of: rule) {
+                    next[position] = StateThresholdRule(match: newValue, color: rule.color)
+                }
+                model.setStateThresholds(
+                    entity.id,
+                    thresholds: StateThresholds(rules: next, baseColor: thresholds.baseColor)
+                )
+            }
+            .frame(width: 120)
+            .accessibilityLabel("\(entity.name) state threshold \(index + 1) match")
+
+            Spacer(minLength: 0)
+
+            Button {
+                var next = thresholds.rules
+                if let position = next.firstIndex(of: rule) {
+                    next.remove(at: position)
+                }
+                model.setStateThresholds(
+                    entity.id,
+                    thresholds: StateThresholds(rules: next, baseColor: thresholds.baseColor)
+                )
+            } label: {
+                Image(systemName: "trash")
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(PerchHACircularIconButtonStyle())
+            .controlSize(.small)
+            .help("Delete threshold")
+            .accessibilityLabel("Delete \(entity.name) state threshold \(index + 1)")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -3544,6 +3848,51 @@ public struct PerchHASettingsView: View {
                     return
                 }
                 model.setThresholds(id, thresholds: ValueThresholds(steps: thresholds.steps, baseColor: accent))
+            }
+        )
+    }
+
+    private func stateThresholdRuleColorBinding(
+        for id: EntityID,
+        thresholds: StateThresholds,
+        rule: StateThresholdRule
+    ) -> Binding<Color> {
+        Binding(
+            get: {
+                PerchHATheme.color(for: rule.color)
+            },
+            set: { newColor in
+                guard let accent = PerchHAAccentColor(newColor) else {
+                    return
+                }
+                var next = thresholds.rules
+                if let position = next.firstIndex(of: rule) {
+                    next[position] = StateThresholdRule(match: rule.match, color: accent)
+                }
+                model.setStateThresholds(
+                    id,
+                    thresholds: StateThresholds(rules: next, baseColor: thresholds.baseColor)
+                )
+            }
+        )
+    }
+
+    private func stateThresholdBaseColorBinding(
+        for id: EntityID,
+        thresholds: StateThresholds
+    ) -> Binding<Color> {
+        Binding(
+            get: {
+                thresholds.baseColor.map(PerchHATheme.color(for:)) ?? PerchHATheme.accent
+            },
+            set: { newColor in
+                guard let accent = PerchHAAccentColor(newColor) else {
+                    return
+                }
+                model.setStateThresholds(
+                    id,
+                    thresholds: StateThresholds(rules: thresholds.rules, baseColor: accent)
+                )
             }
         )
     }
@@ -4052,6 +4401,47 @@ struct ThresholdBoundField: View {
             return String(Int(value))
         }
         return String(value)
+    }
+}
+
+/// A text editor for non-numeric threshold matches. Empty or whitespace-only
+/// edits revert to the prior stored match instead of creating a blank rule.
+struct ThresholdMatchField: View {
+    let placeholder: String
+    let value: String
+    let onCommit: (String) -> Void
+
+    @State private var text: String = ""
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        TextField(placeholder, text: $text)
+            .textFieldStyle(.roundedBorder)
+            .focused($isFocused)
+            .onAppear {
+                text = value
+            }
+            .onChange(of: value) { newValue in
+                if !isFocused {
+                    text = newValue
+                }
+            }
+            .onSubmit(commit)
+            .onChange(of: isFocused) { focused in
+                if !focused {
+                    commit()
+                }
+            }
+    }
+
+    private func commit() {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            text = value
+            return
+        }
+        text = trimmed
+        onCommit(trimmed)
     }
 }
 

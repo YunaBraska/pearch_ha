@@ -93,6 +93,76 @@ public struct ThresholdStep: Codable, Equatable, Sendable {
     }
 }
 
+public struct StateThresholdRule: Codable, Equatable, Sendable, Identifiable {
+    public let match: String
+    public let color: PerchHAAccentColor
+
+    public var id: String {
+        normalizedMatch
+    }
+
+    public init(match: String, color: PerchHAAccentColor) {
+        self.match = match
+        self.color = color
+    }
+
+    var normalizedMatch: String {
+        match.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+}
+
+public struct StateThresholds: Codable, Equatable, Sendable {
+    public static let inheritingDefaults = StateThresholds(inheritsDefaults: true)
+
+    public let rules: [StateThresholdRule]
+    public let baseColor: PerchHAAccentColor?
+    public let inheritsDefaults: Bool
+
+    public init(
+        rules: [StateThresholdRule] = [],
+        baseColor: PerchHAAccentColor? = nil,
+        inheritsDefaults: Bool = false
+    ) {
+        self.rules = Self.uniqueRules(rules)
+        self.baseColor = baseColor
+        self.inheritsDefaults = inheritsDefaults
+    }
+
+    public func color(for state: String) -> PerchHAAccentColor? {
+        let normalized = state.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else {
+            return baseColor
+        }
+        return rules.first(where: { normalized.contains($0.normalizedMatch) })?.color ?? baseColor
+    }
+
+    public func severity(for state: String) -> ValueSeverity? {
+        guard let color = color(for: state) else {
+            return nil
+        }
+        return ValueThresholds.severity(of: color)
+    }
+
+    private static func uniqueRules(_ rules: [StateThresholdRule]) -> [StateThresholdRule] {
+        var seen: Set<String> = []
+        var result: [StateThresholdRule] = []
+        for rule in rules {
+            let normalized = rule.normalizedMatch
+            guard !normalized.isEmpty, !seen.contains(normalized) else {
+                continue
+            }
+            seen.insert(normalized)
+            result.append(
+                StateThresholdRule(
+                    match: rule.match.trimmingCharacters(in: .whitespacesAndNewlines),
+                    color: rule.color
+                )
+            )
+        }
+        return result
+    }
+}
+
 /// Grafana-style thresholds: ordered steps over a base color.
 ///
 /// The highest step at or below the value wins; below every step the optional
@@ -294,6 +364,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
     /// Empty means no averaging.
     public let averageEntityIDs: [EntityID]
     public let thresholds: ValueThresholds
+    public let stateThresholds: StateThresholds
     /// The chart range for this entity's inline preview and history popover,
     /// or `nil` to inherit the global Appearance default.
     public let defaultHistoryRange: HistoryRange?
@@ -326,6 +397,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         totalEntityID: EntityID? = nil,
         averageEntityIDs: [EntityID] = [],
         thresholds: ValueThresholds = ValueThresholds(),
+        stateThresholds: StateThresholds = .inheritingDefaults,
         defaultHistoryRange: HistoryRange? = nil,
         coverControlMode: CoverControlMode = .both,
         displayUnit: ValueUnit? = nil,
@@ -345,6 +417,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         self.totalEntityID = totalEntityID
         self.averageEntityIDs = Self.uniqueAverageEntityIDs(averageEntityIDs)
         self.thresholds = thresholds
+        self.stateThresholds = stateThresholds
         self.defaultHistoryRange = defaultHistoryRange
         self.coverControlMode = coverControlMode
         self.displayUnit = displayUnit
@@ -368,6 +441,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         totalEntityID: EntityID? = nil,
         averageEntityIDs: [EntityID] = [],
         thresholds: ValueThresholds = ValueThresholds(),
+        stateThresholds: StateThresholds = .inheritingDefaults,
         defaultHistoryRange: HistoryRange? = nil,
         coverControlMode: CoverControlMode = .both,
         displayUnit: ValueUnit? = nil,
@@ -387,6 +461,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             totalEntityID: totalEntityID,
             averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
+            stateThresholds: stateThresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
@@ -408,6 +483,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         absoluteTotal: Double? = nil,
         totalEntityID: EntityID? = nil,
         thresholds: ValueThresholds = ValueThresholds(),
+        stateThresholds: StateThresholds = .inheritingDefaults,
         defaultHistoryRange: HistoryRange? = nil,
         coverControlMode: CoverControlMode = .both,
         displayUnit: ValueUnit? = nil,
@@ -427,6 +503,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             totalEntityID: totalEntityID,
             averageEntityIDs: [],
             thresholds: thresholds,
+            stateThresholds: stateThresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
@@ -447,6 +524,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         totalEntityID: EntityID? = nil,
         averageEntityIDs: [EntityID]? = nil,
         thresholds: ValueThresholds? = nil,
+        stateThresholds: StateThresholds? = nil,
         coverControlMode: CoverControlMode? = nil,
         displayUnit: ValueUnit? = nil,
         displayUnitSymbol: String? = nil,
@@ -464,6 +542,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             totalEntityID: totalEntityID ?? self.totalEntityID,
             averageEntityIDs: averageEntityIDs ?? self.averageEntityIDs,
             thresholds: thresholds ?? self.thresholds,
+            stateThresholds: stateThresholds ?? self.stateThresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode ?? self.coverControlMode,
             displayUnit: displayUnit ?? self.displayUnit,
@@ -492,6 +571,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             totalEntityID: totalEntityID,
             averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
+            stateThresholds: stateThresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
@@ -519,6 +599,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             totalEntityID: totalEntityID,
             averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
+            stateThresholds: stateThresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: unit,
@@ -542,6 +623,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             totalEntityID: totalEntityID,
             averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
+            stateThresholds: stateThresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
@@ -571,6 +653,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             totalEntityID: totalEntityID,
             averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
+            stateThresholds: stateThresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
@@ -594,6 +677,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             totalEntityID: nil,
             averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
+            stateThresholds: stateThresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
@@ -617,6 +701,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             totalEntityID: id,
             averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
+            stateThresholds: stateThresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
@@ -653,6 +738,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             totalEntityID: totalEntityID,
             averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
+            stateThresholds: stateThresholds,
             defaultHistoryRange: range,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
@@ -676,6 +762,31 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             totalEntityID: totalEntityID,
             averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
+            stateThresholds: stateThresholds,
+            defaultHistoryRange: defaultHistoryRange,
+            coverControlMode: coverControlMode,
+            displayUnit: displayUnit,
+            displayUnitSymbol: displayUnitSymbol,
+            minValue: minValue,
+            maxValue: maxValue,
+            showsEntityIcon: showsEntityIcon,
+            customIconName: customIconName
+        )
+    }
+
+    public func settingStateThresholds(_ stateThresholds: StateThresholds) -> MenuBarItemConfiguration {
+        MenuBarItemConfiguration(
+            entityID: entityID,
+            style: style,
+            appearance: appearance,
+            showsLabel: showsLabel,
+            showsUnit: showsUnit,
+            maximumFractionDigits: maximumFractionDigits,
+            absoluteTotal: absoluteTotal,
+            totalEntityID: totalEntityID,
+            averageEntityIDs: averageEntityIDs,
+            thresholds: thresholds,
+            stateThresholds: stateThresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
@@ -703,6 +814,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             totalEntityID: totalEntityID,
             averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
+            stateThresholds: stateThresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
@@ -731,6 +843,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             totalEntityID: totalEntityID,
             averageEntityIDs: averageEntityIDs,
             thresholds: thresholds,
+            stateThresholds: stateThresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
@@ -754,6 +867,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             totalEntityID: totalEntityID,
             averageEntityIDs: ids,
             thresholds: thresholds,
+            stateThresholds: stateThresholds,
             defaultHistoryRange: defaultHistoryRange,
             coverControlMode: coverControlMode,
             displayUnit: displayUnit,
@@ -776,6 +890,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         case totalEntityID
         case averageEntityIDs
         case thresholds
+        case stateThresholds
         case defaultHistoryRange
         case coverControlMode
         case displayUnit
@@ -804,6 +919,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
             try container.decodeIfPresent([EntityID].self, forKey: .averageEntityIDs) ?? []
         )
         thresholds = try container.decodeIfPresent(ValueThresholds.self, forKey: .thresholds) ?? ValueThresholds()
+        stateThresholds = try container.decodeIfPresent(StateThresholds.self, forKey: .stateThresholds) ?? .inheritingDefaults
         defaultHistoryRange = try container.decodeIfPresent(HistoryRange.self, forKey: .defaultHistoryRange)
         coverControlMode = try container.decodeIfPresent(CoverControlMode.self, forKey: .coverControlMode) ?? .both
         displayUnit = Self.decodeDisplayUnit(from: container)
@@ -830,6 +946,7 @@ public struct MenuBarItemConfiguration: Codable, Equatable, Sendable {
         try container.encodeIfPresent(totalEntityID, forKey: .totalEntityID)
         try container.encode(averageEntityIDs, forKey: .averageEntityIDs)
         try container.encode(thresholds, forKey: .thresholds)
+        try container.encode(stateThresholds, forKey: .stateThresholds)
         try container.encodeIfPresent(defaultHistoryRange, forKey: .defaultHistoryRange)
         try container.encode(coverControlMode, forKey: .coverControlMode)
         try container.encodeIfPresent(displayUnit, forKey: .displayUnit)
@@ -1228,10 +1345,14 @@ public struct MenuBarItemRenderer: Sendable {
         configuration: MenuBarItemConfiguration
     ) -> ValueSeverity {
         let metric = gauge?.percent ?? numericState(entity.state)
-        guard let metric else {
-            return .normal
+        if let metric {
+            return EntityDisplayDefaults.effectiveThresholds(for: entity, configuration: configuration).severity(for: metric)
         }
-        return EntityDisplayDefaults.effectiveThresholds(for: entity, configuration: configuration).severity(for: metric)
+        return EntityDisplayDefaults.semanticStateSeverity(
+            for: entity.state,
+            entity: entity,
+            configuration: configuration
+        )
     }
 
     private func numericState(_ state: String) -> Double? {

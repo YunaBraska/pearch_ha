@@ -173,6 +173,7 @@ final class PerchHAUITests: XCTestCase {
     func testPanelEntityContextPresentationReflectsMenuBarSettings() {
         let entityID = EntityID("sensor.office_temperature")
         let configuration = MenuBarItemConfiguration(entityID: entityID)
+            .settingAverageEntityIDs([EntityID("sensor.office_temperature_peer")])
             .settingShowsEntityIcon(false)
             .updating(showsLabel: true)
             .updating(showsUnit: false)
@@ -188,10 +189,11 @@ final class PerchHAUITests: XCTestCase {
             entityID: entityID
         )
 
-        XCTAssertEqual(
+            XCTAssertEqual(
             presentation,
             PerchHAPanelEntityContextPresentation(
                 isPromotedToMenuBar: true,
+                hasAverageLinks: true,
                 showsEntityIcon: false,
                 showsLabel: true,
                 showsUnit: false
@@ -1163,22 +1165,67 @@ final class PerchHAUITests: XCTestCase {
         await model.loadHistory("sensor.office_temperature", range: .day)
         XCTAssertNotNil(model.cachedHistorySeries(for: "sensor.office_temperature"))
 
-        // The entry crosses its TTL, the refetch fails: the hover popover reports
-        // unavailable, but the inline preview must keep its last-known series —
-        // an expired read that races a server hiccup used to delete the entry and
-        // blank the sparkline until the next successful sync.
+        // The entry crosses its TTL, the refetch fails: the detail keeps showing
+        // the stale cache while the background refresh misses, and the inline
+        // preview also keeps its last-known series.
         _ = await clock.advance(by: .seconds(6))
         await model.loadHistory("sensor.office_temperature", range: .day)
 
         XCTAssertEqual(
             model.snapshot.historyState,
-            .unavailable(entityID: "sensor.office_temperature", range: .day, message: "server hiccup")
+            .loaded(historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4))
         )
         XCTAssertEqual(
             model.cachedHistorySeries(for: "sensor.office_temperature"),
             historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4),
             "a failed refetch must not evict the stale-but-displayable series"
         )
+    }
+
+    func test_t_open_history_detail_refreshes_on_its_own_interval() async {
+        let clock = TestPerchClock()
+        let recorder = HistoryProviderRecorder(
+            results: [
+                .success(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4)),
+                .success(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 22.0))
+            ]
+        )
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { form, entityID, range in
+                await recorder.provide(form: form, entityID: entityID, range: range)
+            },
+            clock: clock,
+            historyDebounce: .milliseconds(0),
+            bulkSyncConfiguration: .disabled,
+            periodicRefreshConfiguration: .disabled
+        )
+        model.applyDisplayPreferences(.defaults.with(historyDetailRefreshInterval: .oneSecond))
+
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.setPanelActive(true)
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
+
+        await spinUntil {
+            if case let .loaded(series) = model.snapshot.historyState {
+                return series.samples.last?.state == "21.4"
+            }
+            return false
+        }
+        let callCountAfterOpen = await recorder.callCount()
+        XCTAssertEqual(callCountAfterOpen, 1)
+
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .seconds(1))
+        await spinUntil {
+            if case let .loaded(series) = model.snapshot.historyState {
+                return series.samples.last?.state == "22.0"
+            }
+            return false
+        }
+        let callCountAfterRefresh = await recorder.callCount()
+        XCTAssertEqual(callCountAfterRefresh, 2)
     }
 
     func test_t_history_cache_diagnostics_report_series_and_sample_counts() async {
@@ -5164,6 +5211,49 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(application.snapshot.configurationPersistenceState, .ready)
     }
 
+    func test_t_app_shell_shows_loading_indicator_while_launch_autoconnect_is_in_flight() async throws {
+        let url = temporaryConfigURL()
+        let keychain = KeychainSecretStore(service: "dev.pearchha.ui.tests.\(UUID().uuidString)")
+        let sessionStore = PerchHAAuthSessionStore(secretStore: keychain)
+        let gate = ConnectionGate()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+            _ = try? sessionStore.clear()
+        }
+        _ = try sessionStore.saveAccessToken("stored-token")
+        let store = JSONConfigStore(fileURL: url)
+        _ = try store.save(
+            PerchHAConfiguration(
+                connectionProfile: PerchHAConnectionProfile(urlString: "https://homeassistant.local:8123")
+            )
+        )
+
+        let application = PerchHAApplication(
+            configStore: store,
+            authSessionStore: sessionStore,
+            connector: { form in
+                await gate.wait()
+                return .success(rooms: selectionRooms())
+            },
+            historyProvider: { _, _, _ in .unavailable("history unavailable") }
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        await spinUntil {
+            let snapshot = application.snapshot
+            return snapshot.connectionForm.usesStoredAuthSession
+                && snapshot.statusItemShowsLoadingIndicator
+                && snapshot.statusItemHasImage == false
+        }
+
+        await gate.open()
+        await spinUntil { application.snapshot.connectionState == .connected }
+        await spinUntil { application.snapshot.statusItemShowsLoadingIndicator == false }
+    }
+
     func test_t_app_shell_promoted_menu_bar_item_updates_from_panel_and_live_state() async throws {
         let url = temporaryConfigURL()
         defer {
@@ -5280,6 +5370,9 @@ final class PerchHAUITests: XCTestCase {
             menuBarAppearance: .iconOnly,
             stableMenuBarWidth: true,
             themeMode: .dark,
+            menuBarRefreshInterval: .sixtySeconds,
+            dataSyncInterval: .fifteenSeconds,
+            historyDetailRefreshInterval: .oneHundredTwentySeconds,
             accentColor: PerchHAAccentColor(red: 0.1, green: 0.2, blue: 0.3),
             dashboardRowDensity: .compact,
             defaultHistoryRange: .week,
@@ -5294,6 +5387,9 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(reloaded.menuBarAppearance, .iconOnly)
         XCTAssertTrue(reloaded.stableMenuBarWidth)
         XCTAssertEqual(reloaded.themeMode, .dark)
+        XCTAssertEqual(reloaded.menuBarRefreshInterval, .sixtySeconds)
+        XCTAssertEqual(reloaded.dataSyncInterval, .fifteenSeconds)
+        XCTAssertEqual(reloaded.historyDetailRefreshInterval, .oneHundredTwentySeconds)
         XCTAssertEqual(reloaded.accentColor, PerchHAAccentColor(red: 0.1, green: 0.2, blue: 0.3))
         // The new dashboard display preferences also round-trip.
         XCTAssertEqual(reloaded.dashboardRowDensity, .compact)
@@ -7410,6 +7506,90 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(secondApplication.snapshot.configurationPersistenceState, .ready)
     }
 
+    func test_t_average_links_persist_and_survive_application_relaunch() async throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let store = JSONConfigStore(fileURL: url)
+        let firstApplication = PerchHAApplication(configStore: store)
+        firstApplication.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        var firstApplicationIsRunning = true
+        defer {
+            if firstApplicationIsRunning {
+                firstApplication.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+            }
+        }
+
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: averageRooms()) },
+            menuBarDisplayConfiguration: firstApplication.snapshot.menuBarDisplayConfiguration,
+            menuBarDisplaySink: { configuration in
+                firstApplication.persist(menuBarDisplayConfiguration: configuration)
+            }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        XCTAssertTrue(
+            model.setAverageLinkedEntityIDs(
+                "sensor.temperature_office",
+                linkedEntityIDs: ["sensor.temperature_bedroom", "sensor.temperature_living"]
+            )
+        )
+
+        let expectedFamily: [EntityID] = [
+            "sensor.temperature_office",
+            "sensor.temperature_living",
+            "sensor.temperature_bedroom"
+        ]
+        let persistedConfiguration = try store.load().menuBarDisplayConfiguration
+        XCTAssertEqual(
+            persistedConfiguration.itemConfiguration(for: "sensor.temperature_office").averageEntityIDs,
+            expectedFamily
+        )
+        XCTAssertEqual(
+            persistedConfiguration.itemConfiguration(for: "sensor.temperature_bedroom").averageEntityIDs,
+            expectedFamily
+        )
+        XCTAssertEqual(
+            persistedConfiguration.itemConfiguration(for: "sensor.temperature_living").averageEntityIDs,
+            expectedFamily
+        )
+
+        firstApplication.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        firstApplicationIsRunning = false
+
+        let secondApplication = PerchHAApplication(
+            configStore: store,
+            connector: { _ in .success(rooms: averageRooms()) }
+        )
+        secondApplication.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            secondApplication.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+        secondApplication.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await secondApplication.connect()
+
+        XCTAssertEqual(
+            secondApplication.snapshot.menuBarDisplayConfiguration
+                .itemConfiguration(for: "sensor.temperature_office")
+                .averageEntityIDs,
+            expectedFamily
+        )
+        XCTAssertEqual(
+            secondApplication.snapshot.menuBarDisplayConfiguration
+                .itemConfiguration(for: "sensor.temperature_bedroom")
+                .averageEntityIDs,
+            expectedFamily
+        )
+        XCTAssertEqual(
+            secondApplication.snapshot.menuBarDisplayConfiguration
+                .itemConfiguration(for: "sensor.temperature_living")
+                .averageEntityIDs,
+            expectedFamily
+        )
+    }
+
     func testAppShellRemembersConnectionProfileAndStoredAccessTokenAcrossRelaunch() async throws {
         let url = temporaryConfigURL()
         let keychain = KeychainSecretStore(service: "dev.perchha.ui.tests.\(UUID().uuidString)")
@@ -8191,15 +8371,21 @@ final class PerchHAUITests: XCTestCase {
         clock: TestPerchClock,
         rooms: [Room],
         bulkSync: PerchHAHistoryBulkSyncConfiguration,
+        historyProvider: @Sendable @escaping (PerchHAConnectionForm, EntityID, HistoryRange) async -> PerchHAHistoryProviderResult = {
+            _, _, _ in .unavailable("history unavailable")
+        },
+        historyDebounce: PerchDuration = .milliseconds(250),
         cacheTTL: PerchDuration = .seconds(60),
         capacity: Int = 64
     ) async -> PerchHAPanelModel {
         let model = PerchHAPanelModel(
             connector: { _ in .success(rooms: rooms) },
+            historyProvider: historyProvider,
             bulkHistoryProvider: { form, entityIDs, range in
                 await recorder.provide(form: form, entityIDs: entityIDs, range: range)
             },
             clock: clock,
+            historyDebounce: historyDebounce,
             historyCacheConfiguration: PerchHAHistoryCacheConfiguration(capacity: capacity, ttl: cacheTTL),
             bulkSyncConfiguration: bulkSync,
             // Isolate bulk sync from the active-panel periodic refresh safety net so
@@ -8252,13 +8438,181 @@ final class PerchHAUITests: XCTestCase {
 
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
+        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 3)
 
-        // One bulk request covered the whole displayed list — not one per entity.
+        // One grouped batch per due range covered the currently visible rows —
+        // not one request per entity and never off-screen rows.
         let batchCount = await recorder.batchCount()
-        XCTAssertEqual(batchCount, 1, "the displayed entities sync in a single bulk request, not one-by-one")
+        XCTAssertEqual(batchCount, 3, "cold visible rows warm in grouped day/week/month requests")
         let requested = await recorder.requestedIDs()
-        XCTAssertEqual(requested, Set((0..<10).map { EntityID("sensor.prefetch_\($0)") }))
+        XCTAssertEqual(requested, Set([EntityID("sensor.prefetch_0"), EntityID("sensor.prefetch_1")]))
+        model.setPanelActive(false)
+    }
+
+    func test_t_visible_hour_preview_keeps_day_history_warm_in_background() async {
+        let clock = TestPerchClock()
+        let recorder = BulkHistoryRecorder()
+        let settleDelay = PerchDuration.milliseconds(250)
+        let model = await makeConnectedBulkSyncModel(
+            recorder: recorder,
+            clock: clock,
+            rooms: prefetchRooms(count: 1),
+            bulkSync: PerchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40, coldRefreshDivisor: 1)
+        )
+        XCTAssertTrue(model.setMenuBarDefaultHistoryRange("sensor.prefetch_0", defaultHistoryRange: HistoryRange.hour))
+
+        model.setPanelActive(true)
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 4)
+
+        let requestedRanges = await recorder.requestedRanges()
+        XCTAssertTrue(Set(requestedRanges).isSuperset(of: Set([HistoryRange.hour, HistoryRange.day])))
+        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0", range: HistoryRange.day) != nil }
+        model.setPanelActive(false)
+    }
+
+    func test_t_visible_history_background_sync_counts_each_batch_in_requests_per_minute() async {
+        let dates = MutableDateBox(Date(timeIntervalSince1970: 1_000_000))
+        let clock = TestPerchClock()
+        let recorder = BulkHistoryRecorder()
+        let settleDelay = PerchDuration.milliseconds(250)
+        let model = PerchHAPanelModel(
+            connector: { _ in .success(rooms: prefetchRooms(count: 1)) },
+            bulkHistoryProvider: { form, entityIDs, range in
+                await recorder.provide(form: form, entityIDs: entityIDs, range: range)
+            },
+            clock: clock,
+            wallClock: { dates.now },
+            bulkSyncConfiguration: PerchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40, coldRefreshDivisor: 1),
+            periodicRefreshConfiguration: .disabled
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let baseline = model.requestsPerMinute()
+        XCTAssertTrue(model.setMenuBarDefaultHistoryRange("sensor.prefetch_0", defaultHistoryRange: HistoryRange.hour))
+
+        model.setPanelActive(true)
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 4)
+
+        XCTAssertEqual(
+            model.requestsPerMinute(),
+            baseline + 4,
+            "each background history batch must count toward the diagnostics RPM"
+        )
+        model.setPanelActive(false)
+    }
+
+    func test_t_visible_row_warms_day_week_and_month_layers_when_long_ranges_are_cold() async {
+        let clock = TestPerchClock()
+        let recorder = BulkHistoryRecorder()
+        let settleDelay = PerchDuration.milliseconds(250)
+        let model = await makeConnectedBulkSyncModel(
+            recorder: recorder,
+            clock: clock,
+            rooms: prefetchRooms(count: 1),
+            bulkSync: PerchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40, coldRefreshDivisor: 1),
+            historyDebounce: PerchDuration.seconds(600)
+        )
+        XCTAssertTrue(model.setMenuBarDefaultHistoryRange("sensor.prefetch_0", defaultHistoryRange: HistoryRange.hour))
+
+        model.setPanelActive(true)
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: settleDelay)
+        await spinUntil { await recorder.batchCount() >= 4 }
+
+        let requestedRanges = await recorder.requestedRanges()
+        let requestedRangeSet = Set(requestedRanges)
+        let hourRequests = await recorder.requestCount(for: HistoryRange.hour)
+        let dayRequests = await recorder.requestCount(for: HistoryRange.day)
+        let weekRequests = await recorder.requestCount(for: HistoryRange.week)
+        let monthRequests = await recorder.requestCount(for: HistoryRange.month)
+        XCTAssertEqual(requestedRangeSet, Set([HistoryRange.hour, HistoryRange.day, HistoryRange.week, HistoryRange.month]))
+        XCTAssertEqual(hourRequests, 1)
+        XCTAssertEqual(dayRequests, 1)
+        XCTAssertEqual(weekRequests, 1)
+        XCTAssertEqual(monthRequests, 1)
+        model.setPanelActive(false)
+    }
+
+    func test_t_opened_history_detail_reuses_warmed_month_cache_without_refetching() async {
+        let clock = TestPerchClock()
+        let bulkRecorder = BulkHistoryRecorder()
+        let historyRecorder = HistoryProviderRecorder(results: [.unavailable("should stay cached")])
+        let settleDelay = PerchDuration.milliseconds(250)
+        let model = await makeConnectedBulkSyncModel(
+            recorder: bulkRecorder,
+            clock: clock,
+            rooms: prefetchRooms(count: 1),
+            bulkSync: PerchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40, coldRefreshDivisor: 1),
+            historyProvider: { form, entityID, range in
+                await historyRecorder.provide(form: form, entityID: entityID, range: range)
+            },
+            historyDebounce: PerchDuration.seconds(600),
+            cacheTTL: PerchDuration.seconds(60)
+        )
+        XCTAssertTrue(model.setMenuBarDefaultHistoryRange("sensor.prefetch_0", defaultHistoryRange: HistoryRange.hour))
+
+        model.setPanelActive(true)
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: settleDelay)
+        await spinUntil { await bulkRecorder.batchCount() >= 4 }
+        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0", range: HistoryRange.month) != nil }
+        _ = await clock.advance(by: PerchDuration.seconds(120))
+
+        await model.loadHistory("sensor.prefetch_0", range: HistoryRange.month)
+
+        let directHistoryCallCount = await historyRecorder.callCount()
+        XCTAssertEqual(
+            directHistoryCallCount,
+            0,
+            "the warmed month layer should satisfy history reads without another full-range fetch"
+        )
+        model.setPanelActive(false)
+    }
+
+    func test_t_opened_history_detail_refreshes_week_and_month_only_after_24_hours() async {
+        let clock = TestPerchClock()
+        let recorder = BulkHistoryRecorder()
+        let settleDelay = PerchDuration.milliseconds(250)
+        let interval = PerchDuration.seconds(30)
+        let model = await makeConnectedBulkSyncModel(
+            recorder: recorder,
+            clock: clock,
+            rooms: prefetchRooms(count: 1),
+            bulkSync: PerchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, batchSize: 40, coldRefreshDivisor: 1),
+            historyDebounce: PerchDuration.seconds(600)
+        )
+        XCTAssertTrue(model.setMenuBarDefaultHistoryRange("sensor.prefetch_0", defaultHistoryRange: HistoryRange.hour))
+
+        model.setPanelActive(true)
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: settleDelay)
+        await spinUntil { await recorder.batchCount() >= 4 }
+
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: interval)
+        await spinUntil { await recorder.batchCount() >= 6 }
+        let hourRequestsAfterFirstRefresh = await recorder.requestCount(for: HistoryRange.hour)
+        let dayRequestsAfterFirstRefresh = await recorder.requestCount(for: HistoryRange.day)
+        let weekRequestsAfterFirstRefresh = await recorder.requestCount(for: HistoryRange.week)
+        let monthRequestsAfterFirstRefresh = await recorder.requestCount(for: HistoryRange.month)
+        XCTAssertEqual(hourRequestsAfterFirstRefresh, 2)
+        XCTAssertEqual(dayRequestsAfterFirstRefresh, 2)
+        XCTAssertEqual(weekRequestsAfterFirstRefresh, 1)
+        XCTAssertEqual(monthRequestsAfterFirstRefresh, 1)
+
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: PerchDuration.seconds(86_400))
+        await spinUntil { await recorder.batchCount() >= 10 }
+        let weekRequestsAfterOneDay = await recorder.requestCount(for: HistoryRange.week)
+        let monthRequestsAfterOneDay = await recorder.requestCount(for: HistoryRange.month)
+        XCTAssertEqual(weekRequestsAfterOneDay, 2)
+        XCTAssertEqual(monthRequestsAfterOneDay, 2)
+        model.setPanelActive(false)
     }
 
     func test_t_cancelled_bulk_cycle_never_writes_previous_connections_history() async {
@@ -8312,7 +8666,7 @@ final class PerchHAUITests: XCTestCase {
         )
 
         model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0"])
+        model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
         await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
         let afterFirstCycle = await recorder.batchCount()
         XCTAssertEqual(afterFirstCycle, 1)
@@ -8320,10 +8674,9 @@ final class PerchHAUITests: XCTestCase {
         // the apply is still in flight would cancel it and drop the sync marks.
         await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0") != nil }
 
-        // A scroll pause re-arms the loop, but every displayed entity was synced
-        // moments ago — the settled cycle must fetch nothing instead of
-        // re-requesting the whole list on every 250 ms pause.
-        model.updateVisibleEntities(["sensor.prefetch_1"])
+        // A scroll pause that narrows the visible set to an already-synced row
+        // must not refetch that row immediately.
+        model.updateVisibleEntities(["sensor.prefetch_0"])
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: settleDelay)
         for _ in 0..<50 {
@@ -8332,7 +8685,7 @@ final class PerchHAUITests: XCTestCase {
         let afterRearm = await recorder.batchCount()
         XCTAssertEqual(afterRearm, 1, "a re-arm within the interval must not refetch just-synced entities")
 
-        // After a full interval the same entities are due again.
+        // After a full interval the same visible entity is due again.
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: interval)
         await spinUntil { await recorder.batchCount() >= 2 }
@@ -8408,7 +8761,7 @@ final class PerchHAUITests: XCTestCase {
 
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
+        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 3)
 
         // The connection drops: while the state is failed, interval ticks must
         // not hammer the dead server with bulk batches across fallback URLs.
@@ -8419,7 +8772,7 @@ final class PerchHAUITests: XCTestCase {
             await Task.yield()
         }
         let duringOutage = await recorder.batchCount()
-        XCTAssertEqual(duringOutage, 1, "bulk sync must pause while the connection is failed")
+        XCTAssertEqual(duringOutage, 3, "bulk sync must pause while the connection is failed")
 
         // Recovery: a successful refresh restores the connected state, and the
         // next interval tick resumes syncing.
@@ -8444,16 +8797,17 @@ final class PerchHAUITests: XCTestCase {
 
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
+        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 3)
         let firstCycleBatches = await recorder.batchCount()
-        XCTAssertEqual(firstCycleBatches, 1, "first cycle ran on open")
+        XCTAssertEqual(firstCycleBatches, 3, "first cycle warms the cold visible ranges")
 
         // The loop must RE-ARM on its own: advancing the clock by the interval (no
         // new visibility change) triggers further cycles.
-        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: 2)
-        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: 3)
-        let cycles = await recorder.cycleCount()
-        XCTAssertGreaterThan(cycles, 1, "the sync re-arms and runs multiple cycles, not just once")
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: 4)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: 5)
+        let laterBatchCount = await recorder.batchCount()
+        XCTAssertEqual(laterBatchCount, 5, "the sync re-arms and keeps running after the cold-start warmup")
+        model.setPanelActive(false)
     }
 
     func test_t_bulk_sync_overrides_cached_series_in_place() async {
@@ -8519,12 +8873,11 @@ final class PerchHAUITests: XCTestCase {
         )
     }
 
-    func test_t_bulk_sync_syncs_hot_every_cycle_and_cold_less_often() async {
+    func test_t_bulk_sync_syncs_visible_entities_and_ignores_hidden_ones() async {
         let clock = TestPerchClock()
         let recorder = BulkHistoryRecorder()
         let settleDelay = PerchDuration.milliseconds(250)
         let interval = PerchDuration.seconds(30)
-        // Cold entities sync only every 3rd cycle; hot (visible) ones every cycle.
         let model = await makeConnectedBulkSyncModel(
             recorder: recorder,
             clock: clock,
@@ -8533,17 +8886,16 @@ final class PerchHAUITests: XCTestCase {
         )
 
         model.setPanelActive(true)
-        // _0 is visible (hot); _1.._3 are cold. Cycle 0 includes cold (0 % 3 == 0).
         model.updateVisibleEntities(["sensor.prefetch_0"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
-        // Cycles 1 and 2 are hot-only.
+        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 3)
         await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: 2)
-        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: 3)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: 5)
 
-        let hot = await recorder.requestCountForEntity("sensor.prefetch_0")
-        let cold = await recorder.requestCountForEntity("sensor.prefetch_3")
-        XCTAssertEqual(hot, 3, "the visible (hot) entity syncs every cycle")
-        XCTAssertEqual(cold, 1, "a cold entity syncs only on the divisor-th cycle")
+        let visibleRequests = await recorder.requestCountForEntity("sensor.prefetch_0")
+        let hiddenRequests = await recorder.requestCountForEntity("sensor.prefetch_3")
+        XCTAssertEqual(visibleRequests, 5, "the visible entity gets cold long-range warmup plus recurring day refreshes")
+        XCTAssertEqual(hiddenRequests, 0, "hidden entities are ignored by the background history sync")
+        model.setPanelActive(false)
     }
 
     func test_t_bulk_sync_does_nothing_while_inactive() async {
@@ -8573,7 +8925,7 @@ final class PerchHAUITests: XCTestCase {
         let clock = TestPerchClock()
         let recorder = BulkHistoryRecorder()
         let settleDelay = PerchDuration.milliseconds(250)
-        // 10 displayed entities, batch cap 4 → batches of 4, 4, 2 in one cycle.
+        // 10 visible entities, batch cap 4 → batches of 4, 4, 2 in one cycle.
         let model = await makeConnectedBulkSyncModel(
             recorder: recorder,
             clock: clock,
@@ -8587,7 +8939,7 @@ final class PerchHAUITests: XCTestCase {
         )
 
         model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0"])
+        model.updateVisibleEntities((0..<10).map { EntityID("sensor.prefetch_\($0)") })
         await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 3)
         for _ in 0..<10 {
             await Task.yield()
@@ -8597,13 +8949,14 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertLessThanOrEqual(largest, 4, "no batch exceeds the configured cap")
         let requested = await recorder.requestedIDs()
         XCTAssertEqual(requested, Set((0..<10).map { EntityID("sensor.prefetch_\($0)") }))
+        model.setPanelActive(false)
     }
 
     func test_t_bulk_sync_does_not_evict_displayed_entities_beyond_base_capacity() async {
         let clock = TestPerchClock()
         let recorder = BulkHistoryRecorder()
         let settleDelay = PerchDuration.milliseconds(250)
-        // 40 displayed entities with the default cache capacity (256): one cycle's
+        // 40 visible entities with the default cache capacity (256): one cycle's
         // bulk results must all stay cached — no eviction churn flickering previews.
         let model = await makeConnectedBulkSyncModel(
             recorder: recorder,
@@ -8614,7 +8967,7 @@ final class PerchHAUITests: XCTestCase {
         )
 
         model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0"])
+        model.updateVisibleEntities((0..<40).map { EntityID("sensor.prefetch_\($0)") })
         await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
         await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_39") != nil }
 
@@ -8626,6 +8979,7 @@ final class PerchHAUITests: XCTestCase {
             model.cachedHistorySeries(for: "sensor.prefetch_5"),
             "a mid-list displayed entity stays cached after the whole list is synced"
         )
+        model.setPanelActive(false)
     }
 
     func test_t_inline_history_survives_ttl_expiry_for_display() async {
@@ -8659,6 +9013,47 @@ final class PerchHAUITests: XCTestCase {
         )
     }
 
+    func test_t_successful_sync_prunes_expired_hidden_history_but_keeps_visible_stale_cache() async {
+        let clock = TestPerchClock()
+        let recorder = BulkHistoryRecorder()
+        let settleDelay = PerchDuration.milliseconds(250)
+        let interval = PerchDuration.seconds(30)
+        let model = await makeConnectedBulkSyncModel(
+            recorder: recorder,
+            clock: clock,
+            rooms: prefetchRooms(count: 2),
+            bulkSync: PerchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, coldRefreshDivisor: 1),
+            cacheTTL: PerchDuration.seconds(60)
+        )
+
+        model.setPanelActive(true)
+        model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
+        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
+        await spinUntil {
+            model.cachedHistorySeries(for: "sensor.prefetch_0") != nil &&
+            model.cachedHistorySeries(for: "sensor.prefetch_1") != nil
+        }
+
+        _ = await clock.advance(by: PerchDuration.seconds(190))
+        XCTAssertNotNil(model.cachedHistorySeries(for: "sensor.prefetch_1"))
+
+        model.updateVisibleEntities(["sensor.prefetch_0"])
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: settleDelay)
+        await spinUntil { await recorder.batchCount() >= 2 }
+        await spinUntil {
+            model.cachedHistorySeries(for: "sensor.prefetch_0") != nil &&
+            model.cachedHistorySeries(for: "sensor.prefetch_1") == nil
+        }
+
+        XCTAssertNotNil(model.cachedHistorySeries(for: "sensor.prefetch_0"))
+        XCTAssertNil(
+            model.cachedHistorySeries(for: "sensor.prefetch_1"),
+            "expired hidden cache is pruned only after a successful visible-row sync lands"
+        )
+        model.setPanelActive(false)
+    }
+
     func test_t_gauge_meter_shows_for_available_and_stale_not_for_missing() {
         XCTAssertTrue(PerchHADashboardPreview.meterShows(for: .available))
         // Last-known fraction stays on screen through a background sync / WS gap.
@@ -8671,7 +9066,8 @@ final class PerchHAUITests: XCTestCase {
         let entered = ConnectionGate()
         let release = ConnectionGate()
         let calls = CallCounter()
-        let model = PerchHAPanelModel(
+        let clock = TestPerchClock()
+        var model: PerchHAPanelModel? = PerchHAPanelModel(
             connector: { _ in
                 let n = await calls.next()
                 // The initial connect is call 1; the immediate background periodic
@@ -8684,31 +9080,43 @@ final class PerchHAUITests: XCTestCase {
                 return .success(rooms: selectionRooms())
             },
             historyProvider: { _, _, _ in .unavailable("no history") },
-            clock: TestPerchClock()
+            clock: clock
         )
-        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
-        await model.connect()
-        switch model.snapshot.phase {
+        guard let currentModel = model else {
+            XCTFail("expected model")
+            return
+        }
+        currentModel.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await currentModel.connect()
+        switch currentModel.snapshot.phase {
         case .connectedData, .connectedEmpty:
             break
         default:
             XCTFail("expected a connected session after connect")
         }
 
-        model.setPanelActive(true)
+        currentModel.setPanelActive(true)
+        await spinUntil { await clock.sleepingTaskCount() >= 1 }
+        _ = await clock.advance(by: .seconds(45))
         // Wait until the background sync is genuinely in flight (connector blocked).
         await entered.wait()
 
         XCTAssertFalse(
-            model.snapshot.valuesAreStale,
+            currentModel.snapshot.valuesAreStale,
             "a silent background sync must not mark values stale (which would flicker previews)"
         )
-        if case .reconnecting = model.snapshot.phase {
+        if case .reconnecting = currentModel.snapshot.phase {
             XCTFail("background sync flipped the UI into a visible reconnecting state")
         }
 
         await release.open()
-        model.setPanelActive(false)
+        await spinUntil {
+            if case .connected = currentModel.snapshot.connectionState { return true } else { return false }
+        }
+        currentModel.setPanelActive(false)
+        await Task.yield()
+        model = nil
+        await spinUntil { await clock.sleepingTaskCount() == 0 }
     }
 
     func test_t_same_connection_ignores_address_row_identity() {
@@ -8877,7 +9285,7 @@ final class PerchHAUITests: XCTestCase {
         // No hover popover is open and none is requested.
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
         model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0"])
+        model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
         await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
         await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_1") != nil }
 
@@ -8929,10 +9337,9 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(afterLiveBatches, 0)
     }
 
-    func test_t_history_range_picker_offers_at_most_one_week() {
-        // The dashboard and detail panel cap the offered history at one week.
-        XCTAssertEqual(HistoryRange.uiSelectable, [.hour, .day, .week])
-        XCTAssertFalse(HistoryRange.uiSelectable.contains(.month))
+    func test_t_history_range_picker_offers_month_for_older_history() {
+        XCTAssertEqual(HistoryRange.uiSelectable, [.hour, .day, .week, .month])
+        XCTAssertTrue(HistoryRange.uiSelectable.contains(.month))
     }
 
     func test_t_inline_sparkline_geometry_downsamples_to_budget() {
@@ -9556,6 +9963,7 @@ final class PerchHAUITests: XCTestCase {
                 availableRooms: rooms
             )
         )
+        model.setPanelActive(true)
 
         XCTAssertTrue(
             model.applyLiveState(
@@ -9572,6 +9980,74 @@ final class PerchHAUITests: XCTestCase {
         XCTAssertEqual(updated.name, "Office temperature")
         XCTAssertEqual(updated.unit, "°C")
         XCTAssertEqual(updated.state, "22.1")
+    }
+
+    func test_t_apply_live_state_keeps_more_specific_existing_name_when_live_update_is_subset() {
+        let entity = DiscoveredEntity(
+            id: "sensor.shellyplugsg3_e4b063fa527c_leistung",
+            name: "Deskyuna Leistung",
+            state: "87.7",
+            unit: "W",
+            areaID: nil,
+            deviceID: nil
+        )
+        let rooms = [Room(id: "office", name: "Office", entities: [entity])]
+        let model = PerchHAPanelModel(
+            snapshot: PerchHAPanelSnapshot(
+                connectionState: .connected,
+                phase: .connectedData,
+                rooms: rooms,
+                availableRooms: rooms
+            )
+        )
+        model.setPanelActive(true)
+
+        XCTAssertTrue(
+            model.applyLiveState(
+                EntityState(
+                    id: entity.id,
+                    name: "Leistung",
+                    state: "91.2",
+                    unit: "W"
+                )
+            )
+        )
+
+        let updated = model.snapshot.availableRooms[0].entities[0]
+        XCTAssertEqual(updated.name, "Deskyuna Leistung")
+        XCTAssertEqual(updated.unit, "W")
+        XCTAssertEqual(updated.state, "91.2")
+    }
+
+    func test_t_apply_live_state_is_no_op_when_everything_is_already_identical() {
+        let entity = DiscoveredEntity(
+            id: "sensor.office_temperature",
+            name: "Office temperature",
+            state: "21.4",
+            unit: "°C",
+            areaID: nil,
+            deviceID: nil
+        )
+        let rooms = [Room(id: "office", name: "Office", entities: [entity])]
+        let snapshot = PerchHAPanelSnapshot(
+            connectionState: .connected,
+            phase: .connectedData,
+            rooms: rooms,
+            availableRooms: rooms
+        )
+        let model = PerchHAPanelModel(snapshot: snapshot)
+
+        XCTAssertTrue(
+            model.applyLiveState(
+                EntityState(
+                    id: entity.id,
+                    name: entity.name,
+                    state: entity.state,
+                    unit: entity.unit
+                )
+            )
+        )
+        XCTAssertEqual(model.snapshot, snapshot)
     }
 
     func test_t_panel_display_unit_switch_reseeds_default_temperature_thresholds() async {
@@ -10468,6 +10944,8 @@ private actor HistoryProviderRecorder {
 private actor BulkHistoryRecorder {
     /// One entry per bulk request, each the entity IDs in that batch.
     private(set) var batches: [[EntityID]] = []
+    /// One entry per bulk request, aligned with `batches`.
+    private(set) var rangesByBatch: [HistoryRange] = []
     /// A canned numeric value returned for every series; tests can override per
     /// entity to assert override-in-place semantics.
     private var valueByEntity: [EntityID: Double] = [:]
@@ -10512,6 +10990,7 @@ private actor BulkHistoryRecorder {
         range: HistoryRange
     ) async -> [EntityID: HistorySeries] {
         batches.append(entityIDs)
+        rangesByBatch.append(range)
         if holdCount > 0 {
             holdCount -= 1
             await withCheckedContinuation { continuation in
@@ -10549,6 +11028,16 @@ private actor BulkHistoryRecorder {
 
     func requestedIDs() -> Set<EntityID> {
         Set(batches.flatMap { $0 })
+    }
+
+    func requestedRanges() -> [HistoryRange] {
+        rangesByBatch
+    }
+
+    func requestCount(for range: HistoryRange) -> Int {
+        rangesByBatch.reduce(0) { count, recordedRange in
+            count + (recordedRange == range ? 1 : 0)
+        }
     }
 
     func requestCountForEntity(_ entityID: EntityID) -> Int {

@@ -169,6 +169,41 @@ public enum PerchHADashboardRowDensity: String, CaseIterable, Codable, Equatable
     }
 }
 
+/// The minimum cadence at which the menu-bar UI is allowed to repaint.
+///
+/// Live data can continue updating in the background, but the visible menu-bar
+/// items only reconcile on this schedule so idle websocket chatter does not keep
+/// redrawing the status items.
+public enum PerchHAMenuBarRefreshInterval: Int, CaseIterable, Codable, Equatable, Sendable {
+    case oneSecond = 1
+    case fiveSeconds = 5
+    case fifteenSeconds = 15
+    case thirtySeconds = 30
+    case fortyFiveSeconds = 45
+    case sixtySeconds = 60
+    case oneHundredTwentySeconds = 120
+    case threeHundredSeconds = 300
+
+    public static let defaultInterval: PerchHAMenuBarRefreshInterval = .thirtySeconds
+
+    public var displayName: String {
+        switch self {
+        case .oneSecond: "1s"
+        case .fiveSeconds: "5s"
+        case .fifteenSeconds: "15s"
+        case .thirtySeconds: "30s"
+        case .fortyFiveSeconds: "45s"
+        case .sixtySeconds: "60s"
+        case .oneHundredTwentySeconds: "120s"
+        case .threeHundredSeconds: "300s"
+        }
+    }
+
+    public var timeInterval: TimeInterval {
+        TimeInterval(rawValue)
+    }
+}
+
 /// The bundle of user display preferences surfaced in the settings window.
 ///
 /// Carried as a single value so the Settings UI and the app shell exchange the
@@ -181,12 +216,18 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
     public let stableMenuBarWidth: Bool
     /// The application appearance override (system/light/dark).
     public let themeMode: PerchHAThemeMode
+    /// The minimum cadence at which menu-bar items repaint.
+    public let menuBarRefreshInterval: PerchHAMenuBarRefreshInterval
+    /// The cadence for background cache/data synchronization loops.
+    public let dataSyncInterval: PerchHAMenuBarRefreshInterval
+    /// The cadence for refreshing an open history detail surface in the background.
+    public let historyDetailRefreshInterval: PerchHAMenuBarRefreshInterval
     /// The accent color applied across the panel and settings.
     public let accentColor: PerchHAAccentColor
     /// The vertical density of dashboard telemetry rows.
     public let dashboardRowDensity: PerchHADashboardRowDensity
     /// The default inline/detail history range used when an entity has no
-    /// per-entity override. Capped at a week in the UI.
+    /// per-entity override.
     public let defaultHistoryRange: HistoryRange
     /// Whether the dashboard footer shows the "updated" timestamp caption.
     public let showsFooterTimestamp: Bool
@@ -213,6 +254,9 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
         menuBarAppearance: PerchHAMenuBarAppearance = .defaultAppearance,
         stableMenuBarWidth: Bool = false,
         themeMode: PerchHAThemeMode = .defaultMode,
+        menuBarRefreshInterval: PerchHAMenuBarRefreshInterval = .defaultInterval,
+        dataSyncInterval: PerchHAMenuBarRefreshInterval = .fiveSeconds,
+        historyDetailRefreshInterval: PerchHAMenuBarRefreshInterval = .thirtySeconds,
         accentColor: PerchHAAccentColor = .homeAssistantBlue,
         dashboardRowDensity: PerchHADashboardRowDensity = .defaultDensity,
         defaultHistoryRange: HistoryRange = .day,
@@ -224,6 +268,9 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
         self.menuBarAppearance = menuBarAppearance
         self.stableMenuBarWidth = stableMenuBarWidth
         self.themeMode = themeMode
+        self.menuBarRefreshInterval = menuBarRefreshInterval
+        self.dataSyncInterval = dataSyncInterval
+        self.historyDetailRefreshInterval = historyDetailRefreshInterval
         self.accentColor = accentColor
         self.dashboardRowDensity = dashboardRowDensity
         self.defaultHistoryRange = defaultHistoryRange
@@ -272,6 +319,21 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
         copy(themeMode: themeMode)
     }
 
+    /// Returns a copy with the menu-bar repaint cadence replaced.
+    public func with(menuBarRefreshInterval: PerchHAMenuBarRefreshInterval) -> PerchHADisplayPreferences {
+        copy(menuBarRefreshInterval: menuBarRefreshInterval)
+    }
+
+    /// Returns a copy with the background data-sync cadence replaced.
+    public func with(dataSyncInterval: PerchHAMenuBarRefreshInterval) -> PerchHADisplayPreferences {
+        copy(dataSyncInterval: dataSyncInterval)
+    }
+
+    /// Returns a copy with the history-detail refresh cadence replaced.
+    public func with(historyDetailRefreshInterval: PerchHAMenuBarRefreshInterval) -> PerchHADisplayPreferences {
+        copy(historyDetailRefreshInterval: historyDetailRefreshInterval)
+    }
+
     /// Returns a copy with the accent color replaced.
     public func with(accentColor: PerchHAAccentColor) -> PerchHADisplayPreferences {
         copy(accentColor: accentColor)
@@ -313,6 +375,9 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
         menuBarAppearance: PerchHAMenuBarAppearance? = nil,
         stableMenuBarWidth: Bool? = nil,
         themeMode: PerchHAThemeMode? = nil,
+        menuBarRefreshInterval: PerchHAMenuBarRefreshInterval? = nil,
+        dataSyncInterval: PerchHAMenuBarRefreshInterval? = nil,
+        historyDetailRefreshInterval: PerchHAMenuBarRefreshInterval? = nil,
         accentColor: PerchHAAccentColor? = nil,
         dashboardRowDensity: PerchHADashboardRowDensity? = nil,
         defaultHistoryRange: HistoryRange? = nil,
@@ -325,6 +390,9 @@ public struct PerchHADisplayPreferences: Equatable, Sendable {
             menuBarAppearance: menuBarAppearance ?? self.menuBarAppearance,
             stableMenuBarWidth: stableMenuBarWidth ?? self.stableMenuBarWidth,
             themeMode: themeMode ?? self.themeMode,
+            menuBarRefreshInterval: menuBarRefreshInterval ?? self.menuBarRefreshInterval,
+            dataSyncInterval: dataSyncInterval ?? self.dataSyncInterval,
+            historyDetailRefreshInterval: historyDetailRefreshInterval ?? self.historyDetailRefreshInterval,
             accentColor: accentColor ?? self.accentColor,
             dashboardRowDensity: dashboardRowDensity ?? self.dashboardRowDensity,
             defaultHistoryRange: defaultHistoryRange ?? self.defaultHistoryRange,

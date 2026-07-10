@@ -1503,6 +1503,18 @@ public struct EntityValueFormatter: Sendable {
 /// to the battery gauge, temperatures keep the reported unit, covers expose
 /// both control styles) while leaving every option editable for unknowns.
 public enum EntityDisplayDefaults {
+    public struct SemanticStateThresholdLegendItem: Equatable, Sendable, Identifiable {
+        public let id: String
+        public let label: String
+        public let color: PerchHAAccentColor
+
+        public init(id: String, label: String, color: PerchHAAccentColor) {
+            self.id = id
+            self.label = label
+            self.color = color
+        }
+    }
+
     /// The default per-entity menu-bar/display configuration for an entity.
     ///
     /// - Parameter entity: The entity to derive defaults for.
@@ -1513,6 +1525,7 @@ public enum EntityDisplayDefaults {
             style: defaultStyle(for: entity),
             maximumFractionDigits: defaultMaximumFractionDigits(for: entity),
             thresholds: defaultThresholds(for: entity),
+            stateThresholds: .inheritingDefaults,
             coverControlMode: .both,
             displayUnit: nil
         )
@@ -1618,9 +1631,104 @@ public enum EntityDisplayDefaults {
         }
     }
 
+    /// The shipped semantic color legend for non-numeric entity states.
+    public static let semanticStateThresholdLegend: [SemanticStateThresholdLegendItem] = [
+        SemanticStateThresholdLegendItem(
+            id: "good",
+            label: "Good / OK",
+            color: ValueThresholds.okColor
+        ),
+        SemanticStateThresholdLegendItem(
+            id: "medium",
+            label: "Medium / Warning",
+            color: ValueThresholds.warningColor
+        ),
+        SemanticStateThresholdLegendItem(
+            id: "bad",
+            label: "Bad / Critical",
+            color: ValueThresholds.criticalColor
+        )
+    ]
+
+    public static func defaultStateThresholds(for entity: DiscoveredEntity) -> StateThresholds {
+        let currentState = entity.state.trimmingCharacters(in: .whitespacesAndNewlines)
+        let preferredMatches = [currentState.uppercased(), "GOOD", "MEDIUM", "BAD"]
+            .filter { !$0.isEmpty }
+        let rules = uniqueStateThresholdRules(
+            preferredMatches.map { match in
+                let color: PerchHAAccentColor
+                switch match {
+                case "BAD":
+                    color = ValueThresholds.criticalColor
+                case "MEDIUM":
+                    color = ValueThresholds.warningColor
+                default:
+                    color = ValueThresholds.okColor
+                }
+                return StateThresholdRule(match: match, color: color)
+            }
+        )
+        return StateThresholds(rules: rules)
+    }
+
+    /// Classifies a non-numeric state into the standard severity buckets.
+    public static func semanticStateSeverity(for state: String) -> ValueSeverity {
+        let normalized = normalizedSemanticState(state)
+        guard !normalized.isEmpty else {
+            return .normal
+        }
+        if criticalSemanticStates.contains(normalized)
+            || criticalSemanticFragments.contains(where: normalized.contains) {
+            return .critical
+        }
+        if warningSemanticStates.contains(normalized)
+            || warningSemanticFragments.contains(where: normalized.contains) {
+            return .warning
+        }
+        return .normal
+    }
+
+    public static func semanticStateSeverity(
+        for state: String,
+        entity: DiscoveredEntity,
+        configuration: MenuBarItemConfiguration
+    ) -> ValueSeverity {
+        if let severity = effectiveStateThresholds(for: entity, configuration: configuration).severity(for: state) {
+            return severity
+        }
+        return semanticStateSeverity(for: state)
+    }
+
+    /// The semantic threshold color a non-numeric state resolves to.
+    public static func semanticStateColor(for state: String) -> PerchHAAccentColor {
+        switch semanticStateSeverity(for: state) {
+        case .normal:
+            ValueThresholds.okColor
+        case .warning:
+            ValueThresholds.warningColor
+        case .critical:
+            ValueThresholds.criticalColor
+        }
+    }
+
+    public static func semanticStateColor(
+        for state: String,
+        entity: DiscoveredEntity,
+        configuration: MenuBarItemConfiguration
+    ) -> PerchHAAccentColor {
+        if let color = effectiveStateThresholds(for: entity, configuration: configuration).color(for: state) {
+            return color
+        }
+        return semanticStateColor(for: state)
+    }
+
     /// Whether a threshold set carries any explicit styling information.
     public static func hasThresholds(_ thresholds: ValueThresholds) -> Bool {
         thresholds.baseColor != nil || thresholds.steps.isEmpty == false
+    }
+
+    public static func hasStateThresholds(_ thresholds: StateThresholds) -> Bool {
+        thresholds.inheritsDefaults || thresholds.baseColor != nil || thresholds.rules.isEmpty == false
     }
 
     /// The thresholds an entity should currently use, falling back to known
@@ -1643,6 +1751,16 @@ public enum EntityDisplayDefaults {
             return configuration.thresholds
         }
         return defaults
+    }
+
+    public static func effectiveStateThresholds(
+        for entity: DiscoveredEntity,
+        configuration: MenuBarItemConfiguration
+    ) -> StateThresholds {
+        if configuration.stateThresholds.inheritsDefaults {
+            return defaultStateThresholds(for: entity)
+        }
+        return configuration.stateThresholds
     }
 
     /// Repairs a stored item configuration using the entity's current metadata.
@@ -1703,6 +1821,7 @@ public enum EntityDisplayDefaults {
             && configuration.totalEntityID == defaultConfiguration.totalEntityID
             && configuration.averageEntityIDs == defaultConfiguration.averageEntityIDs
             && configuration.thresholds == defaultConfiguration.thresholds
+            && configuration.stateThresholds == defaultConfiguration.stateThresholds
             && configuration.defaultHistoryRange == defaultConfiguration.defaultHistoryRange
             && configuration.coverControlMode == defaultConfiguration.coverControlMode
             && configuration.displayUnit == defaultConfiguration.displayUnit
@@ -1711,6 +1830,42 @@ public enum EntityDisplayDefaults {
             && configuration.maxValue == defaultConfiguration.maxValue
             && configuration.showsEntityIcon == defaultConfiguration.showsEntityIcon
             && configuration.customIconName == defaultConfiguration.customIconName
+    }
+
+    private static let criticalSemanticStates: Set<String> = [
+        "bad", "critical", "error", "alarm", "alert", "poor", "unsafe", "unhealthy"
+    ]
+
+    private static let warningSemanticStates: Set<String> = [
+        "medium", "moderate", "warning", "warn", "degraded", "unknown", "stale"
+    ]
+
+    private static let criticalSemanticFragments = [
+        "critical", "error", "alarm", "unsafe", "poor", "unhealthy"
+    ]
+
+    private static let warningSemanticFragments = [
+        "medium", "moderate", "warning", "degraded", "unknown"
+    ]
+
+    private static func uniqueStateThresholdRules(_ rules: [StateThresholdRule]) -> [StateThresholdRule] {
+        var seen: Set<String> = []
+        var result: [StateThresholdRule] = []
+        for rule in rules {
+            let normalized = rule.match.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !normalized.isEmpty, !seen.contains(normalized) else {
+                continue
+            }
+            seen.insert(normalized)
+            result.append(rule)
+        }
+        return result
+    }
+
+    private static func normalizedSemanticState(_ state: String) -> String {
+        state
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
     }
 
     /// The concrete display unit detected from an entity's HA unit and state.

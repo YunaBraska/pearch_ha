@@ -564,6 +564,23 @@ final class PerchHACoreTests: XCTestCase {
         XCTAssertEqual(rendered.accessibilityLabel, "Battery, 15%, 15 percent, critical, battery")
     }
 
+    func testMenuBarRendererClassifiesSemanticStringStates() {
+        let rendered = MenuBarItemRenderer().render(
+            entity: entity("sensor.air_quality", name: "Air quality", state: "BAD", unit: nil),
+            configuration: MenuBarItemConfiguration(entityID: "sensor.air_quality"),
+            locale: Locale(identifier: "en_US")
+        )
+
+        XCTAssertEqual(rendered.severity, .critical)
+        XCTAssertTrue(rendered.accessibilityLabel.contains("critical"))
+    }
+
+    func testEntityDisplayDefaultsSemanticStateSeverityHandlesGoodMediumBad() {
+        XCTAssertEqual(EntityDisplayDefaults.semanticStateSeverity(for: "GOOD"), .normal)
+        XCTAssertEqual(EntityDisplayDefaults.semanticStateSeverity(for: "MEDIUM"), .warning)
+        XCTAssertEqual(EntityDisplayDefaults.semanticStateSeverity(for: "BAD"), .critical)
+    }
+
     func testMenuBarItemProjectorPromotesConfiguredEntitiesInOrder() {
         let promoted = MenuBarItemProjector().promotedEntities(
             rooms: selectionRooms(),
@@ -1707,6 +1724,44 @@ extension PerchHACoreTests {
         XCTAssertEqual(thresholds.severity(for: 10), .critical, "at or below the legacy edge stays critical")
         XCTAssertEqual(thresholds.severity(for: 15), .critical)
         XCTAssertEqual(thresholds.severity(for: 50), .normal)
+    }
+
+    func test_t_state_threshold_rules_match_case_insensitively() {
+        let thresholds = StateThresholds(
+            rules: [
+                StateThresholdRule(match: "GOOD", color: ValueThresholds.okColor),
+                StateThresholdRule(match: "bad", color: ValueThresholds.criticalColor)
+            ],
+            baseColor: ValueThresholds.warningColor
+        )
+
+        XCTAssertEqual(thresholds.color(for: " good "), ValueThresholds.okColor)
+        XCTAssertEqual(thresholds.severity(for: "BAD"), .critical)
+        XCTAssertEqual(thresholds.severity(for: "Very Bad Air"), .critical)
+        XCTAssertEqual(thresholds.color(for: "unknown"), ValueThresholds.warningColor)
+    }
+
+    func test_t_effective_state_thresholds_use_defaults_until_user_overrides() {
+        let entity = entity("sensor.air_quality", name: "Air quality", state: "GOOD", unit: nil)
+        let inherited = EntityDisplayDefaults.effectiveStateThresholds(
+            for: entity,
+            configuration: EntityDisplayDefaults.configuration(for: entity)
+        )
+
+        XCTAssertEqual(inherited.color(for: "GOOD"), ValueThresholds.okColor)
+        XCTAssertEqual(inherited.severity(for: "BAD"), .critical)
+
+        let overridden = EntityDisplayDefaults.effectiveStateThresholds(
+            for: entity,
+            configuration: EntityDisplayDefaults.configuration(for: entity).settingStateThresholds(
+                StateThresholds(
+                    rules: [StateThresholdRule(match: "GOOD", color: ValueThresholds.criticalColor)]
+                )
+            )
+        )
+
+        XCTAssertEqual(overridden.color(for: "GOOD"), ValueThresholds.criticalColor)
+        XCTAssertNil(overridden.color(for: "BAD"))
     }
 
     func test_t_dashboard_room_row_cap_defaults_to_six() {

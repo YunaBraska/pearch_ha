@@ -320,6 +320,22 @@ public enum TelemetryRowMetrics {
     public static let controlWidth: CGFloat = 38
 }
 
+public struct TelemetryRowLabelAccessory {
+    public let systemImage: String
+    public let accessibilityLabel: String?
+    public let color: Color?
+
+    public init(
+        systemImage: String,
+        accessibilityLabel: String? = nil,
+        color: Color? = nil
+    ) {
+        self.systemImage = systemImage
+        self.accessibilityLabel = accessibilityLabel
+        self.color = color
+    }
+}
+
 /// A compact, single-line telemetry row — the cockpit replacement for the old
 /// entity row.
 ///
@@ -338,6 +354,7 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
     private let icon: String?
     private let iconActive: Bool
     private let label: String
+    private let labelAccessories: [TelemetryRowLabelAccessory]
     private let labelAccessorySystemImage: String?
     private let labelAccessoryAccessibilityLabel: String?
     private let subtitle: String?
@@ -368,6 +385,7 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
         icon: String?,
         iconActive: Bool,
         label: String,
+        labelAccessories: [TelemetryRowLabelAccessory] = [],
         labelAccessorySystemImage: String? = nil,
         labelAccessoryAccessibilityLabel: String? = nil,
         subtitle: String? = nil,
@@ -379,6 +397,7 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
         self.icon = icon
         self.iconActive = iconActive
         self.label = label
+        self.labelAccessories = labelAccessories
         self.labelAccessorySystemImage = labelAccessorySystemImage
         self.labelAccessoryAccessibilityLabel = labelAccessoryAccessibilityLabel
         self.subtitle = subtitle
@@ -409,6 +428,13 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
                             .foregroundStyle(palette.textPrimary)
                             .lineLimit(1)
                             .minimumScaleFactor(0.85)
+                        ForEach(Array(labelAccessories.enumerated()), id: \.offset) { _, accessory in
+                            Image(systemName: accessory.systemImage)
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundStyle(accessory.color ?? palette.accentPrimary)
+                                .accessibilityHidden(accessory.accessibilityLabel == nil)
+                                .help(accessory.accessibilityLabel ?? "")
+                        }
                         if let labelAccessorySystemImage {
                             Image(systemName: labelAccessorySystemImage)
                                 .font(.system(size: 10.5, weight: .medium))

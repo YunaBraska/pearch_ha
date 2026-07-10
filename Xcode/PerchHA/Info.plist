@@ -12,8 +12,10 @@
 	<string>PearchHA</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>CFBundleDisplayName</key>
+	<string>PearchHA</string>
 	<key>CFBundleName</key>
-	<string>PerchHA</string>
+	<string>PearchHA</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

@@ -40,6 +40,13 @@ final class PerchHAPersistenceTests: XCTestCase {
                         warning: ValueThreshold(value: 30, direction: .belowOrEqual),
                         critical: ValueThreshold(value: 15, direction: .belowOrEqual)
                     ),
+                    stateThresholds: StateThresholds(
+                        rules: [
+                            StateThresholdRule(match: "GOOD", color: ValueThresholds.okColor),
+                            StateThresholdRule(match: "BAD", color: ValueThresholds.criticalColor)
+                        ],
+                        baseColor: ValueThresholds.warningColor
+                    ),
                     defaultHistoryRange: .week
                 ),
                 MenuBarItemConfiguration(
@@ -93,6 +100,37 @@ final class PerchHAPersistenceTests: XCTestCase {
         XCTAssertEqual(try store.load(), configuration)
     }
 
+    func test_t_json_config_store_loads_latest_existing_variant_path() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("perchha-persistence-variant-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let canonicalURL = directory
+            .appendingPathComponent("PerchHA", isDirectory: true)
+            .appendingPathComponent("config.json", isDirectory: false)
+        let legacyURL = directory
+            .appendingPathComponent("perchha", isDirectory: true)
+            .appendingPathComponent("config.json", isDirectory: false)
+        try FileManager.default.createDirectory(
+            at: canonicalURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: legacyURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        let olderConfiguration = PerchHAConfiguration(selectedEntityIDs: ["sensor.old"])
+        let newerConfiguration = PerchHAConfiguration(selectedEntityIDs: ["sensor.new"])
+        try JSONConfigStore(fileURL: canonicalURL).save(olderConfiguration)
+        Thread.sleep(forTimeInterval: 1.1)
+        try JSONConfigStore(fileURL: legacyURL).save(newerConfiguration)
+
+        let store = JSONConfigStore(fileURL: canonicalURL, legacyFallbackFileURLs: [legacyURL])
+        XCTAssertEqual(try store.load().selectedEntityIDs, ["sensor.new"])
+    }
+
     func testJSONConfigStoreDefaultsMissingHistoryRangeToInheritGlobal() throws {
         let url = temporaryConfigURL()
         defer {
@@ -135,6 +173,9 @@ final class PerchHAPersistenceTests: XCTestCase {
         XCTAssertEqual(configuration.menuBarAppearance, .iconAndText)
         XCTAssertFalse(configuration.stableMenuBarWidth)
         XCTAssertEqual(configuration.themeMode, .system)
+        XCTAssertEqual(configuration.menuBarRefreshInterval, .thirtySeconds)
+        XCTAssertEqual(configuration.dataSyncInterval, .fiveSeconds)
+        XCTAssertEqual(configuration.historyDetailRefreshInterval, .thirtySeconds)
         XCTAssertEqual(configuration.accentColor, .homeAssistantBlue)
         XCTAssertEqual(configuration.dashboardRowDensity, .comfortable)
         XCTAssertEqual(configuration.dashboardDefaultHistoryRange, .day)
@@ -153,6 +194,9 @@ final class PerchHAPersistenceTests: XCTestCase {
             menuBarAppearance: .iconOnly,
             stableMenuBarWidth: true,
             themeMode: .dark,
+            menuBarRefreshInterval: .sixtySeconds,
+            dataSyncInterval: .fifteenSeconds,
+            historyDetailRefreshInterval: .oneHundredTwentySeconds,
             accentColor: PerchHAAccentColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 0.9),
             dashboardRowDensity: .compact,
             dashboardDefaultHistoryRange: .week,
@@ -168,6 +212,9 @@ final class PerchHAPersistenceTests: XCTestCase {
 
     func testConfigurationDisplayPreferencesBridgesDashboardFields() {
         let configuration = PerchHAConfiguration(
+            menuBarRefreshInterval: .fiveSeconds,
+            dataSyncInterval: .sixtySeconds,
+            historyDetailRefreshInterval: .oneHundredTwentySeconds,
             dashboardRowDensity: .compact,
             dashboardDefaultHistoryRange: .week,
             dashboardShowsFooterTimestamp: false,
@@ -177,6 +224,9 @@ final class PerchHAPersistenceTests: XCTestCase {
 
         let preferences = configuration.displayPreferences
 
+        XCTAssertEqual(preferences.menuBarRefreshInterval, .fiveSeconds)
+        XCTAssertEqual(preferences.dataSyncInterval, .sixtySeconds)
+        XCTAssertEqual(preferences.historyDetailRefreshInterval, .oneHundredTwentySeconds)
         XCTAssertEqual(preferences.dashboardRowDensity, .compact)
         XCTAssertEqual(preferences.defaultHistoryRange, .week)
         XCTAssertFalse(preferences.showsFooterTimestamp)
@@ -190,6 +240,9 @@ final class PerchHAPersistenceTests: XCTestCase {
             menuBarEntityIDs: ["sensor.office_temperature"]
         )
         let preferences = PerchHADisplayPreferences.defaults
+            .with(menuBarRefreshInterval: .oneHundredTwentySeconds)
+            .with(dataSyncInterval: .fifteenSeconds)
+            .with(historyDetailRefreshInterval: .sixtySeconds)
             .with(dashboardRowDensity: .compact)
             .with(defaultHistoryRange: .week)
             .with(showsFooterTimestamp: false)
@@ -199,6 +252,9 @@ final class PerchHAPersistenceTests: XCTestCase {
         let applied = base.applying(displayPreferences: preferences)
 
         // Display fields take the new values.
+        XCTAssertEqual(applied.menuBarRefreshInterval, .oneHundredTwentySeconds)
+        XCTAssertEqual(applied.dataSyncInterval, .fifteenSeconds)
+        XCTAssertEqual(applied.historyDetailRefreshInterval, .sixtySeconds)
         XCTAssertEqual(applied.dashboardRowDensity, .compact)
         XCTAssertEqual(applied.dashboardDefaultHistoryRange, .week)
         XCTAssertFalse(applied.dashboardShowsFooterTimestamp)
@@ -231,6 +287,9 @@ final class PerchHAPersistenceTests: XCTestCase {
         XCTAssertEqual(configuration.menuBarAppearance, .iconAndText)
         XCTAssertFalse(configuration.stableMenuBarWidth)
         XCTAssertEqual(configuration.themeMode, .system)
+        XCTAssertEqual(configuration.menuBarRefreshInterval, .thirtySeconds)
+        XCTAssertEqual(configuration.dataSyncInterval, .fiveSeconds)
+        XCTAssertEqual(configuration.historyDetailRefreshInterval, .thirtySeconds)
         XCTAssertEqual(configuration.accentColor, .homeAssistantBlue)
         // New dashboard display fields decode to their shipped defaults when a
         // pre-existing config file omits them.
@@ -330,6 +389,12 @@ final class PerchHAPersistenceTests: XCTestCase {
         XCTAssertEqual(base.with(menuBarAppearance: .textOnly).menuBarAppearance, .textOnly)
         XCTAssertTrue(base.with(stableMenuBarWidth: true).stableMenuBarWidth)
         XCTAssertEqual(base.with(themeMode: .light).themeMode, .light)
+        XCTAssertEqual(base.with(menuBarRefreshInterval: .fiveSeconds).menuBarRefreshInterval, .fiveSeconds)
+        XCTAssertEqual(base.with(dataSyncInterval: .sixtySeconds).dataSyncInterval, .sixtySeconds)
+        XCTAssertEqual(
+            base.with(historyDetailRefreshInterval: .oneHundredTwentySeconds).historyDetailRefreshInterval,
+            .oneHundredTwentySeconds
+        )
         XCTAssertEqual(
             base.with(accentColor: .homeAssistantBlue).accentColor,
             .homeAssistantBlue
@@ -340,6 +405,8 @@ final class PerchHAPersistenceTests: XCTestCase {
         XCTAssertEqual(base.with(hiddenModuleIDs: ["room.office"]).hiddenModuleIDs, ["room.office"])
         // Replacing one field leaves the rest at their defaults.
         XCTAssertEqual(base.with(themeMode: .light).menuBarAppearance, .iconAndText)
+        XCTAssertEqual(base.with(menuBarRefreshInterval: .fiveSeconds).defaultHistoryRange, .day)
+        XCTAssertEqual(base.with(dataSyncInterval: .sixtySeconds).menuBarRefreshInterval, .thirtySeconds)
         XCTAssertEqual(base.with(dashboardRowDensity: .compact).defaultHistoryRange, .day)
         XCTAssertTrue(base.with(hiddenModuleIDs: ["room.office"]).showsFooterTimestamp)
     }

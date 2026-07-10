@@ -2350,24 +2350,10 @@ struct PerchHASmoke {
             "panel history opens popover presentation"
         )
         historyPanel.cancelHistoryHover()
-        for _ in 0..<100 {
-            if await historyClock.sleepingTaskCount() == 1 {
-                break
-            }
-            await Task.yield()
-        }
         try expect(
-            historyPanel.snapshot.historyPresentationEntityID == "sensor.office_temperature",
-            "panel history hover-out keeps popover open during grace period"
+            historyPanel.snapshot.historyPresentationEntityID == nil,
+            "panel history cancel clears selection immediately"
         )
-        _ = await historyClock.advance(by: .milliseconds(300))
-        for _ in 0..<100 {
-            if historyPanel.snapshot.historyPresentationEntityID == nil {
-                break
-            }
-            await Task.yield()
-        }
-        try expect(historyPanel.snapshot.historyPresentationEntityID == nil, "panel history hover-out closes popover")
         let providerCallsAfterDebounce = await historyProbe.callCount()
         try expect(providerCallsAfterDebounce == 1, "panel history provider called after debounce")
         await historyPanel.loadHistory("sensor.office_temperature", range: .hour)

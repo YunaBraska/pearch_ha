@@ -812,17 +812,20 @@ public struct PerchHAPanelRootAccessibilityPresentation: Equatable, Sendable {
 
 public struct PerchHAPanelEntityContextPresentation: Equatable, Sendable {
     public let isPromotedToMenuBar: Bool
+    public let hasAverageLinks: Bool
     public let showsEntityIcon: Bool
     public let showsLabel: Bool
     public let showsUnit: Bool
 
     public init(
         isPromotedToMenuBar: Bool,
+        hasAverageLinks: Bool,
         showsEntityIcon: Bool,
         showsLabel: Bool,
         showsUnit: Bool
     ) {
         self.isPromotedToMenuBar = isPromotedToMenuBar
+        self.hasAverageLinks = hasAverageLinks
         self.showsEntityIcon = showsEntityIcon
         self.showsLabel = showsLabel
         self.showsUnit = showsUnit
@@ -1287,11 +1290,6 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
 
     public func formattedValue(for entity: DiscoveredEntity, locale: Locale = .current) -> FormattedEntityValue {
         let configuration = effectiveMenuBarItemConfiguration(for: entity)
-        let displayedEntity = PerchHAEntityAveraging.averagedEntity(
-            base: entity,
-            configuration: configuration,
-            availableEntities: availableRooms.flatMap(\.entities)
-        )
         return EntityValueFormatter(
             locale: locale,
             displayUnit: configuration.displayUnit,
@@ -1299,7 +1297,7 @@ public struct PerchHAPanelSnapshot: Equatable, Sendable {
             showsUnit: configuration.showsUnit,
             minValue: configuration.minValue,
             maxValue: configuration.maxValue
-        ).format(displayedEntity, isStale: valuesAreStale)
+        ).format(displayedEntity(for: entity), isStale: valuesAreStale)
     }
 
     private func displayedEntity(for entity: DiscoveredEntity) -> DiscoveredEntity {
@@ -1645,15 +1643,34 @@ private struct PerchHAHistoryCache {
         _ series: HistorySeries,
         for key: PerchHAHistoryCacheKey,
         now: PerchInstant,
-        configuration: PerchHAHistoryCacheConfiguration,
+        capacity: Int,
+        ttl: PerchDuration,
         protecting protected: Set<PerchHAHistoryCacheKey> = []
     ) {
         entries[key] = PerchHAHistoryCacheEntry(
             series: series,
-            expiresAt: now.advanced(by: configuration.ttl)
+            expiresAt: now.advanced(by: ttl)
         )
         markRecentlyUsed(key)
-        trim(to: configuration.capacity, protecting: protected)
+        trim(to: capacity, protecting: protected)
+    }
+
+    mutating func pruneExpired(
+        now: PerchInstant,
+        protecting protected: Set<PerchHAHistoryCacheKey> = []
+    ) -> Set<PerchHAHistoryCacheKey> {
+        let expiredKeys = entries.compactMap { key, entry in
+            entry.expiresAt <= now && !protected.contains(key) ? key : nil
+        }
+        guard !expiredKeys.isEmpty else {
+            return []
+        }
+        let removed = Set(expiredKeys)
+        for key in removed {
+            entries[key] = nil
+        }
+        order.removeAll { removed.contains($0) }
+        return removed
     }
 
     private mutating func markRecentlyUsed(_ key: PerchHAHistoryCacheKey) {
@@ -1753,6 +1770,11 @@ private struct AvailableEntityLocation {
     let entityIndex: Int
 }
 
+private struct FormattedEntityValueCacheKey: Hashable {
+    let entityID: EntityID
+    let localeIdentifier: String
+}
+
 private enum PerchHAInlineHistoryPreviewData {
     case sparkline(PerchHAHistorySparklineGeometry)
     case state(HistorySeries)
@@ -1788,22 +1810,26 @@ public final class PerchHAPanelModel: ObservableObject {
 
     @Published public private(set) var snapshot: PerchHAPanelSnapshot {
         didSet {
-            if oldValue.availableRooms != snapshot.availableRooms {
-                rebuildAvailableEntityCaches(from: snapshot.availableRooms)
-            }
-            if oldValue.rooms != snapshot.rooms || oldValue.menuBarDisplayConfiguration != snapshot.menuBarDisplayConfiguration {
-                rowPresentationCache.removeAll(keepingCapacity: true)
+            let previousAvailableEntityIndexSignature = availableEntityIndexSignature
+            rebuildAvailableEntityCaches(from: snapshot.availableRooms)
+            let availableEntityIndexChanged = previousAvailableEntityIndexSignature != availableEntityIndexSignature
+            if oldValue.rooms != snapshot.rooms
+                || oldValue.availableRooms != snapshot.availableRooms
+                || oldValue.menuBarDisplayConfiguration != snapshot.menuBarDisplayConfiguration
+                || oldValue.valuesAreStale != snapshot.valuesAreStale {
+                invalidateAllDisplayCaches()
+            } else if oldValue.connectionState != snapshot.connectionState {
+                formattedValueCache.removeAll(keepingCapacity: true)
             }
             snapshotSink(snapshot)
             refreshRetryBackoffState()
-            refreshSettingsSelectionTreeIfNeeded(newSnapshot: snapshot)
+            if availableEntityIndexChanged
+                || oldValue.selectionConfiguration != snapshot.selectionConfiguration
+                || oldValue.selectionQuery != snapshot.selectionQuery {
+                refreshSettingsSelectionTreeIfNeeded(newSnapshot: snapshot)
+            }
         }
     }
-
-    /// The entity whose history popover the user pinned open with a click, or
-    /// `nil` when the popover follows hover. While pinned, hover-out and other
-    /// rows' hovers are ignored; clicking the pinned row again releases it.
-    @Published public private(set) var pinnedHistoryEntityID: EntityID?
 
     /// The Settings Entities tree, recomputed only when the snapshot changes.
     /// The projection filters and orders every room and entity; computing it
@@ -1893,6 +1919,8 @@ public final class PerchHAPanelModel: ObservableObject {
     private var availableEntitiesByID: [EntityID: DiscoveredEntity] = [:]
     private var availableEntities: [DiscoveredEntity] = []
     private var averageCandidateCache: [EntityID: [DiscoveredEntity]] = [:]
+    private var displayedEntityCache: [EntityID: DiscoveredEntity] = [:]
+    private var formattedValueCache: [FormattedEntityValueCacheKey: FormattedEntityValue] = [:]
     private var rowPresentationCache: [EntityID: PerchHAEntityRowPresentation] = [:]
     private var inlineSparklineGeometryCache: [PerchHAHistoryCacheKey: PerchHAHistorySparklineGeometry?] = [:]
     private var historyRevisionSubjects: [EntityID: CurrentValueSubject<UInt64, Never>] = [:]
@@ -1904,14 +1932,12 @@ public final class PerchHAPanelModel: ObservableObject {
     private var controlActionTask: Task<Void, Never>?
     private var pendingControlChange: PendingControlChange?
     private var historyTask: Task<Void, Never>?
-    private var historyCloseTask: Task<Void, Never>?
-    private var historyScrollSuppressionTask: Task<Void, Never>?
+    private var historyDetailRefreshTask: Task<Void, Never>?
     private var historyRequestGeneration = 0
-    private var isPointerInsideHistorySurface = false
     private var historyHoverSuppressionDepth = 0
-    private var isScrollSuppressingHistoryHover = false
     private var transientUITrackingDepth = 0
     private var deferredLiveStates: [EntityID: EntityState] = [:]
+    private var deferredBackgroundLiveStates: [EntityID: EntityState] = [:]
     private var deferredSilentRefreshRequested = false
     private var protectedValueDrafts: [String: String] = [:]
     /// Whether the panel is currently shown, gating all background fetching.
@@ -1927,9 +1953,11 @@ public final class PerchHAPanelModel: ObservableObject {
     /// every cycle, cold ones every Nth cycle. Bounded so it never grows without
     /// limit (capped per entity; pruned to displayed/visible entities each cycle).
     private var entityInterest: [EntityID: Int] = [:]
-    /// When each entity's history last landed from a bulk cycle. Bounds re-arm
-    /// churn: a scroll-pause re-arm skips entities synced within the interval.
-    private var entityLastSyncedAt: [EntityID: PerchInstant] = [:]
+    /// When each entity/range history layer last landed from a bulk cycle.
+    /// Range-specific timestamps stop a fresh day sync from suppressing the week
+    /// or month layer, which would otherwise leave long ranges stale while still
+    /// paying their full fetch cost when opened later.
+    private var entityLastSyncedAt: [PerchHAHistoryCacheKey: PerchInstant] = [:]
     /// Monotonic count of completed sync cycles, used to gate cold-entity refresh.
     private var bulkSyncCycle = 0
     private var periodicRefreshTask: Task<Void, Never>?
@@ -2040,8 +2068,7 @@ public final class PerchHAPanelModel: ObservableObject {
         actionTask?.cancel()
         controlActionTask?.cancel()
         historyTask?.cancel()
-        historyCloseTask?.cancel()
-        historyScrollSuppressionTask?.cancel()
+        historyDetailRefreshTask?.cancel()
         bulkSyncTask?.cancel()
         periodicRefreshTask?.cancel()
         liveUpdateTask?.cancel()
@@ -2271,10 +2298,22 @@ public final class PerchHAPanelModel: ObservableObject {
     ///
     /// - Parameter preferences: The new display preferences.
     public func applyDisplayPreferences(_ preferences: PerchHADisplayPreferences) {
-        guard displayPreferences != preferences else {
+        let previousPreferences = displayPreferences
+        guard previousPreferences != preferences else {
             return
         }
         displayPreferences = preferences
+        guard isPanelActive else {
+            return
+        }
+        if previousPreferences.dataSyncInterval != preferences.dataSyncInterval {
+            startHistoryBulkSync()
+            startPeriodicRefresh(refreshImmediately: false)
+        }
+        if previousPreferences.historyDetailRefreshInterval != preferences.historyDetailRefreshInterval
+            || previousPreferences.dataSyncInterval != preferences.dataSyncInterval {
+            restartHistoryDetailRefresh()
+        }
     }
 
     /// Reports (or clears) a shell-level persistence problem so it surfaces in
@@ -2305,6 +2344,61 @@ public final class PerchHAPanelModel: ObservableObject {
         )
         rowPresentationCache[entity.id] = presentation
         return presentation
+    }
+
+    public func formattedValue(for entity: DiscoveredEntity, locale: Locale = .current) -> FormattedEntityValue {
+        let key = FormattedEntityValueCacheKey(
+            entityID: entity.id,
+            localeIdentifier: locale.identifier
+        )
+        if let cached = formattedValueCache[key] {
+            return cached
+        }
+        let configuration = snapshot.effectiveMenuBarItemConfiguration(for: entity)
+        let value = EntityValueFormatter(
+            locale: locale,
+            displayUnit: configuration.displayUnit,
+            displayUnitSymbol: configuration.displayUnitSymbol,
+            showsUnit: configuration.showsUnit,
+            minValue: configuration.minValue,
+            maxValue: configuration.maxValue
+        ).format(displayedEntity(for: entity), isStale: snapshot.valuesAreStale)
+        formattedValueCache[key] = value
+        return value
+    }
+
+    private func displayedEntity(for entity: DiscoveredEntity) -> DiscoveredEntity {
+        if let cached = displayedEntityCache[entity.id] {
+            return cached
+        }
+        let resolved = PerchHAEntityAveraging.averagedEntity(
+            base: entity,
+            configuration: snapshot.effectiveMenuBarItemConfiguration(for: entity),
+            availableEntities: availableEntities
+        )
+        displayedEntityCache[entity.id] = resolved
+        return resolved
+    }
+
+    private func invalidateAllDisplayCaches() {
+        displayedEntityCache.removeAll(keepingCapacity: true)
+        formattedValueCache.removeAll(keepingCapacity: true)
+        rowPresentationCache.removeAll(keepingCapacity: true)
+    }
+
+    private func invalidateDisplayCaches(affectedBy entityID: EntityID) {
+        let affectedIDs = Set(
+            [entityID] + averageCandidateCache.compactMap { key, members in
+                members.contains(where: { $0.id == entityID }) ? key : nil
+            }
+        )
+        for affectedID in affectedIDs {
+            displayedEntityCache.removeValue(forKey: affectedID)
+            rowPresentationCache.removeValue(forKey: affectedID)
+        }
+        if !affectedIDs.isEmpty {
+            formattedValueCache = formattedValueCache.filter { !affectedIDs.contains($0.key.entityID) }
+        }
     }
 
     private func rebuildAvailableEntityCaches(from rooms: [Room]) {
@@ -2618,6 +2712,20 @@ public final class PerchHAPanelModel: ObservableObject {
         )
     }
 
+    /// Replaces the entity's state-to-color threshold rules.
+    ///
+    /// - Parameters:
+    ///   - id: The entity whose string/state thresholds change.
+    ///   - thresholds: The explicit string rules plus optional base color.
+    /// - Returns: `true` when the configuration was updated and persisted.
+    @discardableResult
+    public func setStateThresholds(_ id: EntityID, thresholds: StateThresholds) -> Bool {
+        updateMenuBarItemConfiguration(
+            snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id)
+                .settingStateThresholds(thresholds)
+        )
+    }
+
     /// Overrides the entity's dashboard icon with a custom SF Symbol.
     ///
     /// - Parameters:
@@ -2814,31 +2922,23 @@ public final class PerchHAPanelModel: ObservableObject {
     /// - Parameters:
     ///   - id: The entity whose history should be shown.
     ///   - range: An explicit range, or `nil` to use the entity's default.
+    public func presentHistoryDetail(_ id: EntityID, range: HistoryRange? = nil) {
+        startHistoryHover(id, range: range)
+    }
+
     public func startHistoryHover(
         _ id: EntityID,
-        range: HistoryRange? = nil,
-        immediatePresentation: Bool = false
+        range: HistoryRange? = nil
     ) {
         guard historyHoverSuppressionDepth == 0 else {
-            return
-        }
-        // While a row is pinned, hovering other rows must not steal the popover.
-        guard pinnedHistoryEntityID == nil || pinnedHistoryEntityID == id else {
             return
         }
         let resolvedRange = range ?? historyRange(for: id)
         // Opening a detail/hover marks the entity as hot so the bulk sync keeps it
         // freshest across cycles.
         bumpInterest(id)
-        cancelPendingHistoryClose()
         historyTask?.cancel()
-        let isSwitchingWithinPanelSurface = isPointerInsideHistorySurface && snapshot.historyPresentationEntityID != nil
-        let shouldPresentImmediately = immediatePresentation
-            || snapshot.historyPresentationEntityID == id
-            || isSwitchingWithinPanelSurface
-        if shouldPresentImmediately {
-            primeHistoryPresentation(entityID: id, range: resolvedRange)
-        }
+        primeHistoryPresentation(entityID: id, range: resolvedRange)
         historyTask = Task { @MainActor [weak self] in
             guard let self else {
                 return
@@ -2850,49 +2950,19 @@ public final class PerchHAPanelModel: ObservableObject {
             }
             applyHistoryPresentationEntityID(id)
             await loadHistory(id, range: resolvedRange)
+            restartHistoryDetailRefresh()
             if !Task.isCancelled {
                 historyTask = nil
             }
         }
     }
 
-    /// Keeps the history popover open while the cursor is inside it.
-    ///
-    /// Called when the cursor enters the popover content; cancels any pending
-    /// grace-period close scheduled when the cursor left the underlying row.
-    public func keepHistoryHoverAlive() {
-        cancelPendingHistoryClose()
-    }
-
     /// Closes and suppresses history hover briefly while the user scrolls.
     ///
-    /// The history popover is useful while lingering on one row, but it should
-    /// not thrash open/closed or fight the cursor during scrolling. A short
-    /// timed suppression keeps scrolling calm and allows hover to resume after
-    /// the list settles.
+    /// History is now explicit-selection driven, so scrolling simply dismisses
+    /// the current detail surface instead of juggling hover suppression timers.
     public func notePanelScrollActivity() {
         closeHistoryHoverImmediately()
-        if !isScrollSuppressingHistoryHover {
-            historyHoverSuppressionDepth += 1
-            isScrollSuppressingHistoryHover = true
-        }
-        historyScrollSuppressionTask?.cancel()
-        historyScrollSuppressionTask = Task { @MainActor [weak self] in
-            guard let self else {
-                return
-            }
-            do {
-                _ = try await clock.sleep(for: .milliseconds(180))
-            } catch {
-                return
-            }
-            historyScrollSuppressionTask = nil
-            guard isScrollSuppressingHistoryHover else {
-                return
-            }
-            isScrollSuppressingHistoryHover = false
-            historyHoverSuppressionDepth = max(0, historyHoverSuppressionDepth - 1)
-        }
     }
 
     /// Suspends row-hover driven history changes while a native context menu is open.
@@ -2901,7 +2971,6 @@ public final class PerchHAPanelModel: ObservableObject {
     /// while the context menu is active are ignored until the menu closes.
     public func beginHistoryHoverSuppression() {
         historyHoverSuppressionDepth += 1
-        cancelPendingHistoryClose()
     }
 
     /// Ends one level of context-menu hover suppression.
@@ -2935,80 +3004,32 @@ public final class PerchHAPanelModel: ObservableObject {
         }
     }
 
-    /// Marks whether the cursor is still somewhere inside the panel surface.
-    ///
-    /// While true, a row-exit must not dismiss the history popover; the user is
-    /// still navigating the dashboard. Leaving the panel schedules the normal
-    /// hover-grace close so the popover can survive the short trip into its own
-    /// content view.
-    public func setHistorySurfaceHovering(_ isInside: Bool) {
-        guard isPointerInsideHistorySurface != isInside else {
-            return
-        }
-        isPointerInsideHistorySurface = isInside
-        if isInside {
-            cancelPendingHistoryClose()
-        } else {
-            cancelHistoryHover()
-        }
-    }
-
-    /// Schedules the history popover to close after the hover grace period.
-    ///
-    /// Called when the cursor leaves the row or the popover. The close does not
-    /// happen immediately: a grace timer (``historyHoverGrace``) runs on the
-    /// injected clock so the cursor can travel from the row into the popover
-    /// without dismissing it. ``startHistoryHover(_:range:)`` or
-    /// ``keepHistoryHoverAlive()`` called before the timer fires cancels the
-    /// pending close.
+    /// Legacy compatibility entrypoint for tests and tooling that used the old
+    /// hover-driven history panel. In the explicit-selection model, cancelling
+    /// history simply dismisses the current detail immediately.
     public func cancelHistoryHover() {
-        // A pinned popover stays open until the user unpins it; hover-out is
-        // ignored entirely.
-        guard pinnedHistoryEntityID == nil else {
-            return
-        }
-        guard historyHoverSuppressionDepth == 0 else {
-            return
-        }
-        guard !isPointerInsideHistorySurface else {
-            return
-        }
-        let isLoading: Bool
-        if case .loading = snapshot.historyState {
-            isLoading = true
-        } else {
-            isLoading = false
-        }
-        guard snapshot.historyPresentationEntityID != nil || historyTask != nil || isLoading else {
-            return
-        }
-        historyCloseTask?.cancel()
-        historyCloseTask = Task { @MainActor [weak self] in
-            guard let self else {
-                return
-            }
-            do {
-                _ = try await clock.sleep(for: historyHoverGrace)
-            } catch {
-                return
-            }
-            guard !Task.isCancelled else {
-                return
-            }
-            historyCloseTask = nil
-            closeHistoryHoverImmediately()
+        closeHistoryHoverImmediately()
+    }
+
+    /// Compatibility accessor retained for older tests that still talk in terms
+    /// of a pinned hover target. The explicit-selection model exposes the same
+    /// entity through `historyPresentationEntityID`.
+    public var pinnedHistoryEntityID: EntityID? {
+        snapshot.historyPresentationEntityID
+    }
+
+    /// Compatibility no-op for the retired hover-grace model.
+    public func keepHistoryHoverAlive() {}
+
+    /// Compatibility hook for the retired hover-surface tracking model.
+    public func setHistorySurfaceHovering(_ isHovering: Bool) {
+        if !isHovering {
+            dismissHistoryPopover()
         }
     }
 
-    private func cancelPendingHistoryClose() {
-        historyCloseTask?.cancel()
-        historyCloseTask = nil
-    }
-
-    /// Keeps the history panel feeling continuous while the cursor moves across
-    /// rows inside the dashboard: switch the presented entity immediately and, if
-    /// a cached series already exists, render it right away instead of waiting
-    /// for the debounce/fetch path to catch up.
+    /// Selection opens the history panel immediately from cache when possible,
+    /// then refreshes the backing series through the normal debounced load path.
     private func primeHistoryPresentation(entityID: EntityID, range: HistoryRange) {
         applyHistoryPresentationEntityID(entityID)
         let cacheKey = PerchHAHistoryCacheKey(entityID: entityID, range: range)
@@ -3026,10 +3047,9 @@ public final class PerchHAPanelModel: ObservableObject {
     /// Used by teardown paths (sign-out, reconnect, panel dismissal) where the
     /// popover must disappear without waiting.
     private func closeHistoryHoverImmediately() {
-        pinnedHistoryEntityID = nil
-        cancelPendingHistoryClose()
         historyTask?.cancel()
         historyTask = nil
+        cancelHistoryDetailRefresh()
         historyRequestGeneration += 1
         applyHistoryPresentationEntityID(nil)
         if case .loading = snapshot.historyState {
@@ -3037,22 +3057,8 @@ public final class PerchHAPanelModel: ObservableObject {
         }
     }
 
-    /// Pins (or unpins) an entity's history popover from a click.
-    ///
-    /// A pinned popover ignores hover-out and stays open while the user reads
-    /// or scrubs the chart; clicking the row again — or dismissing the popover —
-    /// releases the pin. Hovering other rows does not steal a pinned popover.
-    ///
-    /// - Parameter id: The clicked entity.
     public func toggleHistoryPin(_ id: EntityID) {
-        if pinnedHistoryEntityID == id {
-            pinnedHistoryEntityID = nil
-            closeHistoryHoverImmediately()
-            return
-        }
-        pinnedHistoryEntityID = nil
-        startHistoryHover(id, immediatePresentation: true)
-        pinnedHistoryEntityID = id
+        presentHistoryDetail(id)
     }
 
     public func loadHistory(_ id: EntityID, range: HistoryRange? = nil) async {
@@ -3064,21 +3070,29 @@ public final class PerchHAPanelModel: ObservableObject {
             applyHistoryState(.loaded(cachedSeries))
             return
         }
+        let staleSeries = historyCache.peekAllowingStale(for: cacheKey)
+        if let staleSeries {
+            applyHistoryState(.loaded(staleSeries))
+        }
 
         guard let form = lastConnectedForm else {
-            applyHistoryState(
-                .unavailable(
-                    entityID: id,
-                    range: resolvedRange,
-                    message: "history requires a connected Home Assistant session"
+            if staleSeries == nil {
+                applyHistoryState(
+                    .unavailable(
+                        entityID: id,
+                        range: resolvedRange,
+                        message: "history requires a connected Home Assistant session"
+                    )
                 )
-            )
+            }
             return
         }
 
         historyRequestGeneration += 1
         let requestGeneration = historyRequestGeneration
-        applyHistoryState(.loading(entityID: id, range: resolvedRange))
+        if staleSeries == nil {
+            applyHistoryState(.loading(entityID: id, range: resolvedRange))
+        }
         recordOutboundRequest()
         let result = await historyProvider(form, id, resolvedRange)
         guard !Task.isCancelled, requestGeneration == historyRequestGeneration else {
@@ -3102,7 +3116,95 @@ public final class PerchHAPanelModel: ObservableObject {
             insertHistory(series, for: cacheKey, now: insertNow)
             applyHistoryState(.loaded(series))
         case let .unavailable(message):
-            applyHistoryState(.unavailable(entityID: id, range: resolvedRange, message: message))
+            if staleSeries == nil {
+                applyHistoryState(.unavailable(entityID: id, range: resolvedRange, message: message))
+            }
+        }
+    }
+
+    private var effectivePeriodicRefreshInterval: PerchDuration {
+        guard periodicRefreshConfiguration.isEnabled else {
+            return .seconds(0)
+        }
+        let configuredDefault = PerchHAPeriodicRefreshConfiguration().interval
+        if periodicRefreshConfiguration.interval != configuredDefault {
+            return periodicRefreshConfiguration.interval
+        }
+        return PerchDuration.seconds(Int64(displayPreferences.dataSyncInterval.rawValue))
+    }
+
+    private var effectiveBulkSyncInterval: PerchDuration {
+        guard bulkSyncConfiguration.isEnabled else {
+            return .seconds(0)
+        }
+        let configuredDefault = PerchHAHistoryBulkSyncConfiguration().interval
+        if bulkSyncConfiguration.interval != configuredDefault {
+            return bulkSyncConfiguration.interval
+        }
+        return PerchDuration.seconds(Int64(displayPreferences.dataSyncInterval.rawValue))
+    }
+
+    private var effectiveHistoryDetailRefreshInterval: PerchDuration {
+        PerchDuration.seconds(Int64(displayPreferences.historyDetailRefreshInterval.rawValue))
+    }
+
+    private func restartHistoryDetailRefresh() {
+        cancelHistoryDetailRefresh()
+        guard isPanelActive,
+              let entityID = snapshot.historyPresentationEntityID,
+              effectiveHistoryDetailRefreshInterval.nanoseconds > 0
+        else {
+            return
+        }
+        let interval = effectiveHistoryDetailRefreshInterval
+        let range = snapshot.historyState.range ?? historyRange(for: entityID)
+        historyDetailRefreshTask = Task { @MainActor [weak self, clock] in
+            while !Task.isCancelled {
+                do {
+                    _ = try await clock.sleep(for: interval)
+                } catch {
+                    return
+                }
+                guard let model = self,
+                      model.isPanelActive,
+                      model.snapshot.historyPresentationEntityID == entityID,
+                      (model.snapshot.historyState.range ?? model.historyRange(for: entityID)) == range
+                else {
+                    return
+                }
+                await model.refreshPresentedHistoryInBackground(entityID: entityID, range: range)
+            }
+        }
+    }
+
+    private func cancelHistoryDetailRefresh() {
+        historyDetailRefreshTask?.cancel()
+        historyDetailRefreshTask = nil
+    }
+
+    private func refreshPresentedHistoryInBackground(entityID: EntityID, range: HistoryRange) async {
+        guard let form = lastConnectedForm else {
+            return
+        }
+        recordOutboundRequest()
+        let result = await historyProvider(form, entityID, range)
+        guard !Task.isCancelled,
+              snapshot.historyPresentationEntityID == entityID,
+              (snapshot.historyState.range ?? historyRange(for: entityID)) == range
+        else {
+            return
+        }
+        switch result {
+        case let .success(series):
+            guard series.entityID == entityID, series.range == range else {
+                return
+            }
+            let insertNow = await clock.now()
+            lastObservedInstant = insertNow
+            insertHistory(series, for: PerchHAHistoryCacheKey(entityID: entityID, range: range), now: insertNow)
+            applyHistoryState(.loaded(series))
+        case .unavailable:
+            return
         }
     }
 
@@ -3121,6 +3223,10 @@ public final class PerchHAPanelModel: ObservableObject {
     /// - Returns: The cached series for the entity's default range, or `nil`.
     public func cachedHistorySeries(for id: EntityID) -> HistorySeries? {
         let range = historyRange(for: id)
+        return cachedHistorySeries(for: id, range: range)
+    }
+
+    func cachedHistorySeries(for id: EntityID, range: HistoryRange) -> HistorySeries? {
         let key = PerchHAHistoryCacheKey(entityID: id, range: range)
         // Display uses the stale-tolerant peek so the inline sparkline keeps
         // showing its last-known data instead of flickering out when the entry
@@ -3179,26 +3285,90 @@ public final class PerchHAPanelModel: ObservableObject {
             series,
             for: key,
             now: now,
-            configuration: historyCacheConfiguration,
+            capacity: historyCacheConfiguration.capacity,
+            ttl: historyCacheTTL(for: key.range),
             protecting: protectedHistoryKeys()
         )
         inlineSparklineGeometryCache[key] = nil
         bumpHistoryRevisions(for: [key.entityID])
     }
 
-    /// The cache keys that back the on-screen inline previews: every displayed
-    /// entity at its default history range. These are exempt from capacity
-    /// eviction so a dashboard larger than the cache capacity cannot flicker
-    /// its own visible rows out while the tail of the list syncs.
+    /// The cache keys that back the on-screen inline previews: the currently
+    /// visible entities at their effective preview range, plus the opened
+    /// detail entity's background-maintained layers. Keeping protection scoped
+    /// to what the user can actually see keeps the cache from bloating around
+    /// off-screen rows.
     private func protectedHistoryKeys() -> Set<PerchHAHistoryCacheKey> {
-        Set(
-            displayedEntityIDs().map { id in
+        var keys = Set(
+            visibleEntityIDs.map { id in
                 PerchHAHistoryCacheKey(
                     entityID: id,
                     range: historyRange(for: id)
                 )
             }
         )
+        if let presenting = snapshot.historyPresentationEntityID {
+            for range in detailMaintenanceHistoryRanges(for: presenting) {
+                keys.insert(PerchHAHistoryCacheKey(entityID: presenting, range: range))
+            }
+        }
+        return keys
+    }
+
+    /// The extra ranges maintained for an opened history detail.
+    ///
+    /// Day stays close to live use and acts as the cheap maintenance pass.
+    /// Week and month piggyback on that recurring visible-row maintenance only
+    /// when those caches are older than 24 hours (or absent), so long-range
+    /// fetches stay rare without depending on click-time warming.
+    private static let detailMaintenanceBaseRange: HistoryRange = .day
+    private static let detailLongRangeMaintenance: [HistoryRange] = [.week, .month]
+    private static let longRangeMaintenanceAge = PerchDuration.seconds(86_400)
+
+    private func detailMaintenanceHistoryRanges(for id: EntityID) -> [HistoryRange] {
+        var ordered: [HistoryRange] = []
+        func append(_ range: HistoryRange) {
+            if !ordered.contains(range) {
+                ordered.append(range)
+            }
+        }
+        append(historyRange(for: id))
+        append(Self.detailMaintenanceBaseRange)
+        for range in Self.detailLongRangeMaintenance {
+            append(range)
+        }
+        return ordered
+    }
+
+    private func historyCacheTTL(for range: HistoryRange) -> PerchDuration {
+        scaledDuration(historyCacheConfiguration.ttl, by: historyCacheTTLMultiplier(for: range))
+    }
+
+    private func historyCacheTTLMultiplier(for range: HistoryRange) -> Int64 {
+        switch range {
+        case .hour:
+            1
+        case .day:
+            3
+        case .week:
+            1_440
+        case .month:
+            1_440
+        }
+    }
+
+    private func minimumBulkSyncInterval(for range: HistoryRange) -> PerchDuration {
+        switch range {
+        case .week, .month:
+            return Self.longRangeMaintenanceAge
+        case .hour, .day:
+            return bulkSyncConfiguration.interval
+        }
+    }
+
+    private func scaledDuration(_ duration: PerchDuration, by multiplier: Int64) -> PerchDuration {
+        let scaled = duration.nanoseconds.multipliedReportingOverflow(by: max(1, multiplier))
+        return PerchDuration(nanoseconds: scaled.overflow ? Int64.max : scaled.partialValue)
     }
 
     /// Drops the entire history cache and publishes the eviction so previews that
@@ -3225,6 +3395,7 @@ public final class PerchHAPanelModel: ObservableObject {
         }
         isPanelActive = active
         if active {
+            flushDeferredBackgroundLiveStates()
             // A reopen starts cold so every displayed row refreshes in the first
             // cycle; previews that aged while the panel was hidden catch up
             // immediately instead of waiting out the warm-cycle rotation.
@@ -3233,10 +3404,12 @@ public final class PerchHAPanelModel: ObservableObject {
             // Opening the panel should render from the current snapshot/cache
             // first, then let background refresh happen quietly afterward.
             startPeriodicRefresh(refreshImmediately: false)
+            restartHistoryDetailRefresh()
         } else {
             closeHistoryHoverImmediately()
             cancelHistoryBulkSync()
             cancelPeriodicRefresh()
+            cancelHistoryDetailRefresh()
         }
     }
 
@@ -3251,7 +3424,7 @@ public final class PerchHAPanelModel: ObservableObject {
     /// gentle backstop that keeps the request-volume budget intact.
     private func startPeriodicRefresh(refreshImmediately: Bool = true) {
         periodicRefreshTask?.cancel()
-        guard periodicRefreshConfiguration.isEnabled, lastConnectedForm != nil else {
+        guard effectivePeriodicRefreshInterval.nanoseconds > 0, lastConnectedForm != nil else {
             periodicRefreshTask = nil
             return
         }
@@ -3473,11 +3646,11 @@ public final class PerchHAPanelModel: ObservableObject {
     /// to the configured ceiling.
     private func periodicRefreshDelay() -> PerchDuration {
         guard periodicRefreshFailureStreak > 0 else {
-            return periodicRefreshConfiguration.interval
+            return effectivePeriodicRefreshInterval
         }
         // First failure already doubles the base interval, then 4x, 8x, … capped.
         let multiplier = Int64(1 << min(periodicRefreshFailureStreak, 8))
-        let scaled = periodicRefreshConfiguration.interval.nanoseconds.multipliedReportingOverflow(by: multiplier)
+        let scaled = effectivePeriodicRefreshInterval.nanoseconds.multipliedReportingOverflow(by: multiplier)
         let capped = min(scaled.overflow ? Int64.max : scaled.partialValue, periodicRefreshConfiguration.maximumBackoff.nanoseconds)
         return PerchDuration(nanoseconds: capped)
     }
@@ -3552,11 +3725,11 @@ public final class PerchHAPanelModel: ObservableObject {
     private func startHistoryBulkSync() {
         bulkSyncTask?.cancel()
         bulkSyncTask = nil
-        guard bulkSyncConfiguration.isEnabled, isPanelActive, lastConnectedForm != nil else {
+        let interval = effectiveBulkSyncInterval
+        guard interval.nanoseconds > 0, isPanelActive, lastConnectedForm != nil else {
             return
         }
         let settleDelay = bulkSyncConfiguration.settleDelay
-        let interval = bulkSyncConfiguration.interval
         bulkSyncTask = Task { @MainActor [weak self, clock] in
             do {
                 // Settle first so scrolling coalesces into one armed loop.
@@ -3616,13 +3789,14 @@ public final class PerchHAPanelModel: ObservableObject {
             return
         }
 
-        // Group entities by their default range so each bulk request covers a
-        // single range, then split each range group into client-capped batches.
-        let byRange = Dictionary(grouping: targets) { id in
-            historyRange(for: id)
+        // Group entity/range targets by range so each bulk request covers a
+        // single layer, then split each range group into client-capped batches.
+        let byRange = Dictionary(grouping: targets) { key in
+            key.range
         }
         var batches: [(range: HistoryRange, ids: [EntityID])] = []
-        for (range, ids) in byRange {
+        for (range, keys) in byRange {
+            let ids = keys.map(\.entityID)
             var index = 0
             while index < ids.count {
                 let upper = min(index + bulkSyncConfiguration.batchSize, ids.count)
@@ -3650,15 +3824,20 @@ public final class PerchHAPanelModel: ObservableObject {
             for _ in window {
                 recordOutboundRequest()
             }
-            let results = await withTaskGroup(of: [EntityID: HistorySeries].self) { group in
+            let results = await withTaskGroup(of: [PerchHAHistoryCacheKey: HistorySeries].self) { group in
                 for batch in window {
                     let ids = batch.ids
                     let range = batch.range
                     group.addTask { [bulkHistoryProvider] in
-                        await bulkHistoryProvider(form, ids, range)
+                        let partial = await bulkHistoryProvider(form, ids, range)
+                        var keyed: [PerchHAHistoryCacheKey: HistorySeries] = [:]
+                        for (entityID, series) in partial {
+                            keyed[PerchHAHistoryCacheKey(entityID: entityID, range: series.range)] = series
+                        }
+                        return keyed
                     }
                 }
-                var merged: [EntityID: HistorySeries] = [:]
+                var merged: [PerchHAHistoryCacheKey: HistorySeries] = [:]
                 for await partial in group {
                     merged.merge(partial) { _, new in new }
                 }
@@ -3670,34 +3849,60 @@ public final class PerchHAPanelModel: ObservableObject {
 
     /// The prioritized entity set to sync this cycle.
     ///
-    /// Hot entities (currently visible, or with a non-zero interest score from past
-    /// visibility/hover) sync every cycle. Cold entities (displayed but never
-    /// looked at) sync only every `coldRefreshDivisor`-th cycle, so hot rows stay
-    /// freshest while the whole list is still covered periodically.
-    private func bulkSyncTargets(cycle: Int, now: PerchInstant) -> [EntityID] {
-        let displayed = displayedEntityIDs()
+    /// Only currently visible rows participate in background sync. Every visible
+    /// row keeps both its preview range and a day layer warm on the normal
+    /// interval; that same recurring maintenance pass opportunistically refreshes
+    /// week/month whenever those layers are older than 24 hours.
+    private func bulkSyncTargets(cycle _: Int, now: PerchInstant) -> [PerchHAHistoryCacheKey] {
         let visible = Set(visibleEntityIDs)
-        let includeCold = cycle % bulkSyncConfiguration.coldRefreshDivisor == 0
 
-        var seen = Set<EntityID>()
-        var targets: [EntityID] = []
-        // Visible first (highest priority), then the rest of the displayed list.
-        for id in visibleEntityIDs + displayed where seen.insert(id).inserted {
-            let isHot = visible.contains(id) || (entityInterest[id] ?? 0) > 0
-            guard isHot || includeCold else {
-                continue
+        var seenKeys = Set<PerchHAHistoryCacheKey>()
+        var targets: [PerchHAHistoryCacheKey] = []
+        for id in visibleEntityIDs where visible.contains(id) {
+            for range in visibleSyncRanges(for: id, now: now) {
+                let key = PerchHAHistoryCacheKey(entityID: id, range: range)
+                let minimumInterval = minimumBulkSyncInterval(for: range)
+                if let lastSynced = entityLastSyncedAt[key],
+                   now.nanosecondsSinceStart - lastSynced.nanosecondsSinceStart < minimumInterval.nanoseconds {
+                    continue
+                }
+                if seenKeys.insert(key).inserted {
+                    targets.append(key)
+                }
             }
-            // Skip entities synced within the cycle interval. Scroll-pause
-            // re-arms would otherwise refetch the same rows every settle delay;
-            // an entity never synced (or synced a full interval ago) still
-            // fetches immediately, so newly displayed rows warm without waiting.
-            if let lastSynced = entityLastSyncedAt[id],
-               now.nanosecondsSinceStart - lastSynced.nanosecondsSinceStart < bulkSyncConfiguration.interval.nanoseconds {
-                continue
-            }
-            targets.append(id)
         }
         return targets
+    }
+
+    private func visibleSyncRanges(
+        for id: EntityID,
+        now: PerchInstant
+    ) -> [HistoryRange] {
+        var ranges: [HistoryRange] = []
+        let previewRange = historyRange(for: id)
+        if !ranges.contains(previewRange) {
+            ranges.append(previewRange)
+        }
+        if !ranges.contains(Self.detailMaintenanceBaseRange) {
+            ranges.append(Self.detailMaintenanceBaseRange)
+        }
+        let dayKey = PerchHAHistoryCacheKey(entityID: id, range: Self.detailMaintenanceBaseRange)
+        let dayIsDue = entityLastSyncedAt[dayKey].map {
+            now.nanosecondsSinceStart - $0.nanosecondsSinceStart >= bulkSyncConfiguration.interval.nanoseconds
+        } ?? true
+        guard dayIsDue else {
+            return ranges
+        }
+        for range in Self.detailLongRangeMaintenance {
+            let key = PerchHAHistoryCacheKey(entityID: id, range: range)
+            let isOlderThanOneDay = entityLastSyncedAt[key].map {
+                now.nanosecondsSinceStart - $0.nanosecondsSinceStart >= Self.longRangeMaintenanceAge.nanoseconds
+            } ?? true
+            if isOlderThanOneDay, !ranges.contains(range) {
+                ranges.append(range)
+            }
+        }
+        return ranges
     }
 
     /// Drops interest entries for entities no longer displayed so the score map
@@ -3705,7 +3910,7 @@ public final class PerchHAPanelModel: ObservableObject {
     private func pruneInterest() {
         let live = Set(displayedEntityIDs() + visibleEntityIDs)
         entityInterest = entityInterest.filter { live.contains($0.key) }
-        entityLastSyncedAt = entityLastSyncedAt.filter { live.contains($0.key) }
+        entityLastSyncedAt = entityLastSyncedAt.filter { live.contains($0.key.entityID) }
     }
 
     /// Whether the visible connection state is a failure (including failed-stale).
@@ -3724,28 +3929,36 @@ public final class PerchHAPanelModel: ObservableObject {
     /// one and the cycle has not been cancelled — a cancelled cycle finishing its
     /// in-flight batches must not write the previous connection's history into a
     /// freshly cleared cache (entity IDs overlap across HA instances).
-    private func applyBulkSyncResults(_ results: [EntityID: HistorySeries], from form: PerchHAConnectionForm) async {
+    private func applyBulkSyncResults(_ results: [PerchHAHistoryCacheKey: HistorySeries], from form: PerchHAConnectionForm) async {
         guard !results.isEmpty, isPanelActive, !Task.isCancelled, form.sameConnection(as: lastConnectedForm) else {
             return
         }
         let now = await clock.now()
         lastObservedInstant = now
         var insertedAny = false
-        for (entityID, series) in results {
-            let key = PerchHAHistoryCacheKey(entityID: entityID, range: series.range)
+        var changedEntityIDs = Set<EntityID>()
+        let protectedKeys = protectedHistoryKeys()
+        for (key, series) in results {
             historyCache.insert(
                 series,
                 for: key,
                 now: now,
-                configuration: historyCacheConfiguration,
-                protecting: protectedHistoryKeys()
+                capacity: historyCacheConfiguration.capacity,
+                ttl: historyCacheTTL(for: key.range),
+                protecting: protectedKeys
             )
             inlineSparklineGeometryCache[key] = nil
             insertedAny = true
-            entityLastSyncedAt[entityID] = now
+            entityLastSyncedAt[key] = now
+            changedEntityIDs.insert(key.entityID)
+        }
+        let removedKeys = historyCache.pruneExpired(now: now, protecting: protectedKeys)
+        for key in removedKeys {
+            inlineSparklineGeometryCache[key] = nil
+            entityLastSyncedAt[key] = nil
         }
         if insertedAny {
-            bumpHistoryRevisions(for: results.keys)
+            bumpHistoryRevisions(for: changedEntityIDs)
         }
     }
 
@@ -5078,8 +5291,6 @@ public final class PerchHAPanelModel: ObservableObject {
         controlActionTask = nil
         historyTask?.cancel()
         historyTask = nil
-        historyCloseTask?.cancel()
-        historyCloseTask = nil
         historyRequestGeneration += 1
         pendingControlChange = nil
         evictAllHistory()
@@ -5245,6 +5456,10 @@ public final class PerchHAPanelModel: ObservableObject {
         guard let location = availableEntityLocations[state.id] else {
             return false
         }
+        if shouldDeferBackgroundLiveState(for: state.id) {
+            deferredBackgroundLiveStates[state.id] = state
+            return true
+        }
         let signpostID = performanceSignposter.makeSignpostID()
         let interval = performanceSignposter.beginInterval("ApplyLiveState", id: signpostID)
         defer {
@@ -5268,17 +5483,21 @@ public final class PerchHAPanelModel: ObservableObject {
             deviceDomain: entity.deviceDomain,
             currentPosition: state.currentPosition
         )
+        guard updatedEntity != entity else {
+            return true
+        }
         entities[location.entityIndex] = updatedEntity
         availableRooms[location.roomIndex] = Room(id: room.id, name: room.name, entities: entities)
         availableEntitiesByID[state.id] = updatedEntity
         if let entityIndex = availableEntities.firstIndex(where: { $0.id == state.id }) {
             availableEntities[entityIndex] = updatedEntity
         }
-        averageCandidateCache.removeAll(keepingCapacity: true)
-        inlineSparklineGeometryCache.removeAll(keepingCapacity: true)
-        rowPresentationCache[state.id] = nil
+        if updatedEntity.unit != entity.unit {
+            averageCandidateCache.removeAll(keepingCapacity: true)
+        }
+        invalidateDisplayCaches(affectedBy: state.id)
 
-        let visibleRooms = selectedRooms(from: availableRooms, using: snapshot.selectionConfiguration)
+        let visibleRooms = replacingVisibleEntity(updatedEntity, in: snapshot.rooms)
         let nextConnectionState: ConnectionState
         let nextPhase: PerchHAPanelPhase
         switch snapshot.phase {
@@ -5314,12 +5533,56 @@ public final class PerchHAPanelModel: ObservableObject {
         return true
     }
 
+    private func shouldDeferBackgroundLiveState(for id: EntityID) -> Bool {
+        guard !isPanelActive,
+              !snapshot.menuBarDisplayConfiguration.isPromoted(id),
+              snapshot.historyPresentationEntityID != id
+        else {
+            return false
+        }
+        return true
+    }
+
+    private func flushDeferredBackgroundLiveStates() {
+        guard !deferredBackgroundLiveStates.isEmpty else {
+            return
+        }
+        let deferredStates = deferredBackgroundLiveStates.values.sorted { $0.id.rawValue < $1.id.rawValue }
+        deferredBackgroundLiveStates = [:]
+        for state in deferredStates {
+            _ = applyLiveState(state)
+        }
+    }
+
+    private func replacingVisibleEntity(_ entity: DiscoveredEntity, in rooms: [Room]) -> [Room] {
+        var updatedRooms = rooms
+        for roomIndex in updatedRooms.indices {
+            guard let entityIndex = updatedRooms[roomIndex].entities.firstIndex(where: { $0.id == entity.id }) else {
+                continue
+            }
+            var entities = updatedRooms[roomIndex].entities
+            entities[entityIndex] = entity
+            updatedRooms[roomIndex] = Room(
+                id: updatedRooms[roomIndex].id,
+                name: updatedRooms[roomIndex].name,
+                entities: entities
+            )
+            break
+        }
+        return updatedRooms
+    }
+
     private static func preferredLiveEntityName(_ candidate: String, existing: DiscoveredEntity) -> String {
         let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return existing.name
         }
+        let existingTrimmed = existing.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !existingTrimmed.isEmpty else {
+            return trimmed
+        }
         let lowered = trimmed.lowercased()
+        let existingLowered = existingTrimmed.lowercased()
         let genericNames: Set<String> = [
             existing.id.rawValue.lowercased(),
             existing.id.domain.lowercased(),
@@ -5330,7 +5593,37 @@ public final class PerchHAPanelModel: ObservableObject {
             "binary sensor",
             "number"
         ]
-        return genericNames.contains(lowered) ? existing.name : trimmed
+        if genericNames.contains(lowered) || lowered == existingLowered {
+            return existingTrimmed
+        }
+        if liveNameIsLessSpecific(trimmed, than: existingTrimmed) {
+            return existingTrimmed
+        }
+        return trimmed
+    }
+
+    private static func liveNameIsLessSpecific(_ candidate: String, than existing: String) -> Bool {
+        let candidateTokens = normalizedEntityNameTokens(candidate)
+        let existingTokens = normalizedEntityNameTokens(existing)
+        guard !candidateTokens.isEmpty, !existingTokens.isEmpty else {
+            return false
+        }
+        guard candidateTokens.count <= existingTokens.count else {
+            return false
+        }
+        let existingTokenSet = Set(existingTokens)
+        if Set(candidateTokens).isSubset(of: existingTokenSet) {
+            return candidateTokens.count < existingTokens.count
+                || candidate.count < existing.count
+        }
+        return false
+    }
+
+    private static func normalizedEntityNameTokens(_ raw: String) -> [String] {
+        raw
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .split { !$0.isLetter && !$0.isNumber }
+            .map(String.init)
     }
 
     private static func preferredLiveEntityUnit(_ candidate: String?, existing: DiscoveredEntity) -> String? {
@@ -5401,8 +5694,6 @@ public final class PerchHAPanelModel: ObservableObject {
             if connectionChanged {
                 historyTask?.cancel()
                 historyTask = nil
-                historyCloseTask?.cancel()
-                historyCloseTask = nil
                 historyRequestGeneration += 1
                 evictAllHistory()
                 cancelHistoryBulkSync()
@@ -6422,9 +6713,7 @@ public struct PerchHAHistoryPopoverContent: View {
         .shadow(color: palette.shadowSoft, radius: 14, x: 0, y: 6)
     }
 
-    /// The ranges offered in the segmented selector. Capped at one week; the
-    /// currently-selected range is always included so a persisted `.month`
-    /// default still renders as a selected segment without offering Month.
+    /// The ranges offered in the segmented selector.
     private var rangeOptions: [HistoryRange] {
         var options = HistoryRange.uiSelectable
         if !options.contains(selectedRange) {
@@ -6694,21 +6983,16 @@ enum PerchHASliderValueFormatting {
 @MainActor
 private final class PerchHAPanelViewState: ObservableObject {
     @Published private(set) var snapshot: PerchHAPanelSnapshot
-    @Published private(set) var pinnedHistoryEntityID: EntityID?
     @Published private(set) var oauthSignInState: PerchHAOAuthSignInState
     @Published private(set) var displayPreferences: PerchHADisplayPreferences
 
     init(model: PerchHAPanelModel) {
         self.snapshot = model.snapshot
-        self.pinnedHistoryEntityID = model.pinnedHistoryEntityID
         self.oauthSignInState = model.oauthSignInState
         self.displayPreferences = model.displayPreferences
         model.$snapshot
             .receive(on: RunLoop.main)
             .assign(to: &$snapshot)
-        model.$pinnedHistoryEntityID
-            .receive(on: RunLoop.main)
-            .assign(to: &$pinnedHistoryEntityID)
         model.$oauthSignInState
             .receive(on: RunLoop.main)
             .assign(to: &$oauthSignInState)
@@ -6786,17 +7070,20 @@ private struct PerchHAInlineHistoryPreview: View {
 
 @MainActor
 private final class PerchHAHistoryPopoverController: ObservableObject {
+    private static let popoverSize = NSSize(width: 308, height: 244)
     private weak var model: PerchHAPanelModel?
-    private let onOpenSettings: (() -> Void)?
+    private let onOpenEntitySettings: ((EntityID) -> Void)?
     private let popover: NSPopover
     private var snapshotCancellable: AnyCancellable?
     private var anchors: [EntityID: WeakAnchorView] = [:]
     private var currentEntityID: EntityID?
     private weak var currentAnchorView: NSView?
+    private var hostingController: NSHostingController<PerchHAHistoryPopoverRootView>?
+    private var clickOutsideMonitor: Any?
 
-    init(model: PerchHAPanelModel, onOpenSettings: (() -> Void)?) {
+    init(model: PerchHAPanelModel, onOpenEntitySettings: ((EntityID) -> Void)?) {
         self.model = model
-        self.onOpenSettings = onOpenSettings
+        self.onOpenEntitySettings = onOpenEntitySettings
         let popover = NSPopover()
         popover.behavior = .applicationDefined
         popover.animates = false
@@ -6848,16 +7135,19 @@ private final class PerchHAHistoryPopoverController: ObservableObject {
             return
         }
 
-        let rootView = PerchHAHistoryPopoverRootView(
-            model: model,
-            entity: entity,
-            onOpenSettings: onOpenSettings
-        )
-        let hostingController = NSHostingController(rootView: rootView)
-        hostingController.view.layoutSubtreeIfNeeded()
-        popover.contentViewController = hostingController
-        popover.contentSize = hostingController.view.fittingSize
-        currentEntityID = entityID
+        if currentEntityID != entityID || hostingController == nil {
+            let rootView = PerchHAHistoryPopoverRootView(
+                model: model,
+                entity: entity,
+                onOpenEntitySettings: onOpenEntitySettings
+            )
+            let hostingController = NSHostingController(rootView: rootView)
+            hostingController.view.layoutSubtreeIfNeeded()
+            self.hostingController = hostingController
+            popover.contentViewController = hostingController
+            popover.contentSize = Self.popoverSize
+            currentEntityID = entityID
+        }
 
         let needsReanchor = currentAnchorView !== anchorView
         currentAnchorView = anchorView
@@ -6866,19 +7156,67 @@ private final class PerchHAHistoryPopoverController: ObservableObject {
         }
         if !popover.isShown {
             popover.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .maxX)
+            installClickOutsideMonitor()
         }
     }
 
     private func dismiss() {
         currentEntityID = nil
         currentAnchorView = nil
+        hostingController = nil
         if popover.isShown {
             popover.performClose(nil)
         }
+        removeClickOutsideMonitor()
     }
 
     private func pruneDeadAnchors() {
         anchors = anchors.filter { $0.value.view != nil }
+    }
+
+    private func installClickOutsideMonitor() {
+        guard clickOutsideMonitor == nil else {
+            return
+        }
+        clickOutsideMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] event in
+            guard let self else {
+                return event
+            }
+            guard popover.isShown else {
+                removeClickOutsideMonitor()
+                return event
+            }
+            if shouldKeepPopoverOpen(for: event) {
+                return event
+            }
+            model?.dismissHistoryPopover()
+            return event
+        }
+    }
+
+    private func removeClickOutsideMonitor() {
+        guard let clickOutsideMonitor else {
+            return
+        }
+        NSEvent.removeMonitor(clickOutsideMonitor)
+        self.clickOutsideMonitor = nil
+    }
+
+    private func shouldKeepPopoverOpen(for event: NSEvent) -> Bool {
+        if let popoverWindow = popover.contentViewController?.view.window,
+           event.window === popoverWindow {
+            return true
+        }
+        guard let anchorView = currentAnchorView,
+              let anchorWindow = anchorView.window,
+              event.window === anchorWindow
+        else {
+            return false
+        }
+        let pointInAnchor = anchorView.convert(event.locationInWindow, from: nil)
+        return anchorView.bounds.contains(pointInAnchor)
     }
 }
 
@@ -6917,32 +7255,27 @@ private struct PerchHAHistoryPopoverAnchor: NSViewRepresentable {
 private struct PerchHAHistoryPopoverRootView: View {
     @ObservedObject var model: PerchHAPanelModel
     let entity: DiscoveredEntity
-    let onOpenSettings: (() -> Void)?
+    let onOpenEntitySettings: ((EntityID) -> Void)?
 
     var body: some View {
         PerchHAHistoryPopoverContent(
             entityID: entity.id,
             entityName: entity.name,
-            valueText: model.snapshot.formattedValue(for: entity).text,
+            valueText: model.formattedValue(for: entity).text,
             unit: entity.unit,
             state: model.snapshot.historyState,
-            onOpenSettings: onOpenSettings,
+            onOpenSettings: {
+                onOpenEntitySettings?(entity.id)
+            },
             selectedRange: Binding(
                 get: {
                     model.snapshot.historyState.range ?? model.historyRange(for: entity.id)
                 },
                 set: { range in
-                    model.startHistoryHover(entity.id, range: range, immediatePresentation: true)
+                    model.presentHistoryDetail(entity.id, range: range)
                 }
             )
         )
-        .onHover { isInside in
-            if isInside {
-                model.keepHistoryHoverAlive()
-            } else {
-                model.cancelHistoryHover()
-            }
-        }
     }
 }
 
@@ -6950,6 +7283,7 @@ public struct PerchHAPanelView: View {
     private let model: PerchHAPanelModel
     private let accessibilityPreferencesOverride: PerchHAAccessibilityPreferences?
     private let onOpenSettings: (() -> Void)?
+    private let onOpenEntitySettings: ((EntityID) -> Void)?
     @StateObject private var viewState: PerchHAPanelViewState
     @StateObject private var historyPopoverController: PerchHAHistoryPopoverController
     @State private var pendingCustomActionID: CustomActionID?
@@ -6961,14 +7295,19 @@ public struct PerchHAPanelView: View {
     public init(
         model: PerchHAPanelModel,
         accessibilityPreferencesOverride: PerchHAAccessibilityPreferences? = nil,
-        onOpenSettings: (() -> Void)? = nil
+        onOpenSettings: (() -> Void)? = nil,
+        onOpenEntitySettings: ((EntityID) -> Void)? = nil
     ) {
         self.model = model
         self.accessibilityPreferencesOverride = accessibilityPreferencesOverride
         self.onOpenSettings = onOpenSettings
+        self.onOpenEntitySettings = onOpenEntitySettings
         _viewState = StateObject(wrappedValue: PerchHAPanelViewState(model: model))
         _historyPopoverController = StateObject(
-            wrappedValue: PerchHAHistoryPopoverController(model: model, onOpenSettings: onOpenSettings)
+            wrappedValue: PerchHAHistoryPopoverController(
+                model: model,
+                onOpenEntitySettings: onOpenEntitySettings
+            )
         )
     }
 
@@ -6990,10 +7329,6 @@ public struct PerchHAPanelView: View {
 
     private var oauthState: PerchHAOAuthSignInState {
         viewState.oauthSignInState
-    }
-
-    private var pinnedHistoryEntityID: EntityID? {
-        viewState.pinnedHistoryEntityID
     }
 
     public var body: some View {
@@ -7077,6 +7412,7 @@ public struct PerchHAPanelView: View {
         let configuration = snapshot.menuBarDisplayConfiguration.itemConfiguration(for: entityID)
         return PerchHAPanelEntityContextPresentation(
             isPromotedToMenuBar: snapshot.menuBarDisplayConfiguration.isPromoted(entityID),
+            hasAverageLinks: !configuration.averageEntityIDs.isEmpty,
             showsEntityIcon: configuration.showsEntityIcon,
             showsLabel: configuration.showsLabel,
             showsUnit: configuration.showsUnit
@@ -7160,7 +7496,6 @@ public struct PerchHAPanelView: View {
         .padding(.bottom, PerchHASpacing.sm)
         .onHover { isInside in
             if isInside {
-                model.setHistorySurfaceHovering(false)
                 model.dismissHistoryPopover()
             }
         }
@@ -7189,11 +7524,6 @@ public struct PerchHAPanelView: View {
                 .padding(.top, 4)
                 .padding(.bottom, 14)
             }
-            .background(
-                PerchHAHoverRegion { isInside in
-                    model.setHistorySurfaceHovering(isInside)
-                }
-            )
             .onAppear {
                 syncWarmedEntityIDs()
             }
@@ -7317,15 +7647,18 @@ public struct PerchHAPanelView: View {
                 controller: historyPopoverController
             )
         )
-        .onHover { isInside in
-            if isInside {
-                model.startHistoryHover(entity.id)
+        .onTapGesture {
+            if snapshot.historyPresentationEntityID == entity.id {
+                model.dismissHistoryPopover()
             } else {
-                model.cancelHistoryHover()
+                model.presentHistoryDetail(entity.id)
             }
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(entity.name), \(value.text)")
+        .accessibilityAction(named: "Show history") {
+            model.presentHistoryDetail(entity.id)
+        }
         .accessibilityAction(named: "Hide history") {
             model.dismissHistoryPopover()
         }
@@ -7385,8 +7718,7 @@ public struct PerchHAPanelView: View {
             icon: entityIconName(for: entity),
             iconActive: value.status == .available,
             label: entity.name,
-            labelAccessorySystemImage: contextPresentation.isPromotedToMenuBar ? "menubar.rectangle" : nil,
-            labelAccessoryAccessibilityLabel: "Shown in bar",
+            labelAccessories: rowLabelAccessories(contextPresentation: contextPresentation),
             subtitle: rowSubtitle(for: entity, value: value),
             secondLine: rowSecondLine(for: entity),
             preview: {
@@ -7401,6 +7733,32 @@ public struct PerchHAPanelView: View {
             },
             control: { rowControls(for: entity) }
         )
+    }
+
+    private func rowLabelAccessories(
+        contextPresentation: PerchHAPanelEntityContextPresentation
+    ) -> [TelemetryRowLabelAccessory] {
+        let palette = PerchHATheme.Dashboard.palette(colorScheme)
+        var accessories: [TelemetryRowLabelAccessory] = []
+        if contextPresentation.hasAverageLinks {
+            accessories.append(
+                .init(
+                    systemImage: "link",
+                    accessibilityLabel: "Linked values",
+                    color: palette.warning
+                )
+            )
+        }
+        if contextPresentation.isPromotedToMenuBar {
+            accessories.append(
+                .init(
+                    systemImage: "menubar.rectangle",
+                    accessibilityLabel: "Shown in bar",
+                    color: palette.accentPrimary
+                )
+            )
+        }
+        return accessories
     }
 
     @ViewBuilder
@@ -7722,7 +8080,6 @@ public struct PerchHAPanelView: View {
         )
         .onHover { isInside in
             if isInside {
-                model.setHistorySurfaceHovering(false)
                 model.dismissHistoryPopover()
             }
         }
@@ -7739,7 +8096,7 @@ public struct PerchHAPanelView: View {
     }
 
     private func entityValue(_ entity: DiscoveredEntity) -> FormattedEntityValue {
-        snapshot.formattedValue(for: entity)
+        model.formattedValue(for: entity)
     }
 
     /// The row's reserved history-preview column: a tiny micro chart (or bounded
@@ -7935,65 +8292,6 @@ public func perchHAEntityIconName(for entity: DiscoveredEntity) -> String {
             return "sensor"
         }
         return "gauge.medium"
-    }
-}
-
-@MainActor
-private struct PerchHAHoverRegion: NSViewRepresentable {
-    let onChange: (Bool) -> Void
-
-    func makeNSView(context: Context) -> HoverTrackingView {
-        let view = HoverTrackingView()
-        view.onChange = onChange
-        return view
-    }
-
-    func updateNSView(_ nsView: HoverTrackingView, context: Context) {
-        nsView.onChange = onChange
-    }
-}
-
-@MainActor
-private final class HoverTrackingView: NSView {
-    var onChange: ((Bool) -> Void)?
-    private var trackingArea: NSTrackingArea?
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        translatesAutoresizingMaskIntoConstraints = false
-        wantsLayer = false
-    }
-
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        return nil
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let trackingArea {
-            removeTrackingArea(trackingArea)
-        }
-        let options: NSTrackingArea.Options = [
-            .mouseEnteredAndExited,
-            .activeAlways,
-            .inVisibleRect,
-            .enabledDuringMouseDrag
-        ]
-        let trackingArea = NSTrackingArea(rect: .zero, options: options, owner: self, userInfo: nil)
-        addTrackingArea(trackingArea)
-        self.trackingArea = trackingArea
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        onChange?(true)
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        onChange?(false)
     }
 }
 
@@ -8394,13 +8692,8 @@ extension HistoryRange {
         }
     }
 
-    /// The history ranges the UI offers, capped at one week.
-    ///
-    /// ``HistoryRange/month`` is retained in the enum (the client routes month
-    /// recorder statistics and persistence round-trips it), but the dashboard and
-    /// the detail panel never offer it: the inline preview and hover detail cap at
-    /// a week so cache and request volume stay bounded.
-    static let uiSelectable: [HistoryRange] = [.hour, .day, .week]
+    /// The history ranges the UI offers.
+    static let uiSelectable: [HistoryRange] = [.hour, .day, .week, .month]
 }
 
 extension PerchHAPanelModel {
