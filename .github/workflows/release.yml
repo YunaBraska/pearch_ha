@@ -122,7 +122,18 @@ jobs:
           fi
 
       - name: Build universal release binary
-        run: swift build -c release --arch arm64 --arch x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .build-release-arm64 .build-release-x86_64 build/universal
+          swift build -c release --arch arm64 --product PerchHA --scratch-path .build-release-arm64
+          swift build -c release --arch x86_64 --product PerchHA --scratch-path .build-release-x86_64
+          mkdir -p build/universal
+          lipo -create \
+            -output build/universal/PerchHA \
+            .build-release-arm64/arm64-apple-macosx/release/PerchHA \
+            .build-release-x86_64/x86_64-apple-macosx/release/PerchHA
+          lipo -info build/universal/PerchHA
 
       - name: Package app bundle
         shell: bash
@@ -130,7 +141,7 @@ jobs:
           set -euo pipefail
           tag="${{ steps.plan.outputs.tag }}"
           swift run perchha-package-app \
-            --executable .build/apple/Products/Release/PerchHA \
+            --executable build/universal/PerchHA \
             --output build/PerchHA.app \
             --callback-scheme perchha \
             --replace \

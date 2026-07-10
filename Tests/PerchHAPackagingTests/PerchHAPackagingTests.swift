@@ -800,9 +800,12 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertTrue(workflow.contains("sh scripts/check.sh"))
         // Universal release binary, packaged with manifest + evidence and
         // verified before anything is published or retained as an artifact.
-        XCTAssertTrue(workflow.contains("swift build -c release --arch arm64 --arch x86_64"))
+        XCTAssertTrue(workflow.contains("swift build -c release --arch arm64 --product PerchHA --scratch-path .build-release-arm64"))
+        XCTAssertTrue(workflow.contains("swift build -c release --arch x86_64 --product PerchHA --scratch-path .build-release-x86_64"))
+        XCTAssertTrue(workflow.contains("lipo -create"))
         XCTAssertTrue(workflow.contains("--sign-ad-hoc"))
         XCTAssertTrue(workflow.contains("--package-dmg"))
+        XCTAssertTrue(workflow.contains("--executable build/universal/PerchHA"))
         XCTAssertTrue(workflow.contains("--release-manifest build/perchha-release-manifest.json"))
         XCTAssertTrue(workflow.contains("--bundle-release-evidence build/perchha-release-evidence"))
         XCTAssertTrue(workflow.contains("--snapshot-dir .build/perchha-snapshots/current"))
