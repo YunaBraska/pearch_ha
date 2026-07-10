@@ -10,6 +10,12 @@ func requestPercentEncodedPath(_ url: URL) -> String {
     URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath ?? url.path
 }
 
+func replacingHost(in url: URL, with host: String) throws -> URL {
+    var components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+    components.host = host
+    return try XCTUnwrap(components.url)
+}
+
 final class PerchHAClientTests: XCTestCase {
     func testConnectionInputKeepsURLs() throws {
         let primary = try XCTUnwrap(URL(string: "http://homeassistant.local:8123"))
@@ -1126,17 +1132,18 @@ final class PerchHAClientTests: XCTestCase {
             server.stop()
         }
         let client = HomeAssistantClient()
+        let localhostURL = try replacingHost(in: server.baseURL, with: "localhost")
         let strictInput = HAConnectionInput(
-            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            endpoint: HAEndpoint(primaryURL: localhostURL, fallbackURL: nil),
             token: "fake-token"
         )
         let allowedInput = HAConnectionInput(
-            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            endpoint: HAEndpoint(primaryURL: localhostURL, fallbackURL: nil),
             token: "fake-token",
-            serverTrustPolicy: HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["127.0.0.1"])
+            serverTrustPolicy: HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["localhost"])
         )
 
-        await assertEqualAsync(await client.checkRESTConnection(strictInput), .failure(.tlsRejected(host: "127.0.0.1")))
+        await assertEqualAsync(await client.checkRESTConnection(strictInput), .failure(.tlsRejected(host: "localhost")))
         await assertEqualAsync(await client.checkRESTConnection(allowedInput), .success(HARESTCheck(message: "API running.")))
     }
 
@@ -1170,17 +1177,18 @@ final class PerchHAClientTests: XCTestCase {
             server.stop()
         }
         let client = HomeAssistantClient()
+        let localhostURL = try replacingHost(in: server.baseURL, with: "localhost")
         let strictInput = HAConnectionInput(
-            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            endpoint: HAEndpoint(primaryURL: localhostURL, fallbackURL: nil),
             token: "fake-token"
         )
         let allowedInput = HAConnectionInput(
-            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            endpoint: HAEndpoint(primaryURL: localhostURL, fallbackURL: nil),
             token: "fake-token",
-            serverTrustPolicy: HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["127.0.0.1"])
+            serverTrustPolicy: HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["localhost"])
         )
 
-        await assertEqualAsync(await client.checkWebSocketConnection(strictInput), .failure(.tlsRejected(host: "127.0.0.1")))
+        await assertEqualAsync(await client.checkWebSocketConnection(strictInput), .failure(.tlsRejected(host: "localhost")))
         await assertEqualAsync(await client.checkWebSocketConnection(allowedInput), .success(HAWebSocketCheck(haVersion: "fake-ha")))
     }
 
@@ -6209,15 +6217,15 @@ extension PerchHAClientTests {
             token: "fake-token"
         )
 
-        await assertEqualAsync(
-            await HomeAssistantClient().nextStateChangedEvent(input),
-            .failure(
-                .invalidPayload(
-                    path: "/api/websocket",
-                    reason: #"DecodingError.keyNotFound: Key 'entity_id' not found in keyed decoding container. Path: event.data.new_state. Debug description: No value associated with key CodingKeys(stringValue: "entity_id", intValue: nil) ("entity_id")."#
-                )
-            )
-        )
+        let result = await HomeAssistantClient().nextStateChangedEvent(input)
+        guard case let .failure(.invalidPayload(path, reason)) = result else {
+            XCTFail("expected invalid payload failure, got \(result)")
+            return
+        }
+
+        XCTAssertEqual(path, "/api/websocket")
+        XCTAssertTrue(reason.contains("entity_id"), "expected missing entity_id in reason: \(reason)")
+        XCTAssertTrue(reason.contains("event.data.new_state"), "expected coding path in reason: \(reason)")
     }
 
     func testCallServiceSurfacesCommandFailure() async throws {

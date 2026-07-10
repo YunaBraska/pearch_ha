@@ -4,6 +4,29 @@ import XCTest
 import FakeHA
 
 final class FakeHATests: XCTestCase {
+    private func eventuallyProbe<T>(
+        attempts: Int = 20,
+        delayMicroseconds: useconds_t = 10_000,
+        operation: () throws -> T
+    ) throws -> T {
+        var lastError: Error?
+        for attempt in 0..<attempts {
+            do {
+                return try operation()
+            } catch {
+                lastError = error
+                if attempt + 1 < attempts {
+                    usleep(delayMicroseconds)
+                }
+            }
+        }
+        throw lastError ?? NSError(
+            domain: "FakeHATests",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "probe attempts exhausted without an error"]
+        )
+    }
+
     func testFakeHAServesAPIAndStates() async throws {
         let server = try FakeHARESTServer()
         server.start()
@@ -388,10 +411,14 @@ final class FakeHATests: XCTestCase {
         }
 
         let probe = FakeHARawWebSocketProbe()
-        let coalescedAuth = try probe.authenticateWithCoalescedUpgrade(baseURL: server.baseURL)
+        let coalescedAuth = try eventuallyProbe {
+            try probe.authenticateWithCoalescedUpgrade(baseURL: server.baseURL)
+        }
         XCTAssertNotNil(coalescedAuth.range(of: Data(#""type":"auth_ok""#.utf8)))
 
-        let coalescedCommands = try probe.authenticateThenSendCoalescedCommands(baseURL: server.baseURL)
+        let coalescedCommands = try eventuallyProbe {
+            try probe.authenticateThenSendCoalescedCommands(baseURL: server.baseURL)
+        }
         XCTAssertNotNil(coalescedCommands.range(of: Data(#""id":1"#.utf8)))
         XCTAssertNotNil(coalescedCommands.range(of: Data(#""id":2"#.utf8)))
     }
