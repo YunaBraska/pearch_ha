@@ -85,7 +85,7 @@ jobs:
             tag="$(date -u '+%Y.%m.%j%H%M')"
           fi
 
-          if ! [[ "${tag}" =~ ^[0-9]{4}(\.[0-9]{1,3}){2,4}$ ]]; then
+          if ! [[ "${tag}" =~ ^[0-9]{4}(\.[0-9]{1,4}){2,4}$ ]]; then
             echo "Release version must be numeric dot-separated, got: ${tag}" >&2
             exit 1
           fi
