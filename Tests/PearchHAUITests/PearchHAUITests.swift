@@ -11185,6 +11185,7 @@ private actor HistoryProviderRecorder {
     private var recordedEntityIDs: [EntityID] = []
     private var recordedRanges: [HistoryRange] = []
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var pendingReleases = 0
 
     init(results: [PearchHAHistoryProviderResult], waitForRelease: Bool = false) {
         self.results = results
@@ -11200,8 +11201,12 @@ private actor HistoryProviderRecorder {
         recordedEntityIDs.append(entityID)
         recordedRanges.append(range)
         if waitForRelease {
-            await withCheckedContinuation { continuation in
-                waiters.append(continuation)
+            if pendingReleases > 0 {
+                pendingReleases -= 1
+            } else {
+                await withCheckedContinuation { continuation in
+                    waiters.append(continuation)
+                }
             }
         }
         if results.isEmpty {
@@ -11212,6 +11217,7 @@ private actor HistoryProviderRecorder {
 
     func releaseNext() {
         guard !waiters.isEmpty else {
+            pendingReleases += 1
             return
         }
         let continuation = waiters.removeFirst()
@@ -11375,6 +11381,7 @@ private actor ActionRunnerRecorder {
     private var recordedForms: [PearchHAConnectionForm] = []
     private var recordedActions: [ActionSpec] = []
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var pendingReleases = 0
 
     init(results: [PearchHAActionResult], waitForRelease: Bool = false) {
         self.results = results
@@ -11385,8 +11392,12 @@ private actor ActionRunnerRecorder {
         recordedForms.append(form)
         recordedActions.append(action)
         if waitForRelease {
-            await withCheckedContinuation { continuation in
-                waiters.append(continuation)
+            if pendingReleases > 0 {
+                pendingReleases -= 1
+            } else {
+                await withCheckedContinuation { continuation in
+                    waiters.append(continuation)
+                }
             }
         }
         if results.isEmpty {
@@ -11397,6 +11408,7 @@ private actor ActionRunnerRecorder {
 
     func releaseNext() {
         guard !waiters.isEmpty else {
+            pendingReleases += 1
             return
         }
         waiters.removeFirst().resume()
