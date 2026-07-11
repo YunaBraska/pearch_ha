@@ -2,7 +2,8 @@ import Foundation
 import Darwin
 import CryptoKit
 import Network
-import PerchHASupport
+import Security
+import PearchHASupport
 
 public struct FakeHAFixtures: Equatable, Sendable {
     public let apiBody: String
@@ -51,7 +52,13 @@ public struct FakeHAFixtures: Equatable, Sendable {
     public static func load(from directory: URL, bearerToken: String = "fake-token") throws -> FakeHAFixtures {
         let api = try CapturedEndpointFile.load(from: directory.appendingPathComponent("api.json"))
         let states = try CapturedEndpointFile.load(from: directory.appendingPathComponent("states.json"))
-        return FakeHAFixtures(apiBody: api.bodyText, statesBody: states.bodyText, bearerToken: bearerToken)
+        return FakeHAFixtures(
+            apiBody: api.bodyText,
+            statesBody: states.bodyText,
+            entityRegistryDisplayBody: syntheticEntityRegistryDisplayBody(statesBody: states.bodyText),
+            entityRegistryBody: syntheticEntityRegistryBody(statesBody: states.bodyText),
+            bearerToken: bearerToken
+        )
     }
 
     private static func defaultStateChangedEventBody(statesBody: String) -> String {
@@ -65,6 +72,83 @@ public struct FakeHAFixtures: Equatable, Sendable {
             return #"{"entity_id":"sensor.entity_001","state":"0","attributes":{}}"#
         }
         return eventText
+    }
+
+    private static func syntheticEntityRegistryDisplayBody(statesBody: String) -> String? {
+        guard let states = decodedStates(statesBody: statesBody) else {
+            return nil
+        }
+
+        let entities = states.compactMap { state -> [String: String]? in
+            guard let entityID = state["entity_id"] as? String else {
+                return nil
+            }
+            var entity: [String: String] = ["ei": entityID]
+            if let attributes = state["attributes"] as? [String: Any],
+               let name = attributes["friendly_name"] as? String,
+               !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                entity["en"] = name
+            }
+            return entity
+        }
+        guard !entities.isEmpty else {
+            return nil
+        }
+        return jsonString(from: ["entities": entities], fallback: nil)
+    }
+
+    private static func syntheticEntityRegistryBody(statesBody: String) -> String {
+        guard let states = decodedStates(statesBody: statesBody) else {
+            return "[]"
+        }
+
+        let entries = states.compactMap { state -> [String: String]? in
+            guard let entityID = state["entity_id"] as? String else {
+                return nil
+            }
+            var entry: [String: String] = ["entity_id": entityID]
+            if let attributes = state["attributes"] as? [String: Any],
+               let name = attributes["friendly_name"] as? String,
+               !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                entry["name"] = name
+            }
+            return entry
+        }
+        return jsonString(from: entries, fallback: "[]") ?? "[]"
+    }
+
+    private static func decodedStates(statesBody: String) -> [[String: Any]]? {
+        guard
+            let data = statesBody.data(using: .utf8),
+            let states = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else {
+            return nil
+        }
+        return states.sorted {
+            ($0["entity_id"] as? String ?? "") < ($1["entity_id"] as? String ?? "")
+        }
+    }
+
+    private static func jsonString(from object: Any, fallback: String?) -> String? {
+        guard
+            let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+            let text = String(data: data, encoding: .utf8)
+        else {
+            return fallback
+        }
+        return text
+    }
+}
+
+public struct FakeHAWebSocketCommandAvailability: Equatable, Sendable {
+    public let command: String
+    public let available: Bool
+    public let errorCode: String?
+
+    public init(command: String, available: Bool, errorCode: String?) {
+        self.command = command
+        self.available = available
+        self.errorCode = errorCode
     }
 }
 
@@ -106,19 +190,25 @@ public final class FakeHARESTServer: @unchecked Sendable {
     private let redactor: Redactor
     private let pathPrefix: String
 
-    public init(fixtures: FakeHAFixtures = .minimal, pathPrefix: String = "", redactor: Redactor = Redactor()) throws {
-        let endpoint = try Self.makeLoopbackListener()
+    public init(
+        fixtures: FakeHAFixtures = .minimal,
+        pathPrefix: String = "",
+        redactor: Redactor = Redactor(),
+        tlsIdentity: SecIdentity? = nil
+    ) throws {
+        let endpoint = try Self.makeLoopbackListener(tlsIdentity: tlsIdentity)
         let port = endpoint.port
         let listener = endpoint.listener
         let normalizedPathPrefix = Self.normalizedPathPrefix(pathPrefix)
+        let scheme = tlsIdentity == nil ? "http" : "https"
 
         self.listener = listener
         self.fixtures = fixtures
         self.redactor = redactor
         self.pathPrefix = normalizedPathPrefix
         self.journal = FakeHAJournal()
-        self.queue = DispatchQueue(label: "dev.perchha.fakeha.rest")
-        self.baseURL = URL(string: "http://127.0.0.1:\(port)\(normalizedPathPrefix)")!
+        self.queue = DispatchQueue(label: "dev.pearchha.fakeha.rest")
+        self.baseURL = URL(string: "\(scheme)://127.0.0.1:\(port)\(normalizedPathPrefix)")!
     }
 
     public func start() {
@@ -233,16 +323,32 @@ public final class FakeHARESTServer: @unchecked Sendable {
         return data
     }
 
-    private static func makeLoopbackListener(maxAttempts: Int = 16) throws -> (port: UInt16, listener: NWListener) {
+    private static func makeLoopbackListener(
+        tlsIdentity: SecIdentity? = nil,
+        maxAttempts: Int = 16
+    ) throws -> (port: UInt16, listener: NWListener) {
+        let parameters = try makeParameters(tlsIdentity: tlsIdentity)
         for _ in 0..<maxAttempts {
             let port = try reserveLoopbackPort()
             do {
-                return try (port, NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: port)!))
+                return try (port, NWListener(using: parameters, on: NWEndpoint.Port(rawValue: port)!))
             } catch {
                 continue
             }
         }
         throw FakeHAError.portReservationFailed
+    }
+
+    private static func makeParameters(tlsIdentity: SecIdentity?) throws -> NWParameters {
+        guard let tlsIdentity else {
+            return .tcp
+        }
+        guard let localIdentity = sec_identity_create(tlsIdentity) else {
+            throw FakeHAError.tlsIdentityUnavailable
+        }
+        let tls = NWProtocolTLS.Options()
+        sec_protocol_options_set_local_identity(tls.securityProtocolOptions, localIdentity)
+        return NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
     }
 
     private static func reserveLoopbackPort() throws -> UInt16 {
@@ -293,7 +399,215 @@ public final class FakeHARESTServer: @unchecked Sendable {
 public enum FakeHAError: Error, Equatable {
     case missingPort
     case portReservationFailed
+    case tlsIdentityUnavailable
     case invalidWebSocketKey
+}
+
+public final class FakeHASelfSignedIdentity: @unchecked Sendable {
+    public let identity: SecIdentity
+    private let temporaryDirectory: URL
+
+    public convenience init(host: String = "127.0.0.1") throws {
+        try self.init(host: host, issuer: .selfSigned)
+    }
+
+    public static func caSignedLeaf(host: String = "127.0.0.1") throws -> FakeHASelfSignedIdentity {
+        try FakeHASelfSignedIdentity(host: host, issuer: .localCertificateAuthority)
+    }
+
+    private init(host: String, issuer: FakeHATLSIdentityIssuer) throws {
+        temporaryDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("pearchha-fakeha-tls-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+
+        let keyURL = temporaryDirectory.appendingPathComponent("key.pem", isDirectory: false)
+        let certificateURL = temporaryDirectory.appendingPathComponent("cert.pem", isDirectory: false)
+        let p12URL = temporaryDirectory.appendingPathComponent("identity.p12", isDirectory: false)
+        let password = UUID().uuidString
+        let subjectAltName = host == "127.0.0.1" ? "IP:127.0.0.1,DNS:localhost" : "DNS:\(host)"
+        try Self.writeCertificate(
+            host: host,
+            subjectAltName: subjectAltName,
+            keyURL: keyURL,
+            certificateURL: certificateURL,
+            issuer: issuer,
+            temporaryDirectory: temporaryDirectory
+        )
+        try Self.runOpenSSL([
+            "pkcs12",
+            "-export",
+            "-inkey",
+            keyURL.path,
+            "-in",
+            certificateURL.path,
+            "-out",
+            p12URL.path,
+            "-passout",
+            "pass:\(password)"
+        ])
+
+        let data = try Data(contentsOf: p12URL)
+        var items: CFArray?
+        let status = SecPKCS12Import(
+            data as CFData,
+            [kSecImportExportPassphrase as String: password] as CFDictionary,
+            &items
+        )
+        guard status == errSecSuccess,
+              let importedItems = items as? [[String: Any]],
+              let importedIdentity = importedItems.first?[kSecImportItemIdentity as String] as CFTypeRef?,
+              CFGetTypeID(importedIdentity) == SecIdentityGetTypeID()
+        else {
+            throw FakeHATLSIdentityError.importFailed(status)
+        }
+        self.identity = importedIdentity as! SecIdentity
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: temporaryDirectory)
+    }
+
+    private static func runOpenSSL(_ arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["openssl"] + arguments
+        let output = Pipe()
+        let errors = Pipe()
+        process.standardOutput = output
+        process.standardError = errors
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let data = errors.fileHandleForReading.readDataToEndOfFile()
+            let message = String(data: data, encoding: .utf8) ?? "openssl failed"
+            throw FakeHATLSIdentityError.opensslFailed(arguments, message: message)
+        }
+    }
+
+    private static func writeCertificate(
+        host: String,
+        subjectAltName: String,
+        keyURL: URL,
+        certificateURL: URL,
+        issuer: FakeHATLSIdentityIssuer,
+        temporaryDirectory: URL
+    ) throws {
+        switch issuer {
+        case .selfSigned:
+            let configurationURL = temporaryDirectory.appendingPathComponent("self-signed.cnf", isDirectory: false)
+            try """
+            [req]
+            prompt = no
+            distinguished_name = dn
+            x509_extensions = v3_req
+            [dn]
+            CN = \(host)
+            [v3_req]
+            subjectAltName = \(subjectAltName)
+            basicConstraints = critical,CA:FALSE
+            keyUsage = critical,digitalSignature,keyEncipherment
+            extendedKeyUsage = serverAuth
+            """.write(to: configurationURL, atomically: true, encoding: .utf8)
+            try runOpenSSL([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-sha256",
+                "-days",
+                "1",
+                "-nodes",
+                "-keyout",
+                keyURL.path,
+                "-out",
+                certificateURL.path,
+                "-config",
+                configurationURL.path,
+                "-extensions",
+                "v3_req"
+            ])
+        case .localCertificateAuthority:
+            let caKeyURL = temporaryDirectory.appendingPathComponent("ca-key.pem", isDirectory: false)
+            let caCertificateURL = temporaryDirectory.appendingPathComponent("ca-cert.pem", isDirectory: false)
+            let csrURL = temporaryDirectory.appendingPathComponent("leaf.csr", isDirectory: false)
+            let extensionURL = temporaryDirectory.appendingPathComponent("leaf.ext", isDirectory: false)
+            try runOpenSSL([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-sha256",
+                "-days",
+                "1",
+                "-nodes",
+                "-keyout",
+                caKeyURL.path,
+                "-out",
+                caCertificateURL.path,
+                "-subj",
+                "/CN=PearchHA Test CA",
+                "-addext",
+                "basicConstraints=critical,CA:TRUE",
+                "-addext",
+                "keyUsage=critical,keyCertSign,cRLSign"
+            ])
+            try runOpenSSL([
+                "req",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                keyURL.path,
+                "-out",
+                csrURL.path,
+                "-subj",
+                "/CN=\(host)"
+            ])
+            try """
+            subjectAltName=\(subjectAltName)
+            basicConstraints=critical,CA:FALSE
+            keyUsage=critical,digitalSignature,keyEncipherment
+            extendedKeyUsage=serverAuth
+            """.write(to: extensionURL, atomically: true, encoding: .utf8)
+            try runOpenSSL([
+                "x509",
+                "-req",
+                "-in",
+                csrURL.path,
+                "-CA",
+                caCertificateURL.path,
+                "-CAkey",
+                caKeyURL.path,
+                "-CAcreateserial",
+                "-out",
+                certificateURL.path,
+                "-days",
+                "1",
+                "-sha256",
+                "-extfile",
+                extensionURL.path
+            ])
+        }
+    }
+}
+
+private enum FakeHATLSIdentityIssuer {
+    case selfSigned
+    case localCertificateAuthority
+}
+
+public enum FakeHATLSIdentityError: Error, Equatable, CustomStringConvertible {
+    case opensslFailed([String], message: String)
+    case importFailed(OSStatus)
+
+    public var description: String {
+        switch self {
+        case let .opensslFailed(arguments, message):
+            "openssl \(arguments.joined(separator: " ")) failed: \(message)"
+        case let .importFailed(status):
+            "TLS identity import failed with status \(status)"
+        }
+    }
 }
 
 public enum FakeHAUnavailableCommandCode: String, Equatable, Sendable {
@@ -308,6 +622,8 @@ public enum FakeHAWebSocketMode: Equatable, Sendable {
     case silentAfterAuth
     case unsupportedCommands(Set<String>)
     case unavailableCommands(Set<String>, code: FakeHAUnavailableCommandCode)
+    case unavailableCommandMap([String: FakeHAUnavailableCommandCode])
+    case disconnectOnCommands(Set<String>)
     case partialSubscribeEntitiesChange
     case attributeRemovalSubscribeEntitiesChange
     case entityRemovalThenSubscribeEntitiesAddition
@@ -315,13 +631,16 @@ public enum FakeHAWebSocketMode: Equatable, Sendable {
     case entityRemovalThenPartialSubscribeEntitiesChangeThenAddition
     case disconnectOnceAfterSubscribeEntitiesResult
 
-    func unavailableCommandCode(for type: String) -> FakeHAUnavailableCommandCode? {
+    public func unavailableCommandCode(for type: String) -> FakeHAUnavailableCommandCode? {
         switch self {
         case let .unsupportedCommands(commands):
             commands.contains(type) ? .unsupportedCommand : nil
         case let .unavailableCommands(commands, code):
             commands.contains(type) ? code : nil
-        case .normal,
+        case let .unavailableCommandMap(commands):
+            commands[type]
+        case .disconnectOnCommands,
+             .normal,
              .wrongResultID,
              .commandFailure,
              .silentAfterAuth,
@@ -333,6 +652,36 @@ public enum FakeHAWebSocketMode: Equatable, Sendable {
              .disconnectOnceAfterSubscribeEntitiesResult:
             nil
         }
+    }
+
+    func disconnects(on type: String) -> Bool {
+        switch self {
+        case let .disconnectOnCommands(commands):
+            commands.contains(type)
+        case .normal,
+             .wrongResultID,
+             .commandFailure,
+             .silentAfterAuth,
+             .partialSubscribeEntitiesChange,
+             .attributeRemovalSubscribeEntitiesChange,
+             .entityRemovalThenSubscribeEntitiesAddition,
+             .manyEntityRemovalsThenSubscribeEntitiesAddition,
+             .entityRemovalThenPartialSubscribeEntitiesChangeThenAddition,
+             .disconnectOnceAfterSubscribeEntitiesResult,
+             .unsupportedCommands,
+             .unavailableCommands,
+             .unavailableCommandMap:
+            false
+        }
+    }
+
+    public static func mirrored(commandAvailability: [FakeHAWebSocketCommandAvailability]) -> FakeHAWebSocketMode {
+        var unavailable: [String: FakeHAUnavailableCommandCode] = [:]
+        for availability in commandAvailability where !availability.available {
+            unavailable[availability.command] = FakeHAUnavailableCommandCode(rawValue: availability.errorCode ?? "")
+                ?? .unknownCommand
+        }
+        return unavailable.isEmpty ? .normal : .unavailableCommandMap(unavailable)
     }
 }
 
@@ -353,12 +702,14 @@ public final class FakeHAWebSocketServer: @unchecked Sendable {
         fixtures: FakeHAFixtures = .minimal,
         mode: FakeHAWebSocketMode = .normal,
         pathPrefix: String = "",
-        redactor: Redactor = Redactor()
+        redactor: Redactor = Redactor(),
+        tlsIdentity: SecIdentity? = nil
     ) throws {
-        let endpoint = try Self.makeLoopbackListener()
+        let endpoint = try Self.makeLoopbackListener(tlsIdentity: tlsIdentity)
         let port = endpoint.port
         let listener = endpoint.listener
         let normalizedPathPrefix = Self.normalizedPathPrefix(pathPrefix)
+        let scheme = tlsIdentity == nil ? "http" : "https"
 
         self.listener = listener
         self.fixtures = fixtures
@@ -366,8 +717,8 @@ public final class FakeHAWebSocketServer: @unchecked Sendable {
         self.mode = mode
         self.pathPrefix = normalizedPathPrefix
         self.journal = FakeHAJournal()
-        self.queue = DispatchQueue(label: "dev.perchha.fakeha.websocket")
-        self.baseURL = URL(string: "http://127.0.0.1:\(port)\(normalizedPathPrefix)")!
+        self.queue = DispatchQueue(label: "dev.pearchha.fakeha.websocket")
+        self.baseURL = URL(string: "\(scheme)://127.0.0.1:\(port)\(normalizedPathPrefix)")!
     }
 
     public func start() {
@@ -466,6 +817,12 @@ public final class FakeHAWebSocketServer: @unchecked Sendable {
             }
             if mode == .commandFailure {
                 sendText(#"{"id":\#(id),"type":"result","success":false,"error":{"code":"failed","message":"Planned command failure"}}"#, to: connection)
+                return
+            }
+            if mode.disconnects(on: type) {
+                recordWebSocketCommand(type: type, rawMessage: message) {
+                    connection.cancel()
+                }
                 return
             }
             if let unavailableCode = mode.unavailableCommandCode(for: type) {
@@ -591,6 +948,24 @@ public final class FakeHAWebSocketServer: @unchecked Sendable {
 
     private func sendUnavailableCommand(id: Int, code: FakeHAUnavailableCommandCode, to connection: NWConnection) {
         sendText(#"{"id":\#(id),"type":"result","success":false,"error":{"code":"\#(code.rawValue)","message":"Command unavailable"}}"#, to: connection)
+    }
+
+    private func recordWebSocketCommand(
+        type: String,
+        rawMessage: String,
+        completion: @escaping @Sendable () -> Void
+    ) {
+        Task {
+            await journal.record(
+                FakeHAJournalEntry(
+                    method: "WS",
+                    path: "/api/websocket/\(type)",
+                    headers: [:],
+                    bodyText: redactor.redact(message: rawMessage)
+                )
+            )
+            completion()
+        }
     }
 
     private func statesResultMessage(id: Int) -> String {
@@ -736,7 +1111,7 @@ public final class FakeHAWebSocketServer: @unchecked Sendable {
                 #"{"id":\#(id),"type":"event","event":{"c":{"\#(eventEntityID())":{"+":\#(subscribeEntitiesStateOnlyBody)}}}}"#,
                 #"{"id":\#(id),"type":"event","event":{"a":{"\#(eventEntityID())":\#(subscribeEntitiesStateBody)}}}"#
             ]
-        case .normal, .wrongResultID, .commandFailure, .silentAfterAuth, .unsupportedCommands, .unavailableCommands:
+        case .normal, .wrongResultID, .commandFailure, .silentAfterAuth, .unsupportedCommands, .unavailableCommands, .unavailableCommandMap, .disconnectOnCommands:
             return [
                 #"{"id":\#(id),"type":"event","event":{"a":{"\#(eventEntityID())":\#(subscribeEntitiesStateBody)}}}"#
             ]
@@ -856,16 +1231,32 @@ public final class FakeHAWebSocketServer: @unchecked Sendable {
         }
     }
 
-    private static func makeLoopbackListener(maxAttempts: Int = 16) throws -> (port: UInt16, listener: NWListener) {
+    private static func makeLoopbackListener(
+        tlsIdentity: SecIdentity? = nil,
+        maxAttempts: Int = 16
+    ) throws -> (port: UInt16, listener: NWListener) {
+        let parameters = try makeParameters(tlsIdentity: tlsIdentity)
         for _ in 0..<maxAttempts {
             let port = try reserveLoopbackPort()
             do {
-                return try (port, NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: port)!))
+                return try (port, NWListener(using: parameters, on: NWEndpoint.Port(rawValue: port)!))
             } catch {
                 continue
             }
         }
         throw FakeHAError.portReservationFailed
+    }
+
+    private static func makeParameters(tlsIdentity: SecIdentity?) throws -> NWParameters {
+        guard let tlsIdentity else {
+            return .tcp
+        }
+        guard let localIdentity = sec_identity_create(tlsIdentity) else {
+            throw FakeHAError.tlsIdentityUnavailable
+        }
+        let tls = NWProtocolTLS.Options()
+        sec_protocol_options_set_local_identity(tls.securityProtocolOptions, localIdentity)
+        return NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
     }
 
     private static func reserveLoopbackPort() throws -> UInt16 {

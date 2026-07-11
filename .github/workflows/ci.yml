@@ -1,148 +1,57 @@
 name: CI
 
 on:
+  workflow_dispatch:
   pull_request:
-  push:
-    branches:
-      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+concurrency:
+  group: ci-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
-  swift:
-    name: Swift build and test
-    runs-on: macos-latest
+  check:
+    name: Build, test, smoke, audit
+    runs-on: macos-15
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: "📥 Checkout"
+        uses: actions/checkout@v7.0.0
 
-      - name: Swift version
-        run: swift --version
+      - name: "🛠️ Select Xcode"
+        uses: maxim-lobanov/setup-xcode@v1.7.0
+        with:
+          xcode-version: latest-stable
 
-      - name: Build
-        run: swift build -Xswiftc -warnings-as-errors
-
-      - name: List tests
+      - name: "🔎 Toolchain versions"
+        shell: bash
         run: |
-          rg -q "func testEntityIDPreservesRawValue" Tests
-          rg -q "func testPanelSnapshotExposesConnectionStateSummary" Tests
-          rg -q "func test_t_rate_limit_hygiene" Tests
-          rg -q "func test_t_mirror_redaction" Tests
-          rg -q "func test_t_connection_errors" Tests
-          rg -q "func test_t_rest_client_contract" Tests
-          rg -q "func test_t_websocket_auth_and_get_states" Tests
-          rg -q "func test_t_live_updates_panel_and_bar" Tests
-          rg -q "func test_t_call_service_journaled" Tests
-          rg -q "func test_t_discovery_grouping" Tests
-          rg -q "func testRESTSmokePreservesBasePathPrefix" Tests
-          rg -q "func testMirrorCapturePreservesBasePathPrefix" Tests
-          rg -q "func testFakeHAServersStartOnDistinctPortsUnderBurstCreation" Tests
-          rg -q "func testFakeHAConsumesCoalescedWebSocketBytes" Tests
-          rg -q "func testMirrorCaptureSanitizesPrivateStatePayload" Tests
-          rg -q "func testConfigStoreWritesAtomicallyEnoughToLeaveOneReadableJSONFile" Tests
-          rg -q "func test_t_secret_storage_and_redaction" Tests
-          rg -q "func test_t_panel_model_connects_against_fakeha" Tests
-          rg -q "func test_t_panel_applies_selection_config_to_visible_rooms" Tests
-          rg -q "func test_t_settings_toggle_updates_selection_and_persists" Tests
-          rg -q "func testSelectionReordererMovesRoomsAndSelectionOrder" Tests
-          rg -q "func testSelectionReordererMovesEntitiesWithinRoom" Tests
-          rg -q "func testSelectionReordererLeavesBoundaryMovesUntouched" Tests
-          rg -q "func testSelectionReordererPlacesRoomsRelativeToDropTarget" Tests
-          rg -q "func testSelectionReordererPlacesEntitiesRelativeToDropTargetWithinRoom" Tests
-          rg -q "func testSelectionReordererIgnoresEntityDropsAcrossRooms" Tests
-          rg -q "func test_t_settings_reorders_rooms_and_entities_and_persists" Tests
-          rg -q "func test_t_settings_drag_reorder_places_rooms_and_entities_and_persists" Tests
-          rg -q "func testSelectionDropTranslatorUsesTargetRelativePlacement" Tests
-          rg -q "func test_t_settings_reorder_boundary_move_does_not_persist" Tests
-          rg -q "func test_t_reordering_after_refresh_failure_keeps_rows_stale" Tests
-          rg -q "func test_t_reconnecting_rows_render_as_stale_values" Tests
-          rg -q "func test_t_live_update_during_reconnect_preserves_stale_phase" Tests
-          rg -q "func test_t_refresh_failure_keeps_last_rows_visible_as_stale" Tests
-          rg -q "func test_t_live_update_after_refresh_failure_preserves_failed_stale_phase" Tests
-          rg -q "func test_t_cancelling_reconnect_does_not_mark_state_connected" Tests
-          rg -q "func test_t_vanished_selected_ids_are_removed_when_selection_changes" Tests
-          rg -q "func test_t_app_shell_reorder_save_survives_relaunch" Tests
-          rg -q "func test_t_app_shell_reports_config_load_failure_and_blocks_save" Tests
-          rg -q "func test_t_app_shell_reports_config_save_failure_without_mutating_loaded_config" Tests
-          rg -q "func test_t_panel_rejects_reorder_when_app_shell_save_fails" Tests
-          rg -q "func test_t_panel_rejects_drop_reorder_when_app_shell_save_fails" Tests
-          rg -q "func test_t_panel_rejects_entity_drop_reorder_when_app_shell_save_fails" Tests
-          rg -q "func test_t_panel_rejects_entity_move_when_app_shell_save_fails" Tests
-          rg -q "func test_t_panel_rejects_selection_toggle_when_app_shell_save_fails" Tests
-          rg -q "func test_t_first_run_connection_failure_states" Tests
-          rg -q "func testPublicPanelSnapshotNeverExposesAccessToken" Tests
-          rg -q "func test_t_failed_retry_keeps_token_private_and_reuses_visible_token_presence" Tests
-          rg -q "func test_t_non_token_form_edits_preserve_private_token_for_connection" Tests
-          rg -q "func testClearingTokenRemovesPrivateTokenBeforeConnect" Tests
-          rg -q "func test_t_cancelling_panel_action_ignores_late_connection_result" Tests
-          rg -q "func testInvalidFallbackURLFailsBeforeConnectionAttempt" Tests
-          rg -q "func test_t_fallback_url_is_forwarded_to_connector" Tests
-          rg -q "func test_t_manual_refresh_updates_panel_values" Tests
-          rg -q "func testAppShellPanelCanBecomeKeyForFirstRunTextEntry" Tests
-          rg -q "func test_t_app_shell_launch_wires_status_item_panel_and_cleanup" Tests
-          rg -q "func test_t_app_shell_launch_loads_selection_config" Tests
-          rg -q "func test_t_select_reorder_persist" Tests
-          rg -q "func test_t_value_rendering_states" Tests
-          rg -q "func test_t_gauge_rendering_humidity_battery" Tests
-          rg -q "func testMenuBarDisplayConfigurationDefaultsPromotionsAndReplacesItems" Tests
-          rg -q "func testMenuBarRendererClampsPercentageGauge" Tests
-          rg -q "func testMenuBarItemProjectorPromotesConfiguredEntitiesInOrder" Tests
-          rg -q "func test_t_app_shell_promoted_menu_bar_item_updates_from_panel_and_live_state" Tests
-          rg -q "func test_t_display_settings_apply_live" Tests
-          rg -q "func test_t_display_settings_save_failure_rejects_live_status_item_change" Tests
-          rg -q "func testOAuthClientWebsiteAcceptsDeclaredNativeRedirectInFirstTenKB" Tests
-          rg -q "func testOAuthClientWebsiteRejectsMissingNativeRedirectDeclaration" Tests
-          rg -q "func testOAuthClientWebsiteRejectsNativeRedirectDeclarationAfterFirstTenKB" Tests
-          rg -q "func testOAuthClientWebsiteSkipsNetworkForExplicitDefaultHTTPSPort" Tests
-          rg -q "func testOAuthClientWebsiteEnvironmentParsesOAuthOnlyEnvFile" Tests
-          rg -q "func testOAuthApplicationConfigurationLoadsFromExplicitEnvironmentFile" Tests
-          rg -q "func testOAuthApplicationConfigurationEnvironmentOverridesMalformedEnvironmentFile" Tests
-          rg -q "func testOAuthApplicationConfigurationEnvironmentOverridesMissingEnvironmentFile" Tests
-          rg -q "func testOAuthApplicationConfigurationFromEnvironmentRejectsMalformedEnvironmentFileLine" Tests
-          rg -q "func testInfoPlistDeclaresCallbackURLSchemeAndMenuBarAgent" Tests
-          rg -q "func testLaunchServicesVerifierRegistersBundleAndClaimsCallbackScheme" Tests
-          rg -q "func testLaunchServicesVerifierRejectsBundleWithoutCallbackRole" Tests
-          rg -q "func testLaunchServicesVerifierRejectsDumpWhenClaimBindingHasWrongRole" Tests
-          rg -q "func testLaunchServicesVerifierRejectsDumpWhenSchemeBindingIsMissing" Tests
-          rg -q "func testAppShellApplicationOpenAcceptsConfiguredOAuthCallbackWithoutRetainingSecrets" Tests
-          rg -q "func test_t_accessibility_summary_reflects_empty_loading_success_and_error_states" Tests
-          rg -q "func test_t_accessibility_preferences_map_reduce_motion_and_increase_contrast" Tests
-          rg -q "func test_t_accessibility_view_root_surfaces_state_announcements_and_platform_preferences" Tests
-          rg -q "func test_t_accessibility_rows_expose_voiceover_labels_for_values_controls_and_failures" Tests
-          rg -q "func test_t_accessibility_keyboard_reorder_hints_follow_search_and_boundaries" Tests
-          rg -q "func test_t_reconnect_request_volume_uses_single_discovery_and_service_metadata_fetch" Tests
-          rg -q "func test_t_reconnect_after_restart_resubscribes_live_state" Tests
-          rg -q "CountingStatusItemGaugeImageRenderer" Tests Tools/perchha-smoke/main.swift
-          rg -q "disconnectOnceAfterSubscribeEntitiesResult" Tests Tools/perchha-smoke/main.swift
-          rg -q "PerchHAStatusItemImageCacheKey" Sources/PerchHAAppShell
-          rg -q "func verifyPanelOpenPerformance" Tools/perchha-smoke/main.swift
-          rg -q "func verifyApplicationLifecycleMemorySoak" Tools/perchha-smoke/main.swift
-          rg -q "func verifyIdleCPUAtRest" Tools/perchha-smoke/main.swift
-          rg -q "func verifyPanelSnapshotRendering" Tools/perchha-smoke/main.swift
+          set -euo pipefail
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+          swift --version
 
-      - name: Test
-        run: swift test -Xswiftc -warnings-as-errors
+      - name: "🩺 Verify Xcode setup"
+        run: swift run pearchha-xcode-doctor --json --strict
 
-      - name: Smoke
-        run: swift run perchha-smoke
+      - name: "📋 List XCTest cases"
+        run: swift test --disable-swift-testing --enable-xctest list
 
-      - name: Package app bundle
+      - name: "🧪 Checks and tests"
+        run: sh scripts/check.sh
+        env:
+          PERCHHA_TLS_DEBUG: "1"
+
+      - name: "🧹 Verify clean tree"
+        shell: bash
         run: |
-          swift run perchha-package-app --executable .build/debug/PerchHA --output .build/PerchHA.app --callback-scheme perchha --replace --verify-launch-services
-          plutil -p .build/PerchHA.app/Contents/Info.plist | rg -q 'CFBundleURLSchemes'
-
-      - name: Mirror fixture gates
-        run: |
-          swift run hamirror --help
-          swift run hamirror verify --fixtures Fixtures/public/m2-minimal
-          cat > .build/oauth-check.env <<'EOF'
-          PERCHHA_OAUTH_CLIENT_ID=https://perchha.dev/app
-          PERCHHA_OAUTH_REDIRECT_URI=https://perchha.dev/auth
-          EOF
-          swift run hamirror oauth-check --env .build/oauth-check.env
-          if swift run hamirror verify --fixtures Fixtures/missing; then
-            echo "expected missing fixture verification to fail"
-            exit 1
-          fi
-          if swift run hamirror verify --fixtures Fixtures/public/m2-minimal --typo; then
-            echo "expected unknown option to fail"
+          set -euo pipefail
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "Working tree changed during checks."
+            git status --short
             exit 1
           fi

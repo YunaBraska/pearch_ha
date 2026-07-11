@@ -3,136 +3,189 @@
 import PackageDescription
 
 let package = Package(
-    name: "PerchHA",
+    name: "PearchHA",
     platforms: [
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "PerchHA", targets: ["PerchHAApp"]),
+        .executable(name: "PearchHA", targets: ["PearchHAApp"]),
         .executable(name: "hamirror", targets: ["hamirror"]),
-        .executable(name: "perchha-smoke", targets: ["perchha-smoke"]),
-        .library(name: "PerchHACore", targets: ["PerchHACore"]),
-        .library(name: "PerchHAClient", targets: ["PerchHAClient"]),
-        .library(name: "PerchHAPersistence", targets: ["PerchHAPersistence"]),
-        .library(name: "PerchHAAppShell", targets: ["PerchHAAppShell"]),
-        .library(name: "PerchHAPackaging", targets: ["PerchHAPackaging"]),
-        .library(name: "PerchHASupport", targets: ["PerchHASupport"]),
-        .library(name: "PerchHAUI", targets: ["PerchHAUI"]),
+        .executable(name: "pearchha-smoke", targets: ["pearchha-smoke"]),
+        .executable(name: "pearchha-coverage-check", targets: ["pearchha-coverage-check"]),
+        .executable(name: "pearchha-repo-audit", targets: ["pearchha-repo-audit"]),
+        .executable(name: "pearchha-xcode-doctor", targets: ["pearchha-xcode-doctor"]),
+        .library(name: "PearchHACore", targets: ["PearchHACore"]),
+        .library(name: "PearchHAClient", targets: ["PearchHAClient"]),
+        .library(name: "PearchHAPersistence", targets: ["PearchHAPersistence"]),
+        .library(name: "PearchHAAppShell", targets: ["PearchHAAppShell"]),
+        .library(name: "PearchHAPackaging", targets: ["PearchHAPackaging"]),
+        .library(name: "PearchHASupport", targets: ["PearchHASupport"]),
+        .library(name: "PearchHAUI", targets: ["PearchHAUI"]),
+        .library(name: "PearchHACoverageCheck", targets: ["PearchHACoverageCheck"]),
+        .library(name: "PearchHARepoAudit", targets: ["PearchHARepoAudit"]),
         .library(name: "FakeHA", targets: ["FakeHA"]),
-        .executable(name: "perchha-package-app", targets: ["perchha-package-app"])
+        .executable(name: "pearchha-package-app", targets: ["pearchha-package-app"])
     ],
     targets: [
         .executableTarget(
-            name: "PerchHAApp",
+            name: "PearchHAApp",
             dependencies: [
-                "PerchHAAppShell"
+                "PearchHAAppShell"
             ]
         ),
         .target(
-            name: "PerchHAAppShell",
+            name: "PearchHAAppShell",
             dependencies: [
-                "PerchHACore",
-                "PerchHAClient",
-                "PerchHAPersistence",
-                "PerchHAUI"
+                "PearchHACore",
+                "PearchHAClient",
+                "PearchHAPersistence",
+                "PearchHAUI"
+            ],
+            resources: [
+                .copy("Resources/PearchHA.icns")
             ]
         ),
         .target(
-            name: "PerchHACore",
-            dependencies: ["PerchHASupport"]
+            name: "PearchHACore",
+            dependencies: ["PearchHASupport"]
         ),
         .target(
-            name: "PerchHAClient",
+            name: "PearchHAClient",
             dependencies: [
-                "PerchHACore",
-                "PerchHASupport"
+                "PearchHACore",
+                "PearchHASupport"
             ]
         ),
         .target(
-            name: "PerchHAPersistence",
+            name: "PearchHAPersistence",
             dependencies: [
-                "PerchHACore",
-                "PerchHASupport"
+                "PearchHACore",
+                "PearchHASupport"
             ]
         ),
         .target(
-            name: "PerchHAPackaging"
+            name: "PearchHAPackaging",
+            dependencies: ["PearchHASupport"]
         ),
         .target(
-            name: "PerchHASupport"
+            name: "PearchHASupport"
         ),
         .target(
-            name: "PerchHAUI",
-            dependencies: ["PerchHACore"]
+            name: "PearchHAUI",
+            dependencies: ["PearchHACore"]
+        ),
+        .target(
+            name: "PearchHACoverageCheck",
+            dependencies: ["PearchHASupport"]
+        ),
+        .target(
+            name: "PearchHATestSupport"
+        ),
+        .target(
+            name: "PearchHARepoAudit",
+            dependencies: ["PearchHASupport"]
         ),
         .executableTarget(
             name: "hamirror",
             dependencies: [
                 "FakeHA",
-                "PerchHAClient"
+                "PearchHAClient",
+                "PearchHASupport"
             ],
             path: "Tools/hamirror"
         ),
         .executableTarget(
-            name: "perchha-smoke",
+            name: "pearchha-smoke",
             dependencies: [
-                "PerchHACore",
-                "PerchHAClient",
-                "PerchHAAppShell",
-                "PerchHAPackaging",
+                "PearchHACore",
+                "PearchHAClient",
+                "PearchHAAppShell",
+                "PearchHAPackaging",
                 "FakeHA",
-                "PerchHAPersistence",
-                "PerchHASupport",
-                "PerchHAUI"
+                "PearchHAPersistence",
+                "PearchHASupport",
+                "PearchHAUI",
+                "PearchHACoverageCheck",
+                "PearchHARepoAudit"
             ],
-            path: "Tools/perchha-smoke"
+            path: "Tools/pearchha-smoke"
         ),
         .executableTarget(
-            name: "perchha-package-app",
+            name: "pearchha-coverage-check",
+            dependencies: ["PearchHACoverageCheck"],
+            path: "Tools/pearchha-coverage-check"
+        ),
+        .executableTarget(
+            name: "pearchha-repo-audit",
+            dependencies: ["PearchHARepoAudit"],
+            path: "Tools/pearchha-repo-audit"
+        ),
+        .executableTarget(
+            name: "pearchha-xcode-doctor",
+            dependencies: ["PearchHAPackaging"],
+            path: "Tools/pearchha-xcode-doctor"
+        ),
+        .executableTarget(
+            name: "pearchha-package-app",
             dependencies: [
-                "PerchHAPackaging"
+                "PearchHAClient",
+                "PearchHAPackaging",
+                "PearchHASupport"
             ],
-            path: "Tools/perchha-package-app"
+            path: "Tools/pearchha-package-app"
         ),
         .target(
             name: "FakeHA",
-            dependencies: ["PerchHASupport"],
+            dependencies: ["PearchHASupport"],
             path: "Tests/FakeHA",
             exclude: ["README.md"]
         ),
         .testTarget(
-            name: "PerchHACoreTests",
-            dependencies: ["PerchHACore"]
+            name: "PearchHACoreTests",
+            dependencies: ["PearchHACore"]
         ),
         .testTarget(
-            name: "PerchHAClientTests",
+            name: "PearchHAClientTests",
             dependencies: [
                 "FakeHA",
-                "PerchHACore",
-                "PerchHAClient"
+                "PearchHACore",
+                "PearchHAClient",
+                "PearchHATestSupport"
             ]
         ),
         .testTarget(
-            name: "PerchHAPersistenceTests",
-            dependencies: ["PerchHAPersistence"]
+            name: "PearchHAPersistenceTests",
+            dependencies: ["PearchHAPersistence"]
         ),
         .testTarget(
-            name: "PerchHAPackagingTests",
-            dependencies: ["PerchHAPackaging"]
+            name: "PearchHAPackagingTests",
+            dependencies: ["PearchHAPackaging"]
         ),
         .testTarget(
-            name: "PerchHASupportTests",
-            dependencies: ["PerchHASupport"]
+            name: "PearchHASupportTests",
+            dependencies: [
+                "PearchHASupport",
+                "PearchHATestSupport"
+            ]
         ),
         .testTarget(
-            name: "PerchHAUITests",
+            name: "PearchHAUITests",
             dependencies: [
                 "FakeHA",
-                "PerchHAClient",
-                "PerchHAAppShell",
-                "PerchHAPersistence",
-                "PerchHAUI"
+                "PearchHAClient",
+                "PearchHAAppShell",
+                "PearchHAPersistence",
+                "PearchHAUI",
+                "PearchHATestSupport"
             ]
+        ),
+        .testTarget(
+            name: "PearchHACoverageCheckTests",
+            dependencies: ["PearchHACoverageCheck"]
+        ),
+        .testTarget(
+            name: "PearchHARepoAuditTests",
+            dependencies: ["PearchHARepoAudit"]
         ),
         .testTarget(
             name: "FakeHATests",

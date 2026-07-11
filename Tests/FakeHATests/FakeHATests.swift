@@ -4,6 +4,29 @@ import XCTest
 import FakeHA
 
 final class FakeHATests: XCTestCase {
+    private func eventuallyProbe<T>(
+        attempts: Int = 20,
+        delayMicroseconds: useconds_t = 10_000,
+        operation: () throws -> T
+    ) throws -> T {
+        var lastError: Error?
+        for attempt in 0..<attempts {
+            do {
+                return try operation()
+            } catch {
+                lastError = error
+                if attempt + 1 < attempts {
+                    usleep(delayMicroseconds)
+                }
+            }
+        }
+        throw lastError ?? NSError(
+            domain: "FakeHATests",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "probe attempts exhausted without an error"]
+        )
+    }
+
     func testFakeHAServesAPIAndStates() async throws {
         let server = try FakeHARESTServer()
         server.start()
@@ -43,7 +66,7 @@ final class FakeHATests: XCTestCase {
         }
 
         let url = server.baseURL.appendingPathComponent("api/states")
-        let (_, response) = try await URLSession.shared.data(from: url)
+        let (_, response) = try await dataEventually(from: url)
         let http = try XCTUnwrap(response as? HTTPURLResponse)
 
         XCTAssertEqual(http.statusCode, 401)
@@ -93,6 +116,73 @@ final class FakeHATests: XCTestCase {
 
         XCTAssertEqual(fixtures.apiBody, #"{"message":"API running."}"#)
         XCTAssertEqual(fixtures.statesBody, #"[{"entity_id":"sensor.one"}]"#)
+        XCTAssertEqual(fixtures.entityRegistryDisplayBody, #"{"entities":[{"ei":"sensor.one"}]}"#)
+        XCTAssertEqual(fixtures.entityRegistryBody, #"[{"entity_id":"sensor.one"}]"#)
+    }
+
+    func testFakeHALoadsMirrorFixturesAndSynthesizesDisplayRegistryResults() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("fakeha-fixtures-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try #"{"bodyText":"{\"message\":\"API running.\"}"}"#.write(
+            to: directory.appendingPathComponent("api.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try #"{"bodyText":"[{\"entity_id\":\"sensor.one\",\"attributes\":{\"friendly_name\":\"Kitchen sensor\"}}]"}"#.write(
+            to: directory.appendingPathComponent("states.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let fixtures = try FakeHAFixtures.load(from: directory)
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+
+        let task = URLSession.shared.webSocketTask(with: try webSocketURL(baseURL: server.baseURL))
+        task.resume()
+        defer {
+            task.cancel(with: .goingAway, reason: nil)
+        }
+
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
+        try await task.send(.string(#"{"type":"auth","access_token":"fake-token"}"#))
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
+        try await task.send(.string(#"{"id":7,"type":"config/entity_registry/list_for_display"}"#))
+
+        let result = try await receiveString(task)
+
+        XCTAssertTrue(result.contains(#""id":7"#))
+        XCTAssertTrue(result.contains(#""success":true"#))
+        XCTAssertTrue(result.contains(#""ei":"sensor.one""#))
+        XCTAssertTrue(result.contains(#""en":"Kitchen sensor""#))
+    }
+
+    func testFakeHAMirroredWebSocketModePreservesPerCommandAvailabilityCodes() {
+        let mode = FakeHAWebSocketMode.mirrored(
+            commandAvailability: [
+                FakeHAWebSocketCommandAvailability(
+                    command: "config/entity_registry/list_for_display",
+                    available: false,
+                    errorCode: "unsupported_command"
+                ),
+                FakeHAWebSocketCommandAvailability(
+                    command: "subscribe_entities",
+                    available: false,
+                    errorCode: "unknown_command"
+                )
+            ]
+        )
+
+        XCTAssertEqual(mode.unavailableCommandCode(for: "config/entity_registry/list_for_display"), .unsupportedCommand)
+        XCTAssertEqual(mode.unavailableCommandCode(for: "subscribe_entities"), .unknownCommand)
+        XCTAssertNil(mode.unavailableCommandCode(for: "get_states"))
     }
 
     func testFakeHAWebSocketAuthHandshake() {
@@ -126,9 +216,9 @@ final class FakeHATests: XCTestCase {
             task.cancel(with: .goingAway, reason: nil)
         }
 
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"type":"auth","access_token":"fake-token"}"#))
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"id":1,"type":"get_states"}"#))
 
         let result = try await receiveString(task)
@@ -150,9 +240,9 @@ final class FakeHATests: XCTestCase {
             task.cancel(with: .goingAway, reason: nil)
         }
 
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"type":"auth","access_token":"fake-token"}"#))
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"id":9,"type":"unknown_command"}"#))
 
         let result = try await receiveString(task)
@@ -160,6 +250,23 @@ final class FakeHATests: XCTestCase {
         XCTAssertTrue(result.contains(#""id":9"#))
         XCTAssertTrue(result.contains(#""success":false"#))
         XCTAssertTrue(result.contains(#""code":"unknown_command""#))
+    }
+
+    func testFakeHAWebSocketServerIsReachableImmediatelyAfterStartAcrossRepeatedStarts() throws {
+        let probe = FakeHARawWebSocketProbe()
+
+        for _ in 0..<10 {
+            do {
+                let server = try FakeHAWebSocketServer()
+                server.start()
+                defer {
+                    server.stop()
+                }
+
+                let payload = try probe.authenticateWithCoalescedUpgrade(baseURL: server.baseURL)
+                XCTAssertNotNil(payload.range(of: Data(#""type":"auth_ok""#.utf8)))
+            }
+        }
     }
 
     func testFakeHAWebSocketServerReturnsRecorderStatistics() async throws {
@@ -180,9 +287,9 @@ final class FakeHATests: XCTestCase {
             task.cancel(with: .goingAway, reason: nil)
         }
 
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"type":"auth","access_token":"fake-token"}"#))
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
         try await task.send(
             .string(
                 #"{"id":3,"type":"recorder/statistics_during_period","statistic_ids":["sensor.office_temperature"],"period":"hour","start_time":"2026-06-20T12:00:00Z","end_time":"2026-06-27T12:00:00Z","types":["mean","state"]}"#
@@ -215,9 +322,9 @@ final class FakeHATests: XCTestCase {
             task.cancel(with: .goingAway, reason: nil)
         }
 
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"type":"auth","access_token":"fake-token"}"#))
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"id":4,"type":"get_services"}"#))
 
         let result = try await receiveString(task)
@@ -242,9 +349,9 @@ final class FakeHATests: XCTestCase {
             task.cancel(with: .goingAway, reason: nil)
         }
 
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_required","ha_version":"fake-ha"}"#)
         try await task.send(.string(#"{"type":"auth","access_token":"fake-token"}"#))
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_ok","ha_version":"fake-ha"}"#)
         let journal = await server.journal.snapshot()
         XCTAssertEqual(journal.last?.path, "/ha/api/websocket")
     }
@@ -264,7 +371,7 @@ final class FakeHATests: XCTestCase {
 
         _ = try await receiveString(task)
         try await task.send(.string(#"{"type":"auth","access_token":"wrong"}"#))
-        XCTAssertEqual(try await receiveString(task), #"{"type":"auth_invalid","message":"Invalid access token"}"#)
+        try await assertEqualAsync(try await receiveString(task), #"{"type":"auth_invalid","message":"Invalid access token"}"#)
     }
 
     func testFakeHAServersStartOnDistinctPortsUnderBurstCreation() throws {
@@ -304,10 +411,14 @@ final class FakeHATests: XCTestCase {
         }
 
         let probe = FakeHARawWebSocketProbe()
-        let coalescedAuth = try probe.authenticateWithCoalescedUpgrade(baseURL: server.baseURL)
+        let coalescedAuth = try eventuallyProbe {
+            try probe.authenticateWithCoalescedUpgrade(baseURL: server.baseURL)
+        }
         XCTAssertNotNil(coalescedAuth.range(of: Data(#""type":"auth_ok""#.utf8)))
 
-        let coalescedCommands = try probe.authenticateThenSendCoalescedCommands(baseURL: server.baseURL)
+        let coalescedCommands = try eventuallyProbe {
+            try probe.authenticateThenSendCoalescedCommands(baseURL: server.baseURL)
+        }
         XCTAssertNotNil(coalescedCommands.range(of: Data(#""id":1"#.utf8)))
         XCTAssertNotNil(coalescedCommands.range(of: Data(#""id":2"#.utf8)))
     }
@@ -346,6 +457,17 @@ final class FakeHATests: XCTestCase {
         @unknown default:
             return ""
         }
+    }
+
+    private func dataEventually(from url: URL) async throws -> (Data, URLResponse) {
+        for attempt in 0..<50 {
+            do {
+                return try await URLSession.shared.data(from: url)
+            } catch let error as URLError where error.code == .cannotConnectToHost && attempt < 49 {
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+        }
+        return try await URLSession.shared.data(from: url)
     }
 }
 #endif

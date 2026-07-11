@@ -1,0 +1,118 @@
+{
+  "contactSheet" : {
+    "name" : "review-contact-sheet.png",
+    "pixelsHigh" : 1346,
+    "pixelsWide" : 672,
+    "sampledHashHex" : "a43cc2083a7d0db1",
+    "visiblePixelCount" : 904496
+  },
+  "renderEnvironment" : "macos-26.5.1-arm64",
+  "schemaVersion" : 1,
+  "variants" : [
+    {
+      "name" : "connected-light.png",
+      "pixelsHigh" : 936,
+      "pixelsWide" : 768,
+      "sampledHashHex" : "3b27b6a20762a75d",
+      "visiblePixelCount" : 718638
+    },
+    {
+      "name" : "connected-dark.png",
+      "pixelsHigh" : 936,
+      "pixelsWide" : 768,
+      "sampledHashHex" : "8ee7227b4608957e",
+      "visiblePixelCount" : 718848
+    },
+    {
+      "name" : "connected-dark-increased-contrast.png",
+      "pixelsHigh" : 936,
+      "pixelsWide" : 768,
+      "sampledHashHex" : "8cd98130858ff83c",
+      "visiblePixelCount" : 718848
+    },
+    {
+      "name" : "connected-light-reduced-motion.png",
+      "pixelsHigh" : 936,
+      "pixelsWide" : 768,
+      "sampledHashHex" : "3b27b6a20762a75d",
+      "visiblePixelCount" : 718638
+    },
+    {
+      "name" : "history-loaded-light.png",
+      "pixelsHigh" : 840,
+      "pixelsWide" : 720,
+      "sampledHashHex" : "077c274000bf186c",
+      "visiblePixelCount" : 604800
+    },
+    {
+      "name" : "history-loaded-light-increased-contrast.png",
+      "pixelsHigh" : 840,
+      "pixelsWide" : 720,
+      "sampledHashHex" : "4f33e2eeea6f434d",
+      "visiblePixelCount" : 604800
+    },
+    {
+      "name" : "built-in-controls-light.png",
+      "pixelsHigh" : 936,
+      "pixelsWide" : 768,
+      "sampledHashHex" : "d1f40d4bc528e2bf",
+      "visiblePixelCount" : 718638
+    },
+    {
+      "name" : "first-run-light.png",
+      "pixelsHigh" : 936,
+      "pixelsWide" : 768,
+      "sampledHashHex" : "5f554a64239b50bf",
+      "visiblePixelCount" : 718638
+    },
+    {
+      "name" : "connecting-light.png",
+      "pixelsHigh" : 936,
+      "pixelsWide" : 768,
+      "sampledHashHex" : "ccb337d03ef7b6ef",
+      "visiblePixelCount" : 718638
+    },
+    {
+      "name" : "signing-in-light.png",
+      "pixelsHigh" : 936,
+      "pixelsWide" : 768,
+      "sampledHashHex" : "4e1c492772a019ef",
+      "visiblePixelCount" : 718638
+    },
+    {
+      "name" : "settings-selection-light.png",
+      "pixelsHigh" : 1120,
+      "pixelsWide" : 1040,
+      "sampledHashHex" : "8d0ef7993bfb596d",
+      "visiblePixelCount" : 1164800
+    },
+    {
+      "name" : "settings-about-update-light.png",
+      "pixelsHigh" : 1240,
+      "pixelsWide" : 1040,
+      "sampledHashHex" : "bf4465909110683b",
+      "visiblePixelCount" : 1289600
+    },
+    {
+      "name" : "reconnecting-light.png",
+      "pixelsHigh" : 936,
+      "pixelsWide" : 768,
+      "sampledHashHex" : "97ff8de56ea7ad35",
+      "visiblePixelCount" : 718638
+    },
+    {
+      "name" : "empty-light.png",
+      "pixelsHigh" : 936,
+      "pixelsWide" : 768,
+      "sampledHashHex" : "b0e63a051d8be631",
+      "visiblePixelCount" : 718638
+    },
+    {
+      "name" : "error-dark.png",
+      "pixelsHigh" : 936,
+      "pixelsWide" : 768,
+      "sampledHashHex" : "324a49ec4599de76",
+      "visiblePixelCount" : 718848
+    }
+  ]
+}

@@ -1,10 +1,10 @@
-# Architecture Decision Records - PerchHA
+# Architecture Decision Records - PearchHA
 
 Format: context, decision, consequences, alternatives.
 
 ## ADR-0001 - Native macOS app
 
-Context: PerchHA is an always-running menu bar utility and must be fast, native, and low overhead.
+Context: PearchHA is an always-running menu bar utility and must be fast, native, and low overhead.
 
 Decision: Build with Swift, SwiftUI, AppKit, and Swift Charts. Do not use Electron, Tauri, Java, or a web runtime.
 
@@ -14,7 +14,7 @@ Alternatives: Electron and Tauri were rejected because the app is a small ambien
 
 ## ADR-0002 - `NSStatusItem` plus custom `NSPanel`
 
-Context: PerchHA needs multiple menu bar items, gauges, hover behavior, sliders, charts, and rich keyboard support.
+Context: PearchHA needs multiple menu bar items, gauges, hover behavior, sliders, charts, and rich keyboard support.
 
 Decision: Use `NSStatusItem` for menu bar items and a custom borderless `NSPanel` hosting SwiftUI for the drop-down.
 
@@ -56,9 +56,9 @@ Alternatives: Internal mocks were rejected because they would skip transport, pa
 
 Context: Built-in controls and custom actions all become Home Assistant service calls.
 
-Decision: Model Home Assistant service calls as `ActionSpec` and execute them through one `call_service` path. Built-in UI controls produce `ActionSpec`; custom actions persist row metadata around `ActionSpec`. Plaintext custom-action config rejects protected service-data key names until a Keychain-backed protected-field path exists.
+Decision: Model Home Assistant service calls as `ActionSpec` and execute them through one `call_service` path. Built-in UI controls produce `ActionSpec`; custom actions persist row metadata around `ActionSpec`. Protected custom-action service-data values are stored in JSON as opaque references, resolved from Keychain before `call_service`, and fail explicitly if the referenced secret is missing.
 
-Consequences: Covers, switches, lights, scripts, shell commands, and sensor-attached buttons share one tested transport path. Custom actions with secret-bearing payloads fail explicitly instead of being silently written to JSON.
+Consequences: Covers, switches, lights, scripts, shell commands, and sensor-attached buttons share one tested transport path. Custom actions with secret-bearing payloads keep JSON opaque, resolve secrets at execution time, and fail explicitly instead of pretending the secret was safely "just config."
 
 Alternatives: Per-domain transport handlers were rejected as duplicated and harder to test.
 
@@ -84,10 +84,40 @@ Alternatives: Fixed polling and wall-clock sleeps were rejected.
 
 ## ADR-0009 - Release through signed and notarized direct distribution
 
-Context: PerchHA needs normal macOS trust behavior and may need menu bar freedoms that are awkward in the Mac App Store.
+Context: PearchHA needs normal macOS trust behavior and may need menu bar freedoms that are awkward in the Mac App Store.
 
 Decision: Ship a Developer ID signed and notarized app. Use a DMG for v1. Add Sparkle only after the core release path is stable.
 
 Consequences: Direct install is viable; automatic updates are deferred until they earn the added dependency and release work.
 
 Alternatives: Mac App Store first was deferred because sandbox and review constraints can slow this kind of utility.
+
+## ADR-0010 - Host-scoped self-signed trust, on by default, never trust-all
+
+Context: The dashboard-overhaul connection form briefly shipped with certificate validation disabled for every host, exposing bearer tokens to interception on any connection. Home-lab Home Assistant deployments, PearchHA's primary audience, very commonly run behind self-issued certificates, so a strict-only default breaks most first-run connections.
+
+Decision: The self-signed allowance is a visible switch in the Settings Connection tab, on by default, persisted with the connection profile, and scoped to exactly the profile's own HTTPS hosts — the client never trusts all hosts, and hosts outside the configured addresses always get full validation. Turning it off gives strict validation everywhere. The OAuth token exchange uses the same derived policy, and profiles stored before the field decode as trusting so existing setups keep working.
+
+Consequences: Self-signed home labs connect out of the box; the blast radius of the default is limited to the user's own configured addresses. Security-conscious users flip one switch for strict validation. Changing the trust posture counts as a connection-identity change, so caches and sessions rebuild with the new policy.
+
+Alternatives: Trust-all was rejected as a silent security regression with unbounded scope. Strict-by-default with opt-in was implemented first but rejected as product policy because it breaks the dominant deployment. Per-certificate pinning was rejected as disproportionate for a v1 menu bar utility.
+
+## ADR-0011 - Live updates as the primary path, polling as the safety net
+
+Context: The product promise is glanceable, live values. The client had `subscribe_entities` support, but nothing drove it: the UI updated through a periodic refresh that paid a full connect-and-auth handshake per tick.
+
+Decision: The panel model owns one long-lived streaming subscription per connected session (`subscribe_entities`, falling back to `subscribe_events`), applying each pushed state immediately — independent of panel visibility so menu bar items stay live. The stream reconnects with exponential backoff and resets once events flow. The periodic refresh remains only as a backstop, and the background history sync pauses while the connection is failed.
+
+Consequences: Values update in real time over one socket instead of ~45-second polls; request volume drops. WebSocket command/auth/ack receives carry a deadline and receives honor task cancellation, so a silent or half-open server can never hang a caller.
+
+Alternatives: Keeping polling as the primary path was rejected as contradicting FR-3 and wasting request volume. Managing the subscription in the app shell was rejected because the model owns the connection lifecycle and session identity.
+
+## ADR-0012 - Home Assistant palette on an iStat-style layout
+
+Context: The dashboard used a bespoke graphite/navy palette and a flat "Name Value" menu-bar title. User direction: look and behave like iStat Menus, with theme colors that read as Home Assistant.
+
+Decision: The dashboard palettes adopt the Home Assistant theme tokens (dark `#111111`/`#1C1C1C`/`#282828`, light `#FAFAFA`/white, HA text grays, semantic trio `#4CAF50`/`#FF9800`/`#F44336`, 12pt card radius) while layout idioms come from iStat Menus/Stats: accent-colored caps section headers, min/max peak labels pinned on the history chart, a per-entity gear shortcut in the history popover, and the "Show label" menu-bar option rendering as a stacked tiny-caps-label-above-value status item instead of widening the bar with a flat title.
+
+Consequences: One glance reads as "Home Assistant in an iStat shell". The stacked title changes the persisted-visible rendering of "Show label" (title now carries a line break); the review baseline was regenerated. Severity colors are shared between the panel, thresholds, and menu-bar gauges.
+
+Alternatives: Cloning iStat 7's ring-heavy dropdown was rejected — its density cost is the most criticized part of iStat 7. A full theme-pack system was rejected as disproportionate; the accent stays user-configurable.
