@@ -1322,7 +1322,7 @@ public final class PearchHAPanelModel: ObservableObject {
                 else {
                     return
                 }
-                await model.refreshPresentedHistoryInBackground(entityID: entityID, range: range)
+                await model.refreshPresentedHistoryFromCache(entityID: entityID, range: range)
             }
         }
     }
@@ -1332,29 +1332,18 @@ public final class PearchHAPanelModel: ObservableObject {
         historyDetailRefreshTask = nil
     }
 
-    private func refreshPresentedHistoryInBackground(entityID: EntityID, range: HistoryRange) async {
-        guard let form = lastConnectedForm else {
-            return
-        }
-        recordOutboundRequest()
-        let result = await historyProvider(form, entityID, range)
+    private func refreshPresentedHistoryFromCache(entityID: EntityID, range: HistoryRange) async {
         guard !Task.isCancelled,
               snapshot.historyPresentationEntityID == entityID,
               (snapshot.historyState.range ?? historyRange(for: entityID)) == range
         else {
             return
         }
-        switch result {
-        case let .success(series):
-            guard series.entityID == entityID, series.range == range else {
-                return
-            }
-            let insertNow = await clock.now()
-            lastObservedInstant = insertNow
-            insertHistory(series, for: PearchHAHistoryCacheKey(entityID: entityID, range: range), now: insertNow)
+        let cacheKey = PearchHAHistoryCacheKey(entityID: entityID, range: range)
+        let now = await clock.now()
+        lastObservedInstant = now
+        if let series = historyCache.peekAllowingStale(for: cacheKey) {
             applyHistoryState(.loaded(series))
-        case .unavailable:
-            return
         }
     }
 

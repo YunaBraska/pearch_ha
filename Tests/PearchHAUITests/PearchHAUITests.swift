@@ -202,6 +202,11 @@ final class PearchHAUITests: XCTestCase {
         )
     }
 
+    func testPanelEntityContextMenuSettingsActionOnlyAppearsWhenEntitySettingsHandlerExists() {
+        XCTAssertFalse(PearchHAPanelView.entityContextMenuContainsSettingsAction(onOpenEntitySettings: nil))
+        XCTAssertTrue(PearchHAPanelView.entityContextMenuContainsSettingsAction(onOpenEntitySettings: { _ in }))
+    }
+
     func test_t_accessibility_preferences_map_reduce_motion_and_increase_contrast() {
         let defaults = PearchHAPanelSnapshot().accessibilityPresentation()
         let increased = PearchHAPanelSnapshot().accessibilityPresentation(
@@ -1186,12 +1191,11 @@ final class PearchHAUITests: XCTestCase {
         )
     }
 
-    func test_t_open_history_detail_refreshes_on_its_own_interval() async {
+    func test_t_open_history_detail_refresh_interval_reuses_cache_instead_of_refetching() async {
         let clock = TestPearchClock()
         let recorder = HistoryProviderRecorder(
             results: [
-                .success(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4)),
-                .success(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 22.0))
+                .success(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4))
             ]
         )
         let model = PearchHAPanelModel(
@@ -1222,14 +1226,19 @@ final class PearchHAUITests: XCTestCase {
 
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: .seconds(1))
-        await spinUntil {
-            if case let .loaded(series) = model.snapshot.historyState {
-                return series.samples.last?.state == "22.0"
-            }
-            return false
+        for _ in 0..<10 {
+            await Task.yield()
         }
-        let callCountAfterRefresh = await recorder.callCount()
-        XCTAssertEqual(callCountAfterRefresh, 2)
+        if case let .loaded(series) = model.snapshot.historyState {
+            XCTAssertEqual(series.samples.last?.state, "21.4")
+        } else {
+            XCTFail("expected cached history to remain loaded")
+        }
+        let callCountAfterRefreshInterval = await recorder.callCount()
+        XCTAssertEqual(callCountAfterRefreshInterval, 1)
+
+        model.dismissHistoryPopover()
+        await spinUntil { await clock.sleepingTaskCount() == 0 }
     }
 
     func test_t_history_cache_diagnostics_report_series_and_sample_counts() async {

@@ -888,6 +888,13 @@ public struct PearchHAPanelView: View {
         let iconMenuItem = NSMenuItem(title: "Set icon", action: nil, keyEquivalent: "")
         iconMenuItem.submenu = iconSelectionMenu(for: entity)
         menu.addItem(iconMenuItem)
+        if Self.entityContextMenuContainsSettingsAction(onOpenEntitySettings: onOpenEntitySettings),
+           let onOpenEntitySettings {
+            menu.addItem(.separator())
+            menu.addItem(actionMenuItem(title: "Settings", systemImage: "gearshape") {
+                onOpenEntitySettings(entity.id)
+            })
+        }
 
         if contextPresentation.isPromotedToMenuBar {
             menu.addItem(.separator())
@@ -915,6 +922,10 @@ public struct PearchHAPanelView: View {
         }
 
         return menu
+    }
+
+    static func entityContextMenuContainsSettingsAction(onOpenEntitySettings: ((EntityID) -> Void)?) -> Bool {
+        onOpenEntitySettings != nil
     }
 
     private func iconSelectionMenu(for entity: DiscoveredEntity) -> NSMenu {
