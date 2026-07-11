@@ -2191,6 +2191,7 @@ final class PearchHAClientTests: XCTestCase {
         defer {
             server.stop()
         }
+        try await waitForRESTServerReady(baseURL: server.baseURL)
         let client = HomeAssistantClient()
         let input = HAConnectionInput(
             endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
@@ -2217,7 +2218,7 @@ final class PearchHAClientTests: XCTestCase {
             )
         )
         let journal = await server.journal.snapshot()
-        XCTAssertEqual(journal.first?.path, "/ha/api/websocket")
+        XCTAssertTrue(journal.contains { $0.path == "/ha/api/websocket" })
         XCTAssertTrue(journal.contains { $0.path.hasPrefix("/ha/api/history/period/") })
         XCTAssertTrue(journal.contains { $0.path.contains("filter_entity_id=sensor.office_temperature") })
     }

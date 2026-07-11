@@ -1020,9 +1020,9 @@ public struct PearchHASettingsView: View {
         }
     }
 
-    /// The updates diagnostic: the last-updated description plus a manual
-    /// "Refresh now" action. Refresh is otherwise automatic (on open,
-    /// periodically while open, and via live WebSocket push).
+    /// The updates diagnostic: the last-updated description plus the refresh
+    /// cadence controls. Refresh is otherwise automatic (timed sync and,
+    /// optionally, live WebSocket push while the panel is open).
     private var diagnosticsUpdatesContent: some View {
         VStack(alignment: .leading, spacing: 8) {
             settingsControlRow("Last updated") {
@@ -1030,6 +1030,10 @@ public struct PearchHASettingsView: View {
                     .font(PearchHATypography.bodyValue())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+            }
+            settingsControlRow("Live updates") {
+                Toggle("", isOn: liveUpdatesEnabledBinding)
+                    .labelsHidden()
             }
             diagnosticsRefreshSlider(
                 title: "Menu Bar Refresh",
@@ -1046,16 +1050,6 @@ public struct PearchHASettingsView: View {
                 value: displayPreferences.historyDetailRefreshInterval.displayName,
                 binding: historyDetailRefreshIntervalIndexBinding
             )
-            Button {
-                model.startRefresh()
-            } label: {
-                Label("Refresh now", systemImage: "arrow.clockwise")
-                    .labelStyle(.titleAndIcon)
-            }
-            .buttonStyle(PearchHAIconButtonStyle())
-            .disabled(model.snapshot.connectionState != .connected)
-            .help("Fetch the latest values from Home Assistant now")
-            .accessibilityLabel("Refresh values now")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1110,7 +1104,10 @@ public struct PearchHASettingsView: View {
     private var connectionDiagnostic: (label: String, detail: String, systemImage: String, color: Color) {
         switch model.snapshot.connectionState {
         case .connected:
-            return ("Connected", "Live updates are flowing from Home Assistant.", "checkmark.circle.fill", PearchHATheme.ok)
+            if displayPreferences.liveUpdatesEnabled {
+                return ("Connected", "Live updates run while the panel is open.", "checkmark.circle.fill", PearchHATheme.ok)
+            }
+            return ("Connected", "Using cached values plus timed background refresh.", "checkmark.circle.fill", PearchHATheme.ok)
         case .connecting:
             return ("Connecting", "Establishing a connection to Home Assistant.", "hourglass", PearchHATheme.warn)
         case let .reconnecting(attempt):
@@ -1239,6 +1236,13 @@ public struct PearchHASettingsView: View {
         refreshIntervalIndexBinding(
             get: { displayPreferences.historyDetailRefreshInterval },
             set: { updateDisplayPreferences(displayPreferences.with(historyDetailRefreshInterval: $0)) }
+        )
+    }
+
+    private var liveUpdatesEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { displayPreferences.liveUpdatesEnabled },
+            set: { updateDisplayPreferences(displayPreferences.with(liveUpdatesEnabled: $0)) }
         )
     }
 
@@ -1615,11 +1619,8 @@ public struct PearchHASettingsView: View {
         }
     }
 
-    /// The entity tree stays lazy at the top level so opening one inspector
-    /// never forces the entire home to materialize at once. Only the expanded
-    /// room gets a local non-lazy stack, which is enough to keep the inline
-    /// inspector stable without turning a large off-screen catalog into one
-    /// giant layout pass.
+    /// The entity tree stays lazy at every list level so opening one inspector
+    /// never forces a whole room's catalog to materialize at once.
     private func entityTreeStack(_ tree: [SelectableRoom]) -> some View {
         LazyVStack(alignment: .leading, spacing: 0) {
             entityTreeRows(tree)
@@ -1649,22 +1650,9 @@ public struct PearchHASettingsView: View {
 
     @ViewBuilder
     private func roomEntityRows(_ room: SelectableRoom) -> some View {
-        if roomContainsInspectedEntity(room) {
-            VStack(alignment: .leading, spacing: 0) {
-                entityRowsContent(room)
-            }
-        } else {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                entityRowsContent(room)
-            }
+        LazyVStack(alignment: .leading, spacing: 0) {
+            entityRowsContent(room)
         }
-    }
-
-    private func roomContainsInspectedEntity(_ room: SelectableRoom) -> Bool {
-        guard let inspectedEntityID else {
-            return false
-        }
-        return room.entities.contains { $0.entity.id == inspectedEntityID }
     }
 
     @ViewBuilder

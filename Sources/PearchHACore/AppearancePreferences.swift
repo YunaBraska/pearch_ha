@@ -222,6 +222,8 @@ public struct PearchHADisplayPreferences: Equatable, Sendable {
     public let dataSyncInterval: PearchHAMenuBarRefreshInterval
     /// The cadence for refreshing an open history detail surface in the background.
     public let historyDetailRefreshInterval: PearchHAMenuBarRefreshInterval
+    /// Whether the panel may open a live Home Assistant WebSocket stream while visible.
+    public let liveUpdatesEnabled: Bool
     /// The accent color applied across the panel and settings.
     public let accentColor: PearchHAAccentColor
     /// The vertical density of dashboard telemetry rows.
@@ -257,6 +259,7 @@ public struct PearchHADisplayPreferences: Equatable, Sendable {
         menuBarRefreshInterval: PearchHAMenuBarRefreshInterval = .defaultInterval,
         dataSyncInterval: PearchHAMenuBarRefreshInterval = .fiveSeconds,
         historyDetailRefreshInterval: PearchHAMenuBarRefreshInterval = .thirtySeconds,
+        liveUpdatesEnabled: Bool = false,
         accentColor: PearchHAAccentColor = .homeAssistantBlue,
         dashboardRowDensity: PearchHADashboardRowDensity = .defaultDensity,
         defaultHistoryRange: HistoryRange = .day,
@@ -271,6 +274,7 @@ public struct PearchHADisplayPreferences: Equatable, Sendable {
         self.menuBarRefreshInterval = menuBarRefreshInterval
         self.dataSyncInterval = dataSyncInterval
         self.historyDetailRefreshInterval = historyDetailRefreshInterval
+        self.liveUpdatesEnabled = liveUpdatesEnabled
         self.accentColor = accentColor
         self.dashboardRowDensity = dashboardRowDensity
         self.defaultHistoryRange = defaultHistoryRange
@@ -334,6 +338,11 @@ public struct PearchHADisplayPreferences: Equatable, Sendable {
         copy(historyDetailRefreshInterval: historyDetailRefreshInterval)
     }
 
+    /// Returns a copy with the live-update toggle replaced.
+    public func with(liveUpdatesEnabled: Bool) -> PearchHADisplayPreferences {
+        copy(liveUpdatesEnabled: liveUpdatesEnabled)
+    }
+
     /// Returns a copy with the accent color replaced.
     public func with(accentColor: PearchHAAccentColor) -> PearchHADisplayPreferences {
         copy(accentColor: accentColor)
@@ -378,6 +387,7 @@ public struct PearchHADisplayPreferences: Equatable, Sendable {
         menuBarRefreshInterval: PearchHAMenuBarRefreshInterval? = nil,
         dataSyncInterval: PearchHAMenuBarRefreshInterval? = nil,
         historyDetailRefreshInterval: PearchHAMenuBarRefreshInterval? = nil,
+        liveUpdatesEnabled: Bool? = nil,
         accentColor: PearchHAAccentColor? = nil,
         dashboardRowDensity: PearchHADashboardRowDensity? = nil,
         defaultHistoryRange: HistoryRange? = nil,
@@ -393,6 +403,7 @@ public struct PearchHADisplayPreferences: Equatable, Sendable {
             menuBarRefreshInterval: menuBarRefreshInterval ?? self.menuBarRefreshInterval,
             dataSyncInterval: dataSyncInterval ?? self.dataSyncInterval,
             historyDetailRefreshInterval: historyDetailRefreshInterval ?? self.historyDetailRefreshInterval,
+            liveUpdatesEnabled: liveUpdatesEnabled ?? self.liveUpdatesEnabled,
             accentColor: accentColor ?? self.accentColor,
             dashboardRowDensity: dashboardRowDensity ?? self.dashboardRowDensity,
             defaultHistoryRange: defaultHistoryRange ?? self.defaultHistoryRange,

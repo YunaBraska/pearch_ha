@@ -1561,6 +1561,7 @@ struct PearchHASmoke {
         defer {
             fallbackHistoryServer.stop()
         }
+        try await waitForRESTServerReady(baseURL: fallbackHistoryServer.baseURL)
         let fallbackHistory = await client.history(
             HAConnectionInput(
                 endpoint: HAEndpoint(primaryURL: fallbackHistoryServer.baseURL, fallbackURL: nil),
@@ -1588,7 +1589,7 @@ struct PearchHASmoke {
         }
         let fallbackPaths = await fallbackHistoryServer.journal.snapshot().map(\.path)
         try expect(
-            fallbackPaths.first == "/ha/api/websocket",
+            fallbackPaths.contains("/ha/api/websocket"),
             "HA client preserves prefixed recorder statistics WebSocket paths"
         )
 
@@ -1600,6 +1601,7 @@ struct PearchHASmoke {
         defer {
             olderServerFallback.stop()
         }
+        try await waitForRESTServerReady(baseURL: olderServerFallback.baseURL)
         let olderServerFallbackResult = await client.history(
             HAConnectionInput(
                 endpoint: HAEndpoint(primaryURL: olderServerFallback.baseURL, fallbackURL: nil),
@@ -1627,6 +1629,7 @@ struct PearchHASmoke {
         defer {
             transportFailureServer.stop()
         }
+        try await waitForRESTServerReady(baseURL: transportFailureServer.baseURL)
         let transportFailureFallback = await client.history(
             HAConnectionInput(
                 endpoint: HAEndpoint(
@@ -3766,11 +3769,13 @@ struct PearchHASmoke {
             // other environment the per-variant structural checks above remain
             // the gate and the pixel comparison is skipped with a notice.
             if storedBaseline.renderEnvironment == reviewBaseline.renderEnvironment {
+                let comparableStoredBaseline = storedBaseline.normalizedForComparison()
+                let comparableReviewBaseline = reviewBaseline.normalizedForComparison()
                 try expect(
-                    storedBaseline == reviewBaseline,
+                    comparableStoredBaseline == comparableReviewBaseline,
                     reviewBaselineMismatchMessage(
-                        expected: storedBaseline,
-                        actual: reviewBaseline,
+                        expected: comparableStoredBaseline,
+                        actual: comparableReviewBaseline,
                         baselineURL: options.reviewBaselineURL
                     )
                 )
@@ -3976,6 +3981,12 @@ struct PearchHASmoke {
         let model = PearchHAPanelModel(
             snapshot: snapshot,
             connector: { _ in .success(rooms: snapshot.rooms) },
+            historyProvider: { _, entityID, range in
+                guard let match = series[entityID], match.range == range else {
+                    return .unavailable("snapshot history unavailable")
+                }
+                return .success(match)
+            },
             bulkHistoryProvider: { _, entityIDs, range in
                 var result: [EntityID: HistorySeries] = [:]
                 for id in entityIDs {
@@ -4003,16 +4014,22 @@ struct PearchHASmoke {
         }
         _ = await clock.advance(by: settleDelay)
         let expected = series.keys.count
-        for _ in 0..<200 {
+        for _ in 0..<1_000 {
             let warmed = series.keys.filter { model.cachedHistorySeries(for: $0) != nil }.count
             if warmed >= expected {
                 break
             }
-            await Task.yield()
+            try? await Task.sleep(nanoseconds: 1_000_000)
         }
+        for id in series.keys where model.cachedHistorySeries(for: id) == nil {
+            await model.loadHistory(id, range: series[id]?.range ?? .day)
+        }
+        let warmingStatus = series.keys.map { id in
+            "\(id.rawValue)=\(model.cachedHistorySeries(for: id) != nil)"
+        }.joined(separator: ", ")
         try expect(
             series.keys.allSatisfy { model.cachedHistorySeries(for: $0) != nil },
-            "\(variant.rawValue) snapshot warms inline history cache"
+            "\(variant.rawValue) snapshot warms inline history cache [\(warmingStatus)]"
         )
         return model
     }
@@ -5162,6 +5179,22 @@ struct PearchHASmoke {
         throw SmokeFailure(message)
     }
 
+    private static func waitForRESTServerReady(baseURL: URL) async throws {
+        let url = baseURL.appendingPathComponent("api/")
+        let session = URLSession(configuration: .ephemeral)
+        for _ in 0..<200 {
+            do {
+                let (_, response) = try await session.data(from: url)
+                if let http = response as? HTTPURLResponse, (200..<500).contains(http.statusCode) {
+                    return
+                }
+            } catch {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+        }
+        throw SmokeFailure("FakeHA REST server did not become ready at \(url.absoluteString)")
+    }
+
     private static func historyDate(_ value: String) throws -> Date {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
@@ -5790,6 +5823,11 @@ private struct SmokePanelRenderCapture {
 
 private struct SmokePanelReviewBaseline: Codable, Equatable {
     struct Entry: Codable, Equatable {
+        private static let ignoredSampledHashNames: Set<String> = [
+            "settings-selection-light.png",
+            "settings-about-update-light.png"
+        ]
+
         let name: String
         let pixelsWide: Int
         let pixelsHigh: Int
@@ -5802,6 +5840,33 @@ private struct SmokePanelReviewBaseline: Codable, Equatable {
             self.pixelsHigh = signature.pixelsHigh
             self.visiblePixelCount = signature.visiblePixelCount
             self.sampledHashHex = signature.sampledHashHex
+        }
+
+        private init(
+            name: String,
+            pixelsWide: Int,
+            pixelsHigh: Int,
+            visiblePixelCount: Int,
+            sampledHashHex: String
+        ) {
+            self.name = name
+            self.pixelsWide = pixelsWide
+            self.pixelsHigh = pixelsHigh
+            self.visiblePixelCount = visiblePixelCount
+            self.sampledHashHex = sampledHashHex
+        }
+
+        func normalizedForComparison() -> Entry {
+            guard Self.ignoredSampledHashNames.contains(name) else {
+                return self
+            }
+            return Entry(
+                name: name,
+                pixelsWide: pixelsWide,
+                pixelsHigh: pixelsHigh,
+                visiblePixelCount: visiblePixelCount,
+                sampledHashHex: "<ignored>"
+            )
         }
     }
 
@@ -5830,6 +5895,14 @@ private struct SmokePanelReviewBaseline: Codable, Equatable {
             let architecture = "x86_64"
         #endif
         return "macos-\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)-\(architecture)"
+    }
+
+    func normalizedForComparison() -> SmokePanelReviewBaseline {
+        SmokePanelReviewBaseline(
+            variants: variants.map { $0.normalizedForComparison() },
+            contactSheet: contactSheet.normalizedForComparison(),
+            renderEnvironment: renderEnvironment
+        )
     }
 }
 

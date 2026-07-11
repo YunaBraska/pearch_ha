@@ -40,6 +40,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
     public let menuBarRefreshInterval: PearchHAMenuBarRefreshInterval
     public let dataSyncInterval: PearchHAMenuBarRefreshInterval
     public let historyDetailRefreshInterval: PearchHAMenuBarRefreshInterval
+    public let liveUpdatesEnabled: Bool
     public let accentColor: PearchHAAccentColor
     public let dashboardRowDensity: PearchHADashboardRowDensity
     public let dashboardDefaultHistoryRange: HistoryRange
@@ -64,6 +65,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
         menuBarRefreshInterval: PearchHAMenuBarRefreshInterval = .defaultInterval,
         dataSyncInterval: PearchHAMenuBarRefreshInterval = .fiveSeconds,
         historyDetailRefreshInterval: PearchHAMenuBarRefreshInterval = .thirtySeconds,
+        liveUpdatesEnabled: Bool = false,
         accentColor: PearchHAAccentColor = .homeAssistantBlue,
         dashboardRowDensity: PearchHADashboardRowDensity = .defaultDensity,
         dashboardDefaultHistoryRange: HistoryRange = .day,
@@ -87,6 +89,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
         self.menuBarRefreshInterval = menuBarRefreshInterval
         self.dataSyncInterval = dataSyncInterval
         self.historyDetailRefreshInterval = historyDetailRefreshInterval
+        self.liveUpdatesEnabled = liveUpdatesEnabled
         self.accentColor = accentColor
         self.dashboardRowDensity = dashboardRowDensity
         self.dashboardDefaultHistoryRange = dashboardDefaultHistoryRange
@@ -184,6 +187,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
         case menuBarRefreshInterval
         case dataSyncInterval
         case historyDetailRefreshInterval
+        case liveUpdatesEnabled
         case accentColor
         case dashboardRowDensity
         case dashboardDefaultHistoryRange
@@ -218,6 +222,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
         menuBarRefreshInterval = try container.decodeIfPresent(PearchHAMenuBarRefreshInterval.self, forKey: .menuBarRefreshInterval) ?? .defaultInterval
         dataSyncInterval = try container.decodeIfPresent(PearchHAMenuBarRefreshInterval.self, forKey: .dataSyncInterval) ?? .fiveSeconds
         historyDetailRefreshInterval = try container.decodeIfPresent(PearchHAMenuBarRefreshInterval.self, forKey: .historyDetailRefreshInterval) ?? .thirtySeconds
+        liveUpdatesEnabled = try container.decodeIfPresent(Bool.self, forKey: .liveUpdatesEnabled) ?? false
         accentColor = try container.decodeIfPresent(PearchHAAccentColor.self, forKey: .accentColor) ?? .homeAssistantBlue
         dashboardRowDensity = try container.decodeIfPresent(PearchHADashboardRowDensity.self, forKey: .dashboardRowDensity) ?? .defaultDensity
         dashboardDefaultHistoryRange = try container.decodeIfPresent(HistoryRange.self, forKey: .dashboardDefaultHistoryRange) ?? .day
@@ -242,6 +247,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
             menuBarRefreshInterval: menuBarRefreshInterval,
             dataSyncInterval: dataSyncInterval,
             historyDetailRefreshInterval: historyDetailRefreshInterval,
+            liveUpdatesEnabled: liveUpdatesEnabled,
             accentColor: accentColor,
             dashboardRowDensity: dashboardRowDensity,
             defaultHistoryRange: dashboardDefaultHistoryRange,
@@ -272,6 +278,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
             menuBarRefreshInterval: displayPreferences.menuBarRefreshInterval,
             dataSyncInterval: displayPreferences.dataSyncInterval,
             historyDetailRefreshInterval: displayPreferences.historyDetailRefreshInterval,
+            liveUpdatesEnabled: displayPreferences.liveUpdatesEnabled,
             accentColor: displayPreferences.accentColor,
             dashboardRowDensity: displayPreferences.dashboardRowDensity,
             dashboardDefaultHistoryRange: displayPreferences.defaultHistoryRange,

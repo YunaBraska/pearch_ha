@@ -864,6 +864,15 @@ public struct PearchHAPanelView: View {
                 }
             }
         }
+        if Self.entityContextMenuContainsSettingsAction(onOpenEntitySettings: onOpenEntitySettings),
+           let onOpenEntitySettings {
+            Divider()
+            Button {
+                onOpenEntitySettings(entity.id)
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+            }
+        }
         if contextPresentation.isPromotedToMenuBar {
             Divider()
             Toggle("Show Icon", isOn: panelEntityIconVisibilityBinding(for: entity.id))

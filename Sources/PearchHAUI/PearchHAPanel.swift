@@ -192,9 +192,8 @@ public final class PearchHAPanelModel: ObservableObject {
     private var bulkSyncCycle = 0
     private var periodicRefreshTask: Task<Void, Never>?
     private var periodicRefreshFailureStreak = 0
-    /// The single long-lived live update loop. Runs while a session is
-    /// connected — independent of panel visibility, so promoted menu-bar items
-    /// stay live with the panel closed.
+    /// The single long-lived live update loop. Runs only while the panel is
+    /// visible and live updates are enabled.
     private var liveUpdateTask: Task<Void, Never>?
     private var diagnosticLog = PearchHADiagnosticLog()
     /// Whether a connection/refresh failure has been recorded since the last
@@ -515,16 +514,27 @@ public final class PearchHAPanelModel: ObservableObject {
             return
         }
         displayPreferences = preferences
-        guard isPanelActive else {
-            return
-        }
+        let liveUpdateSettingChanged = previousPreferences.liveUpdatesEnabled != preferences.liveUpdatesEnabled
         if previousPreferences.dataSyncInterval != preferences.dataSyncInterval {
             startHistoryBulkSync()
-            startPeriodicRefresh(refreshImmediately: false)
+            reconcilePeriodicRefreshLoop(refreshImmediately: false)
+        }
+        guard isPanelActive else {
+            if liveUpdateSettingChanged {
+                cancelLiveUpdates()
+            }
+            return
         }
         if previousPreferences.historyDetailRefreshInterval != preferences.historyDetailRefreshInterval
             || previousPreferences.dataSyncInterval != preferences.dataSyncInterval {
             restartHistoryDetailRefresh()
+        }
+        if liveUpdateSettingChanged {
+            if preferences.liveUpdatesEnabled {
+                startLiveUpdates()
+            } else {
+                cancelLiveUpdates()
+            }
         }
     }
 
@@ -1538,12 +1548,13 @@ public final class PearchHAPanelModel: ObservableObject {
 
     // MARK: - History bulk sync loop
 
-    /// Marks the panel as shown or hidden, gating the background history sync.
+    /// Marks the panel as shown or hidden, gating panel-only background work.
     ///
     /// The app shell calls this with `true` when the panel becomes visible and
-    /// `false` when it is hidden or closed. While inactive the model does no
-    /// background fetching whatsoever: the re-arming bulk sync loop is cancelled
-    /// and no cycle runs. Re-activating with a known visible set re-arms the loop.
+    /// `false` when it is hidden or closed. While inactive the model cancels
+    /// panel-only work (history sync, detail refresh, live socket). Timed data
+    /// sync may still continue in the background when menu-bar entities need to
+    /// stay fresh.
     ///
     /// - Parameter active: Whether the panel is currently shown.
     public func setPanelActive(_ active: Bool) {
@@ -1564,26 +1575,28 @@ public final class PearchHAPanelModel: ObservableObject {
             // first, then let background refresh happen quietly afterward.
             startPeriodicRefresh(refreshImmediately: false)
             restartHistoryDetailRefresh()
+            startLiveUpdates()
         } else {
             closeHistoryHoverImmediately()
             cancelHistoryBulkSync()
-            cancelPeriodicRefresh()
             cancelHistoryDetailRefresh()
+            cancelLiveUpdates()
+            reconcilePeriodicRefreshLoop(refreshImmediately: false)
         }
     }
 
-    /// Starts the active-panel periodic refresh safety net.
+    /// Starts the timed refresh safety net.
     ///
-    /// Refreshes once on open (a discovery/refresh when a session is connected),
-    /// then repeats on the injected clock at the configured interval while the
-    /// panel stays active. Refreshes coalesce with any in-flight action and never
-    /// fire while the panel is closed. A failed refresh backs off exponentially up
-    /// to the configured ceiling; a success resets the streak to the base
-    /// interval. Live WebSocket push remains the primary update path; this is a
-    /// gentle backstop that keeps the request-volume budget intact.
+    /// Refreshes once on demand (a discovery/refresh when a session is connected),
+    /// then repeats on the injected clock while there is any visible/background
+    /// consumer that needs fresh values: the open panel or promoted menu-bar
+    /// entities. A failed refresh backs off exponentially up to the configured
+    /// ceiling; a success resets the streak to the base interval. Live WebSocket
+    /// push remains optional; this timed loop is the cheap fallback that keeps
+    /// cached values moving without an always-on socket.
     private func startPeriodicRefresh(refreshImmediately: Bool = true) {
         periodicRefreshTask?.cancel()
-        guard effectivePeriodicRefreshInterval.nanoseconds > 0, lastConnectedForm != nil else {
+        guard shouldRunPeriodicRefreshLoop else {
             periodicRefreshTask = nil
             return
         }
@@ -1598,7 +1611,7 @@ public final class PearchHAPanelModel: ObservableObject {
                 await self?.runPeriodicRefreshTick()
             }
             while !Task.isCancelled {
-                guard let delay = self.map({ $0.periodicRefreshDelay() }), self?.isPanelActive == true else {
+                guard let delay = self.map({ $0.periodicRefreshDelay() }), self?.shouldRunPeriodicRefreshLoop == true else {
                     return
                 }
                 do {
@@ -1606,11 +1619,26 @@ public final class PearchHAPanelModel: ObservableObject {
                 } catch {
                     return
                 }
-                guard !Task.isCancelled, let model = self, model.isPanelActive, model.lastConnectedForm != nil else {
+                guard !Task.isCancelled, let model = self, model.shouldRunPeriodicRefreshLoop else {
                     return
                 }
                 await model.runPeriodicRefreshTick()
             }
+        }
+    }
+
+    private var shouldRunPeriodicRefreshLoop: Bool {
+        guard effectivePeriodicRefreshInterval.nanoseconds > 0, lastConnectedForm != nil else {
+            return false
+        }
+        return isPanelActive || snapshot.menuBarDisplayConfiguration.promotedEntityIDs.isEmpty == false
+    }
+
+    private func reconcilePeriodicRefreshLoop(refreshImmediately: Bool) {
+        if shouldRunPeriodicRefreshLoop {
+            startPeriodicRefresh(refreshImmediately: refreshImmediately)
+        } else {
+            cancelPeriodicRefresh()
         }
     }
 
@@ -1625,18 +1653,19 @@ public final class PearchHAPanelModel: ObservableObject {
     /// current connection.
     ///
     /// The loop holds one subscription open and applies each pushed state
-    /// change immediately — the primary update path promised by the product;
-    /// the periodic refresh is only a safety net. It runs independently of
-    /// panel visibility so promoted menu-bar items stay live with the panel
-    /// closed. A dropped stream reconnects with exponential backoff on the
-    /// injected clock, resetting to the base delay once events flowed. The
-    /// loop ends on cancellation or when the connection identity changes.
+    /// change immediately while the panel is visible and the user left live
+    /// updates enabled. Periodic refresh remains the safety net. A dropped
+    /// stream reconnects with exponential backoff on the injected clock,
+    /// resetting to the base delay once events flowed. The loop ends on
+    /// cancellation, panel close, disabled preference, or connection change.
     private func startLiveUpdates() {
         liveUpdateTask?.cancel()
         liveUpdateTask = nil
         guard liveUpdateConfiguration.isEnabled,
               let streamer = liveUpdateStreamer,
-              let form = lastConnectedForm
+              let form = lastConnectedForm,
+              isPanelActive,
+              displayPreferences.liveUpdatesEnabled
         else {
             return
         }
@@ -3480,11 +3509,10 @@ public final class PearchHAPanelModel: ObservableObject {
                 // that a connection exists; the immediate tick is skipped because
                 // this connect just delivered fresh data.
                 startPeriodicRefresh(refreshImmediately: false)
+            } else {
+                reconcilePeriodicRefreshLoop(refreshImmediately: false)
             }
             if connectionChanged || liveUpdateTask == nil {
-                // The live push stream follows the session, not the panel: it
-                // starts with the first successful connect and restarts when the
-                // connection identity genuinely changes.
                 startLiveUpdates()
             }
             if diagnosticIsDegraded {
@@ -4067,6 +4095,7 @@ public final class PearchHAPanelModel: ObservableObject {
                 draft.displayPersistenceFailureDescription = nil
             }
         }
+        reconcilePeriodicRefreshLoop(refreshImmediately: false)
         return true
     }
 

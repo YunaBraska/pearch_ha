@@ -4580,7 +4580,7 @@ final class PearchHAUITests: XCTestCase {
         )
     }
 
-    func test_t_live_update_stream_starts_on_connect_applies_events_and_reconnects_with_backoff() async {
+    func test_t_live_update_stream_runs_only_while_panel_is_active_and_reconnects_with_backoff() async {
         let clock = TestPearchClock()
         let script = LiveStreamSessionScript(sessions: [
             // Session 1 pushes one live value, then drops after events flowed.
@@ -4612,11 +4612,15 @@ final class PearchHAUITests: XCTestCase {
             periodicRefreshConfiguration: .disabled,
             liveUpdateConfiguration: PearchHALiveUpdateConfiguration(reconnectDelay: .seconds(1), maximumBackoff: .seconds(8))
         )
+        model.applyDisplayPreferences(.defaults.with(liveUpdatesEnabled: true))
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
+        let startedWhileClosed = await script.startedSessions()
+        XCTAssertEqual(startedWhileClosed, 0, "closed panels must not keep a live socket open")
+        model.setPanelActive(true)
 
-        // The stream starts with the successful connect (no panel visibility
-        // required) and its pushed value lands in the snapshot immediately.
+        // Opening the panel arms the live stream and its pushed value lands in
+        // the snapshot immediately.
         await spinUntil {
             model.snapshot.rooms.first?.entities.contains { $0.id == "sensor.office_humidity" && $0.state == "47" } == true
         }
@@ -4657,6 +4661,82 @@ final class PearchHAUITests: XCTestCase {
         }
         let afterSignOut = await script.startedSessions()
         XCTAssertEqual(afterSignOut, 3, "sign-out cancels the live update loop")
+    }
+
+    func test_t_live_update_stream_cancels_when_panel_closes() async {
+        let clock = TestPearchClock()
+        let script = LiveStreamSessionScript(sessions: [
+            LiveStreamSessionScript.Session(
+                events: [EntityState(id: "sensor.office_humidity", name: "Office humidity", state: "47", unit: "%")],
+                failure: .unreachable(host: "homeassistant.local"),
+                holdsOpen: true
+            )
+        ])
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            liveUpdateStreamer: { form, onEvent in
+                await script.run(form: form, onEvent: onEvent)
+            },
+            clock: clock,
+            bulkSyncConfiguration: .disabled,
+            periodicRefreshConfiguration: .disabled,
+            liveUpdateConfiguration: PearchHALiveUpdateConfiguration(reconnectDelay: .seconds(1), maximumBackoff: .seconds(8))
+        )
+        model.applyDisplayPreferences(.defaults.with(liveUpdatesEnabled: true))
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.setPanelActive(true)
+        await spinUntil { await script.startedSessions() == 1 }
+        await spinUntil {
+            model.snapshot.rooms.first?.entities.contains { $0.id == "sensor.office_humidity" && $0.state == "47" } == true
+        }
+
+        model.setPanelActive(false)
+        await script.release()
+        _ = await clock.advance(by: .seconds(30))
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+
+        let startedAfterClose = await script.startedSessions()
+        XCTAssertEqual(startedAfterClose, 1, "closing the panel must cancel the live socket instead of reconnecting")
+    }
+
+    func test_t_live_update_toggle_disables_and_reenables_stream() async {
+        let clock = TestPearchClock()
+        let script = LiveStreamSessionScript(sessions: [
+            LiveStreamSessionScript.Session(
+                events: [EntityState(id: "sensor.office_humidity", name: "Office humidity", state: "47", unit: "%")],
+                failure: .unreachable(host: "homeassistant.local"),
+                holdsOpen: true
+            )
+        ])
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            liveUpdateStreamer: { form, onEvent in
+                await script.run(form: form, onEvent: onEvent)
+            },
+            clock: clock,
+            bulkSyncConfiguration: .disabled,
+            periodicRefreshConfiguration: .disabled,
+            liveUpdateConfiguration: PearchHALiveUpdateConfiguration(reconnectDelay: .seconds(1), maximumBackoff: .seconds(8))
+        )
+        model.applyDisplayPreferences(.defaults.with(liveUpdatesEnabled: false))
+        model.setPanelActive(true)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        let startedWhileDisabled = await script.startedSessions()
+        XCTAssertEqual(startedWhileDisabled, 0, "disabled live updates must not open the socket")
+
+        model.applyDisplayPreferences(.defaults.with(liveUpdatesEnabled: true))
+        await spinUntil { await script.startedSessions() == 1 }
+        await spinUntil {
+            model.snapshot.rooms.first?.entities.contains { $0.id == "sensor.office_humidity" && $0.state == "47" } == true
+        }
+        await script.release()
     }
 
     func test_t_live_update_after_refresh_failure_preserves_failed_stale_phase() async {
@@ -8412,15 +8492,22 @@ final class PearchHAUITests: XCTestCase {
             bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40, coldRefreshDivisor: 1)
         )
 
+        await spinUntil { await recorder.batchCount() >= 1 }
+        let baselineBatches = await recorder.batchCount()
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 3)
+        await runSettledBulkSyncCycle(
+            clock: clock,
+            recorder: recorder,
+            settleDelay: settleDelay,
+            expectedBatches: baselineBatches + 3
+        )
 
         // One grouped batch per due range covered the currently visible rows —
         // not one request per entity and never off-screen rows.
         let batchCount = await recorder.batchCount()
-        XCTAssertEqual(batchCount, 3, "cold visible rows warm in grouped day/week/month requests")
-        let requested = await recorder.requestedIDs()
+        XCTAssertEqual(batchCount - baselineBatches, 3, "cold visible rows warm in grouped day/week/month requests")
+        let requested = await recorder.requestedIDs(afterBatchCount: baselineBatches)
         XCTAssertEqual(requested, Set([EntityID("sensor.prefetch_0"), EntityID("sensor.prefetch_1")]))
         model.setPanelActive(false)
     }
@@ -8492,18 +8579,19 @@ final class PearchHAUITests: XCTestCase {
         )
         XCTAssertTrue(model.setMenuBarDefaultHistoryRange("sensor.prefetch_0", defaultHistoryRange: HistoryRange.hour))
 
+        let baselineBatches = await recorder.batchCount()
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0"])
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: settleDelay)
-        await spinUntil { await recorder.batchCount() >= 4 }
+        await spinUntil { await recorder.batchCount() >= baselineBatches + 4 }
 
-        let requestedRanges = await recorder.requestedRanges()
+        let requestedRanges = await recorder.requestedRanges(afterBatchCount: baselineBatches)
         let requestedRangeSet = Set(requestedRanges)
-        let hourRequests = await recorder.requestCount(for: HistoryRange.hour)
-        let dayRequests = await recorder.requestCount(for: HistoryRange.day)
-        let weekRequests = await recorder.requestCount(for: HistoryRange.week)
-        let monthRequests = await recorder.requestCount(for: HistoryRange.month)
+        let hourRequests = await recorder.requestCount(for: HistoryRange.hour, afterBatchCount: baselineBatches)
+        let dayRequests = await recorder.requestCount(for: HistoryRange.day, afterBatchCount: baselineBatches)
+        let weekRequests = await recorder.requestCount(for: HistoryRange.week, afterBatchCount: baselineBatches)
+        let monthRequests = await recorder.requestCount(for: HistoryRange.month, afterBatchCount: baselineBatches)
         XCTAssertEqual(requestedRangeSet, Set([HistoryRange.hour, HistoryRange.day, HistoryRange.week, HistoryRange.month]))
         XCTAssertEqual(hourRequests, 1)
         XCTAssertEqual(dayRequests, 1)
@@ -8563,19 +8651,20 @@ final class PearchHAUITests: XCTestCase {
         )
         XCTAssertTrue(model.setMenuBarDefaultHistoryRange("sensor.prefetch_0", defaultHistoryRange: HistoryRange.hour))
 
+        let baselineBatches = await recorder.batchCount()
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0"])
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: settleDelay)
-        await spinUntil { await recorder.batchCount() >= 4 }
+        await spinUntil { await recorder.batchCount() >= baselineBatches + 4 }
 
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: interval)
-        await spinUntil { await recorder.batchCount() >= 6 }
-        let hourRequestsAfterFirstRefresh = await recorder.requestCount(for: HistoryRange.hour)
-        let dayRequestsAfterFirstRefresh = await recorder.requestCount(for: HistoryRange.day)
-        let weekRequestsAfterFirstRefresh = await recorder.requestCount(for: HistoryRange.week)
-        let monthRequestsAfterFirstRefresh = await recorder.requestCount(for: HistoryRange.month)
+        await spinUntil { await recorder.batchCount() >= baselineBatches + 6 }
+        let hourRequestsAfterFirstRefresh = await recorder.requestCount(for: HistoryRange.hour, afterBatchCount: baselineBatches)
+        let dayRequestsAfterFirstRefresh = await recorder.requestCount(for: HistoryRange.day, afterBatchCount: baselineBatches)
+        let weekRequestsAfterFirstRefresh = await recorder.requestCount(for: HistoryRange.week, afterBatchCount: baselineBatches)
+        let monthRequestsAfterFirstRefresh = await recorder.requestCount(for: HistoryRange.month, afterBatchCount: baselineBatches)
         XCTAssertEqual(hourRequestsAfterFirstRefresh, 2)
         XCTAssertEqual(dayRequestsAfterFirstRefresh, 2)
         XCTAssertEqual(weekRequestsAfterFirstRefresh, 1)
@@ -8583,9 +8672,9 @@ final class PearchHAUITests: XCTestCase {
 
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: PearchDuration.seconds(86_400))
-        await spinUntil { await recorder.batchCount() >= 10 }
-        let weekRequestsAfterOneDay = await recorder.requestCount(for: HistoryRange.week)
-        let monthRequestsAfterOneDay = await recorder.requestCount(for: HistoryRange.month)
+        await spinUntil { await recorder.batchCount() >= baselineBatches + 10 }
+        let weekRequestsAfterOneDay = await recorder.requestCount(for: HistoryRange.week, afterBatchCount: baselineBatches)
+        let monthRequestsAfterOneDay = await recorder.requestCount(for: HistoryRange.month, afterBatchCount: baselineBatches)
         XCTAssertEqual(weekRequestsAfterOneDay, 2)
         XCTAssertEqual(monthRequestsAfterOneDay, 2)
         model.setPanelActive(false)
@@ -8641,11 +8730,17 @@ final class PearchHAUITests: XCTestCase {
             bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, coldRefreshDivisor: 1)
         )
 
+        let baselineBatches = await recorder.batchCount()
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 2)
+        await runSettledBulkSyncCycle(
+            clock: clock,
+            recorder: recorder,
+            settleDelay: settleDelay,
+            expectedBatches: baselineBatches + 2
+        )
         let afterFirstCycle = await recorder.batchCount()
-        XCTAssertEqual(afterFirstCycle, 2)
+        XCTAssertEqual(afterFirstCycle - baselineBatches, 2)
         // Wait for the cycle's results to land in the cache — re-arming while
         // the apply is still in flight would cancel it and drop the sync marks.
         await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0") != nil }
@@ -8656,14 +8751,18 @@ final class PearchHAUITests: XCTestCase {
         model.updateVisibleEntities(["sensor.prefetch_0"])
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: settleDelay)
-        await spinUntil { await recorder.batchCount() >= 2 }
+        await spinUntil { await recorder.batchCount() >= baselineBatches + 3 }
         let afterRearm = await recorder.batchCount()
-        XCTAssertEqual(afterRearm, 3, "a re-arm within the interval should add only one maintenance batch")
+        XCTAssertEqual(
+            afterRearm - baselineBatches,
+            3,
+            "a re-arm within the interval should add only one maintenance batch"
+        )
 
         // After a full interval the same visible entity is due again.
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: interval)
-        await spinUntil { await recorder.batchCount() >= 4 }
+        await spinUntil { await recorder.batchCount() >= baselineBatches + 4 }
         model.setPanelActive(false)
     }
 
@@ -8734,9 +8833,15 @@ final class PearchHAUITests: XCTestCase {
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
+        let baselineBatches = await recorder.batchCount()
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 3)
+        await runSettledBulkSyncCycle(
+            clock: clock,
+            recorder: recorder,
+            settleDelay: settleDelay,
+            expectedBatches: baselineBatches + 3
+        )
 
         // The connection drops: while the state is failed, interval ticks must
         // not hammer the dead server with bulk batches across fallback URLs.
@@ -8747,14 +8852,14 @@ final class PearchHAUITests: XCTestCase {
             await Task.yield()
         }
         let duringOutage = await recorder.batchCount()
-        XCTAssertEqual(duringOutage, 3, "bulk sync must pause while the connection is failed")
+        XCTAssertEqual(duringOutage - baselineBatches, 3, "bulk sync must pause while the connection is failed")
 
         // Recovery: a successful refresh restores the connected state, and the
         // next interval tick resumes syncing.
         await model.refresh()
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: interval)
-        await spinUntil { await recorder.batchCount() >= 2 }
+        await spinUntil { await recorder.batchCount() >= baselineBatches + 4 }
         model.setPanelActive(false)
     }
 
@@ -8860,14 +8965,20 @@ final class PearchHAUITests: XCTestCase {
             bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, coldRefreshDivisor: 3)
         )
 
+        let baselineBatches = await recorder.batchCount()
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 3)
-        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: 2)
-        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: 5)
+        await runSettledBulkSyncCycle(
+            clock: clock,
+            recorder: recorder,
+            settleDelay: settleDelay,
+            expectedBatches: baselineBatches + 3
+        )
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: baselineBatches + 4)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: baselineBatches + 7)
 
-        let visibleRequests = await recorder.requestCountForEntity("sensor.prefetch_0")
-        let hiddenRequests = await recorder.requestCountForEntity("sensor.prefetch_3")
+        let visibleRequests = await recorder.requestCountForEntity("sensor.prefetch_0", afterBatchCount: baselineBatches)
+        let hiddenRequests = await recorder.requestCountForEntity("sensor.prefetch_3", afterBatchCount: baselineBatches)
         XCTAssertEqual(visibleRequests, 5, "the visible entity gets cold long-range warmup plus recurring day refreshes")
         XCTAssertEqual(hiddenRequests, 0, "hidden entities are ignored by the background history sync")
         model.setPanelActive(false)
@@ -8880,20 +8991,21 @@ final class PearchHAUITests: XCTestCase {
         let model = await makeConnectedBulkSyncModel(
             recorder: recorder,
             clock: clock,
-            rooms: prefetchRooms(count: 4),
+            rooms: prefetchRooms(count: 20),
             bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1)
         )
 
         // Inactive: reporting visibility must not fetch nor even arm a settle sleep.
-        model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
+        let baselineBatches = await recorder.batchCount()
+        model.updateVisibleEntities(["sensor.prefetch_18", "sensor.prefetch_19"])
         for _ in 0..<10 {
             await Task.yield()
         }
         let inactiveSleepers = await clock.sleepingTaskCount()
         XCTAssertEqual(inactiveSleepers, 0)
         let inactiveBatches = await recorder.batchCount()
-        XCTAssertEqual(inactiveBatches, 0)
-        XCTAssertNil(model.cachedHistorySeries(for: "sensor.prefetch_0"))
+        XCTAssertEqual(inactiveBatches, baselineBatches)
+        XCTAssertNil(model.cachedHistorySeries(for: "sensor.prefetch_19"))
     }
 
     func test_t_bulk_sync_splits_large_sets_into_capped_batches() async {
@@ -9199,6 +9311,7 @@ final class PearchHAUITests: XCTestCase {
             bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1)
         )
 
+        let batchesBeforeActivation = await recorder.batchCount()
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0"])
         // Arm the settle sleep, then deactivate before it fires: no cycle should run.
@@ -9210,7 +9323,7 @@ final class PearchHAUITests: XCTestCase {
         }
 
         let batches = await recorder.batchCount()
-        XCTAssertEqual(batches, 0, "deactivating before the settle fires cancels the armed sync")
+        XCTAssertEqual(batches, batchesBeforeActivation, "deactivating before the settle fires cancels the armed sync")
         XCTAssertNil(model.cachedHistorySeries(for: "sensor.prefetch_0"))
     }
 
@@ -9403,6 +9516,54 @@ final class PearchHAUITests: XCTestCase {
             await Task.yield()
         }
         XCTAssertEqual(model.snapshot.refreshCount, 1)
+    }
+
+    func test_t_periodic_refresh_runs_for_promoted_menu_bar_entities_while_panel_is_closed() async {
+        let clock = TestPearchClock()
+        let calls = CallCounter()
+        let promoted: EntityID = "sensor.office_temperature"
+        let initialRooms = selectionRooms()
+        let refreshedRooms = [
+            Room(
+                id: initialRooms[0].id,
+                name: initialRooms[0].name,
+                entities: initialRooms[0].entities.map { entity in
+                    entity.id == promoted
+                        ? DiscoveredEntity(
+                            id: entity.id,
+                            name: entity.name,
+                            state: "24.1",
+                            unit: entity.unit,
+                            areaID: entity.areaID,
+                            deviceID: entity.deviceID,
+                            currentPosition: entity.currentPosition
+                        )
+                        : entity
+                }
+            )
+        ]
+        let interval = PearchDuration.seconds(15)
+        let model = PearchHAPanelModel(
+            connector: { _ in
+                if await calls.next() == 1 {
+                    return .success(rooms: initialRooms)
+                }
+                return .success(rooms: refreshedRooms)
+            },
+            clock: clock,
+            periodicRefreshConfiguration: PearchHAPeriodicRefreshConfiguration(interval: interval),
+            menuBarDisplayConfiguration: MenuBarDisplayConfiguration(promotedEntityIDs: [promoted])
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        XCTAssertEqual(model.snapshot.refreshCount, 0)
+
+        _ = await clock.advance(by: interval)
+        await spinUntil { model.snapshot.refreshCount == 1 }
+        let entity = model.snapshot.rooms.flatMap { $0.entities }.first { $0.id == promoted }
+        XCTAssertEqual(entity?.state, "24.1")
     }
 
     func test_t_model_with_active_background_loops_deallocates_when_released() async {
@@ -11116,8 +11277,16 @@ private actor BulkHistoryRecorder {
         Set(batches.flatMap { $0 })
     }
 
+    func requestedIDs(afterBatchCount baseline: Int) -> Set<EntityID> {
+        Set(batches.dropFirst(baseline).flatMap { $0 })
+    }
+
     func requestedRanges() -> [HistoryRange] {
         rangesByBatch
+    }
+
+    func requestedRanges(afterBatchCount baseline: Int) -> [HistoryRange] {
+        Array(rangesByBatch.dropFirst(baseline))
     }
 
     func requestCount(for range: HistoryRange) -> Int {
@@ -11126,8 +11295,18 @@ private actor BulkHistoryRecorder {
         }
     }
 
+    func requestCount(for range: HistoryRange, afterBatchCount baseline: Int) -> Int {
+        rangesByBatch.dropFirst(baseline).reduce(0) { count, recordedRange in
+            count + (recordedRange == range ? 1 : 0)
+        }
+    }
+
     func requestCountForEntity(_ entityID: EntityID) -> Int {
         batches.reduce(0) { $0 + ($1.contains(entityID) ? 1 : 0) }
+    }
+
+    func requestCountForEntity(_ entityID: EntityID, afterBatchCount baseline: Int) -> Int {
+        batches.dropFirst(baseline).reduce(0) { $0 + ($1.contains(entityID) ? 1 : 0) }
     }
 
     func largestBatchSize() -> Int {
