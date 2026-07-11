@@ -47,7 +47,13 @@ public final class PearchHAPanelModel: ObservableObject {
             } else if oldValue.connectionState != snapshot.connectionState {
                 formattedValueCache.removeAll(keepingCapacity: true)
             }
-            let forceStatusItemRefresh = oldValue.menuBarDisplayConfiguration != snapshot.menuBarDisplayConfiguration
+            // Menu-bar configuration edits and connection-phase transitions
+            // affect visible shell state immediately (for example the launch
+            // spinner and its removal), so those updates bypass the passive
+            // refresh interval instead of waiting for the next throttle window.
+            let forceStatusItemRefresh =
+                oldValue.menuBarDisplayConfiguration != snapshot.menuBarDisplayConfiguration
+                || oldValue.phase != snapshot.phase
             snapshotSink(snapshot, forceStatusItemRefresh)
             refreshRetryBackoffState()
             if availableEntityIndexChanged

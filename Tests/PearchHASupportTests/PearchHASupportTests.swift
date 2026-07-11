@@ -307,24 +307,6 @@ enum CoalescerTestError: Error, Equatable {
     case planned
 }
 
-func waitUntil(_ message: String, condition: @escaping () async -> Bool) async throws {
-    for _ in 0..<100 {
-        if await condition() {
-            return
-        }
-        await Task.yield()
-    }
-    throw WaitFailure(message)
-}
-
-struct WaitFailure: Error, CustomStringConvertible {
-    let description: String
-
-    init(_ description: String) {
-        self.description = description
-    }
-}
-
 actor TestCounter {
     private(set) var value = 0
 

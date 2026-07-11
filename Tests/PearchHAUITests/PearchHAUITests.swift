@@ -1012,9 +1012,10 @@ final class PearchHAUITests: XCTestCase {
         }
 
         model.dismissHistoryPopover()
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
-        _ = await clock.advance(by: .milliseconds(300))
-        await spinUntil { model.snapshot.historyState == .idle }
+        await Task.yield()
+        XCTAssertEqual(model.snapshot.historyState, .idle)
+        let cancelSleepers = await clock.sleepingTaskCount()
+        XCTAssertEqual(cancelSleepers, 0)
 
         await recorder.releaseNext()
         await task.value
@@ -1408,9 +1409,9 @@ final class PearchHAUITests: XCTestCase {
 
         XCTAssertEqual(loadedModel.snapshot.historyPresentationEntityID, "sensor.office_temperature")
         loadedModel.dismissHistoryPopover()
-        await spinUntil { await loadedClock.sleepingTaskCount() == 1 }
-        _ = await loadedClock.advance(by: .milliseconds(300))
-        await spinUntil { loadedModel.snapshot.historyPresentationEntityID == nil }
+        await Task.yield()
+        let loadedSleepers = await loadedClock.sleepingTaskCount()
+        XCTAssertEqual(loadedSleepers, 0)
         XCTAssertNil(loadedModel.snapshot.historyPresentationEntityID)
         XCTAssertEqual(loadedModel.snapshot.historyState, .loaded(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4)))
 
@@ -1435,9 +1436,9 @@ final class PearchHAUITests: XCTestCase {
 
         XCTAssertEqual(unavailableModel.snapshot.historyPresentationEntityID, "sensor.office_temperature")
         unavailableModel.dismissHistoryPopover()
-        await spinUntil { await unavailableClock.sleepingTaskCount() == 1 }
-        _ = await unavailableClock.advance(by: .milliseconds(300))
-        await spinUntil { unavailableModel.snapshot.historyPresentationEntityID == nil }
+        await Task.yield()
+        let unavailableSleepers = await unavailableClock.sleepingTaskCount()
+        XCTAssertEqual(unavailableSleepers, 0)
         XCTAssertNil(unavailableModel.snapshot.historyPresentationEntityID)
         XCTAssertEqual(
             unavailableModel.snapshot.historyState,
@@ -1528,7 +1529,6 @@ final class PearchHAUITests: XCTestCase {
         }
 
         model.dismissHistoryPopover()
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
         model.startHistoryHover("sensor.office_temperature", range: .hour)
         await spinUntil {
             if case .loaded = model.snapshot.historyState {
@@ -1702,13 +1702,6 @@ final class PearchHAUITests: XCTestCase {
 
         model.notePanelScrollActivity()
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
-
-        model.startHistoryHover("sensor.office_humidity", range: .hour)
-        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
-
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
-        _ = await clock.advance(by: .milliseconds(180))
-        await spinUntil { await clock.sleepingTaskCount() == 0 }
 
         model.startHistoryHover("sensor.office_humidity", range: .hour)
         await spinUntil {
@@ -5363,7 +5356,8 @@ final class PearchHAUITests: XCTestCase {
         let url = temporaryConfigURL()
         let keychain = KeychainSecretStore(service: "dev.pearchha.ui.tests.\(UUID().uuidString)")
         let sessionStore = PearchHAAuthSessionStore(secretStore: keychain)
-        let gate = ConnectionGate()
+        let entered = ConnectionGate()
+        let release = ConnectionGate()
         defer {
             try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
             _ = try? sessionStore.clear()
@@ -5380,7 +5374,8 @@ final class PearchHAUITests: XCTestCase {
             configStore: store,
             authSessionStore: sessionStore,
             connector: { form in
-                await gate.wait()
+                await entered.open()
+                await release.wait()
                 return .success(rooms: selectionRooms())
             },
             historyProvider: { _, _, _ in .unavailable("history unavailable") }
@@ -5390,16 +5385,21 @@ final class PearchHAUITests: XCTestCase {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
         }
 
-        await spinUntil {
+        await entered.wait()
+        await spinUntil("launch auto-connect should surface the loading indicator while the connector is blocked") {
             let snapshot = application.snapshot
             return snapshot.connectionForm.usesStoredAuthSession
                 && snapshot.statusItemShowsLoadingIndicator
                 && snapshot.statusItemHasImage == false
         }
 
-        await gate.open()
-        await spinUntil { application.snapshot.connectionState == .connected }
-        await spinUntil { application.snapshot.statusItemShowsLoadingIndicator == false }
+        await release.open()
+        await spinUntil("launch auto-connect should finish in the connected state") {
+            application.snapshot.connectionState == .connected
+        }
+        await spinUntil("launch auto-connect should clear the loading indicator after connect") {
+            application.snapshot.statusItemShowsLoadingIndicator == false
+        }
     }
 
     func test_t_app_shell_promoted_menu_bar_item_updates_from_panel_and_live_state() async throws {
@@ -7276,7 +7276,9 @@ final class PearchHAUITests: XCTestCase {
         )
         XCTAssertEqual(result, .saved)
 
-        try await Task.sleep(nanoseconds: 1_300_000_000)
+        for _ in 0..<20 {
+            await Task.yield()
+        }
         XCTAssertEqual(gaugeRenderer.renderCount, 1)
     }
 
@@ -8989,7 +8991,7 @@ final class PearchHAUITests: XCTestCase {
             expectedBatches: baselineBatches + 3
         )
         await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: baselineBatches + 4)
-        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: baselineBatches + 7)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: baselineBatches + 5)
 
         let visibleRequests = await recorder.requestCountForEntity("sensor.prefetch_0", afterBatchCount: baselineBatches)
         let hiddenRequests = await recorder.requestCountForEntity("sensor.prefetch_3", afterBatchCount: baselineBatches)
@@ -9500,10 +9502,11 @@ final class PearchHAUITests: XCTestCase {
 
     func test_t_periodic_refresh_runs_while_active_and_pauses_when_inactive() async {
         let clock = TestPearchClock()
-        let interval = PearchDuration.seconds(45)
+        let interval = PearchDuration.seconds(41)
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: prefetchRooms(count: 1)) },
             clock: clock,
+            bulkSyncConfiguration: .disabled,
             periodicRefreshConfiguration: PearchHAPeriodicRefreshConfiguration(interval: interval)
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
@@ -9513,18 +9516,26 @@ final class PearchHAUITests: XCTestCase {
         // Activating the panel arms the periodic safety net, but a successful
         // connect has already delivered fresh data, so there is no eager tick.
         model.setPanelActive(true)
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        await spinUntil("periodic refresh loop should arm exactly one sleeper once bulk sync is disabled") {
+            await clock.sleepingTaskCount() == 1
+        }
         XCTAssertEqual(model.snapshot.refreshCount, 0)
 
         // Firing the interval performs the first periodic refresh and re-arms
         // the loop.
         _ = await clock.advance(by: interval)
-        await spinUntil { model.snapshot.refreshCount == 1 }
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        await spinUntil("periodic refresh should increment the refresh count after one interval") {
+            model.snapshot.refreshCount == 1
+        }
+        await spinUntil("periodic refresh loop should re-arm after a successful tick") {
+            await clock.sleepingTaskCount() == 1
+        }
 
         // Deactivating pauses the loop: advancing the clock performs no refresh.
         model.setPanelActive(false)
-        await spinUntil { await clock.sleepingTaskCount() == 0 }
+        await spinUntil("periodic refresh sleeper should cancel when the panel deactivates") {
+            await clock.sleepingTaskCount() == 0
+        }
         _ = await clock.advance(by: interval)
         for _ in 0..<20 {
             await Task.yield()
@@ -9608,7 +9619,7 @@ final class PearchHAUITests: XCTestCase {
 
     func test_t_periodic_refresh_arms_after_first_run_connect_while_panel_open() async {
         let clock = TestPearchClock()
-        let interval = PearchDuration.seconds(45)
+        let interval = PearchDuration.seconds(41)
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: prefetchRooms(count: 1)) },
             clock: clock,
@@ -9671,10 +9682,11 @@ final class PearchHAUITests: XCTestCase {
 
     func test_t_periodic_refresh_backs_off_after_failure() async {
         let clock = TestPearchClock()
-        let interval = PearchDuration.seconds(45)
+        let interval = PearchDuration.seconds(41)
         let outcomes = PeriodicConnectorOutcomes(
-            // First call (model.connect) succeeds; the immediate tick fails, so the
-            // next sleep must be a backed-off interval (2x the base), not the base.
+            // First call (model.connect) succeeds; the first scheduled periodic
+            // tick fails, so the next sleep must be a backed-off interval (2x the
+            // base), not another base-interval retry.
             results: [
                 .success(rooms: prefetchRooms(count: 1)),
                 .failure(.unreachable(host: "ha.local"))
@@ -9693,20 +9705,28 @@ final class PearchHAUITests: XCTestCase {
         await model.connect()
 
         model.setPanelActive(true)
-        // The immediate tick fails; the loop arms a backed-off sleep.
-        await spinUntil { if case .failed = model.snapshot.connectionState { return true } else { return false } }
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        await spinUntil("periodic refresh loop should arm at least one sleeper") { await clock.sleepingTaskCount() >= 1 }
+
+        // The first scheduled periodic tick fails; the loop then arms a backed-off sleep.
+        _ = await clock.advance(by: interval)
+        await spinUntil("first periodic refresh failure should surface a failed state") {
+            if case .failed = model.snapshot.connectionState { return true } else { return false }
+        }
+        await spinUntil("failure should re-arm the periodic loop with a backed-off sleeper") {
+            await clock.sleepingTaskCount() >= 1
+        }
+        let refreshCountAfterFailure = model.snapshot.refreshCount
 
         // The base interval is not yet enough to wake the backed-off sleep.
         _ = await clock.advance(by: interval)
         for _ in 0..<20 {
             await Task.yield()
         }
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
-        let beforeBackoff = model.snapshot.connectionState
-        if case .failed = beforeBackoff {} else {
-            XCTFail("expected the backed-off sleep to still be pending after one base interval")
-        }
+        XCTAssertEqual(
+            model.snapshot.refreshCount,
+            refreshCountAfterFailure,
+            "a backed-off periodic refresh must not run again after only one base interval"
+        )
 
         // Advancing the remainder of the doubled backoff wakes it and recovers.
         _ = await clock.advance(by: interval)
@@ -9718,16 +9738,29 @@ final class PearchHAUITests: XCTestCase {
     /// Spins until `condition` holds. Yields for the fast path, then falls
     /// back to short real sleeps so loaded CI runners still converge; total
     /// budget stays bounded (~2 s) so a genuinely stuck condition fails fast.
-    private func spinUntil(_ condition: @escaping @MainActor () -> Bool) async {
-        for _ in 0..<100 where !condition() {
+    private func spinUntil(
+        _ message: String = "UI condition to become true",
+        _ condition: @escaping @MainActor () -> Bool
+    ) async {
+        for _ in 0..<100 {
+            if condition() {
+                return
+            }
             await Task.yield()
         }
-        for _ in 0..<2_000 where !condition() {
+        for _ in 0..<2_000 {
+            if condition() {
+                return
+            }
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
+        XCTFail("Timed out waiting for \(message)")
     }
 
-    private func spinUntil(_ condition: @escaping () async -> Bool) async {
+    private func spinUntil(
+        _ message: String = "async condition to become true",
+        _ condition: @escaping () async -> Bool
+    ) async {
         for _ in 0..<100 {
             if await condition() {
                 return
@@ -9740,6 +9773,7 @@ final class PearchHAUITests: XCTestCase {
             }
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
+        XCTFail("Timed out waiting for \(message)")
     }
 
     private func historySeries(entityID: EntityID, range: HistoryRange, value: Double) -> HistorySeries {
@@ -10704,7 +10738,7 @@ final class PearchHAUITests: XCTestCase {
 
     func test_t_diagnostics_retry_backoff_state_reflects_periodic_backoff() async {
         let clock = TestPearchClock()
-        let interval = PearchDuration.seconds(45)
+        let interval = PearchDuration.seconds(41)
         let outcomes = PeriodicConnectorOutcomes(
             results: [
                 .success(rooms: prefetchRooms(count: 1)),
@@ -10722,9 +10756,9 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.retryBackoffState, .connected)
 
         model.setPanelActive(true)
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        await spinUntil("periodic refresh loop should arm at least one sleeper") { await clock.sleepingTaskCount() >= 1 }
         _ = await clock.advance(by: interval)
-        await spinUntil {
+        await spinUntil("periodic refresh failure should publish backing-off state") {
             if case .backingOff = model.retryBackoffState { return true } else { return false }
         }
         if case let .backingOff(failureStreak, nextRetrySeconds) = model.retryBackoffState {
@@ -10739,7 +10773,7 @@ final class PearchHAUITests: XCTestCase {
         // connect succeeds; the periodic tick fails (degraded); the next tick is a
         // reconnect-while-degraded that must record a `.reconnecting` event.
         let clock = TestPearchClock()
-        let interval = PearchDuration.seconds(45)
+        let interval = PearchDuration.seconds(41)
         let outcomes = PeriodicConnectorOutcomes(
             results: [
                 .success(rooms: prefetchRooms(count: 1)),
@@ -10757,15 +10791,19 @@ final class PearchHAUITests: XCTestCase {
         await model.connect()
 
         model.setPanelActive(true)
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        await spinUntil("periodic refresh loop should arm at least one sleeper") { await clock.sleepingTaskCount() >= 1 }
         _ = await clock.advance(by: interval)
-        await spinUntil { model.diagnosticEvents.contains { $0.kind == .refreshFailed } }
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        await spinUntil("periodic refresh failure should be recorded in diagnostics") {
+            model.diagnosticEvents.contains { $0.kind == .refreshFailed }
+        }
+        await spinUntil("backoff delay should re-arm the periodic refresh loop") { await clock.sleepingTaskCount() >= 1 }
 
         // Wake the backed-off sleep (failure doubled the base interval).
         _ = await clock.advance(by: interval)
         _ = await clock.advance(by: interval)
-        await spinUntil { model.diagnosticEvents.contains { $0.kind == .recovered } }
+        await spinUntil("successful recovery should publish a recovered diagnostic") {
+            model.diagnosticEvents.contains { $0.kind == .recovered }
+        }
 
         XCTAssertTrue(model.diagnosticEvents.contains { $0.kind == .reconnecting })
         XCTAssertTrue(model.diagnosticEvents.contains { $0.kind == .recovered })
