@@ -1598,12 +1598,80 @@ public enum EntityDisplayDefaults {
                     baseColor: ValueThresholds.okColor
                 )
             }
+            if isPM10Like(entity) {
+                return ValueThresholds(
+                    steps: [
+                        ThresholdStep(value: 20, color: comfortCoolColor),
+                        ThresholdStep(value: 45, color: ValueThresholds.warningColor),
+                        ThresholdStep(value: 90, color: ValueThresholds.criticalColor)
+                    ],
+                    baseColor: ValueThresholds.okColor
+                )
+            }
             if isCO2Like(entity) {
                 return ValueThresholds(
                     steps: [
                         ThresholdStep(value: 800, color: comfortCoolColor),
                         ThresholdStep(value: 1_000, color: ValueThresholds.warningColor),
                         ThresholdStep(value: 1_400, color: ValueThresholds.criticalColor)
+                    ],
+                    baseColor: ValueThresholds.okColor
+                )
+            }
+            if isAQILike(entity) {
+                return ValueThresholds(
+                    steps: [
+                        ThresholdStep(value: 51, color: comfortCoolColor),
+                        ThresholdStep(value: 101, color: ValueThresholds.warningColor),
+                        ThresholdStep(value: 151, color: ValueThresholds.criticalColor)
+                    ],
+                    baseColor: ValueThresholds.okColor
+                )
+            }
+            if isVOCIndexLike(entity) || isNOxIndexLike(entity) {
+                return ValueThresholds(
+                    steps: [
+                        ThresholdStep(value: 100, color: ValueThresholds.okColor),
+                        ThresholdStep(value: 200, color: ValueThresholds.warningColor),
+                        ThresholdStep(value: 350, color: ValueThresholds.criticalColor)
+                    ],
+                    baseColor: comfortCoolColor
+                )
+            }
+            if isNoiseLike(entity) {
+                return ValueThresholds(
+                    steps: [
+                        ThresholdStep(value: 35, color: ValueThresholds.okColor),
+                        ThresholdStep(value: 55, color: ValueThresholds.warningColor),
+                        ThresholdStep(value: 85, color: ValueThresholds.criticalColor)
+                    ],
+                    baseColor: comfortCoolColor
+                )
+            }
+            if isStorageUsagePercentLike(entity) {
+                return ValueThresholds(
+                    steps: [
+                        ThresholdStep(value: 80, color: ValueThresholds.warningColor),
+                        ThresholdStep(value: 90, color: ValueThresholds.criticalColor)
+                    ],
+                    baseColor: ValueThresholds.okColor
+                )
+            }
+            if isRadonLike(entity) {
+                let unit = normalizedThresholdUnit(entity)
+                if unit == "pci/l" {
+                    return ValueThresholds(
+                        steps: [
+                            ThresholdStep(value: 2, color: ValueThresholds.warningColor),
+                            ThresholdStep(value: 4, color: ValueThresholds.criticalColor)
+                        ],
+                        baseColor: ValueThresholds.okColor
+                    )
+                }
+                return ValueThresholds(
+                    steps: [
+                        ThresholdStep(value: 75, color: ValueThresholds.warningColor),
+                        ThresholdStep(value: 150, color: ValueThresholds.criticalColor)
                     ],
                     baseColor: ValueThresholds.okColor
                 )
@@ -1651,24 +1719,14 @@ public enum EntityDisplayDefaults {
     ]
 
     public static func defaultStateThresholds(for entity: DiscoveredEntity) -> StateThresholds {
-        let currentState = entity.state.trimmingCharacters(in: .whitespacesAndNewlines)
-        let preferredMatches = [currentState.uppercased(), "GOOD", "MEDIUM", "BAD"]
-            .filter { !$0.isEmpty }
-        let rules = uniqueStateThresholdRules(
-            preferredMatches.map { match in
-                let color: PearchHAAccentColor
-                switch match {
-                case "BAD":
-                    color = ValueThresholds.criticalColor
-                case "MEDIUM":
-                    color = ValueThresholds.warningColor
-                default:
-                    color = ValueThresholds.okColor
-                }
-                return StateThresholdRule(match: match, color: color)
-            }
-        )
-        return StateThresholds(rules: rules)
+        let normalizedState = normalizedSemanticState(entity.state)
+        guard !normalizedState.isEmpty, semanticNumericState(normalizedState) == nil else {
+            return StateThresholds()
+        }
+        guard let preset = defaultStateThresholdPreset(for: entity, normalizedState: normalizedState) else {
+            return StateThresholds()
+        }
+        return StateThresholds(rules: preset.rules)
     }
 
     /// Classifies a non-numeric state into the standard severity buckets.
@@ -1678,11 +1736,11 @@ public enum EntityDisplayDefaults {
             return .normal
         }
         if criticalSemanticStates.contains(normalized)
-            || criticalSemanticFragments.contains(where: normalized.contains) {
+            || semanticStateTokens(normalized).contains(where: criticalSemanticTokenStates.contains) {
             return .critical
         }
         if warningSemanticStates.contains(normalized)
-            || warningSemanticFragments.contains(where: normalized.contains) {
+            || semanticStateTokens(normalized).contains(where: warningSemanticTokenStates.contains) {
             return .warning
         }
         return .normal
@@ -1778,25 +1836,214 @@ public enum EntityDisplayDefaults {
     }
 
     private static let criticalSemanticStates: Set<String> = [
-        "bad", "critical", "error", "alarm", "alert", "poor", "unsafe", "unhealthy"
+        "bad", "critical", "error", "alarm", "alert", "poor", "unsafe", "unhealthy", "jammed", "triggered"
     ]
 
     private static let warningSemanticStates: Set<String> = [
-        "medium", "moderate", "warning", "warn", "degraded", "unknown", "stale"
+        "medium", "moderate", "warning", "warn", "degraded", "unknown", "stale", "pending"
     ]
 
-    private static let criticalSemanticFragments = [
-        "critical", "error", "alarm", "unsafe", "poor", "unhealthy"
+    private static let criticalSemanticTokenStates: Set<String> = [
+        "bad", "critical", "error", "alarm", "alert", "poor", "unsafe", "unhealthy", "jammed", "triggered"
     ]
 
-    private static let warningSemanticFragments = [
-        "medium", "moderate", "warning", "degraded", "unknown"
+    private static let warningSemanticTokenStates: Set<String> = [
+        "medium", "moderate", "warning", "warn", "degraded", "unknown", "stale", "pending"
     ]
+
+    private struct StateThresholdPreset {
+        let rules: [StateThresholdRule]
+        let exactStates: Set<String>
+        let tokenStates: Set<String>
+
+        init(rules: [StateThresholdRule], exactStates: Set<String> = [], tokenStates: Set<String> = []) {
+            self.rules = EntityDisplayDefaults.uniqueStateThresholdRules(rules)
+            self.exactStates = exactStates
+            self.tokenStates = tokenStates
+        }
+
+        func matches(_ normalizedState: String) -> Bool {
+            if exactStates.contains(normalizedState) {
+                return true
+            }
+            guard !tokenStates.isEmpty else {
+                return false
+            }
+            return EntityDisplayDefaults.semanticStateTokens(normalizedState).contains(where: tokenStates.contains)
+        }
+    }
+
+    private static let semanticGoodMediumBadPreset = StateThresholdPreset(
+        rules: [
+            StateThresholdRule(match: "GOOD", color: ValueThresholds.okColor),
+            StateThresholdRule(match: "MEDIUM", color: ValueThresholds.warningColor),
+            StateThresholdRule(match: "BAD", color: ValueThresholds.criticalColor)
+        ],
+        exactStates: ["good", "medium", "bad"],
+        tokenStates: ["good", "medium", "bad"]
+    )
+
+    private static let semanticAlertPreset = StateThresholdPreset(
+        rules: [
+            StateThresholdRule(match: "WARNING", color: ValueThresholds.warningColor),
+            StateThresholdRule(match: "MODERATE", color: ValueThresholds.warningColor),
+            StateThresholdRule(match: "MEDIUM", color: ValueThresholds.warningColor),
+            StateThresholdRule(match: "DEGRADED", color: ValueThresholds.warningColor),
+            StateThresholdRule(match: "UNKNOWN", color: ValueThresholds.warningColor),
+            StateThresholdRule(match: "STALE", color: ValueThresholds.warningColor),
+            StateThresholdRule(match: "PENDING", color: ValueThresholds.warningColor),
+            StateThresholdRule(match: "CRITICAL", color: ValueThresholds.criticalColor),
+            StateThresholdRule(match: "ERROR", color: ValueThresholds.criticalColor),
+            StateThresholdRule(match: "ALARM", color: ValueThresholds.criticalColor),
+            StateThresholdRule(match: "ALERT", color: ValueThresholds.criticalColor),
+            StateThresholdRule(match: "POOR", color: ValueThresholds.criticalColor),
+            StateThresholdRule(match: "UNSAFE", color: ValueThresholds.criticalColor),
+            StateThresholdRule(match: "UNHEALTHY", color: ValueThresholds.criticalColor),
+            StateThresholdRule(match: "JAMMED", color: ValueThresholds.criticalColor),
+            StateThresholdRule(match: "TRIGGERED", color: ValueThresholds.criticalColor)
+        ],
+        exactStates: criticalSemanticStates.union(warningSemanticStates),
+        tokenStates: criticalSemanticTokenStates.union(warningSemanticTokenStates)
+    )
+
+    private static let onOffPreset = StateThresholdPreset(
+        rules: [
+            StateThresholdRule(match: "ON", color: ValueThresholds.okColor),
+            StateThresholdRule(match: "OFF", color: neutralStateColor)
+        ],
+        exactStates: ["on", "off"]
+    )
+
+    private static let updatePreset = StateThresholdPreset(
+        rules: [
+            StateThresholdRule(match: "ON", color: ValueThresholds.warningColor),
+            StateThresholdRule(match: "OFF", color: ValueThresholds.okColor)
+        ],
+        exactStates: ["on", "off"]
+    )
+
+    private static let coverPreset = StateThresholdPreset(
+        rules: [
+            StateThresholdRule(match: "OPENING", color: progressStateColor),
+            StateThresholdRule(match: "CLOSING", color: progressStateColor),
+            StateThresholdRule(match: "OPEN", color: ValueThresholds.okColor),
+            StateThresholdRule(match: "CLOSED", color: neutralStateColor)
+        ],
+        exactStates: ["open", "opening", "closed", "closing"]
+    )
+
+    private static let lockPreset = StateThresholdPreset(
+        rules: [
+            StateThresholdRule(match: "UNLOCKING", color: progressStateColor),
+            StateThresholdRule(match: "LOCKING", color: progressStateColor),
+            StateThresholdRule(match: "OPENING", color: progressStateColor),
+            StateThresholdRule(match: "UNLOCKED", color: progressStateColor),
+            StateThresholdRule(match: "LOCKED", color: ValueThresholds.okColor),
+            StateThresholdRule(match: "OPEN", color: progressStateColor),
+            StateThresholdRule(match: "JAMMED", color: ValueThresholds.criticalColor)
+        ],
+        exactStates: ["locked", "unlocked", "opening", "open", "locking", "unlocking", "jammed"]
+    )
+
+    private static let presencePreset = StateThresholdPreset(
+        rules: [
+            StateThresholdRule(match: "NOT_HOME", color: neutralStateColor),
+            StateThresholdRule(match: "HOME", color: ValueThresholds.okColor)
+        ],
+        exactStates: ["home", "not_home"]
+    )
+
+    private static let mediaPlayerPreset = StateThresholdPreset(
+        rules: [
+            StateThresholdRule(match: "BUFFERING", color: progressStateColor),
+            StateThresholdRule(match: "PLAYING", color: ValueThresholds.okColor),
+            StateThresholdRule(match: "PAUSED", color: ValueThresholds.warningColor),
+            StateThresholdRule(match: "IDLE", color: neutralStateColor),
+            StateThresholdRule(match: "ON", color: progressStateColor),
+            StateThresholdRule(match: "OFF", color: neutralStateColor)
+        ],
+        exactStates: ["off", "on", "idle", "playing", "paused", "buffering"]
+    )
+
+    private static let vacuumPreset = StateThresholdPreset(
+        rules: [
+            StateThresholdRule(match: "RETURNING", color: progressStateColor),
+            StateThresholdRule(match: "CLEANING", color: progressStateColor),
+            StateThresholdRule(match: "DOCKED", color: ValueThresholds.okColor),
+            StateThresholdRule(match: "PAUSED", color: ValueThresholds.warningColor),
+            StateThresholdRule(match: "IDLE", color: neutralStateColor),
+            StateThresholdRule(match: "ERROR", color: ValueThresholds.criticalColor)
+        ],
+        exactStates: ["cleaning", "docked", "paused", "idle", "returning", "error"]
+    )
+
+    private static let alarmControlPanelPreset = StateThresholdPreset(
+        rules: [
+            StateThresholdRule(match: "ARMED_CUSTOM_BYPASS", color: progressStateColor),
+            StateThresholdRule(match: "ARMED_VACATION", color: progressStateColor),
+            StateThresholdRule(match: "ARMED_AWAY", color: progressStateColor),
+            StateThresholdRule(match: "ARMED_HOME", color: progressStateColor),
+            StateThresholdRule(match: "ARMED_NIGHT", color: progressStateColor),
+            StateThresholdRule(match: "DISARMING", color: progressStateColor),
+            StateThresholdRule(match: "DISARMED", color: ValueThresholds.okColor),
+            StateThresholdRule(match: "ARMING", color: progressStateColor),
+            StateThresholdRule(match: "PENDING", color: ValueThresholds.warningColor),
+            StateThresholdRule(match: "TRIGGERED", color: ValueThresholds.criticalColor)
+        ],
+        exactStates: [
+            "disarmed", "armed_home", "armed_away", "armed_night", "armed_vacation",
+            "armed_custom_bypass", "pending", "arming", "disarming", "triggered"
+        ]
+    )
+
+    private static func defaultStateThresholdPreset(
+        for entity: DiscoveredEntity,
+        normalizedState: String
+    ) -> StateThresholdPreset? {
+        switch normalizedEntityDomain(entity) {
+        case "update" where updatePreset.matches(normalizedState):
+            return updatePreset
+        case "cover" where coverPreset.matches(normalizedState):
+            return coverPreset
+        case "lock" where lockPreset.matches(normalizedState):
+            return lockPreset
+        case "person" where presencePreset.matches(normalizedState):
+            return presencePreset
+        case "media_player" where mediaPlayerPreset.matches(normalizedState):
+            return mediaPlayerPreset
+        case "vacuum" where vacuumPreset.matches(normalizedState):
+            return vacuumPreset
+        case "alarm_control_panel" where alarmControlPanelPreset.matches(normalizedState):
+            return alarmControlPanelPreset
+        default:
+            break
+        }
+        if semanticGoodMediumBadPreset.matches(normalizedState) {
+            return semanticGoodMediumBadPreset
+        }
+        if semanticAlertPreset.matches(normalizedState) {
+            return semanticAlertPreset
+        }
+        if coverPreset.matches(normalizedState) {
+            return coverPreset
+        }
+        if onOffPreset.matches(normalizedState) {
+            return onOffPreset
+        }
+        return nil
+    }
 
     private static func uniqueStateThresholdRules(_ rules: [StateThresholdRule]) -> [StateThresholdRule] {
         var seen: Set<String> = []
         var result: [StateThresholdRule] = []
-        for rule in rules {
+        for rule in rules.sorted(by: {
+            let left = $0.match.trimmingCharacters(in: .whitespacesAndNewlines)
+            let right = $1.match.trimmingCharacters(in: .whitespacesAndNewlines)
+            if left.count == right.count {
+                return left < right
+            }
+            return left.count > right.count
+        }) {
             let normalized = rule.match.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             guard !normalized.isEmpty, !seen.contains(normalized) else {
                 continue
@@ -1811,6 +2058,24 @@ public enum EntityDisplayDefaults {
         state
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
+    }
+
+    private static func semanticStateTokens(_ normalizedState: String) -> Set<String> {
+        Set(normalizedState
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map { String($0).lowercased() }
+            .filter { !$0.isEmpty })
+    }
+
+    private static func semanticNumericState(_ state: String) -> Double? {
+        Double(state.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private static func normalizedEntityDomain(_ entity: DiscoveredEntity) -> String {
+        if let domain = entity.id.rawValue.split(separator: ".", maxSplits: 1).first {
+            return String(domain).lowercased()
+        }
+        return entity.deviceDomain?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
     }
 
     /// The concrete display unit detected from an entity's HA unit and state.
@@ -1926,45 +2191,113 @@ public enum EntityDisplayDefaults {
     }
 
     private static func isHumidityLike(_ entity: DiscoveredEntity) -> Bool {
-        let name = entity.name.lowercased()
-        let id = entity.id.rawValue.lowercased()
+        let text = thresholdText(for: entity)
         return entity.unit?.trimmingCharacters(in: .whitespacesAndNewlines) == "%"
-            && (name.contains("humidity") || name.contains("luftfeuchtigkeit") || id.contains("humidity"))
+            && (text.contains("humidity") || text.contains("luftfeuchtigkeit"))
     }
 
     private static func isPM25Like(_ entity: DiscoveredEntity) -> Bool {
-        let name = entity.name.lowercased()
-        let id = entity.id.rawValue.lowercased()
-        let unit = entity.unit?.lowercased() ?? ""
-        return name.contains("pm2.5")
-            || name.contains("pm25")
-            || id.contains("pm2_5")
-            || id.contains("pm25")
-            || unit.contains("ug/m")
-            || unit.contains("µg/m")
+        let text = thresholdText(for: entity)
+        return text.contains("pm2.5")
+            || text.contains("pm25")
+            || text.contains("pm2_5")
+    }
+
+    private static func isPM10Like(_ entity: DiscoveredEntity) -> Bool {
+        thresholdText(for: entity).contains("pm10")
     }
 
     private static func isCO2Like(_ entity: DiscoveredEntity) -> Bool {
-        let name = entity.name.lowercased()
-        let id = entity.id.rawValue.lowercased()
-        let unit = entity.unit?.lowercased() ?? ""
-        return name.contains("co2") || id.contains("co2") || unit == "ppm"
+        let text = thresholdText(for: entity)
+        return text.contains("co2") || text.contains("carbon dioxide")
+    }
+
+    private static func isAQILike(_ entity: DiscoveredEntity) -> Bool {
+        let text = thresholdText(for: entity)
+        return text.contains("air quality index")
+            || text.contains(".aqi")
+            || text.hasSuffix(" aqi")
+            || text.contains(" aqi ")
+    }
+
+    private static func isVOCIndexLike(_ entity: DiscoveredEntity) -> Bool {
+        let text = thresholdText(for: entity)
+        return text.contains("voc index")
+            || text.contains("tvoc index")
+            || text.contains("volatile organic")
+            || text.contains(" tvoc")
+    }
+
+    private static func isNOxIndexLike(_ entity: DiscoveredEntity) -> Bool {
+        let text = thresholdText(for: entity)
+        return text.contains("nox index")
+            || text.contains("nitrogen oxide")
+            || text.contains(" nox")
+    }
+
+    private static func isNoiseLike(_ entity: DiscoveredEntity) -> Bool {
+        let text = thresholdText(for: entity)
+        let unit = normalizedThresholdUnit(entity)
+        let mentionsNoise = text.contains("noise")
+            || text.contains("sound level")
+            || text.contains("sound pressure")
+            || text.contains("loudness")
+        return mentionsNoise && (unit == "db" || unit == "dba")
+    }
+
+    private static func isStorageUsagePercentLike(_ entity: DiscoveredEntity) -> Bool {
+        guard entity.unit?.trimmingCharacters(in: .whitespacesAndNewlines) == "%" else {
+            return false
+        }
+        let text = thresholdText(for: entity)
+        let mentionsStorage = text.contains("storage")
+            || text.contains("disk")
+            || text.contains("filesystem")
+            || text.contains("drive")
+            || text.contains("volume")
+        let mentionsUsage = text.contains("usage")
+            || text.contains("used")
+            || text.contains("utilization")
+            || text.contains("fill")
+            || text.contains("capacity")
+        return mentionsStorage && mentionsUsage
+    }
+
+    private static func isRadonLike(_ entity: DiscoveredEntity) -> Bool {
+        thresholdText(for: entity).contains("radon")
     }
 
     private static func isFilterPercentLike(_ entity: DiscoveredEntity) -> Bool {
-        let name = entity.name.lowercased()
-        let id = entity.id.rawValue.lowercased()
         return entity.unit?.trimmingCharacters(in: .whitespacesAndNewlines) == "%"
-            && (name.contains("filter") || id.contains("filter"))
+            && thresholdText(for: entity).contains("filter")
     }
 
     private static func isRSSILike(_ entity: DiscoveredEntity) -> Bool {
-        let name = entity.name.lowercased()
-        let id = entity.id.rawValue.lowercased()
-        let unit = entity.unit?.lowercased() ?? ""
-        return name.contains("rssi") || id.contains("rssi") || unit == "dbm"
+        let text = thresholdText(for: entity)
+        return text.contains("rssi") || normalizedThresholdUnit(entity) == "dbm"
+    }
+
+    private static func thresholdText(for entity: DiscoveredEntity) -> String {
+        [
+            entity.name,
+            entity.id.rawValue,
+            entity.deviceName,
+            entity.deviceManufacturer,
+            entity.deviceModel,
+            entity.deviceDomain
+        ]
+        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+        .joined(separator: " ")
+        .lowercased()
+    }
+
+    private static func normalizedThresholdUnit(_ entity: DiscoveredEntity) -> String {
+        ValueUnit.normalizedUnitToken(entity.unit)?.lowercased() ?? ""
     }
 
     private static let comfortColdColor = PearchHAAccentColor(red: 0.19, green: 0.49, blue: 0.96, alpha: 1)
     private static let comfortCoolColor = PearchHAAccentColor(red: 0.12, green: 0.72, blue: 0.83, alpha: 1)
+    private static let progressStateColor = PearchHAAccentColor(red: 0.19, green: 0.49, blue: 0.96, alpha: 1)
+    private static let neutralStateColor = PearchHAAccentColor(red: 0.68, green: 0.70, blue: 0.74, alpha: 1)
 }

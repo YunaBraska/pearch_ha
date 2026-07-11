@@ -1610,33 +1610,68 @@ public struct PearchHASettingsView: View {
                     .foregroundStyle(.secondary)
             } else {
                 let tree = settingsTree
-                // One flat lazy stack: room headers and entity rows are all
-                // direct lazy children. Nesting a lazy stack per room forces
-                // the whole room to materialize when the outer stack sizes it,
-                // which stalls the main thread for seconds on large rooms.
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(tree.enumerated()), id: \.element.id.rawValue) { index, room in
-                        selectionDragDrop(
-                            selectionRoomHeader(
-                                room,
-                                isExpanded: isRoomExpanded(room),
-                                canMoveUp: canReorderSelection && index > tree.startIndex,
-                                canMoveDown: canReorderSelection && index < tree.index(before: tree.endIndex)
-                            )
-                            .padding(.horizontal, PearchHASpacing.xs),
-                            item: .room(room.id)
-                        )
-                        .padding(.top, index == tree.startIndex ? 0 : 10)
-                        .padding(.bottom, 5)
-                        if isRoomExpanded(room) {
-                            ForEach(Array(room.entities.enumerated()), id: \.element.entity.id.rawValue) { rowIndex, selectable in
-                                selectionEntityRowSegment(room: room, rowIndex: rowIndex, selectable: selectable)
-                                    .id(selectable.entity.id.rawValue)
-                            }
-                        }
-                    }
-                }
+                entityTreeStack(tree)
             }
+        }
+    }
+
+    /// The entity tree stays lazy at the top level so opening one inspector
+    /// never forces the entire home to materialize at once. Only the expanded
+    /// room gets a local non-lazy stack, which is enough to keep the inline
+    /// inspector stable without turning a large off-screen catalog into one
+    /// giant layout pass.
+    private func entityTreeStack(_ tree: [SelectableRoom]) -> some View {
+        LazyVStack(alignment: .leading, spacing: 0) {
+            entityTreeRows(tree)
+        }
+    }
+
+    @ViewBuilder
+    private func entityTreeRows(_ tree: [SelectableRoom]) -> some View {
+        ForEach(Array(tree.enumerated()), id: \.element.id.rawValue) { index, room in
+            selectionDragDrop(
+                selectionRoomHeader(
+                    room,
+                    isExpanded: isRoomExpanded(room),
+                    canMoveUp: canReorderSelection && index > tree.startIndex,
+                    canMoveDown: canReorderSelection && index < tree.index(before: tree.endIndex)
+                )
+                .padding(.horizontal, PearchHASpacing.xs),
+                item: .room(room.id)
+            )
+            .padding(.top, index == tree.startIndex ? 0 : 10)
+            .padding(.bottom, 5)
+            if isRoomExpanded(room) {
+                roomEntityRows(room)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func roomEntityRows(_ room: SelectableRoom) -> some View {
+        if roomContainsInspectedEntity(room) {
+            VStack(alignment: .leading, spacing: 0) {
+                entityRowsContent(room)
+            }
+        } else {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                entityRowsContent(room)
+            }
+        }
+    }
+
+    private func roomContainsInspectedEntity(_ room: SelectableRoom) -> Bool {
+        guard let inspectedEntityID else {
+            return false
+        }
+        return room.entities.contains { $0.entity.id == inspectedEntityID }
+    }
+
+    @ViewBuilder
+    private func entityRowsContent(_ room: SelectableRoom) -> some View {
+        ForEach(Array(room.entities.enumerated()), id: \.element.entity.id.rawValue) { rowIndex, selectable in
+            selectionEntityRowSegment(room: room, rowIndex: rowIndex, selectable: selectable)
+                .id(selectable.entity.id.rawValue)
         }
     }
 

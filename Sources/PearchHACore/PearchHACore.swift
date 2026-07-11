@@ -981,7 +981,11 @@ public struct RoomResolver: Sendable {
 
             let entity = DiscoveredEntity(
                 id: state.id,
-                name: nonEmpty(registryEntry?.name) ?? state.name,
+                name: PearchHAEntityNaming.preferredName(
+                    between: state.name,
+                    and: registryEntry?.name,
+                    entityID: state.id
+                ) ?? state.name,
                 state: state.state,
                 unit: state.unit,
                 areaID: resolvedAreaID,

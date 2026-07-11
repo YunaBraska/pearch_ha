@@ -30,7 +30,7 @@ public final class PearchHAPanelModel: ObservableObject {
     public typealias SelectionConfigurationSink = @MainActor (EntitySelectionConfiguration) -> SelectionPersistenceResult
     public typealias MenuBarDisplayConfigurationSink = @MainActor (MenuBarDisplayConfiguration) -> SelectionPersistenceResult
     public typealias CustomActionConfigurationSink = @MainActor (CustomActionConfiguration) -> SelectionPersistenceResult
-    public typealias SnapshotSink = @MainActor (PearchHAPanelSnapshot) -> Void
+    public typealias SnapshotSink = @MainActor (PearchHAPanelSnapshot, Bool) -> Void
     /// Clears the persisted authentication session when the user signs out.
     public typealias SignOutHandler = @MainActor () -> Void
 
@@ -47,7 +47,8 @@ public final class PearchHAPanelModel: ObservableObject {
             } else if oldValue.connectionState != snapshot.connectionState {
                 formattedValueCache.removeAll(keepingCapacity: true)
             }
-            snapshotSink(snapshot)
+            let forceStatusItemRefresh = oldValue.menuBarDisplayConfiguration != snapshot.menuBarDisplayConfiguration
+            snapshotSink(snapshot, forceStatusItemRefresh)
             refreshRetryBackoffState()
             if availableEntityIndexChanged
                 || oldValue.selectionConfiguration != snapshot.selectionConfiguration
@@ -174,6 +175,9 @@ public final class PearchHAPanelModel: ObservableObject {
     /// The single re-arming background bulk-history sync loop. Active only while
     /// the panel is open and a session is connected.
     private var bulkSyncTask: Task<Void, Never>?
+    /// A one-shot hidden-panel warmup so the first explicit panel open can read
+    /// cached previews/history instead of starting from an empty surface.
+    private var startupHistoryWarmTask: Task<Void, Never>?
     /// Per-entity interest score: bumped when an entity is visible and when its
     /// detail/hover is opened. Drives prioritization — high-interest entities sync
     /// every cycle, cold ones every Nth cycle. Bounded so it never grows without
@@ -228,7 +232,7 @@ public final class PearchHAPanelModel: ObservableObject {
         menuBarDisplaySink: @escaping MenuBarDisplayConfigurationSink = { _ in .saved },
         customActionSink: @escaping CustomActionConfigurationSink = { _ in .saved },
         protectedActionValueStore: (any ProtectedActionValueStore)? = nil,
-        snapshotSink: @escaping SnapshotSink = { _ in },
+        snapshotSink: @escaping SnapshotSink = { _, _ in },
         signOutHandler: @escaping SignOutHandler = {}
     ) {
         self.snapshotSink = snapshotSink
@@ -296,6 +300,7 @@ public final class PearchHAPanelModel: ObservableObject {
         historyTask?.cancel()
         historyDetailRefreshTask?.cancel()
         bulkSyncTask?.cancel()
+        startupHistoryWarmTask?.cancel()
         periodicRefreshTask?.cancel()
         liveUpdateTask?.cancel()
     }
@@ -1483,6 +1488,10 @@ public final class PearchHAPanelModel: ObservableObject {
     private static let detailMaintenanceBaseRange: HistoryRange = .day
     private static let detailLongRangeMaintenance: [HistoryRange] = [.week, .month]
     private static let longRangeMaintenanceAge = PearchDuration.seconds(86_400)
+    /// Hidden startup warming only needs enough rows to make the first panel
+    /// open feel immediate; warming the entire selection delays startup for no
+    /// user-visible gain.
+    private static let startupHistoryWarmLimit = 12
 
     private func detailMaintenanceHistoryRanges(for id: EntityID) -> [HistoryRange] {
         var ordered: [HistoryRange] = []
@@ -1554,6 +1563,8 @@ public final class PearchHAPanelModel: ObservableObject {
         }
         isPanelActive = active
         if active {
+            startupHistoryWarmTask?.cancel()
+            startupHistoryWarmTask = nil
             flushDeferredBackgroundLiveStates()
             // A reopen starts cold so every displayed row refreshes in the first
             // cycle; previews that aged while the panel was hidden catch up
@@ -1926,6 +1937,117 @@ public final class PearchHAPanelModel: ObservableObject {
         bulkSyncTask = nil
     }
 
+    private func scheduleStartupHistoryWarmIfNeeded() {
+        startupHistoryWarmTask?.cancel()
+        startupHistoryWarmTask = nil
+        guard !isPanelActive, lastConnectedForm != nil, effectiveBulkSyncInterval.nanoseconds > 0 else {
+            return
+        }
+        guard let form = lastConnectedForm else {
+            return
+        }
+        let ids = startupHistoryWarmEntityIDs()
+        guard !ids.isEmpty else {
+            return
+        }
+        startupHistoryWarmTask = Task { @MainActor [weak self] in
+            guard let self, !self.isPanelActive, form.sameConnection(as: self.lastConnectedForm) else {
+                return
+            }
+            await self.runStartupHistoryWarm(ids: ids, form: form)
+            self.startupHistoryWarmTask = nil
+        }
+    }
+
+    private func startupHistoryWarmEntityIDs() -> [EntityID] {
+        var ordered: [EntityID] = []
+        var seen = Set<EntityID>()
+
+        func append<S: Sequence>(_ ids: S) where S.Element == EntityID {
+            guard ordered.count < Self.startupHistoryWarmLimit else {
+                return
+            }
+            for id in ids {
+                guard seen.insert(id).inserted else {
+                    continue
+                }
+                ordered.append(id)
+                guard ordered.count < Self.startupHistoryWarmLimit else {
+                    return
+                }
+            }
+        }
+
+        append(snapshot.menuBarDisplayConfiguration.promotedEntityIDs)
+        append(displayedEntityIDs())
+        if ordered.isEmpty {
+            append(snapshot.availableRooms.flatMap(\.entities).map(\.id))
+        }
+        return ordered
+    }
+
+    private func startupWarmRanges(for id: EntityID) -> [HistoryRange] {
+        [historyRange(for: id)]
+    }
+
+    private func runStartupHistoryWarm(ids: [EntityID], form: PearchHAConnectionForm) async {
+        var byRange: [HistoryRange: [EntityID]] = [:]
+        for id in ids {
+            for range in startupWarmRanges(for: id) {
+                byRange[range, default: []].append(id)
+            }
+        }
+        var batches: [(range: HistoryRange, ids: [EntityID])] = []
+        for (range, ids) in byRange {
+            var index = 0
+            while index < ids.count {
+                let upper = min(index + bulkSyncConfiguration.batchSize, ids.count)
+                batches.append((range: range, ids: Array(ids[index..<upper])))
+                index = upper
+            }
+        }
+        guard !batches.isEmpty else {
+            return
+        }
+        let limit = bulkSyncConfiguration.maxConcurrentBatches
+        var index = 0
+        while index < batches.count {
+            guard !Task.isCancelled, !isPanelActive, form.sameConnection(as: lastConnectedForm) else {
+                return
+            }
+            let window = batches[index..<min(index + limit, batches.count)]
+            index += limit
+            for _ in window {
+                recordOutboundRequest()
+            }
+            let results = await withTaskGroup(of: [PearchHAHistoryCacheKey: HistorySeries].self) { group in
+                for batch in window {
+                    let ids = batch.ids
+                    let range = batch.range
+                    group.addTask { [bulkHistoryProvider] in
+                        let partial = await bulkHistoryProvider(form, ids, range)
+                        var keyed: [PearchHAHistoryCacheKey: HistorySeries] = [:]
+                        for (entityID, series) in partial {
+                            keyed[PearchHAHistoryCacheKey(entityID: entityID, range: series.range)] = series
+                        }
+                        return keyed
+                    }
+                }
+                var merged: [PearchHAHistoryCacheKey: HistorySeries] = [:]
+                for await partial in group {
+                    merged.merge(partial) { _, new in new }
+                }
+                return merged
+            }
+            guard !results.isEmpty, !Task.isCancelled, !isPanelActive, form.sameConnection(as: lastConnectedForm) else {
+                return
+            }
+            let now = await clock.now()
+            lastObservedInstant = now
+            storeHistorySyncResults(results, now: now)
+        }
+    }
+
     /// Runs one bulk sync cycle: fetches history for the prioritized entities via
     /// the bulk provider (grouped by range), then overrides matching cache entries
     /// in place. Entities absent from a bulk result keep their existing cached
@@ -2002,7 +2124,12 @@ public final class PearchHAPanelModel: ObservableObject {
                 }
                 return merged
             }
-            await applyBulkSyncResults(results, from: form)
+            guard !results.isEmpty, !Task.isCancelled, form.sameConnection(as: lastConnectedForm) else {
+                return
+            }
+            let now = await clock.now()
+            lastObservedInstant = now
+            storeHistorySyncResults(results, now: now)
         }
     }
 
@@ -2088,12 +2215,19 @@ public final class PearchHAPanelModel: ObservableObject {
     /// one and the cycle has not been cancelled — a cancelled cycle finishing its
     /// in-flight batches must not write the previous connection's history into a
     /// freshly cleared cache (entity IDs overlap across HA instances).
-    private func applyBulkSyncResults(_ results: [PearchHAHistoryCacheKey: HistorySeries], from form: PearchHAConnectionForm) async {
+    private func applyBulkSyncResults(
+        _ results: [PearchHAHistoryCacheKey: HistorySeries],
+        from form: PearchHAConnectionForm
+    ) async {
         guard !results.isEmpty, isPanelActive, !Task.isCancelled, form.sameConnection(as: lastConnectedForm) else {
             return
         }
         let now = await clock.now()
         lastObservedInstant = now
+        storeHistorySyncResults(results, now: now)
+    }
+
+    private func storeHistorySyncResults(_ results: [PearchHAHistoryCacheKey: HistorySeries], now: PearchInstant) {
         var insertedAny = false
         var changedEntityIDs = Set<EntityID>()
         let protectedKeys = protectedHistoryKeys()
@@ -3193,65 +3327,45 @@ public final class PearchHAPanelModel: ObservableObject {
     }
 
     private static func preferredLiveEntityName(_ candidate: String, existing: DiscoveredEntity) -> String {
-        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return existing.name
-        }
-        let existingTrimmed = existing.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !existingTrimmed.isEmpty else {
-            return trimmed
-        }
-        let lowered = trimmed.lowercased()
-        let existingLowered = existingTrimmed.lowercased()
-        let genericNames: Set<String> = [
-            existing.id.rawValue.lowercased(),
-            existing.id.domain.lowercased(),
-            existing.id.domain.replacingOccurrences(of: "_", with: " ").lowercased(),
-            "sensor",
-            "select",
-            "switch",
-            "binary sensor",
-            "number"
-        ]
-        if genericNames.contains(lowered) || lowered == existingLowered {
-            return existingTrimmed
-        }
-        if liveNameIsLessSpecific(trimmed, than: existingTrimmed) {
-            return existingTrimmed
-        }
-        return trimmed
-    }
-
-    private static func liveNameIsLessSpecific(_ candidate: String, than existing: String) -> Bool {
-        let candidateTokens = normalizedEntityNameTokens(candidate)
-        let existingTokens = normalizedEntityNameTokens(existing)
-        guard !candidateTokens.isEmpty, !existingTokens.isEmpty else {
-            return false
-        }
-        guard candidateTokens.count <= existingTokens.count else {
-            return false
-        }
-        let existingTokenSet = Set(existingTokens)
-        if Set(candidateTokens).isSubset(of: existingTokenSet) {
-            return candidateTokens.count < existingTokens.count
-                || candidate.count < existing.count
-        }
-        return false
-    }
-
-    private static func normalizedEntityNameTokens(_ raw: String) -> [String] {
-        raw
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            .split { !$0.isLetter && !$0.isNumber }
-            .map(String.init)
+        PearchHAEntityNaming.preferredName(
+            between: candidate,
+            and: existing.name,
+            entityID: existing.id
+        ) ?? existing.name
     }
 
     private static func preferredLiveEntityUnit(_ candidate: String?, existing: DiscoveredEntity) -> String? {
-        let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let trimmed, !trimmed.isEmpty else {
-            return existing.unit
+        PearchHAEntityNaming.preferredUnit(between: candidate, and: existing.unit)
+    }
+
+    private func stabilizedRefreshedRooms(_ refreshedRooms: [Room], preserving existingRooms: [Room]) -> [Room] {
+        let existingEntities = Dictionary(
+            uniqueKeysWithValues: existingRooms.flatMap(\.entities).map { ($0.id, $0) }
+        )
+        return refreshedRooms.map { room in
+            Room(
+                id: room.id,
+                name: room.name,
+                entities: room.entities.map { entity in
+                    guard let existing = existingEntities[entity.id] else {
+                        return entity
+                    }
+                    return DiscoveredEntity(
+                        id: entity.id,
+                        name: Self.preferredLiveEntityName(entity.name, existing: existing),
+                        state: entity.state,
+                        unit: Self.preferredLiveEntityUnit(entity.unit, existing: existing),
+                        areaID: entity.areaID,
+                        deviceID: entity.deviceID,
+                        deviceName: entity.deviceName,
+                        deviceManufacturer: entity.deviceManufacturer,
+                        deviceModel: entity.deviceModel,
+                        deviceDomain: entity.deviceDomain,
+                        currentPosition: entity.currentPosition
+                    )
+                }
+            )
         }
-        return trimmed
     }
 
     private func normalizedMenuBarDisplayConfiguration(
@@ -3324,9 +3438,10 @@ public final class PearchHAPanelModel: ObservableObject {
             }
             lastConnectedForm = form
             editableForm = form
+            let refreshedRooms = stabilizedRefreshedRooms(rooms, preserving: snapshot.availableRooms)
             let normalizedDisplayConfiguration = normalizedMenuBarDisplayConfiguration(
                 snapshot.menuBarDisplayConfiguration,
-                availableRooms: rooms
+                availableRooms: refreshedRooms
             )
             let nextDisplayConfiguration: MenuBarDisplayConfiguration
             let nextDisplayPersistenceFailureDescription: String?
@@ -3343,12 +3458,12 @@ public final class PearchHAPanelModel: ObservableObject {
                 nextDisplayConfiguration = snapshot.menuBarDisplayConfiguration
                 nextDisplayPersistenceFailureDescription = snapshot.displayPersistenceFailureDescription
             }
-            let visibleRooms = selectedRooms(from: rooms, using: snapshot.selectionConfiguration)
+            let visibleRooms = selectedRooms(from: refreshedRooms, using: snapshot.selectionConfiguration)
             updateSnapshot { draft in
                 draft.connectionState = .connected
                 draft.phase = visibleRooms.isEmpty ? .connectedEmpty : .connectedData
                 draft.rooms = visibleRooms
-                draft.availableRooms = rooms
+                draft.availableRooms = refreshedRooms
                 draft.menuBarDisplayConfiguration = nextDisplayConfiguration
                 draft.connectionForm = nonSecretForm(form)
                 draft.lastUpdateDescription = Self.updatedDescription(at: wallClock())
@@ -3369,6 +3484,7 @@ public final class PearchHAPanelModel: ObservableObject {
                 // staying blank forever.
                 startHistoryBulkSync()
             }
+            scheduleStartupHistoryWarmIfNeeded()
             if isPanelActive, periodicRefreshTask == nil {
                 // First-run flow: the panel was opened before any session existed,
                 // so activation could not arm the refresh safety net. Arm it now

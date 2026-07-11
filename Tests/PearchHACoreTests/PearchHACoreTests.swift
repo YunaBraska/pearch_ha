@@ -195,6 +195,35 @@ final class PearchHACoreTests: XCTestCase {
         XCTAssertEqual(rooms.first?.entities.first?.name, "Temperature")
     }
 
+    func testRoomResolverPrefersMoreSpecificStateNameOverGenericRegistryName() {
+        let rooms = RoomResolver().resolve(
+            snapshot: DiscoverySnapshot(
+                areas: [
+                    Area(id: "office", name: "Office")
+                ],
+                devices: [],
+                entities: [
+                    EntityRegistryEntry(
+                        id: "sensor.shellyplugsg3_e4b063fa527c_leistung",
+                        name: "Leistung",
+                        areaID: "office",
+                        deviceID: nil
+                    )
+                ],
+                states: [
+                    EntityState(
+                        id: "sensor.shellyplugsg3_e4b063fa527c_leistung",
+                        name: "Deskyuna Leistung",
+                        state: "87.7",
+                        unit: "W"
+                    )
+                ]
+            )
+        )
+
+        XCTAssertEqual(rooms.first?.entities.first?.name, "Deskyuna Leistung")
+    }
+
     func testSelectionProjectorBuildsSearchableCheckboxTree() {
         let tree = EntitySelectionProjector().selectionTree(
             rooms: selectionRooms(),
@@ -1309,6 +1338,142 @@ final class PearchHACoreTests: XCTestCase {
         )
     }
 
+    func testEntityDisplayDefaultsApplyPM10ThresholdScale() {
+        let entity = DiscoveredEntity(
+            id: "sensor.outdoor_pm10",
+            name: "Outdoor PM10",
+            state: "18",
+            unit: "µg/m³",
+            areaID: nil,
+            deviceID: nil
+        )
+
+        XCTAssertEqual(
+            EntityDisplayDefaults.defaultThresholds(for: entity),
+            ValueThresholds(
+                steps: [
+                    ThresholdStep(value: 20, color: PearchHAAccentColor(red: 0.12, green: 0.72, blue: 0.83, alpha: 1)),
+                    ThresholdStep(value: 45, color: ValueThresholds.warningColor),
+                    ThresholdStep(value: 90, color: ValueThresholds.criticalColor)
+                ],
+                baseColor: ValueThresholds.okColor
+            )
+        )
+    }
+
+    func testEntityDisplayDefaultsApplyAQIThresholdScale() {
+        let entity = DiscoveredEntity(
+            id: "sensor.garden_aqi",
+            name: "Garden AQI",
+            state: "42",
+            unit: nil,
+            areaID: nil,
+            deviceID: nil
+        )
+
+        XCTAssertEqual(
+            EntityDisplayDefaults.defaultThresholds(for: entity),
+            ValueThresholds(
+                steps: [
+                    ThresholdStep(value: 51, color: PearchHAAccentColor(red: 0.12, green: 0.72, blue: 0.83, alpha: 1)),
+                    ThresholdStep(value: 101, color: ValueThresholds.warningColor),
+                    ThresholdStep(value: 151, color: ValueThresholds.criticalColor)
+                ],
+                baseColor: ValueThresholds.okColor
+            )
+        )
+    }
+
+    func testEntityDisplayDefaultsApplyVOCIndexThresholdScale() {
+        let entity = DiscoveredEntity(
+            id: "sensor.office_voc_index",
+            name: "Office VOC Index",
+            state: "84",
+            unit: nil,
+            areaID: nil,
+            deviceID: nil
+        )
+
+        XCTAssertEqual(
+            EntityDisplayDefaults.defaultThresholds(for: entity),
+            ValueThresholds(
+                steps: [
+                    ThresholdStep(value: 100, color: ValueThresholds.okColor),
+                    ThresholdStep(value: 200, color: ValueThresholds.warningColor),
+                    ThresholdStep(value: 350, color: ValueThresholds.criticalColor)
+                ],
+                baseColor: PearchHAAccentColor(red: 0.12, green: 0.72, blue: 0.83, alpha: 1)
+            )
+        )
+    }
+
+    func testEntityDisplayDefaultsApplyNoiseThresholdScale() {
+        let entity = DiscoveredEntity(
+            id: "sensor.office_noise",
+            name: "Office noise",
+            state: "41",
+            unit: "dBA",
+            areaID: nil,
+            deviceID: nil
+        )
+
+        XCTAssertEqual(
+            EntityDisplayDefaults.defaultThresholds(for: entity),
+            ValueThresholds(
+                steps: [
+                    ThresholdStep(value: 35, color: ValueThresholds.okColor),
+                    ThresholdStep(value: 55, color: ValueThresholds.warningColor),
+                    ThresholdStep(value: 85, color: ValueThresholds.criticalColor)
+                ],
+                baseColor: PearchHAAccentColor(red: 0.12, green: 0.72, blue: 0.83, alpha: 1)
+            )
+        )
+    }
+
+    func testEntityDisplayDefaultsApplyStorageUsageThresholdScale() {
+        let entity = DiscoveredEntity(
+            id: "sensor.nas_disk_usage",
+            name: "NAS disk usage",
+            state: "72",
+            unit: "%",
+            areaID: nil,
+            deviceID: nil
+        )
+
+        XCTAssertEqual(
+            EntityDisplayDefaults.defaultThresholds(for: entity),
+            ValueThresholds(
+                steps: [
+                    ThresholdStep(value: 80, color: ValueThresholds.warningColor),
+                    ThresholdStep(value: 90, color: ValueThresholds.criticalColor)
+                ],
+                baseColor: ValueThresholds.okColor
+            )
+        )
+    }
+
+    func testEntityDisplayDefaultsApplyRadonThresholdScale() {
+        let entity = DiscoveredEntity(
+            id: "sensor.basement_radon",
+            name: "Basement radon",
+            state: "62",
+            unit: "Bq/m³",
+            areaID: nil,
+            deviceID: nil
+        )
+
+        XCTAssertEqual(
+            EntityDisplayDefaults.defaultThresholds(for: entity),
+            ValueThresholds(
+                steps: [
+                    ThresholdStep(value: 75, color: ValueThresholds.warningColor),
+                    ThresholdStep(value: 150, color: ValueThresholds.criticalColor)
+                ],
+                baseColor: ValueThresholds.okColor
+            )
+        )
+    }
+
     func testEntityDisplayDefaultsApplyImplicitThresholdsToExistingConfiguration() {
         let entity = DiscoveredEntity(
             id: "sensor.office_temperature",
@@ -1653,6 +1818,83 @@ extension PearchHACoreTests {
         XCTAssertEqual(thresholds.severity(for: "BAD"), .critical)
         XCTAssertEqual(thresholds.severity(for: "Very Bad Air"), .critical)
         XCTAssertEqual(thresholds.color(for: "unknown"), ValueThresholds.warningColor)
+    }
+
+    func test_t_state_threshold_rules_prefer_longest_matching_rule() {
+        let progressColor = PearchHAAccentColor(red: 0.19, green: 0.49, blue: 0.96, alpha: 1)
+        let thresholds = StateThresholds(
+            rules: [
+                StateThresholdRule(match: "OPEN", color: ValueThresholds.okColor),
+                StateThresholdRule(match: "OPENING", color: progressColor)
+            ]
+        )
+
+        XCTAssertEqual(thresholds.color(for: "opening"), progressColor)
+    }
+
+    func test_t_default_state_thresholds_choose_good_medium_bad_family_for_matching_text_state() {
+        let thresholds = EntityDisplayDefaults.defaultStateThresholds(
+            for: entity("sensor.air_quality", name: "Air quality", state: "Very Bad Air", unit: nil)
+        )
+
+        XCTAssertEqual(thresholds.color(for: "GOOD"), ValueThresholds.okColor)
+        XCTAssertEqual(thresholds.color(for: "MEDIUM"), ValueThresholds.warningColor)
+        XCTAssertEqual(thresholds.color(for: "BAD"), ValueThresholds.criticalColor)
+        XCTAssertEqual(thresholds.severity(for: "Very Bad Air"), .critical)
+    }
+
+    func test_t_default_state_thresholds_choose_complete_on_off_family() {
+        let neutralColor = PearchHAAccentColor(red: 0.68, green: 0.70, blue: 0.74, alpha: 1)
+        let thresholds = EntityDisplayDefaults.defaultStateThresholds(
+            for: entity("switch.office_fan", name: "Office fan", state: "off", unit: nil)
+        )
+
+        XCTAssertEqual(thresholds.color(for: "on"), ValueThresholds.okColor)
+        XCTAssertEqual(thresholds.color(for: "off"), neutralColor)
+    }
+
+    func test_t_default_state_thresholds_choose_cover_family_for_opening_state() {
+        let progressColor = PearchHAAccentColor(red: 0.19, green: 0.49, blue: 0.96, alpha: 1)
+        let neutralColor = PearchHAAccentColor(red: 0.68, green: 0.70, blue: 0.74, alpha: 1)
+        let thresholds = EntityDisplayDefaults.defaultStateThresholds(
+            for: entity("cover.office_blinds", name: "Office blinds", state: "opening", unit: nil)
+        )
+
+        XCTAssertEqual(thresholds.color(for: "opening"), progressColor)
+        XCTAssertEqual(thresholds.color(for: "open"), ValueThresholds.okColor)
+        XCTAssertEqual(thresholds.color(for: "closed"), neutralColor)
+    }
+
+    func test_t_default_state_thresholds_choose_domain_specific_update_family() {
+        let thresholds = EntityDisplayDefaults.defaultStateThresholds(
+            for: entity("update.router_firmware", name: "Router firmware", state: "on", unit: nil)
+        )
+
+        XCTAssertEqual(thresholds.color(for: "on"), ValueThresholds.warningColor)
+        XCTAssertEqual(thresholds.color(for: "off"), ValueThresholds.okColor)
+    }
+
+    func test_t_default_state_thresholds_choose_vacuum_family() {
+        let progressColor = PearchHAAccentColor(red: 0.19, green: 0.49, blue: 0.96, alpha: 1)
+        let neutralColor = PearchHAAccentColor(red: 0.68, green: 0.70, blue: 0.74, alpha: 1)
+        let thresholds = EntityDisplayDefaults.defaultStateThresholds(
+            for: entity("vacuum.living_room", name: "Living room vacuum", state: "paused", unit: nil)
+        )
+
+        XCTAssertEqual(thresholds.color(for: "cleaning"), progressColor)
+        XCTAssertEqual(thresholds.color(for: "docked"), ValueThresholds.okColor)
+        XCTAssertEqual(thresholds.color(for: "idle"), neutralColor)
+        XCTAssertEqual(thresholds.color(for: "error"), ValueThresholds.criticalColor)
+        XCTAssertEqual(thresholds.color(for: "paused"), ValueThresholds.warningColor)
+    }
+
+    func test_t_default_state_thresholds_ignore_numeric_values() {
+        let thresholds = EntityDisplayDefaults.defaultStateThresholds(
+            for: entity("sensor.temperature", name: "Temperature", state: "21.4", unit: "°C")
+        )
+
+        XCTAssertFalse(EntityDisplayDefaults.hasStateThresholds(thresholds))
+        XCTAssertTrue(thresholds.rules.isEmpty)
     }
 
     func test_t_effective_state_thresholds_use_defaults_until_user_overrides() {

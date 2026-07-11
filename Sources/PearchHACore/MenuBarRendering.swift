@@ -133,7 +133,17 @@ public struct StateThresholds: Codable, Equatable, Sendable {
         guard !normalized.isEmpty else {
             return baseColor
         }
-        return rules.first(where: { normalized.contains($0.normalizedMatch) })?.color ?? baseColor
+        let bestMatch = rules.enumerated()
+            .filter { normalized.contains($0.element.normalizedMatch) }
+            .max { lhs, rhs in
+                let leftLength = lhs.element.normalizedMatch.count
+                let rightLength = rhs.element.normalizedMatch.count
+                if leftLength == rightLength {
+                    return lhs.offset > rhs.offset
+                }
+                return leftLength < rightLength
+            }
+        return bestMatch?.element.color ?? baseColor
     }
 
     public func severity(for state: String) -> ValueSeverity? {

@@ -993,8 +993,10 @@ public struct HomeAssistantClient: HAClient {
         if range.prefersRecorderStatistics {
             let recorderStatistics = await recorderStatisticsHistory(input, entityID: entityID, range: range, start: start, end: end)
             switch recorderStatistics {
+            case let .success(series) where !series.samples.isEmpty:
+                return .success(series)
             case .success:
-                return recorderStatistics
+                return await restHistory(input, entityID: entityID, range: range, start: start, end: end)
             case let .failure(failure) where failure.shouldFallbackFromRecorderStatisticsToREST:
                 return await restHistory(input, entityID: entityID, range: range, start: start, end: end)
             case .failure:
@@ -1017,6 +1019,7 @@ public struct HomeAssistantClient: HAClient {
             queryItems: [
                 URLQueryItem(name: "filter_entity_id", value: entityID.rawValue),
                 URLQueryItem(name: "end_time", value: Self.historyDateFormatter.string(from: end)),
+                URLQueryItem(name: "include_start_time_state", value: "true"),
                 URLQueryItem(name: "minimal_response", value: "true"),
                 URLQueryItem(name: "no_attributes", value: "true")
             ],
@@ -1219,6 +1222,7 @@ public struct HomeAssistantClient: HAClient {
             queryItems: [
                 URLQueryItem(name: "filter_entity_id", value: entityIDs.map(\.rawValue).joined(separator: ",")),
                 URLQueryItem(name: "end_time", value: Self.historyDateFormatter.string(from: end)),
+                URLQueryItem(name: "include_start_time_state", value: "true"),
                 URLQueryItem(name: "minimal_response", value: "true"),
                 URLQueryItem(name: "no_attributes", value: "true")
             ],

@@ -120,23 +120,41 @@ public struct PearchHAEntityGaugeView: View {
     }
 }
 
-private struct InlineSparklinePath: Shape {
+struct PearchHAColoredSparklineStroke: View {
     let geometry: PearchHAHistorySparklineGeometry
+    let fallbackColor: Color
+    let lineWidth: CGFloat
+    let colorForValue: ((Double) -> Color?)?
 
-    func path(in rect: CGRect) -> Path {
-        return Path { path in
-            for (index, point) in geometry.points.enumerated() {
-                let cgPoint = CGPoint(
-                    x: rect.minX + rect.width * CGFloat(point.x),
-                    y: rect.minY + rect.height * CGFloat(point.y)
+    var body: some View {
+        Canvas { context, size in
+            guard geometry.points.count > 1 else {
+                return
+            }
+            let samples = geometry.samples
+            for index in 1..<geometry.points.count {
+                let start = canvasPoint(for: geometry.points[index - 1], in: size)
+                let end = canvasPoint(for: geometry.points[index], in: size)
+                var path = Path()
+                path.move(to: start)
+                path.addLine(to: end)
+                let segmentValue = samples.indices.contains(index) ? samples[index].value : samples.last?.value
+                let segmentColor = segmentValue.flatMap { colorForValue?($0) } ?? fallbackColor
+                context.stroke(
+                    path,
+                    with: .color(segmentColor),
+                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
                 )
-                if index == 0 {
-                    path.move(to: cgPoint)
-                } else {
-                    path.addLine(to: cgPoint)
-                }
             }
         }
+        .accessibilityHidden(true)
+    }
+
+    private func canvasPoint(for point: PearchHAHistorySparklinePoint, in size: CGSize) -> CGPoint {
+        CGPoint(
+            x: size.width * CGFloat(point.x),
+            y: size.height * CGFloat(point.y)
+        )
     }
 }
 
@@ -153,6 +171,7 @@ public struct MicroSparkline: View {
     private let geometry: PearchHAHistorySparklineGeometry
     private let color: Color
     private let muted: Color
+    private let colorForValue: ((Double) -> Color?)?
 
     /// Creates the sparkline.
     ///
@@ -160,10 +179,17 @@ public struct MicroSparkline: View {
     ///   - geometry: The already-prepared numeric sparkline geometry.
     ///   - color: The stroke and fill tint.
     ///   - muted: The dash color used when there is not enough data.
-    public init(geometry: PearchHAHistorySparklineGeometry, color: Color, muted: Color) {
+    ///   - colorForValue: Optional per-sample tinting for threshold-colored segments.
+    public init(
+        geometry: PearchHAHistorySparklineGeometry,
+        color: Color,
+        muted: Color,
+        colorForValue: ((Double) -> Color?)? = nil
+    ) {
         self.geometry = geometry
         self.color = color
         self.muted = muted
+        self.colorForValue = colorForValue
     }
 
     public var body: some View {
@@ -177,8 +203,12 @@ public struct MicroSparkline: View {
                             endPoint: .bottom
                         )
                     )
-                InlineSparklinePath(geometry: geometry)
-                    .stroke(color, style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
+                PearchHAColoredSparklineStroke(
+                    geometry: geometry,
+                    fallbackColor: color,
+                    lineWidth: 1.4,
+                    colorForValue: colorForValue
+                )
             }
             .accessibilityHidden(true)
         } else {
@@ -188,7 +218,7 @@ public struct MicroSparkline: View {
 }
 
 /// A closed area under the inline sparkline trace, used for the faint gradient
-/// fill. Shares the same downsampled geometry as ``InlineSparklinePath``.
+/// fill.
 private struct InlineSparklineArea: Shape {
     let geometry: PearchHAHistorySparklineGeometry
 
@@ -248,15 +278,17 @@ public struct MicroDash: View {
 public struct MicroActivityBars: View {
     private let series: HistorySeries
     private let muted: Color
+    private let colorForState: ((String) -> Color)?
 
     /// Creates the activity-band view.
     ///
     /// - Parameters:
     ///   - series: The already-resolved history series.
     ///   - muted: The dash color used when there are no segments.
-    public init(series: HistorySeries, muted: Color) {
+    public init(series: HistorySeries, muted: Color, colorForState: ((String) -> Color)? = nil) {
         self.series = series
         self.muted = muted
+        self.colorForState = colorForState
     }
 
     public var body: some View {
@@ -264,7 +296,11 @@ public struct MicroActivityBars: View {
         if segments.isEmpty {
             MicroDash(color: muted)
         } else {
-            PearchHAHistoryStateTimeline(segments: segments, cornerRadius: 1.5)
+            PearchHAHistoryStateTimeline(
+                segments: segments,
+                cornerRadius: 1.5,
+                colorForState: colorForState
+            )
                 .accessibilityHidden(true)
         }
     }

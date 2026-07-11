@@ -1317,6 +1317,7 @@ final class PearchHAClientTests: XCTestCase {
         )
         XCTAssertEqual(items["filter_entity_id"], "sensor.office_temperature")
         XCTAssertEqual(items["end_time"], "2026-06-27T12:00:00Z")
+        XCTAssertEqual(items["include_start_time_state"], "true")
         XCTAssertEqual(items["minimal_response"], "true")
         XCTAssertEqual(items["no_attributes"], "true")
     }
@@ -1369,6 +1370,7 @@ final class PearchHAClientTests: XCTestCase {
         )
         XCTAssertEqual(items["filter_entity_id"], "sensor.office_temperature")
         XCTAssertEqual(items["end_time"], "2026-06-27T12:00:00Z")
+        XCTAssertEqual(items["include_start_time_state"], "true")
         XCTAssertEqual(items["minimal_response"], "true")
         XCTAssertEqual(items["no_attributes"], "true")
     }
@@ -1526,6 +1528,7 @@ final class PearchHAClientTests: XCTestCase {
                 .compactMap { item in item.value.map { (item.name, $0) } }
         )
         XCTAssertEqual(items["filter_entity_id"], "sensor.a,sensor.b")
+        XCTAssertEqual(items["include_start_time_state"], "true")
         XCTAssertEqual(items["minimal_response"], "true")
         XCTAssertEqual(items["no_attributes"], "true")
     }
@@ -1975,6 +1978,58 @@ final class PearchHAClientTests: XCTestCase {
         XCTAssertTrue(command.bodyText?.contains(#""start_time":"2026-06-20T12:00:00Z""#) ?? false)
         XCTAssertTrue(command.bodyText?.contains(#""end_time":"2026-06-27T12:00:00Z""#) ?? false)
         XCTAssertFalse(journal.contains { $0.path.hasPrefix("/api/history/period/") })
+    }
+
+    func test_t_history_week_falls_back_to_rest_when_recorder_statistics_returns_no_samples() async throws {
+        let fixtures = FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[]"#,
+            historyBody: """
+            [
+              [
+                {"entity_id":"sensor.office_temperature","state":"21.4","last_changed":"2026-06-25T10:00:00+00:00"}
+              ]
+            ]
+            """,
+            recorderStatisticsBody: """
+            {
+              "sensor.office_temperature": []
+            }
+            """
+        )
+        let server = try FakeHAWebSocketServer(fixtures: fixtures)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let client = HomeAssistantClient()
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+
+        let result = await client.history(
+            input,
+            entityID: "sensor.office_temperature",
+            range: .week,
+            end: try historyDate("2026-06-27T12:00:00+00:00")
+        )
+
+        XCTAssertEqual(
+            result,
+            .success(
+                HistorySeries(
+                    entityID: "sensor.office_temperature",
+                    range: .week,
+                    samples: [
+                        HistorySample(timestamp: try historyDate("2026-06-25T10:00:00+00:00"), state: "21.4", numericValue: 21.4)
+                    ]
+                )
+            )
+        )
+        let journal = await server.journal.snapshot()
+        XCTAssertTrue(journal.contains { $0.path == "/api/websocket/recorder/statistics_during_period" })
+        XCTAssertTrue(journal.contains { $0.path.hasPrefix("/api/history/period/") })
     }
 
     func testHistoryMonthRoutesToRecorderStatisticsWithDailyPeriod() async throws {

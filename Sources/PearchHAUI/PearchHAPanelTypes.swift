@@ -649,6 +649,7 @@ public struct PearchHAHistorySparklinePoint: Equatable, Sendable {
 }
 
 public struct PearchHAHistorySparklineGeometry: Equatable, Sendable {
+    public let samples: [PearchHAHistoryCursorSample]
     public let points: [PearchHAHistorySparklinePoint]
     public let hasTrace: Bool
 
@@ -666,6 +667,7 @@ public struct PearchHAHistorySparklineGeometry: Equatable, Sendable {
 
     public init(samples: [PearchHAHistoryCursorSample], maxSamples: Int? = nil) {
         let samples = Self.downsample(samples, to: maxSamples)
+        self.samples = samples
         guard samples.count > 1 else {
             points = Self.midline
             hasTrace = false

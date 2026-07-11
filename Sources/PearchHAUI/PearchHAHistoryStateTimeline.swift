@@ -12,10 +12,18 @@ import PearchHACore
 public struct PearchHAHistoryStateTimeline: View {
     private let segments: [HistoryStateSegment]
     private let cornerRadius: CGFloat
+    private let colorForState: (String) -> Color
 
-    public init(segments: [HistoryStateSegment], cornerRadius: CGFloat = 3) {
+    public init(
+        segments: [HistoryStateSegment],
+        cornerRadius: CGFloat = 3,
+        colorForState: ((String) -> Color)? = nil
+    ) {
         self.segments = segments
         self.cornerRadius = cornerRadius
+        self.colorForState = colorForState ?? { state in
+            PearchHATheme.color(for: HistoryStateColorKind.classify(state))
+        }
     }
 
     public var body: some View {
@@ -24,7 +32,7 @@ public struct PearchHAHistoryStateTimeline: View {
             HStack(spacing: 1) {
                 ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
                     Rectangle()
-                        .fill(PearchHATheme.color(for: HistoryStateColorKind.classify(segment.state)))
+                        .fill(colorForState(segment.state))
                         .frame(width: max(0, widths[index]))
                 }
             }
@@ -69,6 +77,7 @@ struct PearchHAHistoryStateTimelinePopoverBody: View {
     let entityName: String
     let labelColor: Color
     let valueColor: Color
+    let colorForState: (String) -> Color
     let onHoverReadoutChange: (String?) -> Void
 
     @State private var cursorNormalizedX: Double?
@@ -110,7 +119,10 @@ struct PearchHAHistoryStateTimelinePopoverBody: View {
     private var timeline: some View {
         GeometryReader { proxy in
             ZStack(alignment: .topLeading) {
-                PearchHAHistoryStateTimeline(segments: segments)
+                PearchHAHistoryStateTimeline(
+                    segments: segments,
+                    colorForState: colorForState
+                )
                 if let normalizedX = cursorNormalizedX {
                     let x = proxy.size.width * CGFloat(min(max(normalizedX, 0), 1))
                     Rectangle()
@@ -142,7 +154,11 @@ struct PearchHAHistoryStateTimelinePopoverBody: View {
 
     private var legend: some View {
         let uniqueStates = orderedUniqueStates
-        return FlowingLegend(states: uniqueStates, labelColor: labelColor)
+        return FlowingLegend(
+            states: uniqueStates,
+            labelColor: labelColor,
+            colorForState: colorForState
+        )
     }
 
     private var orderedUniqueStates: [String] {
@@ -235,13 +251,14 @@ struct PearchHAHistoryStateTimelinePopoverBody: View {
 private struct FlowingLegend: View {
     let states: [String]
     let labelColor: Color
+    let colorForState: (String) -> Color
 
     var body: some View {
         HStack(spacing: 10) {
             ForEach(Array(states.prefix(4).enumerated()), id: \.offset) { _, state in
                 HStack(spacing: 4) {
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(PearchHATheme.color(for: HistoryStateColorKind.classify(state)))
+                        .fill(colorForState(state))
                         .frame(width: 8, height: 8)
                     Text(PearchHAHistoryStateTimelinePopoverBody.label(for: state))
                         .font(.caption2)

@@ -68,6 +68,20 @@ private struct PearchHAInlineHistoryPreview: View {
 
     var body: some View {
         let _ = historyObserver.revision
+        let configuration = model.snapshot.effectiveMenuBarItemConfiguration(for: entity)
+        let numericPreviewColor = PearchHAHistoryTint.numericAccent(for: entity, configuration: configuration)
+            .map(PearchHATheme.color(for:))
+            ?? palette.chartPrimary
+        let numericPreviewThresholdColor: (Double) -> Color? = { value in
+            PearchHAHistoryTint.numericAccent(for: value, entity: entity, configuration: configuration)
+                .map(PearchHATheme.color(for:))
+        }
+        let statePreviewColor: (String) -> Color = { state in
+            if let accent = PearchHAHistoryTint.stateAccent(for: state, entity: entity, configuration: configuration) {
+                return PearchHATheme.color(for: accent)
+            }
+            return PearchHATheme.color(for: HistoryStateColorKind.classify(state))
+        }
         if case let .gauge(gauge) = presentation,
            gauge.style != .ring,
            PearchHADashboardPreview.meterShows(for: value.status) {
@@ -80,10 +94,19 @@ private struct PearchHAInlineHistoryPreview: View {
         } else if let preview = model.cachedInlinePreview(for: entity.id) {
             switch preview {
             case let .sparkline(geometry):
-                MicroSparkline(geometry: geometry, color: palette.chartPrimary, muted: palette.chartMuted)
+                MicroSparkline(
+                    geometry: geometry,
+                    color: numericPreviewColor,
+                    muted: palette.chartMuted,
+                    colorForValue: numericPreviewThresholdColor
+                )
                     .frame(width: TelemetryRowMetrics.previewWidth, height: 22)
             case let .state(series):
-                MicroActivityBars(series: series, muted: palette.chartMuted)
+                MicroActivityBars(
+                    series: series,
+                    muted: palette.chartMuted,
+                    colorForState: statePreviewColor
+                )
                     .frame(width: TelemetryRowMetrics.previewWidth, height: 7)
             case .placeholder:
                 MicroDash(color: palette.chartMuted)
@@ -290,6 +313,9 @@ private struct PearchHAHistoryPopoverRootView: View {
             valueText: model.formattedValue(for: entity).text,
             unit: entity.unit,
             state: model.snapshot.historyState,
+            chartTint: historyChartTint,
+            numericColorForValue: historyNumericColor,
+            stateColorForTimeline: historyStateColor,
             onOpenSettings: {
                 onOpenEntitySettings?(entity.id)
             },
@@ -303,6 +329,30 @@ private struct PearchHAHistoryPopoverRootView: View {
                 }
             )
         )
+    }
+
+    private var configuration: MenuBarItemConfiguration {
+        model.snapshot.effectiveMenuBarItemConfiguration(for: entity)
+    }
+
+    private var historyChartTint: Color? {
+        PearchHAHistoryTint.numericAccent(for: entity, configuration: configuration).map(PearchHATheme.color(for:))
+    }
+
+    private var historyNumericColor: (Double) -> Color? {
+        { value in
+            PearchHAHistoryTint.numericAccent(for: value, entity: entity, configuration: configuration)
+                .map(PearchHATheme.color(for:))
+        }
+    }
+
+    private var historyStateColor: (String) -> Color {
+        { state in
+            if let accent = PearchHAHistoryTint.stateAccent(for: state, entity: entity, configuration: configuration) {
+                return PearchHATheme.color(for: accent)
+            }
+            return PearchHATheme.color(for: HistoryStateColorKind.classify(state))
+        }
     }
 }
 

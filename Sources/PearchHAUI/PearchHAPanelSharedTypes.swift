@@ -176,6 +176,9 @@ public struct PearchHAHistoryPopoverContent: View {
     private let valueText: String
     private let unit: String?
     private let state: PearchHAHistoryPanelState
+    private let chartTint: Color?
+    private let numericColorForValue: (Double) -> Color?
+    private let stateColorForTimeline: (String) -> Color
     private let increaseContrastOverride: Bool?
     private let onOpenSettings: (() -> Void)?
     private let disabledRanges: Set<HistoryRange>
@@ -192,6 +195,9 @@ public struct PearchHAHistoryPopoverContent: View {
         valueText: String,
         unit: String? = nil,
         state: PearchHAHistoryPanelState,
+        chartTint: Color? = nil,
+        numericColorForValue: ((Double) -> Color?)? = nil,
+        stateColorForTimeline: ((String) -> Color)? = nil,
         increaseContrastOverride: Bool? = nil,
         onOpenSettings: (() -> Void)? = nil,
         disabledRanges: Set<HistoryRange> = [],
@@ -202,6 +208,11 @@ public struct PearchHAHistoryPopoverContent: View {
         self.valueText = valueText
         self.unit = unit
         self.state = state
+        self.chartTint = chartTint
+        self.numericColorForValue = numericColorForValue ?? { _ in nil }
+        self.stateColorForTimeline = stateColorForTimeline ?? { state in
+            PearchHATheme.color(for: HistoryStateColorKind.classify(state))
+        }
         self.increaseContrastOverride = increaseContrastOverride
         self.onOpenSettings = onOpenSettings
         self.disabledRanges = disabledRanges
@@ -223,7 +234,7 @@ public struct PearchHAHistoryPopoverContent: View {
                 Spacer(minLength: 8)
                 Text(valueText)
                     .font(.system(size: 16, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(historyValueForegroundStyle)
+                    .foregroundStyle(palette.textPrimary)
                 if let onOpenSettings {
                     Button(action: onOpenSettings) {
                         Image(systemName: "gearshape")
@@ -303,7 +314,8 @@ public struct PearchHAHistoryPopoverContent: View {
                 range: series.range,
                 entityName: entityName,
                 labelColor: historyLabelForegroundStyle,
-                valueColor: historyValueForegroundStyle,
+                valueColor: palette.textPrimary,
+                colorForState: stateColorForTimeline,
                 onHoverReadoutChange: { hoverReadout = $0 }
             )
         case let .statistics(series, statistics):
@@ -337,6 +349,7 @@ public struct PearchHAHistoryPopoverContent: View {
     private func interactiveChart(series: HistorySeries) -> some View {
         let chartHeight: CGFloat = 80
         let peaks = Self.chartPeaks(series: series)
+        let geometry = PearchHAHistorySparklineGeometry(series: series)
         return GeometryReader { proxy in
             ZStack(alignment: .topLeading) {
                 if let peaks {
@@ -353,16 +366,20 @@ public struct PearchHAHistoryPopoverContent: View {
                     .padding(2)
                     .accessibilityHidden(true)
                 }
-                HistorySparklineArea(series: series)
+                HistorySparklineArea(geometry: geometry)
                     .fill(
                         LinearGradient(
-                            colors: [palette.chartPrimary.opacity(0.22), palette.chartPrimary.opacity(0.0)],
+                            colors: [resolvedChartTint.opacity(0.22), resolvedChartTint.opacity(0.0)],
                             startPoint: .top,
                             endPoint: .bottom
                         )
                     )
-                HistorySparkline(series: series)
-                    .stroke(palette.chartPrimary, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                PearchHAColoredSparklineStroke(
+                    geometry: geometry,
+                    fallbackColor: resolvedChartTint,
+                    lineWidth: 1.5,
+                    colorForValue: numericColorForValue
+                )
                 if let normalizedX = cursorNormalizedX {
                     let x = proxy.size.width * CGFloat(min(max(normalizedX, 0), 1))
                     Rectangle()
@@ -465,7 +482,7 @@ public struct PearchHAHistoryPopoverContent: View {
     private func statisticValue(_ text: String) -> some View {
         Text(text)
             .monospacedDigit()
-            .foregroundStyle(historyValueForegroundStyle)
+            .foregroundStyle(palette.textPrimary)
     }
 
     private var historyLabelForegroundStyle: Color {
@@ -475,11 +492,8 @@ public struct PearchHAHistoryPopoverContent: View {
         return palette.textSecondary
     }
 
-    private var historyValueForegroundStyle: Color {
-        if isIncreasedContrast {
-            return palette.textPrimary
-        }
-        return palette.textPrimary
+    private var resolvedChartTint: Color {
+        chartTint ?? palette.chartPrimary
     }
 
     private var isIncreasedContrast: Bool {
@@ -800,31 +814,10 @@ struct PearchHANativeSecureField: NSViewRepresentable {
     }
 }
 
-private struct HistorySparkline: Shape {
-    let series: HistorySeries
-
-    func path(in rect: CGRect) -> Path {
-        let geometry = PearchHAHistorySparklineGeometry(series: series)
-        return Path { path in
-            for (index, point) in geometry.points.enumerated() {
-                let x = rect.minX + rect.width * CGFloat(point.x)
-                let y = rect.minY + rect.height * CGFloat(point.y)
-                let point = CGPoint(x: x, y: y)
-                if index == 0 {
-                    path.move(to: point)
-                } else {
-                    path.addLine(to: point)
-                }
-            }
-        }
-    }
-}
-
 private struct HistorySparklineArea: Shape {
-    let series: HistorySeries
+    let geometry: PearchHAHistorySparklineGeometry
 
     func path(in rect: CGRect) -> Path {
-        let geometry = PearchHAHistorySparklineGeometry(series: series)
         let points = geometry.points
         guard points.count > 1 else {
             return Path()

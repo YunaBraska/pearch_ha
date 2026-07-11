@@ -2123,6 +2123,7 @@ final class PearchHAUITests: XCTestCase {
                 PearchHAHistorySparklinePoint(x: 1, y: 0.5)
             ]
         )
+        XCTAssertEqual(geometry.samples.map(\.value), [10, 20, 15])
     }
 
     func testHistorySparklineGeometrySortsSamplesChronologically() {
@@ -7143,6 +7144,50 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(saved.menuBarItemConfigurations.first?.defaultHistoryRange, .week)
     }
 
+    func test_t_irrelevant_snapshot_changes_do_not_recompute_menu_bar_presentations() async throws {
+        let url = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        let store = JSONConfigStore(fileURL: url)
+        _ = try store.save(
+            PearchHAConfiguration(
+                selectedEntityIDs: ["sensor.office_humidity"],
+                menuBarEntityIDs: ["sensor.office_humidity"],
+                isEntitySelectionExplicit: true,
+                menuBarRefreshInterval: .oneSecond
+            )
+        )
+        let gaugeRenderer = CountingStatusItemGaugeImageRenderer()
+        let application = PearchHAApplication(
+            configStore: store,
+            connector: { _ in .success(rooms: selectionRooms()) },
+            gaugeImageRenderer: gaugeRenderer
+        )
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        }
+
+        application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await application.connect()
+        XCTAssertTrue(application.setMenuBarDisplayStyle("sensor.office_humidity", style: .battery))
+        XCTAssertEqual(gaugeRenderer.renderCount, 1)
+
+        let result = application.persist(
+            selection: EntitySelectionConfiguration(
+                selectedEntityIDs: ["switch.kitchen_light"],
+                roomOrder: [],
+                entityOrder: [],
+                isExplicit: true
+            )
+        )
+        XCTAssertEqual(result, .saved)
+
+        try await Task.sleep(nanoseconds: 1_300_000_000)
+        XCTAssertEqual(gaugeRenderer.renderCount, 1)
+    }
+
     func testHistoryKnownUnavailableRangesMarksCachedEmptyAndUnavailableRanges() async throws {
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
@@ -9216,9 +9261,10 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
     }
 
-    func test_t_inactive_panel_keeps_menu_bar_entities_fresh_without_sync() async {
-        // When the panel is closed, no history sync runs, yet a promoted menu-bar
-        // entity stays current via the panel-state-independent live push.
+    func test_t_inactive_panel_primes_history_once_then_stays_push_driven() async {
+        // Closed-panel startup now does one hidden warm so the first explicit
+        // open can render cached previews/history immediately. After that it
+        // stays push-driven: no recurring settle loop is armed while closed.
         let clock = TestPearchClock()
         let recorder = BulkHistoryRecorder()
         let promoted = EntityID("sensor.prefetch_0")
@@ -9234,8 +9280,10 @@ final class PearchHAUITests: XCTestCase {
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
+        await spinUntil { await recorder.batchCount() >= 1 }
+        await spinUntil { model.cachedHistorySeries(for: promoted) != nil }
 
-        // Panel stays closed: report visibility, which must not arm any sync.
+        // Panel stays closed: reporting visibility must not arm a recurring loop.
         model.updateVisibleEntities([promoted])
         for _ in 0..<10 {
             await Task.yield()
@@ -9243,8 +9291,8 @@ final class PearchHAUITests: XCTestCase {
         let closedSleepers = await clock.sleepingTaskCount()
         let closedBatches = await recorder.batchCount()
         XCTAssertEqual(closedSleepers, 0)
-        XCTAssertEqual(closedBatches, 0)
-        XCTAssertNil(model.cachedHistorySeries(for: promoted))
+        XCTAssertEqual(closedBatches, 1)
+        XCTAssertNotNil(model.cachedHistorySeries(for: promoted))
 
         // Live push updates the promoted entity while the panel is closed.
         let didUpdate = model.applyLiveState(
@@ -9253,9 +9301,38 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertTrue(didUpdate)
         let entity = model.snapshot.rooms.flatMap(\.entities).first { $0.id == promoted }
         XCTAssertEqual(entity?.state, "42.0")
-        // No history sync was triggered by the closed panel.
+        // No extra history sync was triggered by the closed panel.
         let afterLiveBatches = await recorder.batchCount()
-        XCTAssertEqual(afterLiveBatches, 0)
+        XCTAssertEqual(afterLiveBatches, 1)
+    }
+
+    func test_t_inactive_panel_startup_warm_caps_prefetch_working_set() async {
+        let clock = TestPearchClock()
+        let recorder = BulkHistoryRecorder()
+        let rooms = prefetchRooms(count: 30)
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: rooms) },
+            bulkHistoryProvider: { form, entityIDs, range in
+                await recorder.provide(form: form, entityIDs: entityIDs, range: range)
+            },
+            clock: clock,
+            bulkSyncConfiguration: PearchHAHistoryBulkSyncConfiguration(
+                settleDelay: .milliseconds(250),
+                batchSize: 40
+            ),
+            periodicRefreshConfiguration: .disabled
+        )
+
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        await spinUntil { await recorder.batchCount() >= 1 }
+
+        let batchCount = await recorder.batchCount()
+        let largestBatchSize = await recorder.largestBatchSize()
+        let requestedIDCount = await recorder.requestedIDs().count
+        XCTAssertEqual(batchCount, 1)
+        XCTAssertEqual(largestBatchSize, 12)
+        XCTAssertEqual(requestedIDCount, 12)
     }
 
     func test_t_history_range_picker_offers_month_for_older_history() {
@@ -9869,6 +9946,59 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(updated.state, "91.2")
     }
 
+    func test_t_refresh_keeps_more_specific_existing_name_when_result_is_generic() async {
+        let specific = [
+            Room(
+                id: "office",
+                name: "Office",
+                entities: [
+                    DiscoveredEntity(
+                        id: "sensor.shellyplugsg3_e4b063fa527c_leistung",
+                        name: "Deskyuna Leistung",
+                        state: "87.7",
+                        unit: "W",
+                        areaID: nil,
+                        deviceID: nil
+                    )
+                ]
+            )
+        ]
+        let generic = [
+            Room(
+                id: "office",
+                name: "Office",
+                entities: [
+                    DiscoveredEntity(
+                        id: "sensor.shellyplugsg3_e4b063fa527c_leistung",
+                        name: "Leistung",
+                        state: "91.2",
+                        unit: "W",
+                        areaID: nil,
+                        deviceID: nil
+                    )
+                ]
+            )
+        ]
+        final class RefreshModeBox: @unchecked Sendable {
+            var returnsGenericRefresh = false
+        }
+        let refreshMode = RefreshModeBox()
+        let model = PearchHAPanelModel(
+            connector: { _ in
+                .success(rooms: refreshMode.returnsGenericRefresh ? generic : specific)
+            }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+
+        await model.connect()
+        refreshMode.returnsGenericRefresh = true
+        await model.refresh()
+
+        let updated = model.snapshot.availableRooms[0].entities[0]
+        XCTAssertEqual(updated.name, "Deskyuna Leistung")
+        XCTAssertEqual(updated.state, "91.2")
+    }
+
     func test_t_apply_live_state_is_no_op_when_everything_is_already_identical() {
         let entity = DiscoveredEntity(
             id: "sensor.office_temperature",
@@ -9898,6 +10028,82 @@ final class PearchHAUITests: XCTestCase {
             )
         )
         XCTAssertEqual(model.snapshot, snapshot)
+    }
+
+    func testHistoryTintUsesNumericThresholdColorWhenPresent() {
+        let entity = DiscoveredEntity(
+            id: "sensor.office_temperature",
+            name: "Office temperature",
+            state: "82",
+            unit: "°C",
+            areaID: nil,
+            deviceID: nil
+        )
+        let configuration = MenuBarItemConfiguration(
+            entityID: entity.id,
+            thresholds: ValueThresholds(
+                steps: [
+                    ThresholdStep(value: 80, color: ValueThresholds.criticalColor)
+                ],
+                baseColor: ValueThresholds.okColor
+            )
+        )
+
+        XCTAssertEqual(
+            PearchHAHistoryTint.numericAccent(for: entity, configuration: configuration),
+            ValueThresholds.criticalColor
+        )
+    }
+
+    func testHistoryTintUsesSampleValueThresholdColorWhenPresent() {
+        let entity = DiscoveredEntity(
+            id: "sensor.office_temperature",
+            name: "Office temperature",
+            state: "21",
+            unit: "°C",
+            areaID: nil,
+            deviceID: nil
+        )
+        let configuration = MenuBarItemConfiguration(
+            entityID: entity.id,
+            thresholds: ValueThresholds(
+                steps: [
+                    ThresholdStep(value: 18, color: PearchHAAccentColor(red: 0.12, green: 0.72, blue: 0.83, alpha: 1)),
+                    ThresholdStep(value: 25, color: ValueThresholds.warningColor)
+                ],
+                baseColor: ValueThresholds.okColor
+            )
+        )
+
+        XCTAssertEqual(
+            PearchHAHistoryTint.numericAccent(for: 27, entity: entity, configuration: configuration),
+            ValueThresholds.warningColor
+        )
+    }
+
+    func testHistoryTintUsesStateThresholdColorWhenPresent() {
+        let entity = DiscoveredEntity(
+            id: "binary_sensor.window",
+            name: "Window",
+            state: "off",
+            unit: nil,
+            areaID: nil,
+            deviceID: nil
+        )
+        let configuration = MenuBarItemConfiguration(
+            entityID: entity.id,
+            stateThresholds: StateThresholds(
+                rules: [
+                    StateThresholdRule(match: "off", color: ValueThresholds.warningColor)
+                ],
+                baseColor: ValueThresholds.okColor
+            )
+        )
+
+        XCTAssertEqual(
+            PearchHAHistoryTint.stateAccent(for: "off", entity: entity, configuration: configuration),
+            ValueThresholds.warningColor
+        )
     }
 
     func test_t_panel_display_unit_switch_reseeds_default_temperature_thresholds() async {
@@ -9939,6 +10145,23 @@ final class PearchHAUITests: XCTestCase {
             model.snapshot.menuBarDisplayConfiguration.itemConfiguration(for: "sensor.office_temperature").thresholds,
             customThresholds
         )
+    }
+
+    func test_t_panel_menu_bar_display_changes_request_immediate_status_refresh() async {
+        var refreshForces: [Bool] = []
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            snapshotSink: { _, force in
+                refreshForces.append(force)
+            }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        XCTAssertTrue(model.setMenuBarEntity("sensor.office_temperature", isVisible: true))
+        XCTAssertTrue(model.setMenuBarShowsUnit("sensor.office_temperature", showsUnit: false))
+
+        XCTAssertEqual(refreshForces.suffix(2), [true, true])
     }
 
     func test_t_average_links_apply_symmetrically_to_family_members() async {

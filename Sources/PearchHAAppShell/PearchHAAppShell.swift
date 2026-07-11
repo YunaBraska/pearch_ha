@@ -650,6 +650,15 @@ public struct PearchHAAuthorizedHomeAssistantGateway: Sendable {
     }
 }
 
+private struct PearchHAStatusItemRefreshSignature: Equatable {
+    let phase: PearchHAPanelPhase
+    let hasStoredSessionForSpinner: Bool
+    let hasPrimaryURLForSpinner: Bool
+    let valuesAreStale: Bool
+    let availableRooms: [Room]
+    let displayConfiguration: MenuBarDisplayConfiguration
+}
+
 private struct PearchHAAuthorizedInput: Sendable {
     let input: HAConnectionInput
     let session: PearchHAAuthSession?
@@ -1086,8 +1095,10 @@ public final class PearchHAASWebAuthenticationSessionPresenter: NSObject, Pearch
 public final class PearchHAApplication: NSObject, NSApplicationDelegate {
     private var statusItems: [PearchHAStatusItemEntry] = []
     private var pendingStatusItemSnapshot: PearchHAPanelSnapshot?
+    private var pendingStatusItemRefreshSignature: PearchHAStatusItemRefreshSignature?
     private var statusItemRefreshTask: Task<Void, Never>?
     private var lastStatusItemRefreshAt: Date?
+    private var lastRenderedStatusItemRefreshSignature: PearchHAStatusItemRefreshSignature?
     private var panel: NSPanel?
     private var settingsWindow: NSWindow?
     private var panelInactivityTask: Task<Void, Never>?
@@ -1329,8 +1340,8 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
                 self?.persist(customActionConfiguration: customActions) ?? .failed("configuration store unavailable")
             },
             protectedActionValueStore: protectedActionValueStore,
-            snapshotSink: { [weak self] snapshot in
-                self?.scheduleStatusItemRefresh(from: snapshot)
+            snapshotSink: { [weak self] snapshot, force in
+                self?.scheduleStatusItemRefresh(from: snapshot, force: force)
                 self?.scheduleDisplayConfigurationRepairIfNeeded(after: snapshot)
             },
             signOutHandler: { [weak self] in
@@ -1352,6 +1363,9 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
             }
         )
         if let panel = panel as? PearchHAStatusPanel {
+            panel.onVisibilityChange = { [weak model] visible in
+                model?.setPanelActive(visible)
+            }
             panel.onFocusChange = { [weak self, weak panel] focused in
                 guard let self else {
                     return
@@ -2090,6 +2104,40 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         return panel
     }
 
+    private func makePanelContentController(model: PearchHAPanelModel) -> NSViewController {
+        let hostingController = PearchHAFirstMouseHostingController(
+            rootView: PearchHAPanelView(
+                model: model,
+                onOpenSettings: { [weak self] in
+                    self?.openSettingsWindow()
+                },
+                onOpenEntitySettings: { [weak self] entityID in
+                    self?.openSettingsWindow(
+                        initialTab: .entities,
+                        initiallyExpandedEntityIDs: [entityID]
+                    )
+                }
+            )
+        )
+        hostingController.view.wantsLayer = true
+        hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
+        return hostingController
+    }
+
+    private func ensurePanelSurfaceLoaded() {
+        guard let panel, panel.contentViewController == nil, let panelModel else {
+            return
+        }
+        panel.contentViewController = makePanelContentController(model: panelModel)
+    }
+
+    private func suspendPanelSurfaceIfHidden() {
+        guard let panel, !panel.isVisible else {
+            return
+        }
+        panel.contentViewController = nil
+    }
+
     /// Builds the resizable Settings window hosting the SwiftUI settings tree.
     ///
     /// - Parameters:
@@ -2147,6 +2195,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         // not overlap.
         panel?.orderOut(nil)
         panelModel.setPanelActive(false)
+        suspendPanelSurfaceIfHidden()
         let window = settingsWindow ?? Self.makeSettingsWindow(
             model: panelModel,
             initialTab: initialTab,
@@ -2279,6 +2328,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
             return
         }
 
+        ensurePanelSurfaceLoaded()
         position(panel: panel, relativeTo: sender)
         cancelPanelInactivityClose()
         panel.makeKeyAndOrderFront(sender)
@@ -2306,7 +2356,9 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         cancelPanelInactivityClose()
         cancelSettingsWindowInactivityClose()
         pendingStatusItemSnapshot = nil
+        pendingStatusItemRefreshSignature = nil
         lastStatusItemRefreshAt = nil
+        lastRenderedStatusItemRefreshSignature = nil
         autoConnectTask?.cancel()
         autoConnectTask = nil
         panelModel?.cancelInFlightAction()
@@ -2383,7 +2435,13 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         from snapshot: PearchHAPanelSnapshot,
         force: Bool = false
     ) {
+        let signature = statusItemRefreshSignature(for: snapshot)
+        if !force,
+           signature == pendingStatusItemRefreshSignature || signature == lastRenderedStatusItemRefreshSignature {
+            return
+        }
         pendingStatusItemSnapshot = snapshot
+        pendingStatusItemRefreshSignature = signature
         let interval = displayPreferences.menuBarRefreshInterval.timeInterval
         let now = Date()
         let lastRefreshAt = lastStatusItemRefreshAt ?? .distantPast
@@ -2420,9 +2478,23 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         guard let snapshot = pendingStatusItemSnapshot else {
             return
         }
+        let signature = pendingStatusItemRefreshSignature ?? statusItemRefreshSignature(for: snapshot)
         pendingStatusItemSnapshot = nil
+        pendingStatusItemRefreshSignature = nil
         lastStatusItemRefreshAt = Date()
+        lastRenderedStatusItemRefreshSignature = signature
         updateStatusItems(from: snapshot)
+    }
+
+    private func statusItemRefreshSignature(for snapshot: PearchHAPanelSnapshot) -> PearchHAStatusItemRefreshSignature {
+        PearchHAStatusItemRefreshSignature(
+            phase: snapshot.phase,
+            hasStoredSessionForSpinner: snapshot.connectionForm.usesStoredAuthSession,
+            hasPrimaryURLForSpinner: snapshot.connectionForm.primaryURL() != nil,
+            valuesAreStale: snapshot.valuesAreStale,
+            availableRooms: snapshot.availableRooms,
+            displayConfiguration: snapshot.menuBarDisplayConfiguration
+        )
     }
 
     /// Reconciles the live menu-bar status items against the presenter output:
