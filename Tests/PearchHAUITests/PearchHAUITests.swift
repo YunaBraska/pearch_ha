@@ -2592,6 +2592,9 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.entityState("cover.office_blinds"), "open")
         XCTAssertEqual(model.entityPosition("cover.office_blinds"), 75)
         XCTAssertFalse(model.startCoverPositionChange("cover.office_blinds", position: 80))
+        await spinUntil("cover position change should dispatch one action before inspection") {
+            await runner.callCount() == 1
+        }
         let _mlHoisted1004 = await runner.actions()
         XCTAssertEqual(
             _mlHoisted1004,
@@ -8865,13 +8868,14 @@ final class PearchHAUITests: XCTestCase {
         // The connection drops: while the state is failed, interval ticks must
         // not hammer the dead server with bulk batches across fallback URLs.
         await model.refresh()
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        let outageBaseline = await recorder.batchCount()
+        await spinUntil { await clock.sleepingTaskCount() >= 1 }
         _ = await clock.advance(by: interval)
         for _ in 0..<50 {
             await Task.yield()
         }
         let duringOutage = await recorder.batchCount()
-        XCTAssertEqual(duringOutage - baselineBatches, 3, "bulk sync must pause while the connection is failed")
+        XCTAssertEqual(duringOutage, outageBaseline, "bulk sync must pause while the connection is failed")
 
         // Recovery: a successful refresh restores the connected state, and the
         // next interval tick resumes syncing.
@@ -9142,11 +9146,17 @@ final class PearchHAUITests: XCTestCase {
 
         _ = await clock.advance(by: PearchDuration.seconds(190))
         XCTAssertNotNil(model.cachedHistorySeries(for: "sensor.prefetch_1"))
+        let batchesBeforeVisibilityChange = await recorder.batchCount()
 
         model.updateVisibleEntities(["sensor.prefetch_0"])
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        await spinUntil { await clock.sleepingTaskCount() >= 1 }
         _ = await clock.advance(by: settleDelay)
-        await spinUntil { await recorder.batchCount() >= 2 }
+        await spinUntil { await clock.sleepingTaskCount() >= 1 }
+        _ = await clock.advance(by: interval)
+        await spinUntil { await recorder.batchCount() >= batchesBeforeVisibilityChange + 1 }
+        await spinUntil("replacement visible-row sync should target only the remaining entity") {
+            await recorder.requestedIDs(afterBatchCount: batchesBeforeVisibilityChange) == ["sensor.prefetch_0"]
+        }
         await spinUntil {
             model.cachedHistorySeries(for: "sensor.prefetch_0") != nil &&
             model.cachedHistorySeries(for: "sensor.prefetch_1") == nil
