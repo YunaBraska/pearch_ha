@@ -266,7 +266,8 @@ final class PerchHAPackagingTests: XCTestCase {
 
         // CI delegates to the one shared check entrypoint on a full Xcode
         // toolchain, and fails if the checks dirty the working tree.
-        XCTAssertTrue(workflow.contains("maxim-lobanov/setup-xcode@v1"))
+        XCTAssertTrue(workflow.contains("actions/checkout@v7.0.0"))
+        XCTAssertTrue(workflow.contains("maxim-lobanov/setup-xcode@v1.7.0"))
         XCTAssertTrue(workflow.contains("xcode-version: latest-stable"))
         XCTAssertTrue(workflow.contains("group: ci-${{ github.event.pull_request.head.ref || github.ref_name }}"))
         XCTAssertTrue(workflow.contains("swift run perchha-xcode-doctor --json --strict"))
@@ -805,10 +806,12 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertTrue(workflow.contains("--verify-release-manifest build/perchha-release-manifest.json"))
         XCTAssertTrue(workflow.contains("lipo -info"))
         XCTAssertTrue(workflow.contains("codesign --verify --deep"))
-        XCTAssertTrue(workflow.contains("actions/upload-artifact@v4"))
+        XCTAssertTrue(workflow.contains("actions/checkout@v7.0.0"))
+        XCTAssertTrue(workflow.contains("maxim-lobanov/setup-xcode@v1.7.0"))
+        XCTAssertTrue(workflow.contains("actions/upload-artifact@v7.0.1"))
         XCTAssertTrue(workflow.contains("RELEASE_TOKEN"))
         // Publishing and the optional Homebrew tap update.
-        XCTAssertTrue(workflow.contains("softprops/action-gh-release@v2"))
+        XCTAssertTrue(workflow.contains("softprops/action-gh-release@v3.0.1"))
         XCTAssertTrue(workflow.contains("RELEASE_TOKEN"))
         XCTAssertFalse(workflow.contains("github.token"))
         XCTAssertTrue(workflow.contains("Casks/perchha.rb"))

@@ -31,12 +31,12 @@ jobs:
 
     steps:
       - name: "📥 Checkout"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.0
         with:
           fetch-depth: 0
 
       - name: "🛠️ Select Xcode"
-        uses: maxim-lobanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@v1.7.0
         with:
           xcode-version: latest-stable
 
@@ -224,7 +224,7 @@ jobs:
           echo "sha=${sha}" >> "$GITHUB_OUTPUT"
 
       - name: "🗃️ Upload release evidence"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: perchha-release-${{ steps.plan.outputs.artifact_suffix }}
           path: |
@@ -237,7 +237,7 @@ jobs:
 
       - name: "🚀 Create GitHub release"
         if: ${{ steps.plan.outputs.publish == 'true' }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.1
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         with:
@@ -256,7 +256,7 @@ jobs:
 
       - name: "🍺 Checkout Homebrew tap"
         if: ${{ steps.plan.outputs.publish == 'true' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.0
         with:
           repository: YunaBraska/homebrew-tap
           token: ${{ env.RELEASE_TOKEN }}
