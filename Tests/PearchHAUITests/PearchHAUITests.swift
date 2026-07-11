@@ -2369,6 +2369,9 @@ final class PearchHAUITests: XCTestCase {
 
         XCTAssertEqual(model.entityState("switch.office_lamp"), "on")
         XCTAssertFalse(model.startEntityControlToggle("switch.office_lamp", isOn: false))
+        await spinUntil("built-in switch toggle should dispatch exactly one action") {
+            await runner.callCount() == 1
+        }
         let _hoisted21 = await runner.callCount()
         XCTAssertEqual(_hoisted21, 1)
         let _mlHoisted1001 = await runner.actions()
