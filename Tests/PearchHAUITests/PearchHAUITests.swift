@@ -4471,7 +4471,10 @@ final class PearchHAUITests: XCTestCase {
         await thirdGate.open()
         await staleModel.connect()
         staleModel.startRefresh()
-        await spinUntil { staleModel.snapshot.connectionState == .reconnecting(attempt: 1) }
+        await spinUntil {
+            staleModel.snapshot.connectionState == .reconnecting(attempt: 1)
+                && staleModel.snapshot.valuesAreStale
+        }
 
         let entity = staleModel.snapshot.rooms.first?.entities.first
         XCTAssertEqual(
