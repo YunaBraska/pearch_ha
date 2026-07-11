@@ -2038,6 +2038,25 @@ final class PerchHAUITests: XCTestCase {
         )
     }
 
+    func testHistoryContentSummaryUsesTimeWeightedAverageForIrregularSamples() {
+        let summary = PerchHAHistoryContentSummary(
+            series: HistorySeries(
+                entityID: "sensor.office_temperature",
+                range: .day,
+                samples: [
+                    HistorySample(timestamp: Date(timeIntervalSince1970: 0), state: "26", numericValue: 26),
+                    HistorySample(timestamp: Date(timeIntervalSince1970: 60), state: "27", numericValue: 27),
+                    HistorySample(timestamp: Date(timeIntervalSince1970: 3_660), state: "27", numericValue: 27)
+                ]
+            )
+        )
+
+        XCTAssertEqual(
+            summary,
+            .statistics(PerchHAHistoryStatistics(current: 27, minimum: 26, average: 26.991803278688526, maximum: 27))
+        )
+    }
+
     func testHistoryBodyPresentationUsesSkeletonForLoadingState() {
         XCTAssertEqual(
             PerchHAHistoryBodyPresentation(

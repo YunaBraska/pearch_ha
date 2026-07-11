@@ -27,20 +27,20 @@ jobs:
   build-and-release:
     runs-on: macos-latest
     env:
-      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
 
     steps:
-      - name: Checkout
+      - name: "📥 Checkout"
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Select latest stable Xcode
+      - name: "🛠️ Select Xcode"
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
 
-      - name: Toolchain versions
+      - name: "🔎 Toolchain versions"
         shell: bash
         run: |
           set -euo pipefail
@@ -48,13 +48,13 @@ jobs:
           xcrun --sdk macosx --show-sdk-version
           swift --version
 
-      - name: Verify native Xcode setup
+      - name: "🩺 Verify Xcode setup"
         run: swift run perchha-xcode-doctor --json --strict
 
-      - name: List XCTest cases
+      - name: "📋 List XCTest cases"
         run: swift test --disable-swift-testing --enable-xctest list
 
-      - name: Plan release
+      - name: "🧭 Plan release"
         id: plan
         shell: bash
         env:
@@ -108,10 +108,36 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "artifact_suffix=${artifact_suffix}" >> "$GITHUB_OUTPUT"
 
-      - name: Checks and tests
+      - name: "🔐 Verify release token"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${RELEASE_TOKEN:-}" ]]; then
+            echo "RELEASE_TOKEN is required for this release workflow." >&2
+            exit 1
+          fi
+
+          tap_remote="https://x-access-token:${RELEASE_TOKEN}@github.com/YunaBraska/homebrew-tap.git"
+          git ls-remote "${tap_remote}" HEAD >/dev/null
+
+          probe_dir="$(mktemp -d)"
+          trap 'rm -rf "${probe_dir}"' EXIT
+
+          git -C "${probe_dir}" init -q
+          git -C "${probe_dir}" config user.name "github-actions[bot]"
+          git -C "${probe_dir}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf 'release-token probe\n' > "${probe_dir}/README.md"
+          git -C "${probe_dir}" add README.md
+          git -C "${probe_dir}" commit -q -m "release-token probe"
+
+          probe_ref="refs/heads/_release-token-probe-${GITHUB_RUN_ID}"
+          git -C "${probe_dir}" push --dry-run "${tap_remote}" HEAD:"${probe_ref}" >/dev/null
+
+      - name: "🧪 Checks and tests"
         run: sh scripts/check.sh
 
-      - name: Verify clean working tree
+      - name: "🧹 Verify clean tree"
         shell: bash
         run: |
           set -euo pipefail
@@ -121,7 +147,7 @@ jobs:
             exit 1
           fi
 
-      - name: Build universal release binary
+      - name: "🏗️ Build universal binary"
         shell: bash
         run: |
           set -euo pipefail
@@ -135,7 +161,7 @@ jobs:
             .build-release-x86_64/x86_64-apple-macosx/release/PerchHA
           lipo -info build/universal/PerchHA
 
-      - name: Package app bundle
+      - name: "📦 Package app bundle"
         shell: bash
         run: |
           set -euo pipefail
@@ -158,7 +184,7 @@ jobs:
           swift run perchha-package-app \
             --verify-release-manifest build/perchha-release-manifest.json
 
-      - name: Verify bundle metadata
+      - name: "🧾 Verify bundle metadata"
         shell: bash
         run: |
           set -euo pipefail
@@ -168,7 +194,7 @@ jobs:
           [[ "${v}" == "${{ steps.plan.outputs.tag }}" ]]
           [[ "${b}" == "${{ steps.plan.outputs.tag }}" ]]
 
-      - name: Verify universal binary
+      - name: "🧬 Verify universal binary"
         shell: bash
         run: |
           set -euo pipefail
@@ -177,10 +203,10 @@ jobs:
           lipo -info "${bin}" | grep -q "arm64"
           lipo -info "${bin}" | grep -q "x86_64"
 
-      - name: Verify code signature
+      - name: "🪪 Verify code signature"
         run: codesign --verify --deep --verbose=2 build/PerchHA.app
 
-      - name: Zip app bundle
+      - name: "🗜️ Zip app bundle"
         shell: bash
         run: |
           set -euo pipefail
@@ -188,7 +214,7 @@ jobs:
           zip -r --symlinks "PerchHA-${{ steps.plan.outputs.tag }}.zip" PerchHA.app
           cp PerchHA.dmg "PerchHA-${{ steps.plan.outputs.tag }}.dmg"
 
-      - name: Compute SHA256 (for Homebrew)
+      - name: "🧮 Compute SHA256"
         id: sha
         shell: bash
         run: |
@@ -197,7 +223,7 @@ jobs:
           sha="$(shasum -a 256 "${zip}" | awk '{print $1}')"
           echo "sha=${sha}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload release evidence artifact
+      - name: "🗃️ Upload release evidence"
         uses: actions/upload-artifact@v4
         with:
           name: perchha-release-${{ steps.plan.outputs.artifact_suffix }}
@@ -209,11 +235,11 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Create GitHub Release
+      - name: "🚀 Create GitHub release"
         if: ${{ steps.plan.outputs.publish == 'true' }}
         uses: softprops/action-gh-release@v2
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         with:
           tag_name: ${{ steps.plan.outputs.tag }}
           name: PerchHA ${{ steps.plan.outputs.tag }}
@@ -228,16 +254,16 @@ jobs:
           draft: false
           prerelease: false
 
-      - name: Checkout Homebrew tap
-        if: ${{ steps.plan.outputs.publish == 'true' && env.HOMEBREW_TAP_TOKEN != '' }}
+      - name: "🍺 Checkout Homebrew tap"
+        if: ${{ steps.plan.outputs.publish == 'true' }}
         uses: actions/checkout@v4
         with:
           repository: YunaBraska/homebrew-tap
-          token: ${{ env.HOMEBREW_TAP_TOKEN }}
+          token: ${{ env.RELEASE_TOKEN }}
           path: homebrew-tap
 
-      - name: Update Homebrew cask
-        if: ${{ steps.plan.outputs.publish == 'true' && env.HOMEBREW_TAP_TOKEN != '' }}
+      - name: "🍺 Update Homebrew cask"
+        if: ${{ steps.plan.outputs.publish == 'true' }}
         shell: bash
         run: |
           set -euo pipefail

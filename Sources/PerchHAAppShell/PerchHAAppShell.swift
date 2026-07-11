@@ -13,6 +13,7 @@ import SwiftUI
 private enum AppShellLayout {
     static let panelContentSize = NSSize(width: 384, height: 468)
     static let settingsMinContentSize = NSSize(width: 660, height: 560)
+    static let unfocusedSurfaceCloseInterval: TimeInterval = 300
 }
 
 private final class PerchHAFirstMouseHostingView<Content: View>: NSHostingView<Content> {
@@ -32,6 +33,7 @@ public final class PerchHAStatusPanel: NSPanel {
     /// app shell's open-settings path. Set by the owning ``PerchHAApplication``.
     public var onOpenSettings: (() -> Void)?
     public var onScrollWheelEvent: (() -> Void)?
+    public var onFocusChange: ((Bool) -> Void)?
 
     /// Creates a status panel with the menu-bar drop-down style mask used by the
     /// app shell. Exposed so the interaction behavior (Escape to close, Cmd+, to
@@ -93,6 +95,16 @@ public final class PerchHAStatusPanel: NSPanel {
     public override func makeKeyAndOrderFront(_ sender: Any?) {
         super.makeKeyAndOrderFront(sender)
         reportVisibilityIfChanged()
+    }
+
+    public override func becomeKey() {
+        super.becomeKey()
+        onFocusChange?(true)
+    }
+
+    public override func resignKey() {
+        super.resignKey()
+        onFocusChange?(false)
     }
 
     public override func scrollWheel(with event: NSEvent) {
@@ -181,6 +193,20 @@ public final class PerchHAStatusPanel: NSPanel {
             }
         }
         return super.performKeyEquivalent(with: event)
+    }
+}
+
+private final class PerchHASettingsWindow: NSWindow {
+    var onFocusChange: ((Bool) -> Void)?
+
+    override func becomeKey() {
+        super.becomeKey()
+        onFocusChange?(true)
+    }
+
+    override func resignKey() {
+        super.resignKey()
+        onFocusChange?(false)
     }
 }
 
@@ -1064,6 +1090,8 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     private var lastStatusItemRefreshAt: Date?
     private var panel: NSPanel?
     private var settingsWindow: NSWindow?
+    private var panelInactivityTask: Task<Void, Never>?
+    private var settingsWindowInactivityTask: Task<Void, Never>?
     /// Restores the accessory activation policy when Settings closes.
     private var settingsWindowCloseObserver: NSObjectProtocol?
     private var panelModel: PerchHAPanelModel?
@@ -1323,6 +1351,18 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
                 )
             }
         )
+        if let panel = panel as? PerchHAStatusPanel {
+            panel.onFocusChange = { [weak self, weak panel] focused in
+                guard let self else {
+                    return
+                }
+                if focused {
+                    self.cancelPanelInactivityClose()
+                } else if let panel, panel.isVisible {
+                    self.schedulePanelInactivityClose(for: panel)
+                }
+            }
+        }
         scheduleStatusItemRefresh(from: model.snapshot, force: true)
         autoConnectTask = startAutoConnect(form: rememberedForm, model: model)
     }
@@ -2068,7 +2108,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         launchAtLoginProvider: @escaping () -> Bool = { false },
         launchAtLoginSink: @escaping (Bool) -> Bool = { _ in false }
     ) -> NSWindow {
-        let window = NSWindow(
+        let window = PerchHASettingsWindow(
             contentRect: NSRect(origin: .zero, size: AppShellLayout.settingsMinContentSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
@@ -2146,6 +2186,18 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             )
         }
         settingsWindow = window
+        if let window = window as? PerchHASettingsWindow {
+            window.onFocusChange = { [weak self, weak window] focused in
+                guard let self else {
+                    return
+                }
+                if focused {
+                    self.cancelSettingsWindowInactivityClose()
+                } else if let window, window.isVisible {
+                    self.scheduleSettingsWindowInactivityClose(for: window)
+                }
+            }
+        }
         if settingsWindowCloseObserver == nil {
             settingsWindowCloseObserver = NotificationCenter.default.addObserver(
                 forName: NSWindow.willCloseNotification,
@@ -2158,6 +2210,7 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
                     guard let self else {
                         return
                     }
+                    self.cancelSettingsWindowInactivityClose()
                     self.settingsWindow?.contentViewController = nil
                     self.settingsWindow = nil
                     if let observer = self.settingsWindowCloseObserver {
@@ -2220,12 +2273,14 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
         }
         panelModel?.dismissHistoryPopover()
         if panel.isVisible {
+            cancelPanelInactivityClose()
             panel.orderOut(sender)
             panelModel?.setPanelActive(false)
             return
         }
 
         position(panel: panel, relativeTo: sender)
+        cancelPanelInactivityClose()
         panel.makeKeyAndOrderFront(sender)
         panelModel?.setPanelActive(true)
         NSApp.activate(ignoringOtherApps: true)
@@ -2248,6 +2303,8 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
     private func releaseShell() {
         statusItemRefreshTask?.cancel()
         statusItemRefreshTask = nil
+        cancelPanelInactivityClose()
+        cancelSettingsWindowInactivityClose()
         pendingStatusItemSnapshot = nil
         lastStatusItemRefreshAt = nil
         autoConnectTask?.cancel()
@@ -2270,6 +2327,56 @@ public final class PerchHAApplication: NSObject, NSApplicationDelegate {
             NSStatusBar.system.removeStatusItem(entry.item)
         }
         statusItems = []
+    }
+
+    private func schedulePanelInactivityClose(for panel: NSPanel) {
+        cancelPanelInactivityClose()
+        panelInactivityTask = Task { @MainActor [weak self, weak panel] in
+            let duration = UInt64((AppShellLayout.unfocusedSurfaceCloseInterval * 1_000_000_000).rounded())
+            if duration > 0 {
+                try? await Task.sleep(nanoseconds: duration)
+            }
+            guard let self,
+                  let panel,
+                  panel.isVisible,
+                  !panel.isKeyWindow
+            else {
+                return
+            }
+            self.panelModel?.dismissHistoryPopover()
+            self.panelModel?.setPanelActive(false)
+            panel.orderOut(nil)
+            self.panelInactivityTask = nil
+        }
+    }
+
+    private func cancelPanelInactivityClose() {
+        panelInactivityTask?.cancel()
+        panelInactivityTask = nil
+    }
+
+    private func scheduleSettingsWindowInactivityClose(for window: NSWindow) {
+        cancelSettingsWindowInactivityClose()
+        settingsWindowInactivityTask = Task { @MainActor [weak self, weak window] in
+            let duration = UInt64((AppShellLayout.unfocusedSurfaceCloseInterval * 1_000_000_000).rounded())
+            if duration > 0 {
+                try? await Task.sleep(nanoseconds: duration)
+            }
+            guard let self,
+                  let window,
+                  window.isVisible,
+                  !window.isKeyWindow
+            else {
+                return
+            }
+            window.performClose(nil)
+            self.settingsWindowInactivityTask = nil
+        }
+    }
+
+    private func cancelSettingsWindowInactivityClose() {
+        settingsWindowInactivityTask?.cancel()
+        settingsWindowInactivityTask = nil
     }
 
     private func scheduleStatusItemRefresh(

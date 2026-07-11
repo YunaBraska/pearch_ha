@@ -63,6 +63,11 @@ public struct PerchHASettingsView: View {
     /// The single entity whose inspector is open in the Entities tab, or `nil`
     /// when every row is collapsed. Only one inspector is open at a time.
     @State private var inspectedEntityID: EntityID?
+    /// A one-shot scroll target consumed when Settings was opened for a
+    /// specific entity from outside the Entities tab. Once revealed, the list
+    /// stays under the user's control instead of snapping back on later view
+    /// updates or manual scrolling.
+    @State private var pendingRevealEntityID: EntityID?
     /// Room ids (``RoomID/rawValue``) whose entity rows are collapsed in the
     /// Entities tab. Rooms default to expanded, so a room is hidden only when it
     /// appears here. A live search or an open inspector force the affected room
@@ -118,7 +123,9 @@ public struct PerchHASettingsView: View {
         _selectedTab = State(initialValue: initialTab)
         // Only one entity inspector is open at a time; seed it from the first
         // requested expansion (used by snapshot/test render paths).
-        _inspectedEntityID = State(initialValue: initiallyExpandedEntityIDs.first)
+        let initiallyInspectedEntityID = initiallyExpandedEntityIDs.first
+        _inspectedEntityID = State(initialValue: initiallyInspectedEntityID)
+        _pendingRevealEntityID = State(initialValue: initiallyInspectedEntityID)
         _displayPreferences = State(initialValue: displayPreferencesProvider())
         _launchAtLogin = State(initialValue: launchAtLoginProvider())
     }
@@ -145,10 +152,6 @@ public struct PerchHASettingsView: View {
 
     private var diagnosticsEvents: [PerchHADiagnosticEvent] {
         viewState.diagnosticEvents
-    }
-
-    private var diagnosticsReferenceInstant: PerchInstant {
-        viewState.diagnosticsReferenceInstant
     }
 
     public var body: some View {
@@ -178,6 +181,12 @@ public struct PerchHASettingsView: View {
             if accessibility.motionPolicy == .reduced {
                 transaction.animation = nil
             }
+        }
+        .onAppear {
+            viewState.setActiveTab(selectedTab)
+        }
+        .onChange(of: selectedTab) { tab in
+            viewState.setActiveTab(tab)
         }
         .onDisappear {
             flushPendingDisplayPreferencesSave()
@@ -1525,10 +1534,7 @@ public struct PerchHASettingsView: View {
                 settingsContent
             }
             .onAppear {
-                scheduleInspectedEntityReveal(using: scrollProxy)
-            }
-            .onChange(of: inspectedEntityID) { _ in
-                scheduleInspectedEntityReveal(using: scrollProxy)
+                schedulePendingReveal(using: scrollProxy)
             }
         }
     }
@@ -1877,7 +1883,8 @@ public struct PerchHASettingsView: View {
     ) -> some View {
         let palette = PerchHATheme.Dashboard.palette(colorScheme)
         let entity = selectable.entity
-        let presentation = viewState.presentation(for: entity, roomName: roomName)
+        let rowCaption = PerchHAEntityMetadataPresentation.rowCaption(for: entity)
+        let hasAverageLinks = viewState.hasAverageLinks(for: entity.id)
         let isExpanded = inspectedEntityID == entity.id
         let isPromoted = snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
         return VStack(alignment: .leading, spacing: 8) {
@@ -1894,13 +1901,13 @@ public struct PerchHASettingsView: View {
                     Text(entity.name)
                         .foregroundStyle(palette.textPrimary)
                         .lineLimit(1)
-                    Text(presentation.metadata.rowCaption)
+                    Text(rowCaption)
                         .font(PerchHATypography.caption().weight(.regular))
                         .foregroundStyle(palette.textTertiary)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
-                if presentation.hasAverageLinks {
+                if hasAverageLinks {
                     averageLinkedPill
                 }
                 if isPromoted {
@@ -1993,20 +2000,21 @@ public struct PerchHASettingsView: View {
         inspectedEntityID = (inspectedEntityID == id) ? nil : id
     }
 
-    private func revealInspectedEntity(using scrollProxy: ScrollViewProxy) {
-        guard let inspectedEntityID else {
+    private func revealPendingEntity(using scrollProxy: ScrollViewProxy) {
+        guard let pendingRevealEntityID else {
             return
         }
-        scrollProxy.scrollTo(inspectedEntityID.rawValue, anchor: .center)
+        scrollProxy.scrollTo(pendingRevealEntityID.rawValue, anchor: .center)
     }
 
-    private func scheduleInspectedEntityReveal(using scrollProxy: ScrollViewProxy) {
-        guard inspectedEntityID != nil else {
+    private func schedulePendingReveal(using scrollProxy: ScrollViewProxy) {
+        guard pendingRevealEntityID != nil else {
             return
         }
         Task { @MainActor in
             await Task.yield()
-            revealInspectedEntity(using: scrollProxy)
+            revealPendingEntity(using: scrollProxy)
+            pendingRevealEntityID = nil
         }
     }
 
@@ -2021,7 +2029,7 @@ public struct PerchHASettingsView: View {
             entity: entity
         )
         let isPromoted = snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
-        let showsAverageSection = viewState.presentation(for: entity, roomName: roomName).canAverage
+        let showsAverageSection = viewState.canAverageEntity(entity.id)
         return VStack(alignment: .leading, spacing: 0) {
             settingsSection(title: "Identity", systemImage: "info.circle") {
                 entityIdentitySection(metadata.inspectorFields, links: links)

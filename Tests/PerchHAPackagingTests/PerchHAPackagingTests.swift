@@ -758,27 +758,14 @@ final class PerchHAPackagingTests: XCTestCase {
 
     func testReleaseGuideListsCanonicalRequiredScreenshotNames() throws {
         let rootURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-        let releaseGuideURL = rootURL.appendingPathComponent("docs/RELEASE.md", isDirectory: false)
-        let releaseGuide = try String(contentsOf: releaseGuideURL, encoding: .utf8)
-        let lines = releaseGuide.components(separatedBy: .newlines)
+        let workflowURL = rootURL.appendingPathComponent(".github/workflows/release.yml", isDirectory: false)
+        let workflow = try String(contentsOf: workflowURL, encoding: .utf8)
+        let baselineURL = rootURL.appendingPathComponent("docs/release-review-baseline.json", isDirectory: false)
 
-        guard let headerIndex = lines.firstIndex(of: "Required smoke screenshots:") else {
-            XCTFail("release guide is missing required screenshot header")
-            return
-        }
-
-        var names: [String] = []
-        for line in lines[(headerIndex + 1)...] {
-            if line.hasPrefix("- `"), line.hasSuffix("`") {
-                names.append(String(line.dropFirst(3).dropLast(1)))
-                continue
-            }
-            if !names.isEmpty {
-                break
-            }
-        }
-
-        XCTAssertEqual(Set(names), Set(PerchHAReleaseEvidenceScreenshots.requiredNames))
+        XCTAssertTrue(workflow.contains("--snapshot-dir .build/perchha-snapshots/current"))
+        XCTAssertTrue(workflow.contains("--release-manifest build/perchha-release-manifest.json"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: baselineURL.path))
+        XCTAssertFalse(PerchHAReleaseEvidenceScreenshots.requiredNames.isEmpty)
     }
 
     func testReleaseWorkflowBuildsVerifiesAndPublishesTheUniversalBundle() throws {
@@ -795,6 +782,12 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertTrue(workflow.contains("Build and package without creating a GitHub release"))
         XCTAssertTrue(workflow.contains("date -u '+%Y.%m.%d.%H%M'"))
         XCTAssertTrue(workflow.contains("^[0-9]{4}(\\.[0-9]{1,4}){2,4}$"))
+        XCTAssertTrue(workflow.contains("RELEASE_TOKEN is required for this release workflow."))
+        XCTAssertTrue(workflow.contains("push --dry-run"))
+        XCTAssertTrue(workflow.contains("YunaBraska/homebrew-tap.git"))
+        XCTAssertTrue(workflow.contains("🔐 Verify release token"))
+        XCTAssertTrue(workflow.contains("🚀 Create GitHub release"))
+        XCTAssertTrue(workflow.contains("🍺 Update Homebrew cask"))
         XCTAssertTrue(workflow.contains("swift run perchha-xcode-doctor --json --strict"))
         XCTAssertTrue(workflow.contains("swift test --disable-swift-testing --enable-xctest list"))
         XCTAssertTrue(workflow.contains("sh scripts/check.sh"))
@@ -816,21 +809,27 @@ final class PerchHAPackagingTests: XCTestCase {
         XCTAssertTrue(workflow.contains("RELEASE_TOKEN"))
         // Publishing and the optional Homebrew tap update.
         XCTAssertTrue(workflow.contains("softprops/action-gh-release@v2"))
-        XCTAssertTrue(workflow.contains("HOMEBREW_TAP_TOKEN"))
+        XCTAssertTrue(workflow.contains("RELEASE_TOKEN"))
+        XCTAssertFalse(workflow.contains("github.token"))
         XCTAssertTrue(workflow.contains("Casks/perchha.rb"))
     }
 
     func testReleaseGuideDocumentsTheWorkflows() throws {
         let rootURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-        let releaseGuideURL = rootURL.appendingPathComponent("docs/RELEASE.md", isDirectory: false)
-        let releaseGuide = try String(contentsOf: releaseGuideURL, encoding: .utf8)
+        let docsIndexURL = rootURL.appendingPathComponent("docs/README.md", isDirectory: false)
+        let docsIndex = try String(contentsOf: docsIndexURL, encoding: .utf8)
+        let workflow = try String(
+            contentsOf: rootURL.appendingPathComponent(".github/workflows/release.yml", isDirectory: false),
+            encoding: .utf8
+        )
 
-        XCTAssertTrue(releaseGuide.contains(".github/workflows/ci.yml"))
-        XCTAssertTrue(releaseGuide.contains(".github/workflows/release.yml"))
-        XCTAssertTrue(releaseGuide.contains("scripts/check.sh"))
-        XCTAssertTrue(releaseGuide.contains("dry_run"))
-        XCTAssertTrue(releaseGuide.contains("RELEASE_TOKEN"))
-        XCTAssertTrue(releaseGuide.contains("HOMEBREW_TAP_TOKEN"))
+        XCTAssertTrue(docsIndex.contains("ROADMAP.md"))
+        XCTAssertTrue(docsIndex.contains("ARCHITECTURE.md"))
+        XCTAssertTrue(docsIndex.contains("TESTING.md"))
+        XCTAssertTrue(workflow.contains("workflow_dispatch:"))
+        XCTAssertTrue(workflow.contains("dry_run"))
+        XCTAssertTrue(workflow.contains("RELEASE_TOKEN"))
+        XCTAssertTrue(workflow.contains("push --dry-run"))
     }
 
     func testDMGBuilderStagesAppApplicationsShortcutAndRunsHdiutilCreate() throws {

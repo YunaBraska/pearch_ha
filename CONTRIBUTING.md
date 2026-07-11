@@ -23,19 +23,6 @@ swift test --disable-swift-testing --enable-xctest list
 swift test --disable-swift-testing --enable-xctest -Xswiftc -warnings-as-errors --enable-code-coverage
 ```
 
-## Local Home Assistant
-
-Real Home Assistant credentials live in `.env.local`. It is ignored by Git.
-
-Before fixture capture or OAuth verification:
-
-```sh
-swift run hamirror doctor --env .env.local
-swift run hamirror oauth-check --env .env.local
-```
-
-Never commit `.env.local`, private fixtures, generated app bundles, DMGs, or release evidence.
-
 ## Pull requests
 
 1. Branch from `main`.
@@ -63,11 +50,11 @@ Also run these when the touched area needs them:
 
 README is the fast entrypoint. The real contract lives in `docs/`.
 
-- Product behavior: `docs/PRD.md`
 - Build order: `docs/ROADMAP.md`
 - Architecture: `docs/ARCHITECTURE.md`
+- Home Assistant integration: `docs/HA_API.md`
 - Testing and traceability: `docs/TESTING.md`
-- Release process: `docs/RELEASE.md`
+- Decision records: `docs/ADRs.md`
 
 ## Commit style
 

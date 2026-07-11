@@ -1758,6 +1758,7 @@ final class PerchHAClientTests: XCTestCase {
         defer {
             server.stop()
         }
+        try await waitForRESTServerReady(baseURL: server.baseURL)
         let client = HomeAssistantClient()
         let input = HAConnectionInput(
             endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),

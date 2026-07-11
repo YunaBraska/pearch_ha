@@ -1,19 +1,15 @@
 # Architecture - PearchHA
 
-## 1. Stack
+## Stack
 
-- Language: Swift 6 mode where practical, Swift 5.9+ compatibility during bootstrap.
-- UI: SwiftUI views hosted in AppKit.
-- Menu bar: `NSStatusItem` plus custom `NSPanel`.
-- Charts: Swift Charts.
-- Networking: `URLSession`, `URLSessionWebSocketTask`, and standard Foundation APIs.
-- Persistence: Codable JSON for non-secret config; Keychain for secrets.
-- Packaging: SwiftPM-first modules with a thin Xcode app target.
-- Target: macOS 13+ unless implementation proves a higher minimum is required.
+- Swift package as the source of truth.
+- SwiftUI for view code, hosted inside AppKit windows and panels.
+- `NSStatusItem` for menu bar presence.
+- `NSPanel` for the drop-down surface and `NSWindow` for Settings.
+- Foundation networking plus Home Assistant REST and WebSocket calls.
+- JSON config for non-secrets, Keychain for secrets.
 
-No Electron, Tauri, Java runtime, or third-party HTTP client.
-
-## 2. Modules
+## Modules
 
 ```text
 PerchHAApp -> PerchHAUI -> PerchHACore <- PerchHAClient -> PerchHASupport
@@ -21,144 +17,59 @@ PerchHAApp -> PerchHAUI -> PerchHACore <- PerchHAClient -> PerchHASupport
                                  `---- PerchHAPersistence --'
 ```
 
-- `PerchHACore`: domain models, app state, formatting, normalization, ordering, thresholds, and pure behavior.
-- `PerchHAClient`: Home Assistant REST/WebSocket client, auth, reconnection, decoding, service calls, history, and registry discovery.
-- `PerchHASupport`: strict command-line option parsing, rate limiter, jittered scheduler, request coalescer, backoff, clock abstraction, redacted logging.
-- `PerchHAPersistence`: JSON config and Keychain-backed secret storage behind protocols.
-- `PerchHAUI`: SwiftUI panel, settings, gauges, charts, controls, and accessibility labels.
-- `PerchHAApp`: lifecycle, status items, panel positioning, external URL ingress, app commands, and release integration.
-- `PerchHAPackaging`: SwiftPM-driven `.app` bundle metadata, executable layout, OAuth callback URL scheme declaration, LaunchServices verification, code-signature creation/verification, native DMG creation/verification, notarization/stapling command orchestration, and release evidence manifests.
-- `FakeHA`: local test server that mirrors Home Assistant wire behavior from fixtures.
-- `hamirror`: tool that captures and verifies mirrored fixture sets from real Home Assistant.
+- `PerchHACore`: pure formatting, units, thresholds, selection, ordering, and presentation rules.
+- `PerchHAClient`: Home Assistant auth, discovery, history, live updates, and service calls.
+- `PerchHAPersistence`: config store and secret storage.
+- `PerchHAUI`: panel, settings, controls, charts, and local view helpers.
+- `PerchHAApp`: lifecycle, status items, windows, panel placement, and release/update wiring.
+- `PerchHASupport`: clocks, rate limiting, backoff, request coalescing, redaction, and command-line support.
 
-## 3. State model
+## State and flow
 
-`AppStore` is the single source of truth and is isolated to the main actor.
+`PerchHAPanelModel` is the main UI state owner.
 
-It owns:
-
-- `connection`: disconnected, connecting, connected, reconnecting, or failed.
-- `entities`: latest entity states by entity ID.
-- `rooms`: resolved area/device/entity grouping.
-- `config`: selected entities, display order, bar items, actions, thresholds, interval, and theme.
-- `historyCache`: bounded history data keyed by entity and range.
-
-Mutation flow:
+Flow:
 
 ```text
-Home Assistant event or user action
--> PerchHAClient result
--> AppStore mutation
--> immutable UI snapshot
+Home Assistant or user input
+-> client/service result
+-> panel model mutation
+-> immutable snapshot
 -> SwiftUI/AppKit render
 ```
 
-UI does not call Home Assistant directly.
+UI surfaces do not talk to Home Assistant directly.
 
-## 4. Home Assistant data flow
+## Runtime rules
 
-### Initial load
+- Menu bar and history detail always read from cache first.
+- Background sync updates cache asynchronously; UI does not block on it.
+- Live WebSocket updates keep menu bar items fresh even while the panel is closed.
+- Settings is intentionally cheaper than the panel: it works from cached discovery/config data and should not behave like a live dashboard.
+- History caching is bounded by capacity and TTL, not by unbounded growth.
+- Secrets stay in Keychain, never in tracked config, fixtures, or docs.
 
-```text
-connect
--> authenticate
--> fetch config/registry/state
--> resolve rooms
--> render cached snapshot
-```
+## Focus and lifetime
 
-The first implementation path uses documented APIs first: REST `/api/states`, WebSocket `get_states`, `call_service`, and REST history. Mirror support then records less-public but useful WebSocket commands such as `subscribe_entities`, registry display lists, and recorder statistics where the user's HA supports them.
+- The panel is a transient surface. Closing it stops panel-only refresh loops.
+- Settings is a real window, but it should not keep expensive live-update behavior alive on its own.
+- Unfocused transient surfaces are allowed to close themselves after a long idle period to keep the app from lingering forever in the background.
 
-### Live updates
+## Failure boundaries
 
-```text
-WebSocket subscription
--> decode state delta
--> AppStore.apply(delta)
--> panel and bar item update
-```
+The app keeps separate user-facing states for:
 
-Preferred live mechanisms:
+- auth failure
+- unreachable host / TLS failure
+- unsupported HA capability
+- history unavailable
+- service-call failure
+- persistence failure
 
-1. `subscribe_entities` if supported by the mirrored HA version.
-2. `subscribe_events` for `state_changed`.
-3. Jittered REST polling only while WebSocket live updates are unavailable.
+Those failures must stay explicit and testable.
 
-### History
+## What does not belong here
 
-```text
-hover
--> debounce
--> cache lookup
--> history provider
--> chart snapshot
-```
-
-Hour and Day use documented REST history first. Week and Month use recorder statistics when supported. Unsupported history paths fail with an explicit "history unavailable" state, not an empty chart.
-
-### Actions
-
-```text
-button/toggle/slider
--> ActionSpec
--> WebSocket call_service
--> result
--> keep optimistic state or roll back
-```
-
-All built-in controls and custom actions use one service-call path.
-
-Persisted custom actions wrap `ActionSpec` with a stable action ID, attached entity ID, button title, and confirmation flag. Only `ActionSpec` crosses the Home Assistant transport boundary.
-
-## 5. Concurrency
-
-- `AppStore` mutation is main-actor only.
-- Network work runs in async tasks and returns typed results.
-- Long-running WebSocket reads are owned tasks with explicit cancellation.
-- Time-sensitive behavior uses an injected clock.
-- Tests do not rely on fixed sleeps.
-- No shared mutable state outside actors or well-scoped synchronization.
-
-## 6. Failure boundaries
-
-Typed error categories:
-
-- Authentication failed.
-- Host unreachable.
-- TLS rejected.
-- WebSocket protocol error.
-- Unsupported HA command.
-- Service call failed.
-- History unavailable.
-- Fixture drift.
-
-Every category maps to a user-facing message and at least one test.
-
-## 7. Performance design
-
-- No busy loops.
-- No timers while WebSocket is healthy and the panel is closed.
-- Bar item images are cached and redrawn only when style, gauge value, or severity changes.
-- App shell launch and termination release panel, model, status item, and image cache resources under a repeated lifecycle soak.
-- History cache is bounded and TTL-based.
-- Identical in-flight requests are coalesced.
-- REST bursts are rate limited.
-- Reconnects use capped exponential backoff with jitter.
-
-## 8. Persistence
-
-Config path:
-
-```text
-~/Library/Application Support/PerchHA/config.json
-```
-
-Secrets:
-
-- Access tokens.
-- Refresh tokens.
-- Protected custom-action service-data fields backed by opaque references in JSON and resolved from Keychain at execution time.
-
-Secrets live in Keychain and never in JSON config, fixtures, logs, or `.env.local` snapshots. The M11 custom-action slice stores protected service-data as opaque references in JSON, resolves them before `call_service`, and fails explicitly if a referenced secret is missing.
-
-Connection trust exceptions are transient connection-form state in the current local slice. The optional self-signed certificate allowance is off by default, scoped to the current HTTPS Home Assistant hosts, and forwarded to REST, WebSocket, and OAuth token requests.
+- Product promises belong in the UI itself and in tests.
+- Binding technical choices belong in [ADRs.md](ADRs.md).
+- Release procedure belongs in CI and packaging tests, not a separate checklist doc.

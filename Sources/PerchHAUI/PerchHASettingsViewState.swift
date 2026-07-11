@@ -14,12 +14,12 @@ final class PerchHASettingsViewState: ObservableObject {
     @Published private(set) var releaseUpdateState: PerchHAReleaseUpdateState
     @Published private(set) var retryBackoffState: PerchHARetryBackoffState
     @Published private(set) var diagnosticEvents: [PerchHADiagnosticEvent]
-    @Published private(set) var diagnosticsReferenceInstant: PerchInstant
 
     private var cancellables: Set<AnyCancellable> = []
     private weak var model: PerchHAPanelModel?
     private var averageLinkPresenceCache: [EntityID: Bool] = [:]
     private var averageAvailabilityCache: [EntityID: Bool] = [:]
+    private var activeTab: PerchHASettingsView.Tab = .connection
 
     init(model: PerchHAPanelModel) {
         self.model = model
@@ -31,7 +31,6 @@ final class PerchHASettingsViewState: ObservableObject {
         releaseUpdateState = model.releaseUpdateState
         retryBackoffState = model.retryBackoffState
         diagnosticEvents = model.diagnosticEvents
-        diagnosticsReferenceInstant = model.diagnosticsReferenceInstant
 
         model.$snapshot
             .receive(on: RunLoop.main)
@@ -57,25 +56,66 @@ final class PerchHASettingsViewState: ObservableObject {
             .store(in: &cancellables)
         model.$customActionPersistenceFailureDescription
             .receive(on: RunLoop.main)
-            .assign(to: &$customActionPersistenceFailureDescription)
+            .sink { [weak self] failure in
+                guard let self, self.activeTab == .entities else {
+                    return
+                }
+                self.customActionPersistenceFailureDescription = failure
+            }
+            .store(in: &cancellables)
         model.$shellPersistenceFailureDescription
             .receive(on: RunLoop.main)
-            .assign(to: &$shellPersistenceFailureDescription)
+            .sink { [weak self] failure in
+                guard let self, self.activeTab == .entities else {
+                    return
+                }
+                self.shellPersistenceFailureDescription = failure
+            }
+            .store(in: &cancellables)
         model.$oauthSignInState
             .receive(on: RunLoop.main)
-            .assign(to: &$oauthSignInState)
+            .sink { [weak self] state in
+                guard let self, self.activeTab == .connection else {
+                    return
+                }
+                self.oauthSignInState = state
+            }
+            .store(in: &cancellables)
         model.$releaseUpdateState
             .receive(on: RunLoop.main)
-            .assign(to: &$releaseUpdateState)
+            .sink { [weak self] state in
+                guard let self, self.activeTab == .about else {
+                    return
+                }
+                self.releaseUpdateState = state
+            }
+            .store(in: &cancellables)
         model.$retryBackoffState
             .receive(on: RunLoop.main)
-            .assign(to: &$retryBackoffState)
+            .sink { [weak self] state in
+                guard let self, self.activeTab == .diagnostics else {
+                    return
+                }
+                self.retryBackoffState = state
+            }
+            .store(in: &cancellables)
         model.$diagnosticEvents
             .receive(on: RunLoop.main)
-            .assign(to: &$diagnosticEvents)
-        model.$diagnosticsReferenceInstant
-            .receive(on: RunLoop.main)
-            .assign(to: &$diagnosticsReferenceInstant)
+            .sink { [weak self] events in
+                guard let self, self.activeTab == .diagnostics else {
+                    return
+                }
+                self.diagnosticEvents = events
+            }
+            .store(in: &cancellables)
+    }
+
+    func setActiveTab(_ tab: PerchHASettingsView.Tab) {
+        guard activeTab != tab else {
+            return
+        }
+        activeTab = tab
+        syncStateForActiveTab()
     }
 
     func presentation(for entity: DiscoveredEntity, roomName: String) -> PerchHASettingsEntityPresentation {
@@ -86,12 +126,20 @@ final class PerchHASettingsViewState: ObservableObject {
         )
     }
 
+    func hasAverageLinks(for id: EntityID) -> Bool {
+        hasAverageLinksValue(for: id)
+    }
+
+    func canAverageEntity(_ id: EntityID) -> Bool {
+        canAverage(id)
+    }
+
     private func clearDerivedEntityPresentationCaches() {
         averageLinkPresenceCache.removeAll(keepingCapacity: true)
         averageAvailabilityCache.removeAll(keepingCapacity: true)
     }
 
-    private func hasAverageLinks(for id: EntityID) -> Bool {
+    private func hasAverageLinksValue(for id: EntityID) -> Bool {
         if let cached = averageLinkPresenceCache[id] {
             return cached
         }
@@ -109,20 +157,62 @@ final class PerchHASettingsViewState: ObservableObject {
         return resolved
     }
 
+    private func syncStateForActiveTab() {
+        guard let model else {
+            return
+        }
+        let currentSnapshot = model.snapshot
+        if shouldAcceptSnapshotUpdate(from: snapshot, to: currentSnapshot) {
+            snapshot = currentSnapshot
+            snapshotRevision &+= 1
+            if settingsSelectionTree != currentSnapshot.selectionTree {
+                settingsSelectionTree = currentSnapshot.selectionTree
+            }
+        }
+        switch activeTab {
+        case .connection:
+            oauthSignInState = model.oauthSignInState
+        case .entities:
+            settingsSelectionTree = model.settingsSelectionTree
+            customActionPersistenceFailureDescription = model.customActionPersistenceFailureDescription
+            shellPersistenceFailureDescription = model.shellPersistenceFailureDescription
+        case .diagnostics:
+            retryBackoffState = model.retryBackoffState
+            diagnosticEvents = model.diagnosticEvents
+        case .about:
+            releaseUpdateState = model.releaseUpdateState
+        case .general, .appearance, .privacy:
+            break
+        }
+    }
+
     private func shouldAcceptSnapshotUpdate(
         from previous: PerchHAPanelSnapshot,
         to next: PerchHAPanelSnapshot
     ) -> Bool {
-        previous.connectionState != next.connectionState
-            || previous.phase != next.phase
-            || previous.connectionForm != next.connectionForm
-            || previous.canRetry != next.canRetry
-            || previous.selectionConfiguration != next.selectionConfiguration
-            || previous.menuBarDisplayConfiguration != next.menuBarDisplayConfiguration
-            || previous.selectionQuery != next.selectionQuery
-            || previous.isSettingsPresented != next.isSettingsPresented
-            || previous.selectionPersistenceFailureDescription != next.selectionPersistenceFailureDescription
-            || previous.displayPersistenceFailureDescription != next.displayPersistenceFailureDescription
-            || previous.failureDescription != next.failureDescription
+        switch activeTab {
+        case .connection:
+            previous.connectionState != next.connectionState
+                || previous.phase != next.phase
+                || previous.connectionForm != next.connectionForm
+                || previous.canRetry != next.canRetry
+                || previous.failureDescription != next.failureDescription
+        case .entities:
+            previous.selectionConfiguration != next.selectionConfiguration
+                || previous.menuBarDisplayConfiguration != next.menuBarDisplayConfiguration
+                || previous.selectionQuery != next.selectionQuery
+                || previous.selectionPersistenceFailureDescription != next.selectionPersistenceFailureDescription
+                || previous.displayPersistenceFailureDescription != next.displayPersistenceFailureDescription
+                || previous.serviceMetadataFailureDescription != next.serviceMetadataFailureDescription
+        case .diagnostics:
+            previous.connectionState != next.connectionState
+                || previous.phase != next.phase
+                || previous.canRetry != next.canRetry
+                || previous.failureDescription != next.failureDescription
+        case .about:
+            false
+        case .general, .appearance, .privacy:
+            false
+        }
     }
 }

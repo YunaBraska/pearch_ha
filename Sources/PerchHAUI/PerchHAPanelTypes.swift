@@ -567,10 +567,36 @@ public enum PerchHAHistoryContentSummary: Equatable, Sendable {
             PerchHAHistoryStatistics(
                 current: current,
                 minimum: minimum,
-                average: values.reduce(0, +) / Double(values.count),
+                average: Self.weightedAverage(samples),
                 maximum: maximum
             )
         )
+    }
+
+    /// History averages should reflect time, not just sample count. Raw Home
+    /// Assistant day history is often irregular, so a plain arithmetic mean can
+    /// heavily overstate brief spikes. We therefore integrate the polyline over
+    /// time and fall back to a simple mean only when the timestamps collapse.
+    private static func weightedAverage(_ samples: [PerchHAHistoryCursorSample]) -> Double {
+        guard samples.count > 1 else {
+            return samples.first?.value ?? 0
+        }
+
+        var weightedSum = 0.0
+        var totalDuration = 0.0
+        for (current, next) in zip(samples, samples.dropFirst()) {
+            let duration = next.timestamp.timeIntervalSince(current.timestamp)
+            guard duration > 0 else {
+                continue
+            }
+            weightedSum += ((current.value + next.value) / 2.0) * duration
+            totalDuration += duration
+        }
+
+        guard totalDuration > 0 else {
+            return samples.map(\.value).reduce(0, +) / Double(samples.count)
+        }
+        return weightedSum / totalDuration
     }
 }
 

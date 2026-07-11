@@ -69,18 +69,11 @@ struct PerchHAEntityMetadataPresentation: Equatable {
     let inspectorFields: [Field]
 
     init(entity: DiscoveredEntity, roomName: String) {
-        let trimmedUnit = Self.nonEmpty(entity.unit)
-        let trimmedDeviceName = Self.formattedDeviceDisplayName(
-            manufacturer: entity.deviceManufacturer,
-            name: entity.deviceName,
-            model: entity.deviceModel
-        )
+        let trimmedDeviceName = Self.formattedDeviceDisplayName(for: entity)
         let trimmedManufacturer = Self.nonEmpty(entity.deviceManufacturer)
         let trimmedRawDeviceName = Self.nonEmpty(entity.deviceName)
         let trimmedDeviceDomain = Self.nonEmpty(entity.deviceDomain)
-        let rowPrimaryContext = trimmedDeviceName ?? Self.humanizedEntityDomain(entity.id.domain)
-        let rowCaptionParts = Self.uniqueNonEmptyValues([rowPrimaryContext, trimmedUnit])
-        rowCaption = rowCaptionParts.joined(separator: " · ")
+        rowCaption = Self.rowCaption(for: entity)
 
         let identifierParts = [entity.id.rawValue, entity.deviceID?.rawValue].compactMap { $0 }
         rowIdentifier = identifierParts.joined(separator: " · ")
@@ -115,6 +108,12 @@ struct PerchHAEntityMetadataPresentation: Equatable {
             fields.append(Field(label: "Device ID", value: deviceID, usesMonospacedFont: true))
         }
         inspectorFields = fields
+    }
+
+    static func rowCaption(for entity: DiscoveredEntity) -> String {
+        let rowPrimaryContext = formattedDeviceDisplayName(for: entity) ?? humanizedEntityDomain(entity.id.domain)
+        let rowCaptionParts = uniqueNonEmptyValues([rowPrimaryContext, nonEmpty(entity.unit)])
+        return rowCaptionParts.joined(separator: " · ")
     }
 
     private static func nonEmpty(_ value: String?) -> String? {
@@ -162,6 +161,16 @@ struct PerchHAEntityMetadataPresentation: Equatable {
         }
         let filtered = value.lowercased().filter { $0.isLetter || $0.isNumber }
         return filtered.isEmpty ? nil : filtered
+    }
+
+    private static func formattedDeviceDisplayName(
+        for entity: DiscoveredEntity
+    ) -> String? {
+        formattedDeviceDisplayName(
+            manufacturer: entity.deviceManufacturer,
+            name: entity.deviceName,
+            model: entity.deviceModel
+        )
     }
 
     private static func formattedDeviceDisplayName(

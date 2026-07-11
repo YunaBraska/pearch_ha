@@ -3,6 +3,11 @@ name: CI
 on:
   workflow_dispatch:
   pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
 
 concurrency:
   group: ci-${{ github.event.pull_request.head.ref || github.ref_name }}
@@ -14,15 +19,15 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - name: Checkout
+      - name: "📥 Checkout"
         uses: actions/checkout@v4
 
-      - name: Select latest stable Xcode
+      - name: "🛠️ Select Xcode"
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
 
-      - name: Toolchain versions
+      - name: "🔎 Toolchain versions"
         shell: bash
         run: |
           set -euo pipefail
@@ -30,18 +35,18 @@ jobs:
           xcrun --sdk macosx --show-sdk-version
           swift --version
 
-      - name: Verify native Xcode setup
+      - name: "🩺 Verify Xcode setup"
         run: swift run perchha-xcode-doctor --json --strict
 
-      - name: List XCTest cases
+      - name: "📋 List XCTest cases"
         run: swift test --disable-swift-testing --enable-xctest list
 
-      - name: Checks and tests
+      - name: "🧪 Checks and tests"
         run: sh scripts/check.sh
         env:
           PERCHHA_TLS_DEBUG: "1"
 
-      - name: Verify clean working tree
+      - name: "🧹 Verify clean tree"
         shell: bash
         run: |
           set -euo pipefail
