@@ -1,4 +1,4 @@
-# Contributing to PerchHA
+# Contributing to PearchHA
 
 Thanks for helping. Keep changes small, tested, and documented.
 
@@ -10,15 +10,15 @@ cd pearch_ha
 
 swift build -Xswiftc -warnings-as-errors
 swift test -Xswiftc -warnings-as-errors
-swift run perchha-repo-audit
-PERCHHA_SMOKE_SNAPSHOT_DIR=.build/perchha-snapshots swift run perchha-smoke
+swift run pearchha-repo-audit
+PEARCHHA_SMOKE_SNAPSHOT_DIR=.build/pearchha-snapshots swift run pearchha-smoke
 ```
 
 Full native verification needs full Xcode selected:
 
 ```sh
 sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-swift run perchha-xcode-doctor --json --strict
+swift run pearchha-xcode-doctor --json --strict
 swift test --disable-swift-testing --enable-xctest list
 swift test --disable-swift-testing --enable-xctest -Xswiftc -warnings-as-errors --enable-code-coverage
 ```
@@ -36,15 +36,15 @@ swift test --disable-swift-testing --enable-xctest -Xswiftc -warnings-as-errors 
 ```sh
 swift build -Xswiftc -warnings-as-errors
 swift test -Xswiftc -warnings-as-errors
-swift run perchha-repo-audit
+swift run pearchha-repo-audit
 ```
 
 Also run these when the touched area needs them:
 
-- `PERCHHA_SMOKE_SNAPSHOT_DIR=.build/perchha-snapshots swift run perchha-smoke`
+- `PEARCHHA_SMOKE_SNAPSHOT_DIR=.build/pearchha-snapshots swift run pearchha-smoke`
 - `swift run hamirror verify --fixtures Fixtures/public/m2-minimal`
 - `swift build -c release`
-- `swift run perchha-package-app --help`
+- `swift run pearchha-package-app --help`
 
 ## Documentation rule
 

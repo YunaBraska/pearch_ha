@@ -15,7 +15,7 @@
 ## Validation
 - [ ] `swift build -Xswiftc -warnings-as-errors`
 - [ ] `swift test -Xswiftc -warnings-as-errors`
-- [ ] `swift run perchha-repo-audit`
+- [ ] `swift run pearchha-repo-audit`
 - [ ] Relevant smoke / packaging checks were run
 
 ## Docs

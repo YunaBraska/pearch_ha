@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Something in PerchHA does not behave as expected
+about: Something in PearchHA does not behave as expected
 labels: bug
 ---
 
@@ -17,7 +17,7 @@ labels: bug
 
 ## Environment
 - macOS version:
-- PerchHA commit or release:
+- PearchHA commit or release:
 - Home Assistant version:
 - Connection mode: local / Nabu Casa / self-signed / other
 

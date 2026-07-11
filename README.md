@@ -28,20 +28,20 @@ A native macOS menu bar app for Home Assistant.
 With Xcode:
 
 ```sh
-open PerchHA.xcodeproj
+open PearchHA.xcodeproj
 ```
 
 From the command line:
 
 ```sh
-swift build -c release --product PerchHA
-swift run perchha-package-app \
-  --executable .build/release/PerchHA \
-  --output .build/PerchHA.app \
-  --callback-scheme perchha \
+swift build -c release --product PearchHA
+swift run pearchha-package-app \
+  --executable .build/release/PearchHA \
+  --output .build/PearchHA.app \
+  --callback-scheme pearchha \
   --replace \
   --sign-ad-hoc
-open .build/PerchHA.app
+open .build/PearchHA.app
 ```
 
 ## Verify it
@@ -63,9 +63,9 @@ sh scripts/check.sh
 ## Repo layout
 
 ```text
-PerchHA/
+pearch_ha/
 |- Package.swift
-|- PerchHA.xcodeproj
+|- PearchHA.xcodeproj
 |- Sources/
 |- Tests/
 |- Fixtures/

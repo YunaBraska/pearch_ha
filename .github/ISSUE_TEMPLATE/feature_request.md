@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest an improvement for PerchHA
+about: Suggest an improvement for PearchHA
 labels: enhancement
 ---
 

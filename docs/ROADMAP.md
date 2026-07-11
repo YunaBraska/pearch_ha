@@ -19,7 +19,7 @@ This file is now the live backlog. Done work stays out unless it changes a relea
 
 ### 2. Verification hardening
 
-- Raise `PerchHAClient` coverage from the low-90s toward the project target.
+- Raise `PearchHAClient` coverage from the low-90s toward the project target.
 - Keep chasing the Settings entity-view freeze until we have repeatable evidence that the hot loop is gone.
 - Add stronger evidence for long-range history cache behavior under standby, reconnects, and stale-cache recovery.
 

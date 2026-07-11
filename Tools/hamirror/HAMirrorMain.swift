@@ -1,10 +1,10 @@
 import Foundation
 import Darwin
 import FakeHA
-import PerchHAClient
-import PerchHASupport
+import PearchHAClient
+import PearchHASupport
 
-typealias CommandOptions = PerchHACommandLineOptions
+typealias CommandOptions = PearchHACommandLineOptions
 
 @main
 struct HAMirrorCommand {
@@ -148,8 +148,8 @@ struct HAMirrorCommand {
             print("- token: \(presence(report.hasToken))")
             print("- user: \(presence(report.hasUser))")
             print("- password: \(presence(report.hasPassword))")
-            print("- PERCHHA_OAUTH_CLIENT_ID: \(presence(report.hasOAuthClientID))")
-            print("- PERCHHA_OAUTH_REDIRECT_URI: \(presence(report.hasOAuthRedirectURI))")
+            print("- PEARCHHA_OAUTH_CLIENT_ID: \(presence(report.hasOAuthClientID))")
+            print("- PEARCHHA_OAUTH_REDIRECT_URI: \(presence(report.hasOAuthRedirectURI))")
             print("- Capture: \(report.canCaptureMirror ? "ready" : "blocked")")
             print("- OAuth check: \(report.canCheckOAuthClientWebsite ? "ready" : "blocked")")
             if let liveProbe {
@@ -272,7 +272,7 @@ struct HAMirrorCommand {
     private static let helpText = """
     hamirror
 
-    Captures and verifies anonymized Home Assistant fixtures for PerchHA tests.
+    Captures and verifies anonymized Home Assistant fixtures for PearchHA tests.
 
     Usage:
       hamirror help
@@ -289,7 +289,7 @@ struct HAMirrorCommand {
     Capture reads url, url2, and token from the env file. It tries url first and reuses url2 when the primary capture endpoint fails. User/password are not sent to REST.
     Capture with --write re-verifies the written fixture set immediately; private outputs under Fixtures/private/ also prove they stay ignored by Git.
     Doctor prints redacted key presence/status plus next-step hints. Pass --probe for a live /api/ probe against primary and fallback URLs with endpoint-specific remediation hints, --json for scriptable output, and --strict to fail when capture is blocked.
-    OAuth check reads only PERCHHA_OAUTH_CLIENT_ID and PERCHHA_OAUTH_REDIRECT_URI, and reports redacted readiness guidance when they are missing.
+    OAuth check reads only PEARCHHA_OAUTH_CLIENT_ID and PEARCHHA_OAUTH_REDIRECT_URI, and reports redacted readiness guidance when they are missing.
     """
 
     private static func mirroredCommandAvailability(from webSocket: HAMirrorWebSocketEvidence?) -> [FakeHAWebSocketCommandAvailability] {
@@ -512,15 +512,15 @@ struct HAMirrorCommand {
         arguments: [String],
         valueOptions: Set<String>,
         flagOptions: Set<String>
-    ) throws -> PerchHACommandLineOptions {
+    ) throws -> PearchHACommandLineOptions {
         do {
-            return try PerchHACommandLineOptions(
+            return try PearchHACommandLineOptions(
                 arguments: arguments,
                 valueOptions: valueOptions,
                 flagOptions: flagOptions,
                 nonOptionBehavior: .invalidArgument
             )
-        } catch let error as PerchHACommandLineParseError {
+        } catch let error as PearchHACommandLineParseError {
             throw CommandError(parseError: error)
         }
     }
@@ -539,7 +539,7 @@ enum CommandError: Error, CustomStringConvertible {
     case fixtureOutputOutsideRepository(String)
     case gitRepositoryUnavailable
 
-    init(parseError: PerchHACommandLineParseError) {
+    init(parseError: PearchHACommandLineParseError) {
         switch parseError {
         case let .unknownOption(option):
             self = .unknownOption(option)

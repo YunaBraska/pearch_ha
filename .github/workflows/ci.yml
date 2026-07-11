@@ -36,7 +36,7 @@ jobs:
           swift --version
 
       - name: "🩺 Verify Xcode setup"
-        run: swift run perchha-xcode-doctor --json --strict
+        run: swift run pearchha-xcode-doctor --json --strict
 
       - name: "📋 List XCTest cases"
         run: swift test --disable-swift-testing --enable-xctest list

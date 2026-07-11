@@ -3,7 +3,7 @@ import Darwin
 import CryptoKit
 import Network
 import Security
-import PerchHASupport
+import PearchHASupport
 
 public struct FakeHAFixtures: Equatable, Sendable {
     public let apiBody: String
@@ -207,7 +207,7 @@ public final class FakeHARESTServer: @unchecked Sendable {
         self.redactor = redactor
         self.pathPrefix = normalizedPathPrefix
         self.journal = FakeHAJournal()
-        self.queue = DispatchQueue(label: "dev.perchha.fakeha.rest")
+        self.queue = DispatchQueue(label: "dev.pearchha.fakeha.rest")
         self.baseURL = URL(string: "\(scheme)://127.0.0.1:\(port)\(normalizedPathPrefix)")!
     }
 
@@ -417,7 +417,7 @@ public final class FakeHASelfSignedIdentity: @unchecked Sendable {
 
     private init(host: String, issuer: FakeHATLSIdentityIssuer) throws {
         temporaryDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("perchha-fakeha-tls-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("pearchha-fakeha-tls-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
 
         let keyURL = temporaryDirectory.appendingPathComponent("key.pem", isDirectory: false)
@@ -545,7 +545,7 @@ public final class FakeHASelfSignedIdentity: @unchecked Sendable {
                 "-out",
                 caCertificateURL.path,
                 "-subj",
-                "/CN=PerchHA Test CA",
+                "/CN=PearchHA Test CA",
                 "-addext",
                 "basicConstraints=critical,CA:TRUE",
                 "-addext",
@@ -717,7 +717,7 @@ public final class FakeHAWebSocketServer: @unchecked Sendable {
         self.mode = mode
         self.pathPrefix = normalizedPathPrefix
         self.journal = FakeHAJournal()
-        self.queue = DispatchQueue(label: "dev.perchha.fakeha.websocket")
+        self.queue = DispatchQueue(label: "dev.pearchha.fakeha.websocket")
         self.baseURL = URL(string: "\(scheme)://127.0.0.1:\(port)\(normalizedPathPrefix)")!
     }
 

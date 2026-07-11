@@ -12,21 +12,21 @@
 ## Modules
 
 ```text
-PerchHAApp -> PerchHAUI -> PerchHACore <- PerchHAClient -> PerchHASupport
+PearchHAApp -> PearchHAUI -> PearchHACore <- PearchHAClient -> PearchHASupport
                                  ^                         ^
-                                 `---- PerchHAPersistence --'
+                                 `---- PearchHAPersistence --'
 ```
 
-- `PerchHACore`: pure formatting, units, thresholds, selection, ordering, and presentation rules.
-- `PerchHAClient`: Home Assistant auth, discovery, history, live updates, and service calls.
-- `PerchHAPersistence`: config store and secret storage.
-- `PerchHAUI`: panel, settings, controls, charts, and local view helpers.
-- `PerchHAApp`: lifecycle, status items, windows, panel placement, and release/update wiring.
-- `PerchHASupport`: clocks, rate limiting, backoff, request coalescing, redaction, and command-line support.
+- `PearchHACore`: pure formatting, units, thresholds, selection, ordering, and presentation rules.
+- `PearchHAClient`: Home Assistant auth, discovery, history, live updates, and service calls.
+- `PearchHAPersistence`: config store and secret storage.
+- `PearchHAUI`: panel, settings, controls, charts, and local view helpers.
+- `PearchHAApp`: lifecycle, status items, windows, panel placement, and release/update wiring.
+- `PearchHASupport`: clocks, rate limiting, backoff, request coalescing, redaction, and command-line support.
 
 ## State and flow
 
-`PerchHAPanelModel` is the main UI state owner.
+`PearchHAPanelModel` is the main UI state owner.
 
 Flow:
 

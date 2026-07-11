@@ -1,6 +1,6 @@
 # Home Assistant API contract - PearchHA
 
-This document defines the Home Assistant surface PerchHA depends on and the fixture set FakeHA must mirror.
+This document defines the Home Assistant surface PearchHA depends on and the fixture set FakeHA must mirror.
 
 Authoritative references:
 
@@ -39,19 +39,19 @@ OAuth/IndieAuth uses the documented Authentication API:
 | Refresh access token | `POST /auth/token` | `grant_type=refresh_token`, `refresh_token`, `client_id` |
 | Revoke refresh token | `POST /auth/token` | `token=<refresh-token>`, `action=revoke` |
 
-Access-token responses must include `access_token`, `expires_in`, and `token_type=Bearer`. Code exchange must also include `refresh_token`; refresh responses may omit it. PerchHA stores the OAuth `client_id` with the refresh token because Home Assistant requires the same client ID for refresh. A `401` or WebSocket `auth_invalid` from an authenticated app-shell request triggers one access-token refresh and one retry. A failed refresh clears stored secrets and returns the user to reconnect.
+Access-token responses must include `access_token`, `expires_in`, and `token_type=Bearer`. Code exchange must also include `refresh_token`; refresh responses may omit it. PearchHA stores the OAuth `client_id` with the refresh token because Home Assistant requires the same client ID for refresh. A `401` or WebSocket `auth_invalid` from an authenticated app-shell request triggers one access-token refresh and one retry. A failed refresh clears stored secrets and returns the user to reconnect.
 
-Native sign-in reads the application client website and callback URI from `PERCHHA_OAUTH_CLIENT_ID` and `PERCHHA_OAUTH_REDIRECT_URI`. Exported process values win; otherwise the app reads those keys from a local ignored env file, or from the exported `PERCHHA_ENV_FILE` path. The packaged `.app` must declare the callback scheme in `CFBundleURLTypes` with `CFBundleTypeRole=Viewer`; `perchha-package-app --verify-launch-services` writes that metadata, registers the generated bundle, and verifies macOS records the callback scheme claim for that bundle. The app shell accepts delivered callback URLs only when their scheme and redirect base match the configured redirect URI, and records only a redacted ingress event. The client website must publish the redirect URI according to the Home Assistant native-app registration rules before this can pass real-HA sign-in verification.
+Native sign-in reads the application client website and callback URI from `PEARCHHA_OAUTH_CLIENT_ID` and `PEARCHHA_OAUTH_REDIRECT_URI`. Exported process values win; otherwise the app reads those keys from a local ignored env file, or from the exported `PEARCHHA_ENV_FILE` path. The packaged `.app` must declare the callback scheme in `CFBundleURLTypes` with `CFBundleTypeRole=Viewer`; `pearchha-package-app --verify-launch-services` writes that metadata, registers the generated bundle, and verifies macOS records the callback scheme claim for that bundle. The app shell accepts delivered callback URLs only when their scheme and redirect base match the configured redirect URI, and records only a redacted ingress event. The client website must publish the redirect URI according to the Home Assistant native-app registration rules before this can pass real-HA sign-in verification.
 
-For native callback schemes such as `perchha://auth`, the application website must include a redirect declaration in the first 10kB of HTML:
+For native callback schemes such as `pearchha://auth`, the application website must include a redirect declaration in the first 10kB of HTML:
 
 ```html
-<link rel="redirect_uri" href="perchha://auth">
+<link rel="redirect_uri" href="pearchha://auth">
 ```
 
-Run `swift run hamirror oauth-check --env <local-env-file>` before real browser sign-in. The check reads only `PERCHHA_OAUTH_CLIENT_ID` and `PERCHHA_OAUTH_REDIRECT_URI`, verifies the public client website declaration, reports redacted setup guidance when OAuth config is incomplete, and does not send the Home Assistant token, user, or password.
-Run `swift run perchha-package-app --write-oauth-site .build/perchha-oauth-site/index.html --oauth-env <local-env-file>` to generate the static HTML artifact that should be published at the configured client website, then `swift run perchha-package-app --verify-oauth-site .build/perchha-oauth-site/index.html --oauth-env <local-env-file>` to confirm the artifact still matches the configured website URL and redirect declaration before deployment. After publishing, run `swift run perchha-package-app --verify-published-oauth-site --oauth-env <local-env-file>` to fetch the live client website URL and verify the deployed HTML declaration without sending Home Assistant secrets.
-For releasable builds, include `--oauth-site .build/perchha-oauth-site/index.html` when writing the release manifest so the retained release evidence can re-verify the exact OAuth declaration page that was meant to be deployed.
+Run `swift run hamirror oauth-check --env <local-env-file>` before real browser sign-in. The check reads only `PEARCHHA_OAUTH_CLIENT_ID` and `PEARCHHA_OAUTH_REDIRECT_URI`, verifies the public client website declaration, reports redacted setup guidance when OAuth config is incomplete, and does not send the Home Assistant token, user, or password.
+Run `swift run pearchha-package-app --write-oauth-site .build/pearchha-oauth-site/index.html --oauth-env <local-env-file>` to generate the static HTML artifact that should be published at the configured client website, then `swift run pearchha-package-app --verify-oauth-site .build/pearchha-oauth-site/index.html --oauth-env <local-env-file>` to confirm the artifact still matches the configured website URL and redirect declaration before deployment. After publishing, run `swift run pearchha-package-app --verify-published-oauth-site --oauth-env <local-env-file>` to fetch the live client website URL and verify the deployed HTML declaration without sending Home Assistant secrets.
+For releasable builds, include `--oauth-site .build/pearchha-oauth-site/index.html` when writing the release manifest so the retained release evidence can re-verify the exact OAuth declaration page that was meant to be deployed.
 
 ## 2. Required documented API surface
 
@@ -77,7 +77,7 @@ For releasable builds, include `--oauth-site .build/perchha-oauth-site/index.htm
 
 ## 3. Supported extended API surface
 
-These commands are useful and should be mirrored when available, but PerchHA must detect support and keep explicit fallbacks.
+These commands are useful and should be mirrored when available, but PearchHA must detect support and keep explicit fallbacks.
 
 | Type | Purpose | Fallback |
 |---|---|---|
@@ -92,7 +92,7 @@ The Home Assistant project has documented that recorder statistics WebSocket API
 
 ## 4. Entity state shape
 
-PerchHA consumes state objects with at least:
+PearchHA consumes state objects with at least:
 
 ```json
 {
@@ -115,7 +115,7 @@ The first M3 client slice maps REST state objects into `EntityState` by reading 
 
 The WebSocket M3 slice authenticates at `/api/websocket`, validates `auth_required` -> `auth_ok`, sends `get_states` with an integer `id`, requires the matching result `id`, and maps command errors separately from transport failures.
 
-The live-update path tries `subscribe_entities` first. Full compact states in `event.a` and partial state changes in `event.c[entity_id]["+"]` map to `EntityState`; partial changes merge with the current stream snapshot. Attribute removals in `event.c[entity_id]["-"].a` clear removed display fields, and top-level entity removals in `event.r` remove entries from that snapshot before later partial changes are considered. Removal-only frames are skipped until the next state-producing frame. If Home Assistant reports `unknown_command` or legacy `unsupported_command`, PerchHA falls back to documented `subscribe_events` with `event_type: state_changed` and maps `event.data.new_state` into `EntityState`.
+The live-update path tries `subscribe_entities` first. Full compact states in `event.a` and partial state changes in `event.c[entity_id]["+"]` map to `EntityState`; partial changes merge with the current stream snapshot. Attribute removals in `event.c[entity_id]["-"].a` clear removed display fields, and top-level entity removals in `event.r` remove entries from that snapshot before later partial changes are considered. Removal-only frames are skipped until the next state-producing frame. If Home Assistant reports `unknown_command` or older-HA `unsupported_command`, PearchHA falls back to documented `subscribe_events` with `event_type: state_changed` and maps `event.data.new_state` into `EntityState`.
 
 The service-call slice sends WebSocket `call_service` with `domain`, `service`, optional `target.entity_id`, and arbitrary JSON `service_data`. FakeHA journals the exact redacted command payload for control and custom-action assertions.
 
@@ -123,7 +123,7 @@ The discovery slice sends WebSocket registry commands for areas, devices, and en
 
 The first history slice sends `GET /api/history/period/<start>` with `filter_entity_id`, `end_time`, `minimal_response=true`, and `no_attributes=true`. Minimal history rows may omit `entity_id`; the request-level filter is the entity boundary, and rows that still carry a different `entity_id` are discarded. Returned samples are sorted by timestamp and mapped to a string state plus a numeric value when the state parses as `Double`. Empty history is a successful empty series. Missing timestamps or malformed payloads fail as explicit invalid-payload client errors.
 
-The recorder-statistics slice sends WebSocket `recorder/statistics_during_period` for Week and Month ranges. Requests use ISO date strings for `start_time` and `end_time`, a single `statistic_ids` entry, `types: ["mean", "state"]`, hourly buckets for Week, and daily buckets for Month. Responses are keyed by statistic ID. Row `start` values are Unix epoch milliseconds; `mean` is preferred over `state` when both are present. Missing or null numeric columns are treated as no sample, not as malformed payloads. If Home Assistant reports `unknown_command` or legacy `unsupported_command`, or if the recorder-statistics WebSocket endpoint is unreachable or TLS-rejected, PerchHA falls back to REST history for the same range. Malformed statistic rows still fail as explicit invalid-payload client errors.
+The recorder-statistics slice sends WebSocket `recorder/statistics_during_period` for Week and Month ranges. Requests use ISO date strings for `start_time` and `end_time`, a single `statistic_ids` entry, `types: ["mean", "state"]`, hourly buckets for Week, and daily buckets for Month. Responses are keyed by statistic ID. Row `start` values are Unix epoch milliseconds; `mean` is preferred over `state` when both are present. Missing or null numeric columns are treated as no sample, not as malformed payloads. If Home Assistant reports `unknown_command` or older-HA `unsupported_command`, or if the recorder-statistics WebSocket endpoint is unreachable or TLS-rejected, PearchHA falls back to REST history for the same range. Malformed statistic rows still fail as explicit invalid-payload client errors.
 
 ## 5. Domains
 
@@ -153,7 +153,7 @@ Primary WebSocket shape:
 }
 ```
 
-Persisted custom actions wrap the service call with PerchHA row metadata:
+Persisted custom actions wrap the service call with PearchHA row metadata:
 
 ```json
 {
@@ -179,7 +179,7 @@ Protected custom-action values are stored in JSON as opaque protected-string ref
 
 FakeHA must journal every received service call so tests can assert exact payloads.
 
-The custom-action metadata slice sends WebSocket `get_services` and maps the returned domain -> service -> field metadata into typed service metadata. PerchHA preserves field examples and selectors as generic JSON values because Home Assistant selectors vary by integration.
+The custom-action metadata slice sends WebSocket `get_services` and maps the returned domain -> service -> field metadata into typed service metadata. PearchHA preserves field examples and selectors as generic JSON values because Home Assistant selectors vary by integration.
 
 ## 7. Cover semantics
 
@@ -200,7 +200,7 @@ Position payload:
 
 ## 8. Mirrored fixtures
 
-`hamirror` captures from an ignored local env file, anonymizes, and writes fixtures under `Fixtures/`. `hamirror doctor --env <local-env-file>` reports redacted key presence/status plus next-step hints, emits machine-readable readiness plus redacted guidance with `--json`, surfaces exact suggested commands when capture or OAuth checks are ready, and fails before capture in `--strict` mode when the bearer token is missing. `hamirror doctor --probe` adds a live redacted `/api/` check for primary and fallback URLs plus endpoint-specific remediation hints for transport and authorization failures. Exported `PERCHHA_ENV_FILE`, `PERCHHA_HA_URL`, `PERCHHA_HA_FALLBACK_URL`, `PERCHHA_HA_TOKEN`, `PERCHHA_HA_USER`, `PERCHHA_HA_PASSWORD`, `PERCHHA_OAUTH_CLIENT_ID`, and `PERCHHA_OAUTH_REDIRECT_URI` override the file-based values for capture and OAuth checks. The M2 foundation captures `/api/` and `/api/states`; M8 adds optional `--websocket` evidence for optimized commands. The WebSocket evidence records command availability and error codes without storing private WebSocket result payloads. `hamirror serve` replays the mirrored REST payloads and the captured command-availability surface locally; when display-list payloads were intentionally omitted for privacy, FakeHA synthesizes minimal registry rows from mirrored `states.json` so optimized discovery can still be exercised. Deterministic FakeHA tests can also record compact event top-level keys. Verification rejects stale `websocket.json` files and unknown WebSocket evidence fields, and WebSocket capture fails explicitly when HA does not answer before the receive timeout. Later milestones add services and history fixtures.
+`hamirror` captures from an ignored local env file, anonymizes, and writes fixtures under `Fixtures/`. `hamirror doctor --env <local-env-file>` reports redacted key presence/status plus next-step hints, emits machine-readable readiness plus redacted guidance with `--json`, surfaces exact suggested commands when capture or OAuth checks are ready, and fails before capture in `--strict` mode when the bearer token is missing. `hamirror doctor --probe` adds a live redacted `/api/` check for primary and fallback URLs plus endpoint-specific remediation hints for transport and authorization failures. Exported `PEARCHHA_ENV_FILE`, `PEARCHHA_HA_URL`, `PEARCHHA_HA_FALLBACK_URL`, `PEARCHHA_HA_TOKEN`, `PEARCHHA_HA_USER`, `PEARCHHA_HA_PASSWORD`, `PEARCHHA_OAUTH_CLIENT_ID`, and `PEARCHHA_OAUTH_REDIRECT_URI` override the file-based values for capture and OAuth checks. The M2 foundation captures `/api/` and `/api/states`; M8 adds optional `--websocket` evidence for optimized commands. The WebSocket evidence records command availability and error codes without storing private WebSocket result payloads. `hamirror serve` replays the mirrored REST payloads and the captured command-availability surface locally; when display-list payloads were intentionally omitted for privacy, FakeHA synthesizes minimal registry rows from mirrored `states.json` so optimized discovery can still be exercised. Deterministic FakeHA tests can also record compact event top-level keys. Verification rejects stale `websocket.json` files and unknown WebSocket evidence fields, and WebSocket capture fails explicitly when HA does not answer before the receive timeout. Later milestones add services and history fixtures.
 
 The M2 sanitizer structurally rewrites captured JSON before writing. It redacts tokens and credentials, aliases entity IDs, redacts friendly names and free-text attributes, zeros location coordinates, and normalizes timestamps.
 
@@ -225,7 +225,7 @@ Fixtures must not contain tokens, credentials, GPS coordinates, real names, or p
 
 ## 9. Error modes
 
-PerchHA handles:
+PearchHA handles:
 
 - REST `401`.
 - WebSocket `auth_invalid`.

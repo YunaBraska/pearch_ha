@@ -4,7 +4,7 @@ Format: context, decision, consequences, alternatives.
 
 ## ADR-0001 - Native macOS app
 
-Context: PerchHA is an always-running menu bar utility and must be fast, native, and low overhead.
+Context: PearchHA is an always-running menu bar utility and must be fast, native, and low overhead.
 
 Decision: Build with Swift, SwiftUI, AppKit, and Swift Charts. Do not use Electron, Tauri, Java, or a web runtime.
 
@@ -14,7 +14,7 @@ Alternatives: Electron and Tauri were rejected because the app is a small ambien
 
 ## ADR-0002 - `NSStatusItem` plus custom `NSPanel`
 
-Context: PerchHA needs multiple menu bar items, gauges, hover behavior, sliders, charts, and rich keyboard support.
+Context: PearchHA needs multiple menu bar items, gauges, hover behavior, sliders, charts, and rich keyboard support.
 
 Decision: Use `NSStatusItem` for menu bar items and a custom borderless `NSPanel` hosting SwiftUI for the drop-down.
 
@@ -84,7 +84,7 @@ Alternatives: Fixed polling and wall-clock sleeps were rejected.
 
 ## ADR-0009 - Release through signed and notarized direct distribution
 
-Context: PerchHA needs normal macOS trust behavior and may need menu bar freedoms that are awkward in the Mac App Store.
+Context: PearchHA needs normal macOS trust behavior and may need menu bar freedoms that are awkward in the Mac App Store.
 
 Decision: Ship a Developer ID signed and notarized app. Use a DMG for v1. Add Sparkle only after the core release path is stable.
 
@@ -94,7 +94,7 @@ Alternatives: Mac App Store first was deferred because sandbox and review constr
 
 ## ADR-0010 - Host-scoped self-signed trust, on by default, never trust-all
 
-Context: The dashboard-overhaul connection form briefly shipped with certificate validation disabled for every host, exposing bearer tokens to interception on any connection. Home-lab Home Assistant deployments, PerchHA's primary audience, very commonly run behind self-issued certificates, so a strict-only default breaks most first-run connections.
+Context: The dashboard-overhaul connection form briefly shipped with certificate validation disabled for every host, exposing bearer tokens to interception on any connection. Home-lab Home Assistant deployments, PearchHA's primary audience, very commonly run behind self-issued certificates, so a strict-only default breaks most first-run connections.
 
 Decision: The self-signed allowance is a visible switch in the Settings Connection tab, on by default, persisted with the connection profile, and scoped to exactly the profile's own HTTPS hosts — the client never trusts all hosts, and hosts outside the configured addresses always get full validation. Turning it off gives strict validation everywhere. The OAuth token exchange uses the same derived policy, and profiles stored before the field decode as trusting so existing setups keep working.
 
