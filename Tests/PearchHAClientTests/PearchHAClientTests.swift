@@ -2971,9 +2971,8 @@ final class PearchHAClientTests: XCTestCase {
         )
 
         await assertEqualAsync(await client.callService(input, call: call), .success(HAServiceCallResult(contextID: "fake-context")))
-        try await waitForJournalCount(server: server, count: 2)
-
-        let serviceEntry = await server.journal.snapshot().last
+        try await waitForJournalPath(server: server, path: "/api/websocket/call_service")
+        let serviceEntry = await server.journal.snapshot().last { $0.path == "/api/websocket/call_service" }
         XCTAssertEqual(serviceEntry?.method, "WS")
         XCTAssertEqual(serviceEntry?.path, "/api/websocket/call_service")
         XCTAssertTrue(serviceEntry?.bodyText?.contains(#""type":"call_service""#) ?? false)
@@ -3123,7 +3122,7 @@ final class PearchHAClientTests: XCTestCase {
             ),
             .success(HAServiceCallResult(contextID: "fake-context"))
         )
-        try await waitForJournalCount(server: server, count: 2)
+        try await waitForJournalPath(server: server, path: "/api/websocket/call_service")
         await assertTrueAsync(await server.journal.snapshot().contains { $0.path == "/api/websocket/call_service" })
     }
 
@@ -3998,14 +3997,13 @@ final class PearchHAClientTests: XCTestCase {
         }
 
         // The optimized subscription delivers the pushed update...
-        var received: [EntityState] = []
-        for _ in 0..<500 {
-            received = await collector.states
-            if !received.isEmpty {
-                break
-            }
-            try await Task.sleep(nanoseconds: 10_000_000)
+        try await waitUntil(
+            "subscribe_entities stream should deliver the pushed entity update",
+            pollCount: 500
+        ) {
+            await !collector.states.isEmpty
         }
+        let received = await collector.states
         XCTAssertEqual(received.count, 1, "the stream delivers the pushed entity update")
 
         // ...and unlike the one-shot API the stream stays open after it. A
@@ -4074,14 +4072,13 @@ final class PearchHAClientTests: XCTestCase {
             }
         }
 
-        var received: [EntityState] = []
-        for _ in 0..<200 {
-            received = await collector.states
-            if !received.isEmpty {
-                break
-            }
-            try await Task.sleep(nanoseconds: 10_000_000)
+        try await waitUntil(
+            "subscribe_events fallback stream should deliver the pushed entity update",
+            pollCount: 200
+        ) {
+            await !collector.states.isEmpty
         }
+        let received = await collector.states
         XCTAssertEqual(
             received,
             [EntityState(id: "sensor.office_temperature", name: "Office temperature", state: "22.0", unit: "°C")]
@@ -5574,23 +5571,15 @@ actor RecordingMirrorTransport: HAMirrorTransport {
 }
 
 private func waitForJournalCount(server: FakeHAWebSocketServer, count: Int) async throws {
-    for _ in 0..<500 {
-        if await server.journal.snapshot().count >= count {
-            return
-        }
-        try await Task.sleep(nanoseconds: 10_000_000)
+    try await waitUntil("FakeHA WebSocket journal did not reach \(count)", pollCount: 500) {
+        await server.journal.snapshot().count >= count
     }
-    throw ClientTestFailure("FakeHA WebSocket journal did not reach \(count)")
 }
 
 private func waitForJournalPath(server: FakeHAWebSocketServer, path: String) async throws {
-    for _ in 0..<500 {
-        if await server.journal.snapshot().contains(where: { $0.path == path }) {
-            return
-        }
-        try await Task.sleep(nanoseconds: 10_000_000)
+    try await waitUntil("FakeHA WebSocket journal did not contain \(path)", pollCount: 500) {
+        await server.journal.snapshot().contains(where: { $0.path == path })
     }
-    throw ClientTestFailure("FakeHA WebSocket journal did not contain \(path)")
 }
 
 private func waitForRESTServerReady(baseURL: URL) async throws {
@@ -6501,6 +6490,7 @@ extension PearchHAClientTests {
         defer {
             server.stop()
         }
+        _ = try FakeHARawWebSocketProbe().authenticateWithCoalescedUpgrade(baseURL: server.baseURL)
         let environment = HAMirrorEnvironment(
             primaryURL: server.baseURL,
             fallbackURL: nil,
@@ -6537,6 +6527,7 @@ extension PearchHAClientTests {
         defer {
             server.stop()
         }
+        _ = try FakeHARawWebSocketProbe().authenticateWithCoalescedUpgrade(baseURL: server.baseURL)
         let service = HAMirrorCaptureService(
             transport: RecordingMirrorTransport(
                 apiBody: #"{"message":"API running."}"#,

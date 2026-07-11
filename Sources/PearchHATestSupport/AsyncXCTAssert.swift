@@ -1,4 +1,5 @@
 #if canImport(XCTest)
+import Foundation
 import XCTest
 
 public func assertEqualAsync<T: Equatable>(
@@ -31,5 +32,38 @@ public func assertFalseAsync(
 ) async rethrows {
     let value = try await expression()
     XCTAssertFalse(value, message(), file: file, line: line)
+}
+
+public func waitUntil(
+    _ message: String,
+    initialYields: Int = 100,
+    pollCount: Int = 0,
+    pollIntervalNanoseconds: UInt64 = 10_000_000,
+    condition: @escaping () async -> Bool
+) async throws {
+    for _ in 0..<initialYields {
+        if await condition() {
+            return
+        }
+        await Task.yield()
+    }
+    for _ in 0..<pollCount {
+        if await condition() {
+            return
+        }
+        try await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+    }
+    if await condition() {
+        return
+    }
+    throw WaitFailure(message)
+}
+
+public struct WaitFailure: Error, CustomStringConvertible {
+    public let description: String
+
+    public init(_ description: String) {
+        self.description = description
+    }
 }
 #endif
