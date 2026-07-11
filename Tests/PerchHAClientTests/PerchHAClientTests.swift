@@ -1178,6 +1178,28 @@ final class PerchHAClientTests: XCTestCase {
         await assertEqualAsync(await HomeAssistantClient().checkRESTConnection(input), .failure(.tlsRejected(host: "127.0.0.1")))
     }
 
+    func testSelfSignedRESTAllows127001HostAllowance() async throws {
+        let identity = try FakeHASelfSignedIdentity()
+        let server = try FakeHARESTServer(
+            fixtures: FakeHAFixtures(
+                apiBody: #"{"message":"API running."}"#,
+                statesBody: #"[]"#
+            ),
+            tlsIdentity: identity.identity
+        )
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token",
+            serverTrustPolicy: HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["127.0.0.1"])
+        )
+
+        await assertEqualAsync(await HomeAssistantClient().checkRESTConnection(input), .success(HARESTCheck(message: "API running.")))
+    }
+
     func testSelfSignedWebSocketRequiresExplicitHostAllowance() async throws {
         let identity = try FakeHASelfSignedIdentity()
         let server = try FakeHAWebSocketServer(tlsIdentity: identity.identity)
@@ -1224,6 +1246,22 @@ final class PerchHAClientTests: XCTestCase {
         )
 
         await assertEqualAsync(await HomeAssistantClient().checkWebSocketConnection(input), .failure(.tlsRejected(host: "127.0.0.1")))
+    }
+
+    func testSelfSignedWebSocketAllows127001HostAllowance() async throws {
+        let identity = try FakeHASelfSignedIdentity()
+        let server = try FakeHAWebSocketServer(tlsIdentity: identity.identity)
+        server.start()
+        defer {
+            server.stop()
+        }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token",
+            serverTrustPolicy: HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["127.0.0.1"])
+        )
+
+        await assertEqualAsync(await HomeAssistantClient().checkWebSocketConnection(input), .success(HAWebSocketCheck(haVersion: "fake-ha")))
     }
 
     func test_t_rest_history_provider_maps_and_sorts_samples() async throws {

@@ -494,6 +494,20 @@ public final class FakeHASelfSignedIdentity: @unchecked Sendable {
     ) throws {
         switch issuer {
         case .selfSigned:
+            let configurationURL = temporaryDirectory.appendingPathComponent("self-signed.cnf", isDirectory: false)
+            try """
+            [req]
+            prompt = no
+            distinguished_name = dn
+            x509_extensions = v3_req
+            [dn]
+            CN = \(host)
+            [v3_req]
+            subjectAltName = \(subjectAltName)
+            basicConstraints = critical,CA:FALSE
+            keyUsage = critical,digitalSignature,keyEncipherment
+            extendedKeyUsage = serverAuth
+            """.write(to: configurationURL, atomically: true, encoding: .utf8)
             try runOpenSSL([
                 "req",
                 "-x509",
@@ -507,16 +521,10 @@ public final class FakeHASelfSignedIdentity: @unchecked Sendable {
                 keyURL.path,
                 "-out",
                 certificateURL.path,
-                "-subj",
-                "/CN=\(host)",
-                "-addext",
-                "subjectAltName=\(subjectAltName)",
-                "-addext",
-                "basicConstraints=critical,CA:FALSE",
-                "-addext",
-                "keyUsage=critical,digitalSignature,keyEncipherment",
-                "-addext",
-                "extendedKeyUsage=serverAuth"
+                "-config",
+                configurationURL.path,
+                "-extensions",
+                "v3_req"
             ])
         case .localCertificateAuthority:
             let caKeyURL = temporaryDirectory.appendingPathComponent("ca-key.pem", isDirectory: false)
