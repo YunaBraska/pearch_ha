@@ -8426,7 +8426,8 @@ final class PearchHAUITests: XCTestCase {
         },
         historyDebounce: PearchDuration = .milliseconds(250),
         cacheTTL: PearchDuration = .seconds(60),
-        capacity: Int = 64
+        capacity: Int = 64,
+        panelActive: Bool = false
     ) async -> PearchHAPanelModel {
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: rooms) },
@@ -8443,6 +8444,7 @@ final class PearchHAUITests: XCTestCase {
             periodicRefreshConfiguration: .disabled
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        model.setPanelActive(panelActive)
         await model.connect()
         return model
     }
@@ -8975,6 +8977,7 @@ final class PearchHAUITests: XCTestCase {
             bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, coldRefreshDivisor: 3)
         )
 
+        await spinUntil { await recorder.batchCount() == 1 }
         let baselineBatches = await recorder.batchCount()
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0"])
@@ -9327,11 +9330,11 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 4),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1)
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1),
+            panelActive: true
         )
 
         let batchesBeforeActivation = await recorder.batchCount()
-        model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0"])
         // Arm the settle sleep, then deactivate before it fires: no cycle should run.
         await spinUntil { await clock.sleepingTaskCount() == 1 }
