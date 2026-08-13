@@ -21,5 +21,18 @@ swift run pearchha-coverage-check \
     --line-target PearchHACore=95 \
     --line-target PearchHAClient=90 \
     --branch-target PearchHACore=90
-PEARCHHA_SMOKE_SNAPSHOT_DIR=.build/pearchha-snapshots swift run pearchha-smoke
+smoke_output="$(PEARCHHA_SMOKE_SNAPSHOT_DIR=.build/pearchha-snapshots swift run pearchha-smoke 2>&1)" || {
+    smoke_status=$?
+    printf '%s\n' "${smoke_output}"
+    case "${smoke_output}" in
+        *'hdiutil: verify failed - Resource temporarily unavailable'*)
+            sleep 1
+            PEARCHHA_SMOKE_SNAPSHOT_DIR=.build/pearchha-snapshots swift run pearchha-smoke
+            ;;
+        *)
+            exit "${smoke_status}"
+            ;;
+    esac
+}
+printf '%s\n' "${smoke_output}"
 swift run pearchha-repo-audit
