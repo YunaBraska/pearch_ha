@@ -951,6 +951,33 @@ final class PearchHAPackagingTests: XCTestCase {
         }
     }
 
+    func testDMGVerifierRetriesTemporaryResourceFailure() throws {
+        let directory = temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dmgURL = directory.appendingPathComponent("PearchHA.dmg", isDirectory: false)
+        try Data("dmg".utf8).write(to: dmgURL)
+        let hdiutilURL = try fakeExecutable(in: directory, name: "hdiutil")
+        let attempts = LockedValue(0)
+        let runner = RecordingCommandRunner { _, arguments in
+            XCTAssertEqual(arguments, ["verify", dmgURL.path])
+            let attempt = attempts.get() + 1
+            attempts.set(attempt)
+            return attempt == 1
+                ? PearchHACommandResult(status: 1, output: "Resource temporarily unavailable")
+                : PearchHACommandResult(status: 0, output: "verified")
+        }
+
+        let result = try PearchHADMGVerifier(hdiutilURL: hdiutilURL, commandRunner: runner).verify(
+            PearchHADMGVerificationConfiguration(dmgURL: dmgURL)
+        )
+
+        XCTAssertEqual(result.dmgURL.path, dmgURL.path)
+        XCTAssertEqual(runner.invocations.count, 2)
+    }
+
     func testDMGContentVerifierMountsImageChecksAppShortcutAndDetaches() throws {
         let directory = temporaryDirectory()
         defer {

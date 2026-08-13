@@ -2725,6 +2725,9 @@ public struct PearchHADMGVerificationResult: Equatable, Sendable {
 }
 
 public struct PearchHADMGVerifier {
+    private static let transientFailure = "Resource temporarily unavailable"
+    private static let transientRetryDelay: TimeInterval = 5
+
     private let fileManager: FileManager
     private let hdiutilURL: URL
     private let commandRunner: any PearchHACommandRunning
@@ -2747,10 +2750,15 @@ public struct PearchHADMGVerifier {
         guard fileManager.isExecutableFile(atPath: hdiutilURL.path) else {
             throw PearchHADMGBuildError.hdiutilMissing(hdiutilURL.path)
         }
-        let result = try commandRunner.run(
+        let arguments = ["verify", dmgURL.path]
+        var result = try commandRunner.run(
             executableURL: hdiutilURL,
-            arguments: ["verify", dmgURL.path]
+            arguments: arguments
         )
+        if result.status != 0, result.output.contains(Self.transientFailure) {
+            Thread.sleep(forTimeInterval: Self.transientRetryDelay)
+            result = try commandRunner.run(executableURL: hdiutilURL, arguments: arguments)
+        }
         guard result.status == 0 else {
             throw PearchHADMGBuildError.hdiutilFailed(operation: "verify", status: result.status, output: result.output)
         }
