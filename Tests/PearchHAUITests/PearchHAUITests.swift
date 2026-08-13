@@ -8427,13 +8427,19 @@ final class PearchHAUITests: XCTestCase {
         historyDebounce: PearchDuration = .milliseconds(250),
         cacheTTL: PearchDuration = .seconds(60),
         capacity: Int = 64,
-        panelActive: Bool = false
+        panelActive: Bool = false,
+        startupWarm: Bool = false
     ) async -> PearchHAPanelModel {
+        let suppressStartupWarm = !startupWarm && !panelActive && bulkSync.isEnabled && !rooms.isEmpty
+        let startupWarmBlocker = StartupWarmBlocker(suppressedRequestCount: suppressStartupWarm ? 1 : 0)
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: rooms) },
             historyProvider: historyProvider,
             bulkHistoryProvider: { form, entityIDs, range in
-                await recorder.provide(form: form, entityIDs: entityIDs, range: range)
+                if await startupWarmBlocker.shouldSuppressRequest() {
+                    return [:]
+                }
+                return await recorder.provide(form: form, entityIDs: entityIDs, range: range)
             },
             clock: clock,
             historyDebounce: historyDebounce,
@@ -8446,6 +8452,7 @@ final class PearchHAUITests: XCTestCase {
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         model.setPanelActive(panelActive)
         await model.connect()
+        await startupWarmBlocker.waitUntilSuppressionCompletes()
         return model
     }
 
@@ -8488,10 +8495,6 @@ final class PearchHAUITests: XCTestCase {
             bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40, coldRefreshDivisor: 1)
         )
 
-        // Connecting while hidden performs one intentional startup warmup. Let
-        // it complete before arming the panel loop, otherwise a cancelled warmup
-        // can still be releasing its clock waiter on a loaded CI runner.
-        await spinUntil { await recorder.batchCount() == 1 }
         let baselineBatches = await recorder.batchCount()
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
@@ -8726,7 +8729,6 @@ final class PearchHAUITests: XCTestCase {
             bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, coldRefreshDivisor: 1)
         )
 
-        await spinUntil { await recorder.batchCount() >= 1 }
         let baselineBatches = await recorder.batchCount()
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
@@ -8977,7 +8979,6 @@ final class PearchHAUITests: XCTestCase {
             bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, coldRefreshDivisor: 3)
         )
 
-        await spinUntil { await recorder.batchCount() == 1 }
         let baselineBatches = await recorder.batchCount()
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0"])
@@ -9005,7 +9006,8 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 20),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1)
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1),
+            startupWarm: true
         )
 
         // Connecting while hidden performs the intentional one-shot startup warmup.
@@ -11672,6 +11674,30 @@ actor CallCounter {
     func next() -> Int {
         count += 1
         return count
+    }
+}
+
+/// Keeps generic active-panel tests independent from the one-shot hidden warmup.
+/// Tests for that warmup opt in through `startupWarm` on their shared setup.
+private actor StartupWarmBlocker {
+    private var remainingSuppressedRequests: Int
+
+    init(suppressedRequestCount: Int) {
+        remainingSuppressedRequests = suppressedRequestCount
+    }
+
+    func shouldSuppressRequest() -> Bool {
+        guard remainingSuppressedRequests > 0 else {
+            return false
+        }
+        remainingSuppressedRequests -= 1
+        return true
+    }
+
+    func waitUntilSuppressionCompletes() async {
+        while remainingSuppressedRequests > 0 {
+            await Task.yield()
+        }
     }
 }
 
