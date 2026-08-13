@@ -4439,35 +4439,17 @@ final class PearchHAUITests: XCTestCase {
 
     func test_t_reconnecting_rows_render_as_stale_values() async {
         let refreshGate = ConnectionGate()
-        let model = PearchHAPanelModel { _ in
-            await refreshGate.wait()
-            return .success(rooms: selectionRooms())
-        }
-
-        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
-        await refreshGate.open()
-        await model.connect()
-
-        let secondGate = ConnectionGate()
-        let refreshing = PearchHAPanelModel(
-            connector: { _ in
-                await secondGate.wait()
-                return .success(rooms: selectionRooms())
-            }
-        )
-        refreshing.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
-        await secondGate.open()
-        await refreshing.connect()
-
-        let thirdGate = ConnectionGate()
+        let calls = CallCounter()
         let staleModel = PearchHAPanelModel(
             connector: { _ in
-                await thirdGate.wait()
+                if await calls.next() == 1 {
+                    return .success(rooms: selectionRooms())
+                }
+                await refreshGate.wait()
                 return .success(rooms: selectionRooms())
             }
         )
         staleModel.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
-        await thirdGate.open()
         await staleModel.connect()
         staleModel.startRefresh()
         await spinUntil {
@@ -4480,6 +4462,7 @@ final class PearchHAUITests: XCTestCase {
             entity.map { staleModel.snapshot.formattedValue(for: $0, locale: Locale(identifier: "en_US")) },
             FormattedEntityValue(text: "Stale: 21.4 °C", status: .stale)
         )
+        await refreshGate.open()
     }
 
     func test_t_live_update_during_reconnect_preserves_stale_phase() async {
@@ -8443,13 +8426,20 @@ final class PearchHAUITests: XCTestCase {
         },
         historyDebounce: PearchDuration = .milliseconds(250),
         cacheTTL: PearchDuration = .seconds(60),
-        capacity: Int = 64
+        capacity: Int = 64,
+        panelActive: Bool = false,
+        startupWarm: Bool = false
     ) async -> PearchHAPanelModel {
+        let suppressStartupWarm = !startupWarm && !panelActive && bulkSync.isEnabled && !rooms.isEmpty
+        let startupWarmBlocker = StartupWarmBlocker(suppressedRequestCount: suppressStartupWarm ? 1 : 0)
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: rooms) },
             historyProvider: historyProvider,
             bulkHistoryProvider: { form, entityIDs, range in
-                await recorder.provide(form: form, entityIDs: entityIDs, range: range)
+                if await startupWarmBlocker.shouldSuppressRequest() {
+                    return [:]
+                }
+                return await recorder.provide(form: form, entityIDs: entityIDs, range: range)
             },
             clock: clock,
             historyDebounce: historyDebounce,
@@ -8460,7 +8450,9 @@ final class PearchHAUITests: XCTestCase {
             periodicRefreshConfiguration: .disabled
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        model.setPanelActive(panelActive)
         await model.connect()
+        await startupWarmBlocker.waitUntilSuppressionCompletes()
         return model
     }
 
@@ -8503,16 +8495,12 @@ final class PearchHAUITests: XCTestCase {
             bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40, coldRefreshDivisor: 1)
         )
 
-        await spinUntil { await recorder.batchCount() >= 1 }
         let baselineBatches = await recorder.batchCount()
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
-        await runSettledBulkSyncCycle(
-            clock: clock,
-            recorder: recorder,
-            settleDelay: settleDelay,
-            expectedBatches: baselineBatches + 3
-        )
+        await spinUntil { await clock.sleepingTaskCount() >= 1 }
+        _ = await clock.advance(by: settleDelay)
+        await spinUntil { await recorder.batchCount() >= baselineBatches + 3 }
 
         // One grouped batch per due range covered the currently visible rows —
         // not one request per entity and never off-screen rows.
@@ -8741,7 +8729,6 @@ final class PearchHAUITests: XCTestCase {
             bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, coldRefreshDivisor: 1)
         )
 
-        await spinUntil { await recorder.batchCount() >= 1 }
         let baselineBatches = await recorder.batchCount()
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
@@ -9019,7 +9006,8 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 20),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1)
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1),
+            startupWarm: true
         )
 
         // Connecting while hidden performs the intentional one-shot startup warmup.
@@ -9344,11 +9332,11 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 4),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1)
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1),
+            panelActive: true
         )
 
         let batchesBeforeActivation = await recorder.batchCount()
-        model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0"])
         // Arm the settle sleep, then deactivate before it fires: no cycle should run.
         await spinUntil { await clock.sleepingTaskCount() == 1 }
@@ -11686,6 +11674,30 @@ actor CallCounter {
     func next() -> Int {
         count += 1
         return count
+    }
+}
+
+/// Keeps generic active-panel tests independent from the one-shot hidden warmup.
+/// Tests for that warmup opt in through `startupWarm` on their shared setup.
+private actor StartupWarmBlocker {
+    private var remainingSuppressedRequests: Int
+
+    init(suppressedRequestCount: Int) {
+        remainingSuppressedRequests = suppressedRequestCount
+    }
+
+    func shouldSuppressRequest() -> Bool {
+        guard remainingSuppressedRequests > 0 else {
+            return false
+        }
+        remainingSuppressedRequests -= 1
+        return true
+    }
+
+    func waitUntilSuppressionCompletes() async {
+        while remainingSuppressedRequests > 0 {
+            await Task.yield()
+        }
     }
 }
 
