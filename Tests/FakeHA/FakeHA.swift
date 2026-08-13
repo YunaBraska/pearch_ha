@@ -5,6 +5,52 @@ import Network
 import Security
 import PearchHASupport
 
+private final class FakeHAListenerStartup: @unchecked Sendable {
+    private let semaphore = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var failure: String?
+    private var completed = false
+
+    func record(_ state: NWListener.State) {
+        switch state {
+        case .ready:
+            complete(failure: nil)
+        case .failed(let error):
+            complete(failure: error.localizedDescription)
+        case .cancelled:
+            complete(failure: "listener was cancelled before becoming ready")
+        default:
+            break
+        }
+    }
+
+    func waitUntilReady() {
+        guard semaphore.wait(timeout: .now() + 5) == .success else {
+            preconditionFailure("Fake Home Assistant listener did not become ready within five seconds")
+        }
+        lock.lock()
+        let failure = failure
+        lock.unlock()
+        guard let failure else {
+            return
+        }
+        preconditionFailure("Fake Home Assistant listener failed to start: \(failure)")
+    }
+
+    private func complete(failure: String?) {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        guard !completed else {
+            return
+        }
+        self.failure = failure
+        completed = true
+        semaphore.signal()
+    }
+}
+
 public struct FakeHAFixtures: Equatable, Sendable {
     public let apiBody: String
     public let statesBody: String
@@ -215,7 +261,12 @@ public final class FakeHARESTServer: @unchecked Sendable {
         listener.newConnectionHandler = { [weak self] connection in
             self?.handle(connection: connection)
         }
+        let startup = FakeHAListenerStartup()
+        listener.stateUpdateHandler = { state in
+            startup.record(state)
+        }
         listener.start(queue: queue)
+        startup.waitUntilReady()
     }
 
     public func stop() {
@@ -725,7 +776,12 @@ public final class FakeHAWebSocketServer: @unchecked Sendable {
         listener.newConnectionHandler = { [weak self] connection in
             self?.handle(connection: connection)
         }
+        let startup = FakeHAListenerStartup()
+        listener.stateUpdateHandler = { state in
+            startup.record(state)
+        }
         listener.start(queue: queue)
+        startup.waitUntilReady()
     }
 
     public func stop() {
