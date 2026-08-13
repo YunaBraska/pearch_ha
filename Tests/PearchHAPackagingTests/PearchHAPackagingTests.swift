@@ -259,21 +259,15 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertEqual(entrypoint, try String(contentsOf: swiftPMEntrypointURL, encoding: .utf8))
     }
 
-    func testCIWorkflowRunsTheSharedCheckScriptOnFullXcode() throws {
+    func testCIWorkflowUsesTheSharedBuildContract() throws {
         let rootURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-        let workflowURL = rootURL.appendingPathComponent(".github/workflows/ci.yml", isDirectory: false)
+        let workflowURL = rootURL.appendingPathComponent(".github/workflows/build-pr.yml", isDirectory: false)
         let workflow = try String(contentsOf: workflowURL, encoding: .utf8)
 
-        // CI delegates to the one shared check entrypoint on a full Xcode
-        // toolchain, and fails if the checks dirty the working tree.
-        XCTAssertTrue(workflow.contains("actions/checkout@v7.0.0"))
-        XCTAssertTrue(workflow.contains("maxim-lobanov/setup-xcode@v1.7.0"))
-        XCTAssertTrue(workflow.contains("xcode-version: latest-stable"))
-        XCTAssertTrue(workflow.contains("group: ci-${{ github.event.pull_request.head.ref || github.ref_name }}"))
-        XCTAssertTrue(workflow.contains("swift run pearchha-xcode-doctor --json --strict"))
-        XCTAssertTrue(workflow.contains("swift test --disable-swift-testing --enable-xctest list"))
-        XCTAssertTrue(workflow.contains("sh scripts/check.sh"))
-        XCTAssertTrue(workflow.contains("git status --porcelain"))
+        XCTAssertTrue(workflow.contains("pull_request:"))
+        XCTAssertTrue(workflow.contains("wc_swift_build_common.yml@"))
+        XCTAssertTrue(workflow.contains("ref: ${{ github.event.pull_request.head.sha }}"))
+        XCTAssertTrue(workflow.contains("secrets: inherit"))
     }
 
     func testCheckScriptEnforcesTestsCoverageSmokeAndAudit() throws {
@@ -759,12 +753,12 @@ final class PearchHAPackagingTests: XCTestCase {
 
     func testReleaseGuideListsCanonicalRequiredScreenshotNames() throws {
         let rootURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-        let workflowURL = rootURL.appendingPathComponent(".github/workflows/release.yml", isDirectory: false)
-        let workflow = try String(contentsOf: workflowURL, encoding: .utf8)
+        let packageURL = rootURL.appendingPathComponent("scripts/package.sh", isDirectory: false)
+        let package = try String(contentsOf: packageURL, encoding: .utf8)
         let baselineURL = rootURL.appendingPathComponent("docs/release-review-baseline.json", isDirectory: false)
 
-        XCTAssertTrue(workflow.contains("--snapshot-dir .build/pearchha-snapshots/current"))
-        XCTAssertTrue(workflow.contains("--release-manifest build/pearchha-release-manifest.json"))
+        XCTAssertTrue(package.contains("--snapshot-dir .build/pearchha-snapshots/current"))
+        XCTAssertTrue(package.contains("--release-manifest dist/pearchha-release-manifest.json"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: baselineURL.path))
         XCTAssertFalse(PearchHAReleaseEvidenceScreenshots.requiredNames.isEmpty)
     }
@@ -773,50 +767,32 @@ final class PearchHAPackagingTests: XCTestCase {
         let rootURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
         let workflowURL = rootURL.appendingPathComponent(".github/workflows/release.yml", isDirectory: false)
         let workflow = try String(contentsOf: workflowURL, encoding: .utf8)
+        let packageURL = rootURL.appendingPathComponent("scripts/package.sh", isDirectory: false)
+        let package = try String(contentsOf: packageURL, encoding: .utf8)
 
-        // A main-branch push cuts a release; manual dispatch also supports a
-        // branch-safe dry-run packaging path with the same shared checks.
-        XCTAssertTrue(workflow.contains("push:"))
-        XCTAssertTrue(workflow.contains("- main"))
+        XCTAssertTrue(workflow.contains("# yuna-release: true"))
         XCTAssertTrue(workflow.contains("workflow_dispatch:"))
-        XCTAssertTrue(workflow.contains("Optional version override"))
-        XCTAssertTrue(workflow.contains("Build and package without creating a GitHub release"))
-        XCTAssertTrue(workflow.contains("year=\"$(date -u +%Y)\""))
-        XCTAssertTrue(workflow.contains("month=\"$(date -u +%m | sed 's/^0//')\""))
-        XCTAssertTrue(workflow.contains("day=\"$(date -u +%d | sed 's/^0//')\""))
-        XCTAssertTrue(workflow.contains("Release version must look like 2026.7.11"))
-        XCTAssertTrue(workflow.contains("RELEASE_TOKEN is required for this release workflow."))
-        XCTAssertTrue(workflow.contains("push --dry-run"))
-        XCTAssertTrue(workflow.contains("YunaBraska/homebrew-tap.git"))
-        XCTAssertTrue(workflow.contains("🔐 Verify release token"))
-        XCTAssertTrue(workflow.contains("🚀 Create GitHub release"))
-        XCTAssertTrue(workflow.contains("🍺 Update Homebrew cask"))
-        XCTAssertTrue(workflow.contains("swift run pearchha-xcode-doctor --json --strict"))
-        XCTAssertTrue(workflow.contains("swift test --disable-swift-testing --enable-xctest list"))
-        XCTAssertTrue(workflow.contains("sh scripts/check.sh"))
-        // Universal release binary, packaged with manifest + evidence and
-        // verified before anything is published or retained as an artifact.
-        XCTAssertTrue(workflow.contains("swift build -c release --arch arm64 --product PearchHA --scratch-path .build-release-arm64"))
-        XCTAssertTrue(workflow.contains("swift build -c release --arch x86_64 --product PearchHA --scratch-path .build-release-x86_64"))
-        XCTAssertTrue(workflow.contains("lipo -create"))
-        XCTAssertTrue(workflow.contains("--sign-ad-hoc"))
-        XCTAssertTrue(workflow.contains("--package-dmg"))
-        XCTAssertTrue(workflow.contains("--executable build/universal/PearchHA"))
-        XCTAssertTrue(workflow.contains("--release-manifest build/pearchha-release-manifest.json"))
-        XCTAssertTrue(workflow.contains("--bundle-release-evidence build/pearchha-release-evidence"))
-        XCTAssertTrue(workflow.contains("--snapshot-dir .build/pearchha-snapshots/current"))
-        XCTAssertTrue(workflow.contains("--verify-release-manifest build/pearchha-release-manifest.json"))
-        XCTAssertTrue(workflow.contains("lipo -info"))
-        XCTAssertTrue(workflow.contains("codesign --verify --deep"))
-        XCTAssertTrue(workflow.contains("actions/checkout@v7.0.0"))
-        XCTAssertTrue(workflow.contains("maxim-lobanov/setup-xcode@v1.7.0"))
-        XCTAssertTrue(workflow.contains("actions/upload-artifact@v7.0.1"))
-        XCTAssertTrue(workflow.contains("RELEASE_TOKEN"))
-        // Publishing and the optional Homebrew tap update.
-        XCTAssertTrue(workflow.contains("softprops/action-gh-release@v3.0.1"))
-        XCTAssertTrue(workflow.contains("RELEASE_TOKEN"))
-        XCTAssertFalse(workflow.contains("github.token"))
-        XCTAssertTrue(workflow.contains("Casks/pearchha.rb"))
+        XCTAssertTrue(workflow.contains("wc_swift_release.yml@"))
+        XCTAssertTrue(workflow.contains("force: ${{ inputs.force }}"))
+        XCTAssertFalse(workflow.contains("homebrew-tap"))
+        XCTAssertFalse(workflow.contains("RELEASE_TOKEN"))
+
+        XCTAssertTrue(package.contains("swift build -c release --arch arm64 --product PearchHA --scratch-path .build-release-arm64"))
+        XCTAssertTrue(package.contains("swift build -c release --arch x86_64 --product PearchHA --scratch-path .build-release-x86_64"))
+        XCTAssertTrue(package.contains("lipo -create"))
+        XCTAssertTrue(package.contains("--sign-ad-hoc"))
+        XCTAssertTrue(package.contains("--sign-identity \"${identity}\""))
+        XCTAssertTrue(package.contains("--notary-profile \"${notary_profile}\""))
+        XCTAssertTrue(package.contains("--package-dmg"))
+        XCTAssertTrue(package.contains("--executable dist/PearchHA"))
+        XCTAssertTrue(package.contains("--release-manifest dist/pearchha-release-manifest.json"))
+        XCTAssertTrue(package.contains("--bundle-release-evidence dist/pearchha-release-evidence"))
+        XCTAssertTrue(package.contains("--snapshot-dir .build/pearchha-snapshots/current"))
+        XCTAssertTrue(package.contains("--verify-release-manifest dist/pearchha-release-manifest.json"))
+        XCTAssertTrue(package.contains("codesign --verify --deep"))
+        XCTAssertTrue(package.contains("ditto -c -k"))
+        XCTAssertTrue(package.contains("PearchHA-${version}.zip"))
+        XCTAssertTrue(package.contains("PearchHA-${version}.dmg"))
     }
 
     func testReleaseGuideDocumentsTheWorkflows() throws {
@@ -832,9 +808,8 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertTrue(docsIndex.contains("ARCHITECTURE.md"))
         XCTAssertTrue(docsIndex.contains("TESTING.md"))
         XCTAssertTrue(workflow.contains("workflow_dispatch:"))
-        XCTAssertTrue(workflow.contains("dry_run"))
-        XCTAssertTrue(workflow.contains("RELEASE_TOKEN"))
-        XCTAssertTrue(workflow.contains("push --dry-run"))
+        XCTAssertTrue(workflow.contains("force:"))
+        XCTAssertTrue(workflow.contains("wc_swift_release.yml@"))
     }
 
     func testDMGBuilderStagesAppApplicationsShortcutAndRunsHdiutilCreate() throws {

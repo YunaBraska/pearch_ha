@@ -4,6 +4,9 @@
 !.env.example
 
 .build/
+.build-release-arm64/
+.build-release-x86_64/
+dist/
 DerivedData/
 *.xcuserstate
 xcuserdata/
