@@ -9018,7 +9018,10 @@ final class PearchHAUITests: XCTestCase {
             bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1)
         )
 
-        // Inactive: reporting visibility must not fetch nor even arm a settle sleep.
+        // Connecting while hidden performs the intentional one-shot startup warmup.
+        // Wait for it before asserting that an inactive visibility update adds
+        // neither another fetch nor a settle sleeper.
+        await spinUntil { await recorder.batchCount() == 1 }
         let baselineBatches = await recorder.batchCount()
         model.updateVisibleEntities(["sensor.prefetch_18", "sensor.prefetch_19"])
         for _ in 0..<10 {
