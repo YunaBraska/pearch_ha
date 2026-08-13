@@ -8503,16 +8503,16 @@ final class PearchHAUITests: XCTestCase {
             bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40, coldRefreshDivisor: 1)
         )
 
-        await spinUntil { await recorder.batchCount() >= 1 }
+        // Connecting while hidden performs one intentional startup warmup. Let
+        // it complete before arming the panel loop, otherwise a cancelled warmup
+        // can still be releasing its clock waiter on a loaded CI runner.
+        await spinUntil { await recorder.batchCount() == 1 }
         let baselineBatches = await recorder.batchCount()
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
-        await runSettledBulkSyncCycle(
-            clock: clock,
-            recorder: recorder,
-            settleDelay: settleDelay,
-            expectedBatches: baselineBatches + 3
-        )
+        await spinUntil { await clock.sleepingTaskCount() >= 1 }
+        _ = await clock.advance(by: settleDelay)
+        await spinUntil { await recorder.batchCount() >= baselineBatches + 3 }
 
         // One grouped batch per due range covered the currently visible rows —
         // not one request per entity and never off-screen rows.
