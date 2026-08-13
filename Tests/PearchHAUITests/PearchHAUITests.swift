@@ -4439,35 +4439,17 @@ final class PearchHAUITests: XCTestCase {
 
     func test_t_reconnecting_rows_render_as_stale_values() async {
         let refreshGate = ConnectionGate()
-        let model = PearchHAPanelModel { _ in
-            await refreshGate.wait()
-            return .success(rooms: selectionRooms())
-        }
-
-        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
-        await refreshGate.open()
-        await model.connect()
-
-        let secondGate = ConnectionGate()
-        let refreshing = PearchHAPanelModel(
-            connector: { _ in
-                await secondGate.wait()
-                return .success(rooms: selectionRooms())
-            }
-        )
-        refreshing.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
-        await secondGate.open()
-        await refreshing.connect()
-
-        let thirdGate = ConnectionGate()
+        let calls = CallCounter()
         let staleModel = PearchHAPanelModel(
             connector: { _ in
-                await thirdGate.wait()
+                if await calls.next() == 1 {
+                    return .success(rooms: selectionRooms())
+                }
+                await refreshGate.wait()
                 return .success(rooms: selectionRooms())
             }
         )
         staleModel.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
-        await thirdGate.open()
         await staleModel.connect()
         staleModel.startRefresh()
         await spinUntil {
@@ -4480,6 +4462,7 @@ final class PearchHAUITests: XCTestCase {
             entity.map { staleModel.snapshot.formattedValue(for: $0, locale: Locale(identifier: "en_US")) },
             FormattedEntityValue(text: "Stale: 21.4 °C", status: .stale)
         )
+        await refreshGate.open()
     }
 
     func test_t_live_update_during_reconnect_preserves_stale_phase() async {
