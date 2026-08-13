@@ -8855,6 +8855,10 @@ final class PearchHAUITests: XCTestCase {
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
+        // Connecting while hidden performs the intentional one-shot startup warmup.
+        // Let it finish before activating the panel, so the outage assertion only
+        // measures requests made by the recurring bulk-sync loop.
+        await spinUntil { await recorder.batchCount() == 1 }
         let baselineBatches = await recorder.batchCount()
         model.setPanelActive(true)
         model.updateVisibleEntities(["sensor.prefetch_0"])
