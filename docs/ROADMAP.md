@@ -8,14 +8,14 @@ This file is now the live backlog. Done work stays out unless it changes a relea
 - Real Home Assistant connection with browser sign-in or bearer-token auth.
 - Multi-address connection fallback, Keychain-backed session restore, and FakeHA-backed tests.
 - Menu bar values, gauges, thresholds, custom actions, linked averages, entity settings, and cached history detail.
-- CI on pull requests and a release workflow that publishes only from `main`, with manual dispatch available for dry runs or controlled releases.
+- Pull requests and merges build the universal app; weekly or forced manual releases publish stable GitHub releases from `main`.
 
 ## Release gates still open
 
 ### 1. Public release credentials
 
 - Provide production OAuth client values if browser sign-in must ship against a public Home Assistant setup.
-- Provide a real Developer ID signing identity and notarization profile when ad-hoc signing is no longer enough.
+- Provide a real Developer ID signing certificate and notarization API key to enable the already-configured signed and notarized release path.
 
 ### 2. Verification hardening
 
