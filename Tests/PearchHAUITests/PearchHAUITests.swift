@@ -5656,6 +5656,8 @@ final class PearchHAUITests: XCTestCase {
                                              until: .distantPast, inMode: .default, dequeue: true) {
                 XCTAssertTrue(event.window === panel, "Native click must target the current panel")
                 panel.sendEvent(event)
+                // Match the window update performed after each event by NSApplication.run().
+                NSApp.updateWindows()
                 deliveredEvents.append("\(event.type):state=\(control.state.rawValue)")
             }
             return deliveredEvents
