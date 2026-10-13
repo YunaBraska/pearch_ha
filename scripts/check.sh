@@ -2,7 +2,7 @@
 # The single check entrypoint used locally and by CI: strict build, full test
 # suite with the coverage gate, smoke verification with exported snapshots,
 # and the repository safety audit. Fails on the first broken step.
-set -eu
+set -eux
 
 export PERCHHA_TLS_DEBUG=1
 
