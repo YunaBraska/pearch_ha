@@ -5632,28 +5632,25 @@ final class PearchHAUITests: XCTestCase {
         window.recalculateKeyViewLoop()
 
         let textFields = editableTextFields(in: window.contentView)
-        let popUpButtons = nativePopUpButtons(in: window.contentView)
         let debugSummary = nativeControlDebugSummary(in: window.contentView)
         let searchField = textFields.first { $0.placeholderString == "Search" }
         let minField = textFields.first { $0.placeholderString == "0" }
         let maxField = textFields.first { $0.placeholderString == "100" }
-        let firstPopup = popUpButtons.first
+        let unitPopup = try XCTUnwrap(nativePopUpButtons(in: window.contentView).first {
+            $0.title == "Detected · Percent"
+        }, debugSummary)
 
         XCTAssertNotNil(searchField, debugSummary)
         XCTAssertNotNil(minField, debugSummary)
         XCTAssertNotNil(maxField, debugSummary)
-        XCTAssertEqual(firstPopup?.title, "Detected · Percent", debugSummary)
-
         if let searchField {
             XCTAssertTrue(window.makeFirstResponder(searchField), debugSummary)
             let labels = nativeKeyViewLoopLabels(startingAt: searchField)
             XCTAssertGreaterThanOrEqual(labels.count, 3, "\(labels)")
             XCTAssertTrue(labels.contains(where: { $0.contains("placeholder:Search") }), "\(labels)")
         }
-        if let firstPopup {
-            XCTAssertTrue(firstPopup.acceptsFirstResponder, debugSummary)
-            XCTAssertTrue(window.makeFirstResponder(firstPopup), debugSummary)
-        }
+        XCTAssertTrue(unitPopup.acceptsFirstResponder, debugSummary)
+        XCTAssertTrue(window.makeFirstResponder(unitPopup), debugSummary)
     }
 
     func testHistoryPopoverExposesNativeRangeControlAndFocus() {
