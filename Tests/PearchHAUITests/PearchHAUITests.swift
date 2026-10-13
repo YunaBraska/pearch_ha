@@ -5661,11 +5661,16 @@ final class PearchHAUITests: XCTestCase {
             XCTAssertTrue(control.isEnabled)
             XCTAssertEqual(control.state, service == "turn_on" ? .off : .on)
             let point = control.convert(NSPoint(x: control.bounds.midX, y: control.bounds.midY), to: nil)
-            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            for (eventIndex, type) in [NSEvent.EventType.leftMouseDown, .leftMouseUp].enumerated() {
                 let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point,
                     modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber,
-                    context: nil, eventNumber: 1, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0))
-                panel.sendEvent(event)
+                    context: nil, eventNumber: eventIndex + 1, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0))
+                NSApp.postEvent(event, atStart: false)
+            }
+            // AppKit may track the press synchronously, so mouse-up must already be queued.
+            while let event = NSApp.nextEvent(matching: [.leftMouseDown, .leftMouseUp],
+                                             until: .distantPast, inMode: .default, dequeue: true) {
+                NSApp.sendEvent(event)
             }
             await spinUntil("light switch sends \(service)") {
                 let calls = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
