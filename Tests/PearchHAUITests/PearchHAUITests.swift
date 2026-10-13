@@ -5615,6 +5615,48 @@ final class PearchHAUITests: XCTestCase {
         try saveControlSnapshot(panel.contentView, name: "native-cover-panel")
     }
 
+    func testAppShellLightSwitchSendsOnAndOffAfterReopeningPanel() async throws {
+        let server = try FakeHAWebSocketServer()
+        server.start()
+        defer { server.stop() }
+        let lamp = entity("light", state: "off", attributes: [
+            "supported_features": 44, "supported_color_modes": .array(["color_temp", "xy"]),
+            "min_color_temp_kelvin": 2000, "max_color_temp_kelvin": 6535,
+            "effect_list": .array(["off", "candle"])
+        ])
+        let model = await connectedModel([lamp], server: server)
+        for (index, service) in ["turn_on", "turn_off"].enumerated() {
+            let panel = PearchHAApplication.makePanel(model: model)
+            defer { panel.orderOut(nil); panel.contentViewController = nil }
+            panel.makeKeyAndOrderFront(nil)
+            drainPanelRunLoop()
+            panel.contentView?.layoutSubtreeIfNeeded()
+            let control = try XCTUnwrap(nativeSwitches(in: panel.contentView).first)
+            XCTAssertTrue(control.isEnabled)
+            XCTAssertEqual(control.state, service == "turn_on" ? .off : .on)
+            let point = control.convert(NSPoint(x: control.bounds.midX, y: control.bounds.midY), to: nil)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point,
+                    modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber,
+                    context: nil, eventNumber: 1, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0))
+                panel.sendEvent(event)
+            }
+            await spinUntil("light switch sends \(service)") {
+                let calls = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
+                return calls.count == index + 1 && model.snapshot.controlActionState == .idle
+            }
+            let calls = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
+            XCTAssertEqual(calls.count, index + 1)
+            let body = try XCTUnwrap(calls.last?.bodyText)
+            let payload = try JSONDecoder().decode([String: ActionValue].self, from: Data(body.utf8))
+            XCTAssertEqual(payload["domain"], "light")
+            XCTAssertEqual(payload["service"], .string(service))
+            XCTAssertEqual(payload["target"], .object(["entity_id": "light.office"]))
+            XCTAssertEqual(payload["service_data"], .object([:]))
+            XCTAssertEqual(model.snapshot.rooms.first?.entities.first?.state, service == "turn_on" ? "on" : "off")
+        }
+    }
+
     func testSettingsEntitiesTabExposesNativeSearchUnitMenuAndKeyViewLoop() async throws {
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) }
