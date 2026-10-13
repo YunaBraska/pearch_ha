@@ -581,18 +581,6 @@ func menuBarNumberLabel(_ value: Double?) -> String {
 }
 
 enum PearchHASliderValueFormatting {
-    static func label(for value: Double, unit: String?) -> String {
-        let number = menuBarNumberLabel(value)
-        let trimmedUnit = unit?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if trimmedUnit == "%" {
-            return "\(number)%"
-        }
-        guard !trimmedUnit.isEmpty else {
-            return number
-        }
-        return "\(number) \(trimmedUnit)"
-    }
-
     static func accessibilityValue(for value: Double, unit: String?) -> String {
         let number = menuBarNumberLabel(value)
         let trimmedUnit = unit?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

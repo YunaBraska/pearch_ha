@@ -9,37 +9,23 @@ Authoritative references:
 - [Home Assistant Authentication API](https://developers.home-assistant.io/docs/auth_api/)
 - [Statistics WebSocket API change note](https://developers.home-assistant.io/blog/2023/04/30/statistics_impossible_values/)
 
-## 1. Authentication
+## Authentication
 
-REST calls use:
+REST uses `Authorization: Bearer <access-token>`. WebSocket authenticates with
+`{"type":"auth","access_token":"<access-token>"}` and requires `auth_ok`.
+Long-lived tokens and OAuth sessions share this bearer-token contract.
+Username/password credentials are not sent to REST or WebSocket API calls.
 
-```text
-Authorization: Bearer <access-token>
-```
+| OAuth step | Endpoint | Fields |
+| --- | --- | --- |
+| Authorize | `GET /auth/authorize` | `client_id`, `redirect_uri`, `state` |
+| Exchange | `POST /auth/token` | `grant_type=authorization_code`, `code`, `client_id` |
+| Refresh | `POST /auth/token` | `grant_type=refresh_token`, `refresh_token`, `client_id` |
 
-WebSocket auth uses:
-
-```json
-{ "type": "auth", "access_token": "<access-token>" }
-```
-
-Supported input methods:
-
-1. Long-lived access token. This is the first implementation path.
-2. OAuth/IndieAuth login. This produces access and refresh tokens and normalizes to the same bearer-token API path.
-
-Username/password is not a REST or WebSocket authentication mode. If local ignored credentials are present, they are used only for the login flow or manual fixture work.
-
-OAuth/IndieAuth uses the documented Authentication API:
-
-| Step | Method and path | Fields |
-|---|---|---|
-| Authorize | `GET /auth/authorize` | `client_id`, `redirect_uri`, optional `state` |
-| Exchange code | `POST /auth/token` | `grant_type=authorization_code`, `code`, `client_id` |
-| Refresh access token | `POST /auth/token` | `grant_type=refresh_token`, `refresh_token`, `client_id` |
-| Revoke refresh token | `POST /auth/token` | `token=<refresh-token>`, `action=revoke` |
-
-Access-token responses must include `access_token`, `expires_in`, and `token_type=Bearer`. Code exchange must also include `refresh_token`; refresh responses may omit it. PearchHA stores the OAuth `client_id` with the refresh token because Home Assistant requires the same client ID for refresh. A `401` or WebSocket `auth_invalid` from an authenticated app-shell request triggers one access-token refresh and one retry. A failed refresh clears stored secrets and returns the user to reconnect.
+Token responses require `access_token`, `expires_in`, and `token_type=Bearer`.
+Code exchange also requires `refresh_token`. Keychain stores the session and client
+ID. Authentication failure triggers one refresh and one retry. Failed refresh
+clears the stored session and requires reconnecting.
 
 Native sign-in reads the application client website and callback URI from `PEARCHHA_OAUTH_CLIENT_ID` and `PEARCHHA_OAUTH_REDIRECT_URI`. Exported process values win; otherwise the app reads those keys from a local ignored env file, or from the exported `PEARCHHA_ENV_FILE` path. The packaged `.app` must declare the callback scheme in `CFBundleURLTypes` with `CFBundleTypeRole=Viewer`; `pearchha-package-app --verify-launch-services` writes that metadata, registers the generated bundle, and verifies macOS records the callback scheme claim for that bundle. The app shell accepts delivered callback URLs only when their scheme and redirect base match the configured redirect URI, and records only a redacted ingress event. The client website must publish the redirect URI according to the Home Assistant native-app registration rules before this can pass real-HA sign-in verification.
 
@@ -53,79 +39,60 @@ Run `swift run hamirror oauth-check --env <local-env-file>` before real browser 
 Run `swift run pearchha-package-app --write-oauth-site .build/pearchha-oauth-site/index.html --oauth-env <local-env-file>` to generate the static HTML artifact that should be published at the configured client website, then `swift run pearchha-package-app --verify-oauth-site .build/pearchha-oauth-site/index.html --oauth-env <local-env-file>` to confirm the artifact still matches the configured website URL and redirect declaration before deployment. After publishing, run `swift run pearchha-package-app --verify-published-oauth-site --oauth-env <local-env-file>` to fetch the live client website URL and verify the deployed HTML declaration without sending Home Assistant secrets.
 For releasable builds, include `--oauth-site .build/pearchha-oauth-site/index.html` when writing the release manifest so the retained release evidence can re-verify the exact OAuth declaration page that was meant to be deployed.
 
-## 2. Required documented API surface
+## Transport and state
 
-### REST
+Disabling Live Updates disables the persistent subscription. Discovery, service
+metadata, controls, and recorder statistics still use short WebSocket sessions.
+There is no REST service-call fallback in the current client.
 
-| Method and path | Purpose |
-|---|---|
-| `GET /api/` | Reachability and auth smoke check. |
-| `GET /api/states` | Initial full state and fallback polling. |
-| `GET /api/states/<entity_id>` | Single entity verification. |
-| `GET /api/history/period/<start>` | Hour/Day history. |
-| `POST /api/services/<domain>/<service>` | Fallback service call path. |
+| Request | Purpose and fallback |
+| --- | --- |
+| REST `GET /api/` | Reachability/auth check |
+| REST `GET /api/states` | Full state API |
+| WebSocket `get_states` | Discovery snapshot and event-stream baseline |
+| `config/area_registry/list`, `config/device_registry/list` | Room/device metadata. Unsupported registries contribute no records. |
+| `config/entity_registry/list_for_display` | Entity metadata, falling back to `config/entity_registry/list` |
+| `subscribe_entities` | Compact live stream, falling back to `subscribe_events` with `state_changed` |
+| `get_services` | Domain/service/field metadata for custom actions |
+| `call_service` | Built-in controls and custom actions |
+| REST `GET /api/history/period/<start>` | Hour/day history and recorder fallback |
+| `recorder/statistics_during_period` | Week/month statistics |
 
-### WebSocket
+State objects require `entity_id` and a string `state`. Display fields come from
+`attributes.friendly_name`, `unit_of_measurement`, and `current_position`. Missing
+names fall back to the entity ID. Only attributes used by controls are retained.
+Numeric parsing follows the API format. Display formatting uses the user's locale.
 
-| Type | Purpose |
-|---|---|
-| `auth` | Authenticate WebSocket session. |
-| `get_states` | Initial state snapshot. |
-| `subscribe_events` with `event_type: state_changed` | Documented live-state fallback. |
-| `call_service` | Primary control and custom action path. |
-| `get_services` | Discover service metadata for custom actions. |
+Compact additions in `event.a` replace state. Changes in `event.c[id]["+"]` merge
+with it. Attribute removals in `event.c[id]["-"].a` clear only named attributes,
+and `event.r` removes entities from the stream snapshot. Removal-only frames are
+skipped until a state-producing frame arrives. Full `state_changed` events replace
+capabilities, preventing obsolete options from surviving a full update.
 
-## 3. Supported extended API surface
+WebSocket replies must match the command ID. Unsupported commands, auth rejection,
+transport/TLS failures, service failures, and invalid payloads remain distinct.
+`unknown_command` and `unsupported_command` activate documented fallbacks. Ordered
+address fallback retries transport failures, not authentication or malformed data.
 
-These commands are useful and should be mirrored when available, but PearchHA must detect support and keep explicit fallbacks.
+## History
 
-| Type | Purpose | Fallback |
-|---|---|---|
-| `subscribe_entities` | Compact live entity diff stream. | `subscribe_events` + initial `get_states`. |
-| `config/entity_registry/list_for_display` | Lightweight entity display metadata. | Full state plus registry commands where available. |
-| `config/area_registry/list` | Room discovery. | Entity/device area data, then `Unassigned`. |
-| `config/device_registry/list` | Entity -> device -> area resolution. | Entity area or `Unassigned`. |
-| `config/entity_registry/list` | Full entity registry. | `list_for_display` or states. |
-| `recorder/statistics_during_period` | Week/Month history. | REST history for available retention period. |
+REST requests set `filter_entity_id`, `end_time`, `minimal_response=true`, and
+`no_attributes=true`. Minimal rows may omit the entity ID. Explicit mismatched IDs
+are discarded. Samples are sorted by timestamp. Empty history is a successful
+empty series. Missing timestamps or malformed payloads fail explicitly.
 
-The Home Assistant project has documented that recorder statistics WebSocket APIs may change. Treat missing columns as null and fixture drift as a contract warning, not a crash.
+Week/month requests use `recorder/statistics_during_period` with `types: ["mean",
+"state"]`, hourly buckets for week and daily buckets for month. Results are keyed
+by statistic ID. Timestamps use Unix epoch milliseconds. `mean` takes precedence
+over `state`. Missing/null numeric columns contribute no sample. Unsupported
+commands or unreachable/TLS-rejected statistics sessions fall back to REST for
+the same range, subject to HA retention. Malformed statistics still fail.
 
-## 4. Entity state shape
+Preview and detail refresh scheduling is defined in [ARCHITECTURE.md](ARCHITECTURE.md).
+Climate history records the operating mode. Temperature attributes are excluded
+by `no_attributes=true` and need a separate sensor for a numeric temperature graph.
 
-PearchHA consumes state objects with at least:
-
-```json
-{
-  "entity_id": "sensor.office_temperature",
-  "state": "21.4",
-  "attributes": {
-    "friendly_name": "Office temperature",
-    "unit_of_measurement": "°C",
-    "device_class": "temperature",
-    "state_class": "measurement"
-  },
-  "last_changed": "2026-06-27T09:00:00+00:00",
-  "last_updated": "2026-06-27T09:00:00+00:00"
-}
-```
-
-State values are strings. Numeric parsing uses Home Assistant's API format; display formatting uses the user's locale.
-
-The first M3 client slice maps REST state objects into `EntityState` by reading `entity_id`, `state`, `attributes.friendly_name`, and `attributes.unit_of_measurement`. Missing friendly names fall back to the entity ID.
-
-The WebSocket M3 slice authenticates at `/api/websocket`, validates `auth_required` -> `auth_ok`, sends `get_states` with an integer `id`, requires the matching result `id`, and maps command errors separately from transport failures.
-
-The live-update path tries `subscribe_entities` first. Full compact states in `event.a` and partial state changes in `event.c[entity_id]["+"]` map to `EntityState`; partial changes merge with the current stream snapshot. Attribute removals in `event.c[entity_id]["-"].a` clear removed display fields, and top-level entity removals in `event.r` remove entries from that snapshot before later partial changes are considered. Removal-only frames are skipped until the next state-producing frame. If Home Assistant reports `unknown_command` or older-HA `unsupported_command`, PearchHA falls back to documented `subscribe_events` with `event_type: state_changed` and maps `event.data.new_state` into `EntityState`.
-
-The service-call slice sends WebSocket `call_service` with `domain`, `service`, optional `target.entity_id`, and arbitrary JSON `service_data`. FakeHA journals the exact redacted command payload for control and custom-action assertions.
-
-The discovery slice sends WebSocket registry commands for areas, devices, and entities, then pairs those registry records with `get_states`. Room resolution happens in core code so registry transport and grouping rules stay separately testable.
-
-The first history slice sends `GET /api/history/period/<start>` with `filter_entity_id`, `end_time`, `minimal_response=true`, and `no_attributes=true`. Minimal history rows may omit `entity_id`; the request-level filter is the entity boundary, and rows that still carry a different `entity_id` are discarded. Returned samples are sorted by timestamp and mapped to a string state plus a numeric value when the state parses as `Double`. Empty history is a successful empty series. Missing timestamps or malformed payloads fail as explicit invalid-payload client errors.
-
-The recorder-statistics slice sends WebSocket `recorder/statistics_during_period` for Week and Month ranges. Requests use ISO date strings for `start_time` and `end_time`, a single `statistic_ids` entry, `types: ["mean", "state"]`, hourly buckets for Week, and daily buckets for Month. Responses are keyed by statistic ID. Row `start` values are Unix epoch milliseconds; `mean` is preferred over `state` when both are present. Missing or null numeric columns are treated as no sample, not as malformed payloads. If Home Assistant reports `unknown_command` or older-HA `unsupported_command`, or if the recorder-statistics WebSocket endpoint is unreachable or TLS-rejected, PearchHA falls back to REST history for the same range. Malformed statistic rows still fail as explicit invalid-payload client errors.
-
-## 5. Domains
+## Domains
 
 V1 reads and displays any entity with a usable state.
 
@@ -134,8 +101,7 @@ edited directly in its row: choices use a dropdown, numbers use a borderless edi
 value and an optional stepper, booleans use a switch, and actions use a named button.
 Position, brightness, fan speed and volume use a slider with a quiet value. Clicking
 that value reveals precise numeric entry. Sliders have no additional stepper and
-commit on release. Multiple
-settings open an editor from the value marked with a slider icon. Existing on/off
+commit on release. Multiple settings open an editor from the value marked with a slider icon. Existing on/off
 switches and cover controls remain inline. Tooltips list the domain and available
 settings, options and numeric bounds. All controls use Home Assistant's current
 feature flags, options and numeric bounds:
@@ -163,20 +129,19 @@ sent. Live readings do not replace a focused or pending numeric draft. Color edi
 Buttons, update actions, and automation disable/manual execution require confirmation.
 Disabling an automation leaves already running actions alone.
 
-History opens only by clicking its preview. Read-only values have no editing symbol.
-Climate history shows the recorded operating mode as a state timeline.
-Temperature attributes are not included in the state history request.
+History opens by clicking its preview. Read-only values have no editing symbol.
 
 Capabilities survive REST discovery, WebSocket snapshots, compact updates and attribute
 removals. Commands are revalidated against the latest capabilities before dispatch.
-Successful commands refresh reported state rather than guessing values locally; failed
-refreshes leave a visible stale-state warning. Existing entity selection is preserved.
+Capability-derived commands refresh reported state after success. Failed refreshes
+leave a stale-state warning. Existing toggles and covers retain optimistic state
+updates with rollback on service failure or cancellation.
 
 `sensor` and `binary_sensor` are read-only domains. Custom actions can be attached to any
 entity, including those domains. Advanced media browsing, seeking and arbitrary media
 URLs, vendor-specific actions, and domains not listed above still use custom actions.
 
-## 6. Service calls
+## Service calls
 
 Primary WebSocket shape:
 
@@ -191,93 +156,43 @@ Primary WebSocket shape:
 }
 ```
 
-Persisted custom actions wrap the service call with PearchHA row metadata:
-
-```json
-{
-  "id": "boost-air",
-  "entityID": "sensor.office_temperature",
-  "title": "Boost air",
-  "requiresConfirmation": false,
-  "action": {
-    "domain": "script",
-    "service": "turn_on",
-    "targetEntityID": "script.air_cleaner_boost",
-    "serviceData": {
-      "mode": "boost",
-      "duration": 15
-    }
-  }
-}
-```
-
-`requiresConfirmation`, `title`, and attached row metadata are local UI/config fields. The WebSocket transport sends only the nested action as Home Assistant `call_service` fields.
-
-Protected custom-action values are stored in JSON as opaque protected-string references. The actual secret scalar strings live in Keychain, are resolved immediately before `call_service`, and fail explicitly if the referenced secret is missing. Documentation, logs, fixtures, and snapshots must not imply plaintext secret storage.
-
-FakeHA must journal every received service call so tests can assert exact payloads.
+Custom actions persist an `EntityCustomAction` around the same `ActionSpec`.
+Their title, attached row, and confirmation flag are local UI/config fields. Only
+the nested action becomes the service payload. Protected scalar strings are opaque
+references in JSON and resolve from Keychain before execution. Missing references
+fail explicitly. FakeHA journals redacted payloads for exact command assertions.
 
 The custom-action metadata slice sends WebSocket `get_services` and maps the returned domain -> service -> field metadata into typed service metadata. PearchHA preserves field examples and selectors as generic JSON values because Home Assistant selectors vary by integration.
 
-## 7. Cover semantics
+Cover actions use `open_cover`, `close_cover`, `stop_cover`, and
+`set_cover_position` with an integer `position` from 0 to 100. A reported `current_position`
+enables the position slider. The buttons/slider/both preference remains supported.
+Open, Stop, and Close cancel pending numeric edits before dispatch so a delayed
+position cannot restart movement. Numeric editing follows the shared control rules
+above.
 
-Supported services:
+## Mirrored fixtures
 
-- `cover.open_cover`
-- `cover.close_cover`
-- `cover.stop_cover`
-- `cover.set_cover_position`
+`hamirror` captures `/api/` and `/api/states` from ignored local configuration,
+sanitizes them, and writes reviewable fixtures. `--websocket` also records optimized
+command availability and error codes without retaining private result payloads.
+Services, history, live events, and failure scenarios are supplied by FakeHA tests.
 
-Position payload:
-
-```json
-{ "position": 0 }
+```sh
+swift run hamirror doctor --env <local-env-file> --json --strict
+swift run hamirror doctor --env <local-env-file> --probe
+swift run hamirror verify --fixtures Fixtures/public/m2-minimal
 ```
 
-`current_position` drives a position slider and a clickable numeric value when
-present. The existing buttons/slider/both preference remains supported. Clicking
-the value opens precise entry with the same 600 ms debounce and Return/Escape
-behavior as other numbers.
-The slider commits on release. Open, Stop and Close run immediately and cancel
-any pending position edit first, so a delayed target cannot restart movement.
+Exported `PEARCHHA_ENV_FILE`, HA URL/fallback/token/user/password, and OAuth
+client/redirect variables override file values. `doctor` reports presence and
+redacted remediation, never credentials. `--probe` checks configured endpoints.
+Use CLI `--help` for capture and replay options.
 
-## 8. Mirrored fixtures
+The sanitizer aliases entity IDs, redacts credentials, names and free text, zeros
+location coordinates, and normalizes timestamps. Follow the [privacy rules](../Fixtures/README.md).
+Verification rejects stale or unknown WebSocket evidence. Capture has a receive
+deadline and honors cancellation. Replay synthesizes minimal registry rows from
+sanitized states when private registry payloads were omitted.
 
-`hamirror` captures from an ignored local env file, anonymizes, and writes fixtures under `Fixtures/`. `hamirror doctor --env <local-env-file>` reports redacted key presence/status plus next-step hints, emits machine-readable readiness plus redacted guidance with `--json`, surfaces exact suggested commands when capture or OAuth checks are ready, and fails before capture in `--strict` mode when the bearer token is missing. `hamirror doctor --probe` adds a live redacted `/api/` check for primary and fallback URLs plus endpoint-specific remediation hints for transport and authorization failures. Exported `PEARCHHA_ENV_FILE`, `PEARCHHA_HA_URL`, `PEARCHHA_HA_FALLBACK_URL`, `PEARCHHA_HA_TOKEN`, `PEARCHHA_HA_USER`, `PEARCHHA_HA_PASSWORD`, `PEARCHHA_OAUTH_CLIENT_ID`, and `PEARCHHA_OAUTH_REDIRECT_URI` override the file-based values for capture and OAuth checks. The M2 foundation captures `/api/` and `/api/states`; M8 adds optional `--websocket` evidence for optimized commands. The WebSocket evidence records command availability and error codes without storing private WebSocket result payloads. `hamirror serve` replays the mirrored REST payloads and the captured command-availability surface locally; when display-list payloads were intentionally omitted for privacy, FakeHA synthesizes minimal registry rows from mirrored `states.json` so optimized discovery can still be exercised. Deterministic FakeHA tests can also record compact event top-level keys. Verification rejects stale `websocket.json` files and unknown WebSocket evidence fields, and WebSocket capture fails explicitly when HA does not answer before the receive timeout. Later milestones add services and history fixtures.
-
-The M2 sanitizer structurally rewrites captured JSON before writing. It redacts tokens and credentials, aliases entity IDs, redacts friendly names and free-text attributes, zeros location coordinates, and normalizes timestamps.
-
-Required fixture groups:
-
-- Auth success and failure.
-- REST API ping.
-- Full state snapshot.
-- WebSocket `get_states`.
-- Live update stream through `subscribe_entities` if supported.
-- Live update stream through `subscribe_events`.
-- Area, device, and entity registry data where supported.
-- REST history for at least one numeric entity.
-- Recorder statistics for at least one numeric entity where supported.
-- Successful and failed service calls.
-- Cover state and cover service calls.
-- At least one custom action attached to a sensor.
-- HA restart / WebSocket reconnect sequence.
-- TLS failure and unreachable host modes.
-
-Fixtures must not contain tokens, credentials, GPS coordinates, real names, or private free text unless explicitly approved during review.
-
-## 9. Error modes
-
-PearchHA handles:
-
-- REST `401`.
-- WebSocket `auth_invalid`.
-- DNS failure.
-- Connection refused.
-- TLS rejection.
-- WebSocket close during session.
-- Unsupported WebSocket command.
-- Service result failure.
-- Empty or malformed history payload.
-
-Each mode has a visible message and a traceability row in `TESTING.md`.
+The [verification contract](TESTING.md) owns test commands and evidence limits.

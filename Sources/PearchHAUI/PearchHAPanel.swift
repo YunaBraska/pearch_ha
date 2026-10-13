@@ -2350,20 +2350,18 @@ public final class PearchHAPanelModel: ObservableObject {
 
     @discardableResult
     public func startCustomAction(_ id: CustomActionID, confirmed: Bool = false) -> Bool {
-        guard !snapshot.controlActionState.isRunning,
-              let action = customActionConfiguration.action(id: id)
-        else {
-            return false
-        }
-        guard confirmed || !action.requiresConfirmation else {
-            return false
-        }
+        guard let action = customActionConfiguration.action(id: id),
+              confirmed || !action.requiresConfirmation else { return false }
+        return startControlAction { await $0.runCustomAction(id, confirmed: confirmed) }
+    }
+
+    private func startControlAction(_ action: @escaping @MainActor (PearchHAPanelModel) async -> Bool) -> Bool {
+        guard !snapshot.controlActionState.isRunning else { return false }
         controlActionTask?.cancel()
         controlActionTask = Task { @MainActor [weak self] in
-            await self?.runCustomAction(id, confirmed: confirmed)
-            if !Task.isCancelled {
-                self?.controlActionTask = nil
-            }
+            guard let self else { return }
+            _ = await action(self)
+            if !Task.isCancelled { controlActionTask = nil }
         }
         return true
     }
@@ -2430,12 +2428,10 @@ public final class PearchHAPanelModel: ObservableObject {
     /// Returns false while another action is pending; execution failures appear in controlActionState.
     @discardableResult
     public func startEntityControlValue(_ id: EntityID, controlID: String, value: ActionValue? = nil, confirmed: Bool = false) -> Bool {
-        guard controlActionTask == nil, !snapshot.controlActionState.isRunning else { return false }
-        controlActionTask = Task { @MainActor [weak self] in
-            await self?.setEntityControlValue(id, controlID: controlID, value: value, confirmed: confirmed)
-            if !Task.isCancelled { self?.controlActionTask = nil }
+        guard controlActionTask == nil else { return false }
+        return startControlAction {
+            await $0.setEntityControlValue(id, controlID: controlID, value: value, confirmed: confirmed)
         }
-        return true
     }
 
     /// Validates against the latest entity capabilities, then sends one action through the shared runner.
@@ -2483,38 +2479,14 @@ public final class PearchHAPanelModel: ObservableObject {
 
     @discardableResult
     public func startEntityControlToggle(_ id: EntityID, isOn: Bool) -> Bool {
-        guard !snapshot.controlActionState.isRunning else {
-            return false
-        }
-        guard canToggleEntityControl(id, isOn: isOn) else {
-            return false
-        }
-        controlActionTask?.cancel()
-        controlActionTask = Task { @MainActor [weak self] in
-            await self?.setEntityControl(id, isOn: isOn)
-            if !Task.isCancelled {
-                self?.controlActionTask = nil
-            }
-        }
-        return true
+        guard canToggleEntityControl(id, isOn: isOn) else { return false }
+        return startControlAction { await $0.setEntityControl(id, isOn: isOn) }
     }
 
     @discardableResult
     public func startCoverControl(_ id: EntityID, command: PearchHACoverCommand) -> Bool {
-        guard !snapshot.controlActionState.isRunning else {
-            return false
-        }
-        guard canRunCoverControl(id, command: command) else {
-            return false
-        }
-        controlActionTask?.cancel()
-        controlActionTask = Task { @MainActor [weak self] in
-            await self?.setCoverControl(id, command: command)
-            if !Task.isCancelled {
-                self?.controlActionTask = nil
-            }
-        }
-        return true
+        guard canRunCoverControl(id, command: command) else { return false }
+        return startControlAction { await $0.setCoverControl(id, command: command) }
     }
 
     @discardableResult
@@ -2548,54 +2520,11 @@ public final class PearchHAPanelModel: ObservableObject {
             return false
         }
 
-        let previousState = entity.state
-        let previousPosition = entity.currentPosition
-        let targetState = PearchHAEntityControl.optimisticState(isOn: isOn)
-        let actionSpec = control.actionSpec(targetIsOn: isOn)
-        pendingControlChange = PendingControlChange(
-            entityID: id,
-            previousState: previousState,
-            previousPosition: previousPosition,
-            targetState: targetState,
-            targetPosition: previousPosition,
-            name: entity.name
+        return await runOptimisticControl(
+            entity, form: form, action: control.actionSpec(targetIsOn: isOn),
+            targetState: PearchHAEntityControl.optimisticState(isOn: isOn),
+            targetPosition: entity.currentPosition
         )
-        applyControlEntitySnapshot(
-            id,
-            state: targetState,
-            currentPosition: previousPosition,
-            actionState: .running(entityID: id),
-            lastUpdateDescription: "Updating \(entity.name)"
-        )
-
-        recordOutboundRequest()
-        let result = await actionRunner(form, actionSpec)
-        guard !Task.isCancelled else {
-            return false
-        }
-
-        switch result {
-        case .success:
-            pendingControlChange = nil
-            applyControlEntitySnapshot(
-                id,
-                state: targetState,
-                currentPosition: previousPosition,
-                actionState: .idle,
-                lastUpdateDescription: "Updated \(entity.name)"
-            )
-            return true
-        case let .failed(message):
-            pendingControlChange = nil
-            applyControlEntitySnapshot(
-                id,
-                state: previousState,
-                currentPosition: previousPosition,
-                actionState: .failed(entityID: id, message: message),
-                lastUpdateDescription: "Control failed for \(entity.name)"
-            )
-            return false
-        }
     }
 
     @discardableResult
@@ -2638,11 +2567,20 @@ public final class PearchHAPanelModel: ObservableObject {
             }
         }
 
+        return await runOptimisticControl(
+            entity, form: form, action: control.actionSpec(command: command),
+            targetState: control.optimisticState(command: command, currentState: entity.state),
+            targetPosition: control.optimisticPosition(command: command)
+        )
+    }
+
+    private func runOptimisticControl(
+        _ entity: DiscoveredEntity, form: PearchHAConnectionForm, action: ActionSpec,
+        targetState: String, targetPosition: Int?
+    ) async -> Bool {
+        let id = entity.id
         let previousState = entity.state
         let previousPosition = entity.currentPosition
-        let targetState = control.optimisticState(command: command, currentState: entity.state)
-        let targetPosition = control.optimisticPosition(command: command)
-        let actionSpec = control.actionSpec(command: command)
         pendingControlChange = PendingControlChange(
             entityID: id,
             previousState: previousState,
@@ -2660,7 +2598,7 @@ public final class PearchHAPanelModel: ObservableObject {
         )
 
         recordOutboundRequest()
-        let result = await actionRunner(form, actionSpec)
+        let result = await actionRunner(form, action)
         guard !Task.isCancelled else {
             return false
         }

@@ -2283,9 +2283,9 @@ private struct HAStateAttributesDTO: Decodable {
         "swing_modes", "swing_mode", "swing_horizontal_modes", "swing_horizontal_mode",
         "min", "max", "step", "options", "supported_color_modes", "brightness",
         "color_temp_kelvin", "min_color_temp_kelvin", "max_color_temp_kelvin", "rgb_color",
-        "effect_list", "effect", "percentage", "percentage_step", "oscillating", "direction",
+        "effect_list", "effect", "percentage", "oscillating", "direction",
         "volume_level", "is_volume_muted", "source_list", "source", "sound_mode_list",
-        "sound_mode", "shuffle", "repeat", "in_progress", "latest_version", "skipped_version"
+        "sound_mode", "shuffle", "repeat", "in_progress", "skipped_version"
     ]
 
     private static func decodeCurrentPosition(from container: KeyedDecodingContainer<CodingKeys>) -> Int? {

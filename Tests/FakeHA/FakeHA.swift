@@ -407,7 +407,6 @@ public final class FakeHARESTServer: @unchecked Sendable {
 }
 
 public enum FakeHAError: Error, Equatable {
-    case missingPort
     case tlsIdentityUnavailable
     case invalidWebSocketKey
 }
