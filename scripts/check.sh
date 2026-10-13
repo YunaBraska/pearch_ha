@@ -10,7 +10,8 @@ swift run pearchha-xcode-doctor --json --strict
 swift test --disable-swift-testing --enable-xctest list
 
 swift build -Xswiftc -warnings-as-errors
-swift test --disable-swift-testing --enable-xctest -Xswiftc -warnings-as-errors --enable-code-coverage
+# Keep test progress unbuffered so a hung test is identifiable in CI.
+script -q -e /dev/null swift test --disable-swift-testing --enable-xctest -Xswiftc -warnings-as-errors --enable-code-coverage
 coverage_path="$(swift test --disable-swift-testing --enable-xctest --enable-code-coverage --show-codecov-path)"
 coverage_directory="$(dirname "$coverage_path")"
 # SwiftPM may export only the last XCTest bundle. Export all bundles against
