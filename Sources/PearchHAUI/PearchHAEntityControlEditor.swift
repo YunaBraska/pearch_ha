@@ -305,7 +305,7 @@ struct PearchHAEntityControlInput: View {
     }
 
     private var numberTextField: some View {
-        TextField(isInline ? "Value" : "Not reported", text: Binding(get: { text }, set: updateNumberDraft))
+        TextField(isInline ? "Value" : "Not reported", text: Binding(get: { text }, set: { updateNumberDraft($0) }))
             .focused($isEditingNumber)
             .onSubmit { sendNumber() }
             .onExitCommand { cancelPendingNumber(); synchronize(); isEditingNumber = false; isNumberEntryPresented = false }
