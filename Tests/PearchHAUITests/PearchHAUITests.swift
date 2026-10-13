@@ -5670,7 +5670,8 @@ final class PearchHAUITests: XCTestCase {
             // AppKit may track the press synchronously, so mouse-up must already be queued.
             while let event = NSApp.nextEvent(matching: [.leftMouseDown, .leftMouseUp],
                                              until: .distantPast, inMode: .default, dequeue: true) {
-                NSApp.sendEvent(event)
+                XCTAssertTrue(event.window === panel, "Native click must target the current panel")
+                panel.sendEvent(event)
             }
             await spinUntil("light switch sends \(service)") {
                 let calls = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
