@@ -5642,6 +5642,24 @@ final class PearchHAUITests: XCTestCase {
     }
 
     func testAppShellLightSwitchSendsOnAndOffAfterReopeningPanel() async throws {
+        func click(_ control: NSSwitch, in panel: NSPanel) throws -> [String] {
+            let point = control.convert(NSPoint(x: control.bounds.midX, y: control.bounds.midY), to: nil)
+            for (eventIndex, type) in [NSEvent.EventType.leftMouseDown, .leftMouseUp].enumerated() {
+                let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point,
+                    modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber,
+                    context: nil, eventNumber: eventIndex + 1, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0))
+                NSApp.postEvent(event, atStart: false)
+            }
+            var deliveredEvents: [String] = []
+            // AppKit may track the press synchronously, so mouse-up must already be queued.
+            while let event = NSApp.nextEvent(matching: [.leftMouseDown, .leftMouseUp],
+                                             until: .distantPast, inMode: .default, dequeue: true) {
+                XCTAssertTrue(event.window === panel, "Native click must target the current panel")
+                panel.sendEvent(event)
+                deliveredEvents.append("\(event.type):state=\(control.state.rawValue)")
+            }
+            return deliveredEvents
+        }
         let server = try FakeHAWebSocketServer()
         server.start()
         defer { server.stop() }
@@ -5668,27 +5686,27 @@ final class PearchHAUITests: XCTestCase {
                 + "visibleRect=\(control.visibleRect), hit=\(String(describing: hit)), "
                 + "hitsSwitch=\(hit === control || hit?.isDescendant(of: control) == true), "
                 + "visible=\(panel.isVisible), key=\(panel.isKeyWindow), active=\(NSApp.isActive)"
-            var deliveredEvents: [String] = []
-            for (eventIndex, type) in [NSEvent.EventType.leftMouseDown, .leftMouseUp].enumerated() {
-                let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point,
-                    modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber,
-                    context: nil, eventNumber: eventIndex + 1, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0))
-                NSApp.postEvent(event, atStart: false)
-            }
-            // AppKit may track the press synchronously, so mouse-up must already be queued.
-            while let event = NSApp.nextEvent(matching: [.leftMouseDown, .leftMouseUp],
-                                             until: .distantPast, inMode: .default, dequeue: true) {
-                XCTAssertTrue(event.window === panel, "Native click must target the current panel")
-                panel.sendEvent(event)
-                deliveredEvents.append("\(event.type):state=\(control.state.rawValue)")
-            }
+            let deliveredEvents = try click(control, in: panel)
             await spinUntil("light switch sends \(service)") {
                 let calls = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
                 return calls.count == index + 1 && model.snapshot.controlActionState == .idle
             }
             let calls = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
+            let probePanel = PearchHAStatusPanel()
+            defer { probePanel.orderOut(nil); probePanel.contentView = nil }
+            let probeContent = NSView(frame: content.bounds)
+            let probe = NSSwitch(frame: NSRect(x: 40, y: 40, width: control.bounds.width, height: control.bounds.height))
+            probe.controlSize = control.controlSize
+            probeContent.addSubview(probe)
+            probePanel.contentView = probeContent
+            probePanel.makeKeyAndOrderFront(nil)
+            drainPanelRunLoop()
+            let probeEvents = try click(probe, in: probePanel)
+            drainPanelRunLoop()
+            let probeResult = "AppKit baseline delivered=\(probeEvents), state=\(probe.state.rawValue)"
+            print(probeResult)
             XCTAssertEqual(calls.count, index + 1,
-                           "\(clickTarget), delivered=\(deliveredEvents), state=\(control.state.rawValue), action=\(model.snapshot.controlActionState)")
+                           "\(clickTarget), delivered=\(deliveredEvents), state=\(control.state.rawValue), action=\(model.snapshot.controlActionState), \(probeResult)")
             let body = try XCTUnwrap(calls.last?.bodyText)
             let payload = try JSONDecoder().decode([String: ActionValue].self, from: Data(body.utf8))
             XCTAssertEqual(payload["domain"], "light")
