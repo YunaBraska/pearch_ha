@@ -15,7 +15,7 @@ remaining work and release evidence gaps.
 - Verify the Settings entity list stays responsive with a large real installation.
 - Extend closed-menu CPU/memory measurements to open history, Settings, standby,
   reconnects, stale-cache recovery, and long sessions.
-- Run remote CI and the credentialed release path before public release.
+- Verify the credentialed release path before public release.
 
 ## Planned
 

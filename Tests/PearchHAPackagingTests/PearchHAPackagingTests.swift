@@ -289,7 +289,7 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertTrue(script.contains("swift run pearchha-repo-audit"))
     }
 
-    func testCheckScriptExportsAllTestBundlesAndStopsOnExportFailure() throws {
+    func testCheckScriptExportsOnlyTestBinariesAndStopsOnMissingBundlesOrExportFailure() throws {
         let script = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("scripts/check.sh")
         let directory = temporaryDirectory().appendingPathComponent("workspace with spaces")
@@ -303,6 +303,7 @@ final class PearchHAPackagingTests: XCTestCase {
             let binary = products.appendingPathComponent("\(name).xctest/Contents/MacOS/\(name)")
             try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data().write(to: binary)
+            try FileManager.default.createDirectory(at: binary.appendingPathExtension("dSYM"), withIntermediateDirectories: true)
         }
         let swift = try fakeExecutable(in: directory, name: "swift")
         try #"""
@@ -319,9 +320,17 @@ final class PearchHAPackagingTests: XCTestCase {
         printf '%s\n' 'all test bundles'
         exit "$COVERAGE_EXIT"
         """#.write(to: xcrun, atomically: true, encoding: .utf8)
-        for status in [0, 42] {
+        for status in [0, 42, 1] {
+            if status == 1 {
+                for name in ["CoreTests", "ClientTests"] {
+                    try FileManager.default.removeItem(at: products.appendingPathComponent("\(name).xctest"))
+                }
+            }
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent("export-arguments"))
             try Data().write(to: directory.appendingPathComponent("swift-calls"))
             let process = Process()
+            let errors = Pipe()
+            process.standardError = errors
             process.executableURL = URL(fileURLWithPath: "/bin/sh")
             process.arguments = [script.path]
             process.currentDirectoryURL = directory
@@ -329,6 +338,11 @@ final class PearchHAPackagingTests: XCTestCase {
             try process.run()
             process.waitUntilExit()
             XCTAssertEqual(process.terminationStatus, Int32(status))
+            XCTAssertEqual(FileManager.default.fileExists(atPath: directory.appendingPathComponent("export-arguments").path), status != 1)
+            if status == 1 {
+                let diagnostic = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                XCTAssertTrue(diagnostic.contains("No XCTest binaries found"))
+            }
             let calls = try String(contentsOf: directory.appendingPathComponent("swift-calls"), encoding: .utf8)
             XCTAssertEqual(calls.contains("pearchha-coverage-check"), status == 0)
             if status == 0 {
@@ -336,6 +350,7 @@ final class PearchHAPackagingTests: XCTestCase {
                 XCTAssertTrue(arguments.hasPrefix("llvm-cov\nexport\n"))
                 XCTAssertTrue(arguments.contains("CoreTests.xctest/Contents/MacOS/CoreTests"))
                 XCTAssertTrue(arguments.contains("ClientTests.xctest/Contents/MacOS/ClientTests"))
+                XCTAssertFalse(arguments.contains(".dSYM"))
                 XCTAssertEqual(try String(contentsOf: directory.appendingPathComponent(".build/pearchha-codecov.json"), encoding: .utf8), "all test bundles\n")
             }
         }

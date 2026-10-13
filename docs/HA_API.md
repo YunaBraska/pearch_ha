@@ -111,10 +111,10 @@ feature flags, options and numeric bounds:
 | `switch`, `input_boolean` | On/off toggle |
 | `cover` | Open, stop, close, position |
 | `climate` | HVAC mode, target temperature or range, humidity, fan, preset, swing, power |
-| `number`, `select` | Bounded value with step validation; advertised options |
+| `number`, `select` | Bounded value with step validation, advertised options |
 | `light` | Toggle, brightness, color temperature, RGB color, effect |
 | `fan` | Power, speed, preset, oscillation, direction |
-| `scene`, `button` | Activate; press with confirmation |
+| `scene`, `button` | Activate, press with confirmation |
 | `automation` | Enable, disable, run actions with conditions respected |
 | `media_player` | Power, playback/track controls, volume/mute, source, sound mode, shuffle, repeat |
 | `update` | Install, skip, clear skipped version with confirmation |
