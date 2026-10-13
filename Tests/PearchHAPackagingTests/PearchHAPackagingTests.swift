@@ -289,6 +289,132 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertTrue(script.contains("swift run pearchha-repo-audit"))
     }
 
+    func testCheckScriptExportsAllTestBundlesAndStopsOnExportFailure() throws {
+        let script = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("scripts/check.sh")
+        let directory = temporaryDirectory().appendingPathComponent("workspace with spaces")
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent()) }
+        let products = directory.appendingPathComponent(".build/products")
+        let coverage = products.appendingPathComponent("codecov")
+        try FileManager.default.createDirectory(at: coverage, withIntermediateDirectories: true)
+        try "last bundle only".write(to: coverage.appendingPathComponent("PearchHA.json"), atomically: true, encoding: .utf8)
+        try Data().write(to: coverage.appendingPathComponent("default.profdata"))
+        for name in ["CoreTests", "ClientTests"] {
+            let binary = products.appendingPathComponent("\(name).xctest/Contents/MacOS/\(name)")
+            try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data().write(to: binary)
+        }
+        let swift = try fakeExecutable(in: directory, name: "swift")
+        try #"""
+        #!/bin/sh
+        printf '%s\n' "$*" >> swift-calls
+        case "$*" in
+          *--show-codecov-path*) printf '%s\n' "$PWD/.build/products/codecov/PearchHA.json" ;;
+        esac
+        """#.write(to: swift, atomically: true, encoding: .utf8)
+        let xcrun = try fakeExecutable(in: directory, name: "xcrun")
+        try #"""
+        #!/bin/sh
+        printf '%s\n' "$@" > export-arguments
+        printf '%s\n' 'all test bundles'
+        exit "$COVERAGE_EXIT"
+        """#.write(to: xcrun, atomically: true, encoding: .utf8)
+        for status in [0, 42] {
+            try Data().write(to: directory.appendingPathComponent("swift-calls"))
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            process.arguments = [script.path]
+            process.currentDirectoryURL = directory
+            process.environment = ["PATH": "\(directory.path):/usr/bin:/bin", "COVERAGE_EXIT": String(status)]
+            try process.run()
+            process.waitUntilExit()
+            XCTAssertEqual(process.terminationStatus, Int32(status))
+            let calls = try String(contentsOf: directory.appendingPathComponent("swift-calls"), encoding: .utf8)
+            XCTAssertEqual(calls.contains("pearchha-coverage-check"), status == 0)
+            if status == 0 {
+                let arguments = try String(contentsOf: directory.appendingPathComponent("export-arguments"), encoding: .utf8)
+                XCTAssertTrue(arguments.hasPrefix("llvm-cov\nexport\n"))
+                XCTAssertTrue(arguments.contains("CoreTests.xctest/Contents/MacOS/CoreTests"))
+                XCTAssertTrue(arguments.contains("ClientTests.xctest/Contents/MacOS/ClientTests"))
+                XCTAssertEqual(try String(contentsOf: directory.appendingPathComponent(".build/pearchha-codecov.json"), encoding: .utf8), "all test bundles\n")
+            }
+        }
+    }
+
+    func testPackageScriptKeepsManifestArtifactPresentAfterCompletion() throws {
+        let script = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("scripts/package.sh")
+        let directory = temporaryDirectory().appendingPathComponent("release workspace")
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent()) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let swift = try fakeExecutable(in: directory, name: "swift")
+        try #"""
+        #!/bin/sh
+        set -eu
+        if [ "$1" = build ]; then
+          scratch=''
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              --scratch-path) scratch=$2; shift ;;
+            esac
+            shift
+          done
+          mkdir -p "$scratch/custom products"
+          printf '%s\n' 'executable' > "$scratch/custom products/PearchHA"
+          printf '%s\n' "$PWD/$scratch/custom products"
+          exit
+        fi
+        shift 2
+        if [ "$1" = --verify-release-manifest ]; then
+          test -f "$(cat "$2")"
+          exit
+        fi
+        app=''
+        dmg=''
+        manifest=''
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --output) app=$2; shift ;;
+            --dmg-output) dmg=$2; shift ;;
+            --release-manifest) manifest=$2; shift ;;
+          esac
+          shift
+        done
+        if [ -z "$dmg" ]; then dmg=${app%.app}.dmg; fi
+        mkdir -p "$app"
+        printf '%s\n' 'disk image' > "$dmg"
+        printf '%s\n' "$dmg" > "$manifest"
+        """#.write(to: swift, atomically: true, encoding: .utf8)
+        let lipo = try fakeExecutable(in: directory, name: "lipo")
+        try #"""
+        #!/bin/sh
+        set -eu
+        if [ "$1" = -info ]; then test -f "$2"; exit; fi
+        shift 2
+        output=$1
+        shift
+        for input do test -f "$input"; done
+        printf '%s\n' 'universal executable' > "$output"
+        """#.write(to: lipo, atomically: true, encoding: .utf8)
+        for name in ["codesign", "ditto"] {
+            let tool = try fakeExecutable(in: directory, name: name)
+            try "#!/bin/sh\nexit 0\n".write(to: tool, atomically: true, encoding: .utf8)
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [script.path, "2026.10.13"]
+        process.currentDirectoryURL = directory
+        process.environment = ["PATH": "\(directory.path):/usr/bin:/bin"]
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        let artifact = try String(contentsOf: directory.appendingPathComponent("dist/pearchha-release-manifest.json"), encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent(artifact).path),
+                      "the packaged artifact referenced by release evidence must still exist after the script finishes")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("dist/PearchHA-2026.10.13.dmg").path))
+    }
+
     func testXcodePreflightReportsBlockedWhenOnlyCommandLineToolsAreSelected() throws {
         let directory = temporaryDirectory()
         defer {

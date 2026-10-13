@@ -129,14 +129,52 @@ The recorder-statistics slice sends WebSocket `recorder/statistics_during_period
 
 V1 reads and displays any entity with a usable state.
 
-Built-in controls:
+Built-in controls are shown for selected entities in the panel. A single setting is
+edited directly in its row: choices use a dropdown, numbers use a borderless editable
+value and an optional stepper, booleans use a switch, and actions use a named button.
+Position, brightness, fan speed and volume use a slider with a quiet value. Clicking
+that value reveals precise numeric entry. Sliders have no additional stepper and
+commit on release. Multiple
+settings open an editor from the value marked with a slider icon. Existing on/off
+switches and cover controls remain inline. Tooltips list the domain and available
+settings, options and numeric bounds. All controls use Home Assistant's current
+feature flags, options and numeric bounds:
 
-- `cover.*`
-- `switch.*`
-- `light.*`
-- `input_boolean.*`
+| Domain | Native controls |
+| --- | --- |
+| `switch`, `input_boolean` | On/off toggle |
+| `cover` | Open, stop, close, position |
+| `climate` | HVAC mode, target temperature or range, humidity, fan, preset, swing, power |
+| `number`, `select` | Bounded value with step validation; advertised options |
+| `light` | Toggle, brightness, color temperature, RGB color, effect |
+| `fan` | Power, speed, preset, oscillation, direction |
+| `scene`, `button` | Activate; press with confirmation |
+| `automation` | Enable, disable, run actions with conditions respected |
+| `media_player` | Power, playback/track controls, volume/mute, source, sound mode, shuffle, repeat |
+| `update` | Install, skip, clear skipped version with confirmation |
+| `notify` | Send an explicitly entered message |
 
-Custom actions can be attached to any entity, including `sensor.*` and `binary_sensor.*`.
+Unsupported features and empty option lists are omitted. Unavailable entities cannot
+be controlled. Stateless scenes, buttons and notification entities can still operate
+when their state is `unknown`. Numeric fields and steppers share a 600 ms trailing
+debounce in both the panel and popup. Return applies immediately and cancels the
+pending timer. Escape discards an unsent edit. Invalid and unchanged values are not
+sent. Live readings do not replace a focused or pending numeric draft. Color edits use Set.
+Buttons, update actions, and automation disable/manual execution require confirmation.
+Disabling an automation leaves already running actions alone.
+
+History opens only by clicking its preview. Read-only values have no editing symbol.
+Climate history shows the recorded operating mode as a state timeline.
+Temperature attributes are not included in the state history request.
+
+Capabilities survive REST discovery, WebSocket snapshots, compact updates and attribute
+removals. Commands are revalidated against the latest capabilities before dispatch.
+Successful commands refresh reported state rather than guessing values locally; failed
+refreshes leave a visible stale-state warning. Existing entity selection is preserved.
+
+`sensor` and `binary_sensor` are read-only domains. Custom actions can be attached to any
+entity, including those domains. Advanced media browsing, seeking and arbitrary media
+URLs, vendor-specific actions, and domains not listed above still use custom actions.
 
 ## 6. Service calls
 
@@ -196,7 +234,12 @@ Position payload:
 { "position": 0 }
 ```
 
-`current_position` drives the visible slider when present.
+`current_position` drives a position slider and a clickable numeric value when
+present. The existing buttons/slider/both preference remains supported. Clicking
+the value opens precise entry with the same 600 ms debounce and Return/Escape
+behavior as other numbers.
+The slider commits on release. Open, Stop and Close run immediately and cancel
+any pending position edit first, so a delayed target cannot restart movement.
 
 ## 8. Mirrored fixtures
 

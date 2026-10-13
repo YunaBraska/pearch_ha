@@ -54,6 +54,7 @@ struct PearchHASmoke {
 
         let location = ConfigLocation()
         try expect(location.applicationSupportDirectoryName == "PearchHA", "config location uses app name")
+        fputs("Checking support primitives and toolchain...\n", stderr)
         try verifyRateLimiter()
         try verifyJitter()
         try verifyBackoff()
@@ -63,6 +64,7 @@ struct PearchHASmoke {
         try verifyXcodeDoctor()
         try await verifyCoalescing()
         try await verifyTestClock()
+        fputs("Checking Home Assistant protocols and fixture tools...\n", stderr)
         try await verifyMirrorAndFakeHA()
         try await verifyHAMirrorDoctorCLIUsesExportedOverrides()
         try await verifyHAMirrorDoctorProbeReportsLiveGuidance()
@@ -75,15 +77,19 @@ struct PearchHASmoke {
         try await verifyHAWebSocketContract()
         try await verifyDiscoveryAndPersistence()
         try await verifyPanelModelAgainstFakeHA()
+        fputs("Checking native panels and controls...\n", stderr)
         try verifyAppShellPanelFactory()
         try await verifyEntitiesSettingsPanelFactory()
         try verifyHistoryPopoverPanelFactory()
         try await verifyCustomActionButtonsPanelFactory()
         try await verifyBuiltInControlsPanelFactory()
+        fputs("Checking panel performance and lifecycle...\n", stderr)
         try verifyPanelOpenPerformance()
         try await verifyApplicationLifecycleMemorySoak()
         try await verifyIdleCPUAtRest()
+        fputs("Checking rendered snapshots...\n", stderr)
         try await verifyPanelSnapshotRendering(options: options)
+        fputs("Checking packaging and application wiring...\n", stderr)
         try verifyOAuthConfigurationFromEnvironmentFile()
         try await verifyOAuthClientWebsitePackaging()
         try verifyAppBundlePackaging()
@@ -852,7 +858,7 @@ struct PearchHASmoke {
             ]
         )
 
-        try expect(output.terminationStatus == 0, "hamirror doctor CLI accepts exported override readiness path")
+        try expect(output.terminationStatus == 0, "hamirror doctor CLI accepts exported override readiness path: \(output.text)")
         let diagnostic = try JSONDecoder().decode(
             HAMirrorEnvironmentReadinessDiagnostic.self,
             from: Data(output.text.utf8)
@@ -2313,12 +2319,11 @@ struct PearchHASmoke {
                 await historyProbe.provide(form: form, entityID: entityID, range: range)
             },
             clock: historyClock,
-            historyDebounce: .seconds(1),
-            historyHoverGrace: .milliseconds(300)
+            historyDebounce: .seconds(1)
         )
         historyPanel.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await historyPanel.connect()
-        historyPanel.startHistoryHover("sensor.office_temperature", range: .hour)
+        historyPanel.presentHistoryDetail("sensor.office_temperature", range: .hour)
         for _ in 0..<100 {
             if await historyClock.sleepingTaskCount() == 1 {
                 break
@@ -2328,7 +2333,7 @@ struct PearchHASmoke {
         let sleepingHistoryTasks = await historyClock.sleepingTaskCount()
         let providerCallsBeforeDebounce = await historyProbe.callCount()
         try expect(sleepingHistoryTasks == 1, "panel history debounce has sleeper")
-        try expect(providerCallsBeforeDebounce == 0, "panel history hover waits for debounce")
+        try expect(providerCallsBeforeDebounce == 0, "panel history detail waits for debounce")
         try expect(
             PearchHAHistoryBodyPresentation(
                 state: .loading(entityID: "sensor.office_temperature", range: .hour),
@@ -4000,7 +4005,7 @@ struct PearchHASmoke {
             clock: clock,
             // Deterministic footer timestamp so snapshot hashes stay stable.
             wallClock: { Date(timeIntervalSince1970: 1_803_607_200) },
-            bulkSyncConfiguration: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1),
+            bulkSyncConfiguration: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay),
             selectionConfiguration: snapshot.selectionConfiguration,
             menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
             customActionConfiguration: variant.customActionConfiguration

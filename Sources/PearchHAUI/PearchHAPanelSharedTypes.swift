@@ -278,13 +278,22 @@ public struct PearchHAHistoryPopoverContent: View {
 
     @ViewBuilder
     private var historyHoverReadout: some View {
-        let readout = hoverReadout ?? " "
-        Text(readout)
-            .font(.caption2.monospacedDigit())
-            .foregroundStyle(hoverReadout == nil ? historyLabelForegroundStyle.opacity(0) : historyLabelForegroundStyle)
-            .lineLimit(1)
-            .frame(maxWidth: .infinity, minHeight: 14, alignment: .trailing)
-            .accessibilityHidden(true)
+        HStack(spacing: 4) {
+            if state.entityID == entityID, let symbol = state.statusSymbolName, let help = state.statusHelp {
+                Image(systemName: symbol)
+                    .font(.caption2)
+                    .foregroundStyle(historyLabelForegroundStyle)
+                    .help(help)
+                    .accessibilityLabel(help)
+            }
+            Spacer(minLength: 0)
+            Text(hoverReadout ?? " ")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(hoverReadout == nil ? historyLabelForegroundStyle.opacity(0) : historyLabelForegroundStyle)
+                .accessibilityHidden(true)
+        }
+        .lineLimit(1)
+        .frame(maxWidth: .infinity, minHeight: 14, alignment: .trailing)
     }
 
     @ViewBuilder
@@ -336,13 +345,13 @@ public struct PearchHAHistoryPopoverContent: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("Move away and hover again to retry.")
+                Text("Close and reopen history to retry.")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(entityName) history unavailable: \(message). Hover again to retry.")
+            .accessibilityLabel("\(entityName) history unavailable: \(message). Close and reopen history to retry.")
         }
     }
 
@@ -861,62 +870,6 @@ struct HistoryLoadingSkeletonLayout: Equatable {
             StatisticRow(id: row, labelWidth: 42, valueWidth: 54)
         }
     )
-}
-
-struct PearchHACoverPositionSlider: View {
-    let position: Int
-    let disabled: Bool
-    let accessibilityName: String
-    let unit: String?
-    let onCommit: (Int) -> Void
-
-    @State private var draft: Double
-    @State private var isEditing = false
-
-    init(
-        position: Int,
-        disabled: Bool,
-        accessibilityName: String,
-        unit: String? = "%",
-        onCommit: @escaping (Int) -> Void
-    ) {
-        self.position = position
-        self.disabled = disabled
-        self.accessibilityName = accessibilityName
-        self.unit = unit
-        self.onCommit = onCommit
-        _draft = State(initialValue: Double(position))
-    }
-
-    var body: some View {
-        HStack(spacing: PearchHASpacing.sm) {
-            Slider(
-                value: $draft,
-                in: 0...100,
-                step: 1,
-                onEditingChanged: { editing in
-                    isEditing = editing
-                    if !editing {
-                        onCommit(Int(draft.rounded()))
-                    }
-                }
-            )
-            .disabled(disabled)
-            .accessibilityLabel(accessibilityName)
-            .accessibilityValue(PearchHASliderValueFormatting.accessibilityValue(for: draft, unit: unit))
-            .onChange(of: position) { newPosition in
-                if !isEditing {
-                    draft = Double(newPosition)
-                }
-            }
-            Text(PearchHASliderValueFormatting.label(for: draft, unit: unit))
-                .font(PearchHATypography.bodyValue())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .frame(minWidth: 40, maxWidth: 72, alignment: .trailing)
-                .accessibilityHidden(true)
-        }
-    }
 }
 
 struct HistoryLoadingSkeleton: View {

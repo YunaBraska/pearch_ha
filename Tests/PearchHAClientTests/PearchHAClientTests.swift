@@ -1,5 +1,6 @@
 #if canImport(XCTest)
 import Foundation
+import Darwin
 import FakeHA
 import XCTest
 import PearchHACore
@@ -1437,6 +1438,111 @@ final class PearchHAClientTests: XCTestCase {
             result,
             .success(HistorySeries(entityID: "sensor.office_temperature", range: .day, samples: []))
         )
+    }
+
+    func testRESTHistoryKeepsTimestampSemanticsAcrossConcurrentRequests() async throws {
+        let body = #"""
+        [[],[
+          {"entity_id":"sensor.a","state":"1","last_changed":"2026-06-27T10:00:00.123456+00:00","last_updated":"2026-06-27T11:00:00Z"},
+          {"state":"2","last_changed":"invalid","last_updated":"2026-06-27T12:01:00+02:00"},
+          {"state":"unknown","last_changed":null,"last_updated":"2026-06-27T10:02:00Z"},
+          {"state":"4","last_changed":"2026-06-27T10:03:00Z","last_updated":"invalid"}
+        ],[
+          {"entity_id":"sensor.b","state":"7","last_changed":"2026-06-27T05:04:00.987654-05:00"}
+        ]]
+        """#
+        let server = try FakeHARESTServer(fixtures: FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#, statesBody: "[]", historyBody: body
+        ))
+        server.start()
+        defer { server.stop() }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil), token: "fake-token"
+        )
+        let client = HomeAssistantClient()
+        let base = try historyDate("2026-06-27T10:00:00Z").timeIntervalSince1970
+        let end = Date(timeIntervalSince1970: base + 7_200)
+        let expectedA = HistorySeries(entityID: "sensor.a", range: .day, samples: [
+            HistorySample(timestamp: Date(timeIntervalSince1970: base + 0.123), state: "1", numericValue: 1),
+            HistorySample(timestamp: Date(timeIntervalSince1970: base + 60), state: "2", numericValue: 2),
+            HistorySample(timestamp: Date(timeIntervalSince1970: base + 120), state: "unknown", numericValue: nil),
+            HistorySample(timestamp: Date(timeIntervalSince1970: base + 180), state: "4", numericValue: 4)
+        ])
+        let expectedB = HistorySeries(entityID: "sensor.b", range: .day, samples: [
+            HistorySample(timestamp: Date(timeIntervalSince1970: base + 240.987), state: "7", numericValue: 7)
+        ])
+        for _ in 0..<4 {
+            async let single = client.history(input, entityID: "sensor.a", range: .day, end: end)
+            async let batch = client.historyBatch(input, entityIDs: ["sensor.a", "sensor.b"], range: .day, end: end)
+            let results = await (single, batch)
+            XCTAssertEqual(results.0, .success(expectedA))
+            XCTAssertEqual(results.1, .success(["sensor.a": expectedA, "sensor.b": expectedB]))
+        }
+    }
+
+    func testRESTHistoryRejectsInvalidTimestampShapesForSingleAndBatchRequests() async throws {
+        let bodies = [
+            "{}", "[{}]", "[[null]]",
+            #"[[{"state":"1","last_changed":42,"last_updated":"2026-06-27T10:00:00Z"}]]"#,
+            #"[[{"state":"1","last_changed":"2026-06-27T10:00:00Z","last_updated":true}]]"#,
+            #"[[{"state":"1","last_changed":"bad","last_updated":"bad"}]]"#,
+            #"[[{"state":"1","last_changed":null,"last_updated":null}]]"#
+        ]
+        for body in bodies {
+            let response = HARESTResponse(statusCode: 200, headers: [:], body: Data(body.utf8))
+            let client = HomeAssistantClient(transport: RecordingHARESTTransport(
+                responses: [.success(response), .success(response)]
+            ))
+            let input = try connectionInput()
+            let single = await client.history(input, entityID: "sensor.a", range: .day)
+            let batch = await client.historyBatch(input, entityIDs: ["sensor.a"], range: .day)
+            guard case let .failure(singleFailure) = single,
+                  case let .failure(batchFailure) = batch else {
+                XCTFail("invalid history unexpectedly succeeded: \(body)")
+                continue
+            }
+            XCTAssertTrue(singleFailure.description.contains("/api/history/period"))
+            XCTAssertTrue(batchFailure.description.contains("/api/history/period"))
+        }
+    }
+
+    func testRESTHistoryLargeBatchStaysWithinCPUTimeBudget() async throws {
+        let count = 8_192
+        let row = #"{"entity_id":"sensor.a","state":"21.5","last_changed":"2026-06-27T10:00:00.123456+00:00","last_updated":"2026-06-27T10:00:01.654321+00:00"}"#
+        let body = "[[" + Array(repeating: row, count: count).joined(separator: ",") + "]]"
+        let server = try FakeHARESTServer(fixtures: FakeHAFixtures(apiBody: #"{"message":"API running."}"#, statesBody: "[]", historyBody: body))
+        server.start()
+        defer { server.stop() }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+        let client = HomeAssistantClient()
+        let end = try historyDate("2026-06-27T12:00:00Z")
+        func cpuSeconds() throws -> Double {
+            var usage = rusage()
+            guard getrusage(RUSAGE_SELF, &usage) == 0 else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
+            return Double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec)
+                + Double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1_000_000
+        }
+        let start = try cpuSeconds()
+        let result = await client.historyBatch(input, entityIDs: ["sensor.a"], range: .day, end: end)
+        let elapsed = try cpuSeconds() - start
+        guard case let .success(series) = result else {
+            return XCTFail("large history batch failed: \(result)")
+        }
+        let samples = try XCTUnwrap(series["sensor.a"]).samples
+        XCTAssertEqual(samples.count, count)
+        let expected = HistorySample(
+            timestamp: Date(timeIntervalSince1970: try historyDate("2026-06-27T10:00:00Z").timeIntervalSince1970 + 0.123),
+            state: "21.5", numericValue: 21.5
+        )
+        XCTAssertTrue(samples.allSatisfy { $0 == expected })
+        // CPU time excludes network wait. The generous budget catches allocating
+        // and configuring ISO parsers per timestamp on a realistic history batch.
+        XCTAssertLessThan(elapsed, 3, "history batch used \(elapsed) CPU seconds")
     }
 
     func testRESTHistoryRejectsMalformedPayload() async throws {
@@ -4138,6 +4244,34 @@ final class PearchHAClientTests: XCTestCase {
         } catch let error as HAMirrorCaptureError {
             XCTAssertEqual(error, .webSocketTimeout)
         }
+    }
+
+    func testMirrorWebSocketCaptureCancellationFinishesBeforeItsDeadline() async throws {
+        let server = try FakeHAWebSocketServer(mode: .silentAfterAuth)
+        server.start()
+        defer { server.stop() }
+        let environment = HAMirrorEnvironment(primaryURL: server.baseURL, fallbackURL: nil,
+                                              token: "fake-token", user: nil, password: nil)
+        let finished = expectation(description: "cancelled capture returns")
+        let capture = Task {
+            defer { finished.fulfill() }
+            do {
+                _ = try await HAMirrorCaptureService(webSocketReceiveTimeoutNanoseconds: 30_000_000_000)
+                    .captureOptimizedWebSocketEvidence(environment: environment)
+                XCTFail("Cancelled capture must fail")
+            } catch let error as HAMirrorCaptureError {
+                guard case let .transportFailure(path, _) = error else {
+                    return XCTFail("Expected cancellation transport failure, got \(error)")
+                }
+                XCTAssertEqual(path, "/api/websocket")
+            } catch {
+                XCTFail("Unexpected capture failure: \(error)")
+            }
+        }
+        defer { capture.cancel() }
+        try await waitForJournalPath(server: server, path: "/api/websocket")
+        capture.cancel()
+        await fulfillment(of: [finished], timeout: 2)
     }
 
     func testMirrorCaptureSanitizesPrivateStatePayload() async throws {

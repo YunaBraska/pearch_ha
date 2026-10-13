@@ -22,7 +22,7 @@ PearchHA keeps Home Assistant in the macOS menu bar without dragging a browser t
 - Separate refresh controls for menu bar repaint cadence, background data sync cadence, and history detail refresh cadence.
 - Browser sign-in or long-lived token auth, restored from the macOS Keychain after restart.
 - Multiple Home Assistant addresses with ordered fallback support.
-- Native controls for switches, covers, selectors, sliders, and custom Home Assistant service actions.
+- Native controls for climate, lights, covers, fans, switches, numbers, selectors, scenes, buttons, media players, automations, updates, and notifications, plus custom Home Assistant service actions.
 - Per-entity display settings for icon, unit, decimals, chart range, menu bar visibility, and menu bar layout.
 - Automatic unit scaling for supported numeric families such as power, energy, current, voltage, frequency, pressure, storage, transfer rate, and concentration.
 - Threshold colors for numeric sensors and string-state sensors, including default presets you can edit, reset, remove, or replace.

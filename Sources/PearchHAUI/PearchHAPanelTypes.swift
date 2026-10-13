@@ -497,7 +497,27 @@ public enum PearchHAHistoryPanelState: Equatable, Sendable {
     case idle
     case loading(entityID: EntityID, range: HistoryRange)
     case loaded(HistorySeries)
+    /// Previously loaded data retained while its refresh is in flight.
+    case updating(HistorySeries)
+    /// Previously loaded data retained after a failed refresh.
+    case stale(HistorySeries, message: String)
     case unavailable(entityID: EntityID, range: HistoryRange, message: String)
+
+    var statusSymbolName: String? {
+        switch self {
+        case .loading, .updating: "arrow.triangle.2.circlepath"
+        case .stale, .unavailable: "exclamationmark.triangle"
+        case .idle, .loaded: nil
+        }
+    }
+
+    var statusHelp: String? {
+        switch self {
+        case .loading, .updating: "Updating history"
+        case let .stale(_, message), let .unavailable(_, _, message): "Failure: \(message)"
+        case .idle, .loaded: nil
+        }
+    }
 
     public var entityID: EntityID? {
         switch self {
@@ -505,7 +525,7 @@ public enum PearchHAHistoryPanelState: Equatable, Sendable {
             nil
         case let .loading(entityID, _), let .unavailable(entityID, _, _):
             entityID
-        case let .loaded(series):
+        case let .loaded(series), let .updating(series), let .stale(series, _):
             series.entityID
         }
     }
@@ -516,7 +536,7 @@ public enum PearchHAHistoryPanelState: Equatable, Sendable {
             nil
         case let .loading(_, range), let .unavailable(_, range, _):
             range
-        case let .loaded(series):
+        case let .loaded(series), let .updating(series), let .stale(series, _):
             series.range
         }
     }
@@ -619,7 +639,9 @@ public enum PearchHAHistoryBodyPresentation: Equatable, Sendable {
             self = .hidden
         case let .loading(loadingEntityID, _) where loadingEntityID == entityID:
             self = .loadingSkeleton
-        case let .loaded(series) where series.entityID == entityID:
+        case let .loaded(series) where series.entityID == entityID,
+             let .updating(series) where series.entityID == entityID,
+             let .stale(series, _) where series.entityID == entityID:
             switch PearchHAHistoryContentSummary(series: series) {
             case .empty:
                 self = .empty
@@ -632,7 +654,7 @@ public enum PearchHAHistoryBodyPresentation: Equatable, Sendable {
             }
         case let .unavailable(unavailableEntityID, _, message) where unavailableEntityID == entityID:
             self = .unavailable(message)
-        case .loading, .loaded, .unavailable:
+        case .loading, .loaded, .updating, .stale, .unavailable:
             self = .hidden
         }
     }
@@ -870,11 +892,9 @@ public struct PearchHAHistoryCacheConfiguration: Equatable, Sendable {
     public let capacity: Int
     public let ttl: PearchDuration
 
-    /// - Parameter capacity: The default holds the whole displayed working set —
-    ///   the prefetch warms the entire displayed list (unbounded lookahead), so a
-    ///   small cache would evict on-screen rows as the back of the list is fetched,
-    ///   flickering their previews on and off. 256 comfortably covers a curated
-    ///   menu-bar dashboard while staying cheap (downsampled inline series).
+    /// - Parameter capacity: The desired number of retained entries, including
+    ///   failures. Visible previews and the opened detail are protected and may
+    ///   exceed this limit. Older, hidden ranges are removed first.
     public init(capacity: Int = 256, ttl: PearchDuration = .seconds(60)) {
         self.capacity = max(1, capacity)
         self.ttl = ttl
@@ -953,15 +973,10 @@ public struct PearchHALiveUpdateConfiguration: Equatable, Sendable {
     public static let disabled = PearchHALiveUpdateConfiguration(reconnectDelay: .seconds(0))
 }
 
-/// Tuning for the intelligent bulk history sync loop.
+/// Tuning for the shared visible-history refresh loop.
 ///
-/// While the panel is open the model keeps the inline-history cache fresh with a
-/// single re-arming background loop: each cycle fetches many entities' history in
-/// as few requests as possible (bulk), prioritizing the rows the user is actually
-/// looking at. Hot entities (visible or recently inspected) refresh every cycle;
-/// cold ones refresh every `coldRefreshDivisor`-th cycle so everything stays
-/// covered without inflating request volume. The loop re-arms itself each cycle —
-/// that is what keeps the cache from going stale after a single pass.
+/// Only visible previews and the selected detail range are refreshed. Requests
+/// sharing a range are batched, and opening a fresh cache does not fetch again.
 public struct PearchHAHistoryBulkSyncConfiguration: Equatable, Sendable {
     /// The interval between sync cycles while the panel is active.
     public let interval: PearchDuration
@@ -972,10 +987,6 @@ public struct PearchHAHistoryBulkSyncConfiguration: Equatable, Sendable {
     public let batchSize: Int
     /// Maximum bulk batches dispatched concurrently per cycle.
     public let maxConcurrentBatches: Int
-    /// Cold (non-hot) entities are synced every `coldRefreshDivisor`-th cycle. A
-    /// value of 1 syncs everything every cycle; larger values keep hot rows
-    /// freshest while still covering the whole list periodically.
-    public let coldRefreshDivisor: Int
 
     /// Creates a bulk sync configuration.
     ///
@@ -984,19 +995,16 @@ public struct PearchHAHistoryBulkSyncConfiguration: Equatable, Sendable {
     ///   - settleDelay: Quiet period before the first cycle (default 250 ms).
     ///   - batchSize: Entity IDs per bulk request (default 40, clamped to >= 1).
     ///   - maxConcurrentBatches: Concurrent batch cap (default 2, clamped to >= 1).
-    ///   - coldRefreshDivisor: Cold-entity refresh cadence (default 4, clamped to >= 1).
     public init(
         interval: PearchDuration = .seconds(30),
         settleDelay: PearchDuration = .milliseconds(250),
         batchSize: Int = 40,
-        maxConcurrentBatches: Int = 2,
-        coldRefreshDivisor: Int = 4
+        maxConcurrentBatches: Int = 2
     ) {
         self.interval = interval
         self.settleDelay = settleDelay
         self.batchSize = max(1, batchSize)
         self.maxConcurrentBatches = max(1, maxConcurrentBatches)
-        self.coldRefreshDivisor = max(1, coldRefreshDivisor)
     }
 
     /// Whether the bulk sync loop runs. `false` when the interval is zero.
@@ -1434,6 +1442,13 @@ public struct PearchHAPanelSnapshot: Equatable, Sendable {
         if let coverControl = coverControl(for: entity) {
             controls.append(contentsOf: coverAccessibility(for: entity, control: coverControl))
         }
+        controls.append(contentsOf: PearchHAEntityControlField.controls(for: entity).map { field in
+            PearchHAControlAccessibilityPresentation(
+                label: "\(field.title) for \(entity.name)",
+                hint: field.requiresConfirmation ? "Requires confirmation" : "Opens entity controls",
+                isEnabled: connectionState == .connected && !controlActionState.isRunning
+            )
+        })
         controls.append(contentsOf: customActions.map(customActionAccessibility))
 
         return PearchHAEntityRowAccessibilityPresentation(
@@ -1697,8 +1712,10 @@ struct PearchHAHistoryCacheKey: Hashable, Sendable {
 }
 
 private struct PearchHAHistoryCacheEntry {
-    let series: HistorySeries
-    let expiresAt: PearchInstant
+    let series: HistorySeries?
+    let expiresAt: PearchInstant?
+    let fetchedAt: PearchInstant?
+    var failureMessage: String?
 }
 
 struct PearchHAHistoryCache {
@@ -1706,12 +1723,12 @@ struct PearchHAHistoryCache {
     private var order: [PearchHAHistoryCacheKey] = []
 
     var entryCount: Int {
-        entries.count
+        entries.values.filter { $0.series != nil }.count
     }
 
     var sampleCount: Int {
         entries.values.reduce(0) { partial, entry in
-            partial + entry.series.samples.count
+            partial + (entry.series?.samples.count ?? 0)
         }
     }
 
@@ -1719,11 +1736,11 @@ struct PearchHAHistoryCache {
         guard let entry = entries[key] else {
             return nil
         }
-        guard entry.expiresAt > now else {
+        guard let expiresAt = entry.expiresAt, expiresAt > now else {
             // Expired for the fetch path, but the entry stays: the stale-tolerant
             // display peek still needs it if the refetch fails, and a successful
             // refetch overwrites it in place. Deleting here used to blank inline
-            // previews whenever a TTL-expired hover read raced a server hiccup.
+            // previews whenever a TTL-expired detail read raced a server hiccup.
             return nil
         }
         markRecentlyUsed(key)
@@ -1746,31 +1763,36 @@ struct PearchHAHistoryCache {
         capacity: Int,
         ttl: PearchDuration,
         protecting protected: Set<PearchHAHistoryCacheKey> = []
-    ) {
+    ) -> Set<PearchHAHistoryCacheKey> {
         entries[key] = PearchHAHistoryCacheEntry(
             series: series,
-            expiresAt: now.advanced(by: ttl)
+            expiresAt: now.advanced(by: ttl),
+            fetchedAt: now
         )
         markRecentlyUsed(key)
-        trim(to: capacity, protecting: protected)
+        return trim(to: capacity, protecting: protected)
     }
 
-    mutating func pruneExpired(
-        now: PearchInstant,
-        protecting protected: Set<PearchHAHistoryCacheKey> = []
+    func fetchedAt(for key: PearchHAHistoryCacheKey) -> PearchInstant? {
+        entries[key]?.fetchedAt
+    }
+
+    func failureMessage(for key: PearchHAHistoryCacheKey) -> String? {
+        entries[key]?.failureMessage
+    }
+
+    mutating func markFailure(
+        for key: PearchHAHistoryCacheKey, message: String, capacity: Int,
+        protecting protected: Set<PearchHAHistoryCacheKey>
     ) -> Set<PearchHAHistoryCacheKey> {
-        let expiredKeys = entries.compactMap { key, entry in
-            entry.expiresAt <= now && !protected.contains(key) ? key : nil
+        guard entries[key]?.failureMessage != message else { return [] }
+        if entries[key] != nil {
+            entries[key]?.failureMessage = message
+        } else {
+            entries[key] = PearchHAHistoryCacheEntry(series: nil, expiresAt: nil, fetchedAt: nil, failureMessage: message)
         }
-        guard !expiredKeys.isEmpty else {
-            return []
-        }
-        let removed = Set(expiredKeys)
-        for key in removed {
-            entries[key] = nil
-        }
-        order.removeAll { removed.contains($0) }
-        return removed
+        markRecentlyUsed(key)
+        return trim(to: capacity, protecting: protected).union([key])
     }
 
     private mutating func markRecentlyUsed(_ key: PearchHAHistoryCacheKey) {
@@ -1783,16 +1805,13 @@ struct PearchHAHistoryCache {
     /// the configured capacity the cache overflows by the protected count rather
     /// than evicting on-screen rows — evicting those is what used to re-create
     /// the preview flicker on every cold sync cycle.
-    private mutating func trim(to capacity: Int, protecting protected: Set<PearchHAHistoryCacheKey>) {
-        guard order.count > capacity else {
-            return
-        }
-        var removableInLRUOrder = order.filter { !protected.contains($0) }
-        while order.count > capacity, !removableInLRUOrder.isEmpty {
-            let removed = removableInLRUOrder.removeFirst()
-            entries[removed] = nil
-            order.removeAll { $0 == removed }
-        }
+    private mutating func trim(to capacity: Int, protecting protected: Set<PearchHAHistoryCacheKey>) -> Set<PearchHAHistoryCacheKey> {
+        guard order.count > capacity else { return [] }
+        let removableInLRUOrder = order.filter { !protected.contains($0) }
+        let removed = Set(removableInLRUOrder.prefix(order.count - capacity))
+        for key in removed { entries[key] = nil }
+        order.removeAll { removed.contains($0) }
+        return removed
     }
 }
 
@@ -1822,6 +1841,7 @@ struct SettingsSelectionTreeSignature: Equatable {
         let deviceManufacturer: String?
         let deviceModel: String?
         let deviceDomain: String?
+        let controlHelp: String?
     }
 
     let selectionConfiguration: EntitySelectionConfiguration
@@ -1845,7 +1865,8 @@ struct SettingsSelectionTreeSignature: Equatable {
                         deviceName: entity.deviceName,
                         deviceManufacturer: entity.deviceManufacturer,
                         deviceModel: entity.deviceModel,
-                        deviceDomain: entity.deviceDomain
+                        deviceDomain: entity.deviceDomain,
+                        controlHelp: PearchHAEntityControlField.controlHelp(for: entity)
                     )
                 }
             )

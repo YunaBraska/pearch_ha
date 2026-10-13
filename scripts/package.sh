@@ -11,10 +11,12 @@ rm -rf .build-release-arm64 .build-release-x86_64 dist
 mkdir -p dist
 swift build -c release --arch arm64 --product PearchHA --scratch-path .build-release-arm64
 swift build -c release --arch x86_64 --product PearchHA --scratch-path .build-release-x86_64
+arm64_bin=$(swift build -c release --arch arm64 --product PearchHA --scratch-path .build-release-arm64 --show-bin-path)
+x86_64_bin=$(swift build -c release --arch x86_64 --product PearchHA --scratch-path .build-release-x86_64 --show-bin-path)
 lipo -create \
   -output dist/PearchHA \
-  .build-release-arm64/arm64-apple-macosx/release/PearchHA \
-  .build-release-x86_64/x86_64-apple-macosx/release/PearchHA
+  "$arm64_bin/PearchHA" \
+  "$x86_64_bin/PearchHA"
 lipo -info dist/PearchHA
 
 set -- \
@@ -26,6 +28,7 @@ set -- \
   --build-version "${version}" \
   --verify-signature \
   --package-dmg \
+  --dmg-output "dist/PearchHA-${version}.dmg" \
   --verify-dmg \
   --verify-dmg-contents \
   --release-manifest dist/pearchha-release-manifest.json \
@@ -43,4 +46,3 @@ swift run pearchha-package-app "$@"
 swift run pearchha-package-app --verify-release-manifest dist/pearchha-release-manifest.json
 codesign --verify --deep --verbose=2 dist/PearchHA.app
 ditto -c -k --sequesterRsrc --keepParent dist/PearchHA.app "dist/PearchHA-${version}.zip"
-mv dist/PearchHA.dmg "dist/PearchHA-${version}.dmg"

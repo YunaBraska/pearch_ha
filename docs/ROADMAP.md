@@ -7,8 +7,9 @@ This file is now the live backlog. Done work stays out unless it changes a relea
 - Native macOS menu bar app built with Swift, SwiftUI, and AppKit.
 - Real Home Assistant connection with browser sign-in or bearer-token auth.
 - Multi-address connection fallback, Keychain-backed session restore, and FakeHA-backed tests.
-- Menu bar values, gauges, thresholds, custom actions, linked averages, entity settings, and cached history detail.
-- Pull requests and merges build the universal app; weekly or forced manual releases publish stable GitHub releases from `main`.
+- Menu bar values, gauges, thresholds, capability-derived controls, custom actions, linked averages, entity settings, and history loaded on demand.
+- Pull requests and merges build the universal app. The dispatched release workflow publishes stable GitHub releases from `main`.
+- Local candidate 2026.10.13 passes all 960 tests, coverage gates, native smoke, repository audit, universal packaging, signature checks, and DMG/evidence verification. It is installed with the existing local signing identity. This is not a notarized public release.
 
 ## Release gates still open
 
@@ -27,7 +28,7 @@ This file is now the live backlog. Done work stays out unless it changes a relea
 
 - Keep reducing Settings entity-list work so large installs stay cheap while scrolling.
 - Keep the panel and history detail strictly cache-first; background sync should stay asynchronous and bounded.
-- Verify idle CPU and memory on a long-running real-HA session after the latest settings and history changes.
+- Extend the real-HA runtime check beyond the five-minute closed-panel measurement on 2026.10.13: 0.31% average CPU, 96-107 MB RSS, and 43-54 MB physical footprint. Open-panel, Settings, standby, and long-session evidence remain separate checks.
 
 ### 4. Product decisions
 
@@ -36,5 +37,5 @@ This file is now the live backlog. Done work stays out unless it changes a relea
 ## Next engineering slice
 
 1. Finish the Settings freeze investigation with samples and regression coverage.
-2. Tighten history cache maintenance for day/week/month so visible panel rows stay warm without repeated full-range fetches.
-3. Re-run the full CI/release dry-run path after the repo cleanup lands.
+2. Extend real-app performance evidence across open history, Settings, standby, and reconnects. Visible previews and the selected detail range already refresh only when due.
+3. Run remote CI and the credentialed signing/notarization path before public release. The local check and packaging dry run pass after cleanup.

@@ -44,14 +44,19 @@ final class PearchHASettingsViewState: ObservableObject {
                 }
                 self.snapshot = snapshot
                 self.snapshotRevision &+= 1
-                if previousSnapshot.selectionConfiguration != snapshot.selectionConfiguration
-                    || previousSnapshot.selectionQuery != snapshot.selectionQuery {
-                    self.settingsSelectionTree = snapshot.selectionTree
-                    self.clearDerivedEntityPresentationCaches()
-                }
                 if previousSnapshot.menuBarDisplayConfiguration != snapshot.menuBarDisplayConfiguration {
                     self.clearDerivedEntityPresentationCaches()
                 }
+            }
+            .store(in: &cancellables)
+        model.$settingsSelectionTree
+            .receive(on: RunLoop.main)
+            .sink { [weak self] tree in
+                guard let self, self.activeTab == .entities, self.settingsSelectionTree != tree else {
+                    return
+                }
+                self.settingsSelectionTree = tree
+                self.clearDerivedEntityPresentationCaches()
             }
             .store(in: &cancellables)
         model.$customActionPersistenceFailureDescription
@@ -165,9 +170,6 @@ final class PearchHASettingsViewState: ObservableObject {
         if shouldAcceptSnapshotUpdate(from: snapshot, to: currentSnapshot) {
             snapshot = currentSnapshot
             snapshotRevision &+= 1
-            if settingsSelectionTree != currentSnapshot.selectionTree {
-                settingsSelectionTree = currentSnapshot.selectionTree
-            }
         }
         switch activeTab {
         case .connection:
