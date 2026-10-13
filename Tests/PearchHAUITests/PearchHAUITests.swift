@@ -5652,10 +5652,13 @@ final class PearchHAUITests: XCTestCase {
             }
             var deliveredEvents: [String] = []
             // AppKit may track the press synchronously, so mouse-up must already be queued.
-            while let event = NSApp.nextEvent(matching: [.leftMouseDown, .leftMouseUp],
+            // Preserve queued AppKit window events before dispatching the synthetic click.
+            while let event = NSApp.nextEvent(matching: .any,
                                              until: .distantPast, inMode: .default, dequeue: true) {
-                XCTAssertTrue(event.window === panel, "Native click must target the current panel")
-                panel.sendEvent(event)
+                if event.type == .leftMouseDown || event.type == .leftMouseUp {
+                    XCTAssertTrue(event.window === panel, "Native click must target the current panel")
+                }
+                NSApp.sendEvent(event)
                 // Match the window update performed after each event by NSApplication.run().
                 NSApp.updateWindows()
                 deliveredEvents.append("\(event.type):state=\(control.state.rawValue)")
