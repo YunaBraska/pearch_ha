@@ -1094,9 +1094,10 @@ public struct PearchHAPanelView: View {
     }
 
     private func entityControlHelp(for entity: DiscoveredEntity, control: PearchHAEntityControl) -> String {
-        if control.isRunning {
+        if snapshot.controlActionState.isRunning {
             return "Waiting for Home Assistant"
         }
+        if let failure = control.failureMessage { return failure }
         return control.isOn ? "Turns \(entity.name) off" : "Turns \(entity.name) on"
     }
 
@@ -1237,7 +1238,7 @@ public struct PearchHAPanelView: View {
         if let control = snapshot.control(for: entity) {
             CompactSwitch(
                 isOn: control.isOn,
-                isRunning: control.isRunning,
+                isRunning: snapshot.controlActionState.isRunning,
                 onChange: { isOn in model.startEntityControlToggle(entity.id, isOn: isOn) }
             )
             .help(entityControlHelp(for: entity, control: control))

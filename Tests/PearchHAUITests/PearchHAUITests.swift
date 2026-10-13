@@ -5615,6 +5615,32 @@ final class PearchHAUITests: XCTestCase {
         try saveControlSnapshot(panel.contentView, name: "native-cover-panel")
     }
 
+    func testAppShellSwitchesWaitForPendingCommandAndRecoverAfterFailure() async throws {
+        let runner = ActionRunnerRecorder(results: [.failed("Service unavailable")], waitForRelease: true)
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: controlRooms()) },
+            actionRunner: { form, action in await runner.run(form: form, action: action) },
+            bulkSyncConfiguration: .disabled,
+            periodicRefreshConfiguration: .disabled
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let panel = PearchHAApplication.makePanel(model: model)
+        defer { panel.orderOut(nil); panel.contentViewController = nil }
+        panel.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        let switches = nativeSwitches(in: panel.contentView)
+        XCTAssertEqual(switches.count, 3)
+        let control = try XCTUnwrap(switches.first)
+        control.performClick(nil)
+        await spinUntil { await runner.callCount() == 1 }
+        await spinUntil("every switch reflects the shared command lock") { switches.allSatisfy { !$0.isEnabled } }
+        await runner.releaseNext()
+        await spinUntil { !model.snapshot.controlActionState.isRunning }
+        await spinUntil("switches recover after the failed command") { switches.allSatisfy(\.isEnabled) }
+        XCTAssertEqual(control.state, .off)
+    }
+
     func testAppShellLightSwitchSendsOnAndOffAfterReopeningPanel() async throws {
         let server = try FakeHAWebSocketServer()
         server.start()
