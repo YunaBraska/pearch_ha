@@ -901,14 +901,13 @@ public struct PearchHAHistoryCacheConfiguration: Equatable, Sendable {
     }
 }
 
-/// Tuning for the active-panel periodic refresh safety net.
+/// Tuning for periodic state refresh.
 ///
-/// Live WebSocket push already updates values; this gentle periodic refresh only
-/// runs while the panel is open and coalesces with any in-flight refresh, so it
-/// never spams the request-volume budget. A failed refresh backs off
+/// Refreshes selected panel and promoted menu bar values independently of optional
+/// live updates. Requests coalesce with in-flight refreshes, and failures back off
 /// exponentially up to a cap before resuming the base interval.
 public struct PearchHAPeriodicRefreshConfiguration: Equatable, Sendable {
-    /// The base interval between refreshes while the panel is active.
+    /// The base interval between state refreshes.
     public let interval: PearchDuration
     /// The maximum backoff interval applied after consecutive failures.
     public let maximumBackoff: PearchDuration
@@ -973,15 +972,14 @@ public struct PearchHALiveUpdateConfiguration: Equatable, Sendable {
     public static let disabled = PearchHALiveUpdateConfiguration(reconnectDelay: .seconds(0))
 }
 
-/// Tuning for the shared visible-history refresh loop.
+/// Tuning for the shared history refresh loop.
 ///
-/// Only visible previews and the selected detail range are refreshed. Requests
+/// Selected daily previews stay fresh while closed. Only the open detail range is refreshed. Requests
 /// sharing a range are batched, and opening a fresh cache does not fetch again.
 public struct PearchHAHistoryBulkSyncConfiguration: Equatable, Sendable {
-    /// The interval between sync cycles while the panel is active.
+    /// The interval between preview sync cycles.
     public let interval: PearchDuration
-    /// How long visibility must stay unchanged before the first cycle runs, so
-    /// scrolling never thrashes the sync.
+    /// Quiet period before the first cycle to coalesce selection and detail changes.
     public let settleDelay: PearchDuration
     /// Maximum entity IDs requested per bulk batch (mirrors the client cap).
     public let batchSize: Int

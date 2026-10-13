@@ -86,7 +86,7 @@ public final class PearchHAPanelModel: ObservableObject {
     @Published public private(set) var displayPreferences: PearchHADisplayPreferences = .defaults
 
     /// A monotonically increasing token bumped on history data or request changes
-    /// (request start/finish, visible refresh or detail load, and eviction).
+    /// (request start/finish, preview refresh or detail load, and eviction).
     ///
     /// Inline-row previews read ``cachedHistorySeries(for:)``, which peeks the
     /// cache without itself being observable. Reading this published token in the
@@ -174,13 +174,11 @@ public final class PearchHAPanelModel: ObservableObject {
     private var deferredBackgroundLiveStates: [EntityID: EntityState] = [:]
     private var deferredSilentRefreshRequested = false
     private var protectedValueDrafts: [String: String] = [:]
-    /// Whether the panel is currently shown, gating all background fetching.
+    /// Whether the panel is currently shown, gating detail refresh and live updates.
     /// Set through ``setPanelActive(_:)``; readable so the app shell's
     /// window-visibility wiring can be verified through the public boundary.
     public private(set) var isPanelActive = false
-    private var visibleEntityIDs: [EntityID] = []
-    /// The single re-arming background bulk-history sync loop. Active only while
-    /// the panel is open and a session is connected.
+    /// The single re-arming history loop for selected daily previews and open detail.
     private var bulkSyncTask: Task<Void, Never>?
     /// Tokens prevent detail loads and bulk batches from fetching the same key
     /// concurrently, including across cancellation and connection changes.
@@ -511,19 +509,12 @@ public final class PearchHAPanelModel: ObservableObject {
         if previousPreferences.dataSyncInterval != preferences.dataSyncInterval {
             reconcilePeriodicRefreshLoop(refreshImmediately: false)
         }
-        guard isPanelActive else {
-            if liveUpdateSettingChanged {
-                cancelLiveUpdates()
-            }
-            return
-        }
         if previousPreferences.historyDetailRefreshInterval != preferences.historyDetailRefreshInterval
-            || previousPreferences.dataSyncInterval != preferences.dataSyncInterval
-            || previousPreferences.defaultHistoryRange != preferences.defaultHistoryRange {
+            || previousPreferences.dataSyncInterval != preferences.dataSyncInterval {
             startHistoryBulkSync()
         }
         if liveUpdateSettingChanged {
-            if preferences.liveUpdatesEnabled {
+            if isPanelActive && preferences.liveUpdatesEnabled {
                 startLiveUpdates()
             } else {
                 cancelLiveUpdates()
@@ -865,11 +856,11 @@ public final class PearchHAPanelModel: ObservableObject {
         )
     }
 
-    /// The effective chart range for an entity: its explicit per-entity range,
+    /// The initial detail range for an entity: its explicit per-entity range,
     /// or the global Appearance default when the entity inherits.
     ///
     /// - Parameter id: The entity whose range is resolved.
-    /// - Returns: The range driving the inline preview and history popover.
+    /// - Returns: The initial history popover range. Inline previews always use day.
     public func historyRange(for id: EntityID) -> HistoryRange {
         snapshot.menuBarDisplayConfiguration.itemConfiguration(for: id).defaultHistoryRange
             ?? displayPreferences.defaultHistoryRange
@@ -1287,7 +1278,7 @@ public final class PearchHAPanelModel: ObservableObject {
     }
 
     private var presentedHistoryKey: PearchHAHistoryCacheKey? {
-        guard let id = snapshot.historyPresentationEntityID else { return nil }
+        guard isPanelActive, let id = snapshot.historyPresentationEntityID else { return nil }
         return PearchHAHistoryCacheKey(entityID: id, range: snapshot.historyState.range ?? historyRange(for: id))
     }
 
@@ -1295,7 +1286,7 @@ public final class PearchHAPanelModel: ObservableObject {
         let previewInterval = effectiveBulkSyncInterval.nanoseconds > 0
             ? effectiveBulkSyncInterval : effectiveHistoryDetailRefreshInterval
         guard key == presentedHistoryKey else { return previewInterval }
-        if visibleEntityIDs.contains(key.entityID), key.range == historyRange(for: key.entityID) {
+        if key.range == .day, displayedEntityIDs().contains(key.entityID) {
             return PearchDuration(nanoseconds: min(previewInterval.nanoseconds, effectiveHistoryDetailRefreshInterval.nanoseconds))
         }
         return effectiveHistoryDetailRefreshInterval
@@ -1321,7 +1312,7 @@ public final class PearchHAPanelModel: ObservableObject {
 
     /// Read-only presentation shared by previews and the opened history.
     func historyState(for id: EntityID, range: HistoryRange? = nil) -> PearchHAHistoryPanelState {
-        cachedHistoryState(for: PearchHAHistoryCacheKey(entityID: id, range: range ?? historyRange(for: id))) ?? .idle
+        cachedHistoryState(for: PearchHAHistoryCacheKey(entityID: id, range: range ?? .day)) ?? .idle
     }
 
     private func refreshPresentedHistoryFromCache() {
@@ -1354,10 +1345,9 @@ public final class PearchHAPanelModel: ObservableObject {
     /// the no-fetch contract keeps the idle-CPU and request-volume budgets intact.
     ///
     /// - Parameter id: The entity whose cached history is requested.
-    /// - Returns: The cached series for the entity's default range, or `nil`.
+    /// - Returns: The cached daily preview, or `nil`.
     public func cachedHistorySeries(for id: EntityID) -> HistorySeries? {
-        let range = historyRange(for: id)
-        return cachedHistorySeries(for: id, range: range)
+        cachedHistorySeries(for: id, range: .day)
     }
 
     func knownUnavailableHistoryRanges(for id: EntityID) -> Set<HistoryRange> {
@@ -1384,8 +1374,7 @@ public final class PearchHAPanelModel: ObservableObject {
     }
 
     func cachedInlinePreview(for id: EntityID) -> PearchHAInlineHistoryPreviewData? {
-        let range = historyRange(for: id)
-        let key = PearchHAHistoryCacheKey(entityID: id, range: range)
+        let key = PearchHAHistoryCacheKey(entityID: id, range: .day)
         guard let series = historyCache.peekAllowingStale(for: key) else {
             return nil
         }
@@ -1425,7 +1414,7 @@ public final class PearchHAPanelModel: ObservableObject {
 
     /// Inserts a series and returns affected rows for one batched publication.
     ///
-    /// Every cache write (visible refresh or detail load) flows through here so the
+    /// Every cache write (preview refresh or detail load) flows through here so the
     /// inline-preview read path, which depends on ``historyRevision``, re-renders
     /// the affected rows. Callers publish once after their batch has landed.
     private func insertHistory(_ series: HistorySeries, for key: PearchHAHistoryCacheKey, now: PearchInstant) -> Set<EntityID> {
@@ -1442,20 +1431,9 @@ public final class PearchHAPanelModel: ObservableObject {
         return Set(evicted.map(\.entityID)).union([key.entityID])
     }
 
-    /// The cache keys that back the on-screen inline previews: the currently
-    /// visible entities at their effective preview range, plus the opened
-    /// detail entity's selected range. Keeping protection scoped
-    /// to what the user can actually see keeps the cache from bloating around
-    /// off-screen rows.
+    /// Keep selected daily previews and the open detail available between refreshes.
     private func protectedHistoryKeys() -> Set<PearchHAHistoryCacheKey> {
-        var keys = Set(
-            visibleEntityIDs.map { id in
-                PearchHAHistoryCacheKey(
-                    entityID: id,
-                    range: historyRange(for: id)
-                )
-            }
-        )
+        var keys = Set(displayedEntityIDs().map { PearchHAHistoryCacheKey(entityID: $0, range: .day) })
         if let key = presentedHistoryKey {
             keys.insert(key)
         }
@@ -1504,9 +1482,8 @@ public final class PearchHAPanelModel: ObservableObject {
     ///
     /// The app shell calls this with `true` when the panel becomes visible and
     /// `false` when it is hidden or closed. While inactive the model cancels
-    /// panel-only work (history sync, detail refresh, live socket). Timed data
-    /// sync may still continue in the background when menu-bar entities need to
-    /// stay fresh.
+    /// detail refresh and the live socket. Selected daily previews and timed
+    /// data sync continue while closed.
     ///
     /// - Parameter active: Whether the panel is currently shown.
     public func setPanelActive(_ active: Bool) {
@@ -1525,7 +1502,6 @@ public final class PearchHAPanelModel: ObservableObject {
             startLiveUpdates()
         } else {
             dismissHistoryPopover()
-            cancelHistoryBulkSync()
             cancelLiveUpdates()
             reconcilePeriodicRefreshLoop(refreshImmediately: false)
         }
@@ -1535,7 +1511,7 @@ public final class PearchHAPanelModel: ObservableObject {
     ///
     /// Refreshes once on demand (a discovery/refresh when a session is connected),
     /// then repeats on the injected clock while there is any visible/background
-    /// consumer that needs fresh values: the open panel or promoted menu-bar
+    /// consumer that needs fresh values: selected panel or promoted menu-bar
     /// entities. A failed refresh backs off exponentially up to the configured
     /// ceiling; a success resets the streak to the base interval. Live WebSocket
     /// push remains optional; this timed loop is the cheap fallback that keeps
@@ -1577,7 +1553,8 @@ public final class PearchHAPanelModel: ObservableObject {
         guard effectivePeriodicRefreshInterval.nanoseconds > 0, lastConnectedForm != nil else {
             return false
         }
-        return isPanelActive || snapshot.menuBarDisplayConfiguration.promotedEntityIDs.isEmpty == false
+        return isPanelActive || !snapshot.menuBarDisplayConfiguration.promotedEntityIDs.isEmpty
+            || (bulkSyncConfiguration.isEnabled && !snapshot.rooms.isEmpty)
     }
 
     private func reconcilePeriodicRefreshLoop(refreshImmediately: Bool) {
@@ -1811,42 +1788,30 @@ public final class PearchHAPanelModel: ObservableObject {
         refreshRetryBackoffState()
     }
 
-    /// Reports visible rows and coalesces rapid scroll changes before fetching.
-    public func updateVisibleEntities(_ ids: [EntityID]) {
-        guard ids != visibleEntityIDs else { return }
-        visibleEntityIDs = ids
-        startHistoryBulkSync()
-    }
-
     /// The panel's displayed entities flattened in display order.
     private func displayedEntityIDs() -> [EntityID] {
         snapshot.rooms.flatMap(\.entities).map(\.id)
     }
 
-    /// Starts (or re-arms) the single background bulk history sync loop.
-    ///
-    /// Cancelling and restarting the one task is what coalesces rapid visibility
-    /// changes: only the loop armed by the final change survives the settle delay.
-    /// The loop is silent (it overrides cache entries in place and never flips the
-    /// connection state), gated on an active panel with a connected session, and
-    /// re-arms itself every cycle — fixing "runs once then goes stale". Does
-    /// nothing while inactive, disconnected, or when bulk sync is disabled.
+    /// Re-arms the existing loop after connection, selection, interval or detail changes.
+    /// Daily previews stay current while closed. Other ranges are fetched only for
+    /// the open detail. Changes during a request rearm after its results land.
     private func startHistoryBulkSync() {
-        if isPanelActive, bulkSyncTask != nil, !historyRequests.isEmpty, !protectedHistoryKeys().isEmpty {
+        if bulkSyncTask != nil, !historyRequests.isEmpty, !protectedHistoryKeys().isEmpty {
             historySyncNeedsReschedule = true
             return
         }
         historySyncNeedsReschedule = false
         bulkSyncTask?.cancel()
         bulkSyncTask = nil
-        guard effectiveBulkSyncInterval.nanoseconds > 0, isPanelActive,
+        guard effectiveBulkSyncInterval.nanoseconds > 0,
               lastConnectedForm != nil, !protectedHistoryKeys().isEmpty else {
             return
         }
         let settleDelay = bulkSyncConfiguration.settleDelay
         bulkSyncTask = Task { @MainActor [weak self, clock] in
             do {
-                // Settle first so scrolling coalesces into one armed loop.
+                // Coalesce selection and detail changes into one armed loop.
                 _ = try await clock.sleep(for: settleDelay)
             } catch {
                 return
@@ -1854,7 +1819,7 @@ public final class PearchHAPanelModel: ObservableObject {
             // Self is re-bound weakly each iteration so the long-lived loop
             // never pins the model; deinit stays reachable and cancels the task.
             while !Task.isCancelled {
-                guard self?.isPanelActive == true, self?.lastConnectedForm != nil,
+                guard self?.lastConnectedForm != nil,
                       self?.protectedHistoryKeys().isEmpty == false else {
                     return
                 }
@@ -1866,7 +1831,7 @@ public final class PearchHAPanelModel: ObservableObject {
                 if self?.connectionStateIsFailed == false {
                     await self?.runBulkSyncCycle()
                 }
-                guard !Task.isCancelled, self?.isPanelActive == true else {
+                guard !Task.isCancelled else {
                     return
                 }
                 do {
@@ -1884,7 +1849,7 @@ public final class PearchHAPanelModel: ObservableObject {
         }
     }
 
-    /// Wake when the oldest visible key is due, including a cache reopened just
+    /// Wake when the oldest selected key is due, including a cache reopened just
     /// before its deadline. Failed or missing keys retry at their normal interval.
     private func nextHistorySyncDelay(now: PearchInstant) -> PearchDuration {
         let delays = protectedHistoryKeys().map { key in
@@ -1901,11 +1866,11 @@ public final class PearchHAPanelModel: ObservableObject {
         bulkSyncTask = nil
     }
 
-    /// Fetches only due visible previews and the opened detail, in bounded batches.
+    /// Fetches only due daily previews and the opened detail, in bounded batches.
     private func runBulkSyncCycle() async {
         guard let form = lastConnectedForm, transientUITrackingDepth == 0 else { return }
         let now = await clock.now()
-        guard !Task.isCancelled, isPanelActive, form.sameConnection(as: lastConnectedForm) else { return }
+        guard !Task.isCancelled, form.sameConnection(as: lastConnectedForm) else { return }
         let targets = protectedHistoryKeys().filter { historyIsDue($0, now: now) && historyRequests[$0] == nil }
         let requestID = UUID()
         beginHistoryRequest(Array(targets), requestID: requestID)
@@ -1920,8 +1885,12 @@ public final class PearchHAPanelModel: ObservableObject {
             }
         }
         for index in stride(from: 0, to: batches.count, by: bulkSyncConfiguration.maxConcurrentBatches) {
-            guard !Task.isCancelled, isPanelActive, form.sameConnection(as: lastConnectedForm) else { return }
-            let window = batches[index..<min(index + bulkSyncConfiguration.maxConcurrentBatches, batches.count)]
+            guard !Task.isCancelled, form.sameConnection(as: lastConnectedForm) else { return }
+            let activeKeys = protectedHistoryKeys()
+            let window = batches[index..<min(index + bulkSyncConfiguration.maxConcurrentBatches, batches.count)].compactMap { batch -> (range: HistoryRange, ids: [EntityID])? in
+                let ids = batch.ids.filter { activeKeys.contains(PearchHAHistoryCacheKey(entityID: $0, range: batch.range)) }
+                return ids.isEmpty ? nil : (batch.range, ids)
+            }
             for _ in window { recordOutboundRequest() }
             let results = await withTaskGroup(of: [PearchHAHistoryCacheKey: HistorySeries].self) { group in
                 for batch in window {
@@ -1941,7 +1910,7 @@ public final class PearchHAPanelModel: ObservableObject {
                 return merged
             }
             let now = await clock.now()
-            guard !Task.isCancelled, isPanelActive, form.sameConnection(as: lastConnectedForm) else { return }
+            guard !Task.isCancelled, form.sameConnection(as: lastConnectedForm) else { return }
             lastObservedInstant = now
             var changedEntities = Set<EntityID>()
             for batch in window {
@@ -1978,6 +1947,7 @@ public final class PearchHAPanelModel: ObservableObject {
         if let entityID, snapshot.historyPresentationEntityID != entityID {
             return
         }
+        let wasPresenting = snapshot.historyPresentationEntityID != nil
         historyTask?.cancel()
         historyTask = nil
         historyRequestGeneration += 1
@@ -1985,7 +1955,7 @@ public final class PearchHAPanelModel: ObservableObject {
         if case .loading = snapshot.historyState {
             applyHistoryState(.idle)
         }
-        startHistoryBulkSync()
+        if wasPresenting { startHistoryBulkSync() }
     }
 
     private func refreshSettingsSelectionTreeIfNeeded(newSnapshot: PearchHAPanelSnapshot) {
@@ -2821,7 +2791,6 @@ public final class PearchHAPanelModel: ObservableObject {
         cancelHistoryBulkSync()
         cancelPeriodicRefresh()
         cancelLiveUpdates()
-        visibleEntityIDs = []
         lastConnectedForm = nil
         oauthSignInState = .idle
 
@@ -3135,6 +3104,7 @@ public final class PearchHAPanelModel: ObservableObject {
     private func apply(result: PearchHAConnectionAttemptResult, form: PearchHAConnectionForm, refreshCount: Int) async {
         switch result {
         case let .success(rooms):
+            let previousEntityIDs = displayedEntityIDs()
             // Compare on the stable connection identity (URLs + token), NOT plain
             // form equality: the form's address rows carry volatile UUIDs, so a
             // rebuilt-but-equivalent form would otherwise look "changed" and wipe
@@ -3190,10 +3160,7 @@ public final class PearchHAPanelModel: ObservableObject {
                     draft.serviceMetadata = []
                 }
             }
-            if connectionChanged {
-                // A genuine new connection cleared the cache and cancelled the bulk
-                // sync above; re-arm so the visible rows warm again instead of
-                // staying blank forever.
+            if connectionChanged || previousEntityIDs != displayedEntityIDs() {
                 startHistoryBulkSync()
             }
             if isPanelActive, periodicRefreshTask == nil {
@@ -3710,6 +3677,8 @@ public final class PearchHAPanelModel: ObservableObject {
                 draft.selectionPersistenceFailureDescription = nil
             }
         }
+        startHistoryBulkSync()
+        reconcilePeriodicRefreshLoop(refreshImmediately: false)
         return true
     }
 
@@ -3785,7 +3754,6 @@ public final class PearchHAPanelModel: ObservableObject {
             }
         }
 
-        let previousHistoryKeys = protectedHistoryKeys()
         updateSnapshot { draft in
             draft.menuBarDisplayConfiguration = configuration
             if persist {
@@ -3793,7 +3761,6 @@ public final class PearchHAPanelModel: ObservableObject {
             }
         }
         reconcilePeriodicRefreshLoop(refreshImmediately: false)
-        if protectedHistoryKeys() != previousHistoryKeys { startHistoryBulkSync() }
         return true
     }
 

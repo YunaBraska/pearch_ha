@@ -45,11 +45,11 @@ UI surfaces do not talk to Home Assistant directly.
 
 - Menu bar and history detail always read from cache first.
 - Background sync updates cache asynchronously; UI does not block on it.
-- Live WebSocket updates are optional and disabled by default. The live subscription runs only while the panel is open. Timed state refresh keeps promoted menu bar values fresh while it is closed.
+- Live WebSocket updates are optional and disabled by default. The live subscription runs only while the panel is open. Timed state refresh keeps selected panel and promoted menu bar values fresh while it is closed.
 - Settings is intentionally cheaper than the panel: it works from cached discovery/config data and should not behave like a live dashboard.
-- History loads only for displayed previews and the selected detail range while the panel is open. There is no startup prefetch or background maintenance of unused ranges.
+- Selected panel entries load daily history previews after connection and refresh them in bounded REST batches at the data interval, including while the panel is closed. Other ranges load on demand and refresh only for the open detail.
 - History refreshes only when due. Cached graphs remain visible during updates and failures. The first completed load, including an empty result or failure, ends the initial Loading presentation.
-- The history cache evicts unprotected entries by capacity. Displayed previews and the selected detail are protected and may exceed that limit. Expired entries remain available for stale display.
+- The history cache evicts unprotected entries by capacity. Selected daily previews and the open detail are protected and may exceed that limit. Expired entries remain available for stale display.
 - Secrets stay in Keychain, never in tracked config, fixtures, or docs.
 
 ## Focus and lifetime

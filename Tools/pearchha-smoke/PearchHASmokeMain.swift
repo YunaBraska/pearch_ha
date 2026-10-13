@@ -2319,7 +2319,9 @@ struct PearchHASmoke {
                 await historyProbe.provide(form: form, entityID: entityID, range: range)
             },
             clock: historyClock,
-            historyDebounce: .seconds(1)
+            historyDebounce: .seconds(1),
+            bulkSyncConfiguration: .disabled,
+            periodicRefreshConfiguration: .disabled
         )
         historyPanel.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await historyPanel.connect()
@@ -4006,6 +4008,7 @@ struct PearchHASmoke {
             // Deterministic footer timestamp so snapshot hashes stay stable.
             wallClock: { Date(timeIntervalSince1970: 1_803_607_200) },
             bulkSyncConfiguration: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay),
+            periodicRefreshConfiguration: .disabled,
             selectionConfiguration: snapshot.selectionConfiguration,
             menuBarDisplayConfiguration: snapshot.menuBarDisplayConfiguration,
             customActionConfiguration: variant.customActionConfiguration
@@ -4013,7 +4016,6 @@ struct PearchHASmoke {
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
         model.setPanelActive(true)
-        model.updateVisibleEntities(snapshot.rooms.flatMap(\.entities).map(\.id))
         for _ in 0..<200 where await clock.sleepingTaskCount() != 1 {
             await Task.yield()
         }

@@ -595,7 +595,7 @@ public struct PearchHASettingsView: View {
                             .fixedSize()
                             .accessibilityLabel("Default history range")
                         }
-                        Text("Used for inline charts and the history popover unless a value has its own range.")
+                        Text("Used when opening history unless a value has its own range. Inline previews always show the day.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)

@@ -109,12 +109,15 @@ subscription and eager history loading add processing even when no panel is visi
 
 Decision: Live Updates is off by default. When enabled, one subscription runs while
 the panel is open, using `subscribe_entities` with `subscribe_events` fallback and
-reconnect backoff. Timed state refresh keeps promoted menu bar values current while
-closed. History loads only for visible previews and the selected detail range.
+reconnect backoff. Timed state refresh keeps selected panel and promoted menu bar
+values current while closed. Selected daily history previews warm after connection
+and refresh in bounded REST batches at the data interval. Other ranges load on demand
+and refresh only for the open detail.
 
-Consequences: Closing the panel cancels its live/history work. Cached graphs remain
-visible during refresh or failure. Short WebSocket requests for discovery, controls,
-and statistics remain available independently of the Live Updates preference.
+Consequences: Closing the panel stops live updates and detail refresh. Daily previews
+stay current, and cached graphs remain visible during refresh or failure. Short
+WebSocket requests for discovery, controls, and statistics remain available
+independently of the Live Updates preference.
 
 Alternatives: An always-on subscription and eager loading of every history range
 were replaced after resource measurements. Refresh lifecycle stays in the panel model.

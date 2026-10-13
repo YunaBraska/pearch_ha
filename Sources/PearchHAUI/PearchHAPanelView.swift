@@ -640,12 +640,6 @@ public struct PearchHAPanelView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .onAppear {
-                syncVisibleEntityIDs()
-            }
-            .onChange(of: visibleEntityIDs) { ids in
-                syncVisibleEntityIDs(ids)
-            }
         }
     }
 
@@ -668,16 +662,6 @@ public struct PearchHAPanelView: View {
     /// place; every entity is still reachable via Settings.
     private var curatedRowCap: Int? {
         panelDisplayPreferences.dashboardRoomRowCap
-    }
-
-    private var visibleEntityIDs: [EntityID] {
-        visibleModules.flatMap { room in
-            let isExpanded = expandedModuleIDs.contains(room.id.rawValue)
-            let visibleEntities = (isExpanded || curatedRowCap == nil)
-                ? room.entities
-                : Array(room.entities.prefix(curatedRowCap ?? room.entities.count))
-            return visibleEntities.map(\.id)
-        }
     }
 
     private var loadingState: some View {
@@ -1056,12 +1040,6 @@ public struct PearchHAPanelView: View {
             }
             .padding(.leading, 26)
         )
-    }
-
-    /// Reports the rows currently rendered in the panel so background history
-    /// requests follow layout changes without per-row appearance callbacks.
-    private func syncVisibleEntityIDs(_ ids: [EntityID]? = nil) {
-        model.updateVisibleEntities(ids ?? visibleEntityIDs)
     }
 
     private func entityIconName(for entity: DiscoveredEntity) -> String? {
