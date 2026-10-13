@@ -137,8 +137,7 @@ let package = Package(
         .target(
             name: "FakeHA",
             dependencies: ["PearchHASupport"],
-            path: "Tests/FakeHA",
-            exclude: ["README.md"]
+            path: "Tests/FakeHA"
         ),
         .testTarget(
             name: "PearchHACoreTests",
