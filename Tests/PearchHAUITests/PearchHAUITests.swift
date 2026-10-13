@@ -5692,21 +5692,8 @@ final class PearchHAUITests: XCTestCase {
                 return calls.count == index + 1 && model.snapshot.controlActionState == .idle
             }
             let calls = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
-            let probePanel = PearchHAStatusPanel()
-            defer { probePanel.orderOut(nil); probePanel.contentView = nil }
-            let probeContent = NSView(frame: content.bounds)
-            let probe = NSSwitch(frame: NSRect(x: 40, y: 40, width: control.bounds.width, height: control.bounds.height))
-            probe.controlSize = control.controlSize
-            probeContent.addSubview(probe)
-            probePanel.contentView = probeContent
-            probePanel.makeKeyAndOrderFront(nil)
-            drainPanelRunLoop()
-            let probeEvents = try click(probe, in: probePanel)
-            drainPanelRunLoop()
-            let probeResult = "AppKit baseline delivered=\(probeEvents), state=\(probe.state.rawValue)"
-            print(probeResult)
             XCTAssertEqual(calls.count, index + 1,
-                           "\(clickTarget), delivered=\(deliveredEvents), state=\(control.state.rawValue), action=\(model.snapshot.controlActionState), \(probeResult)")
+                           "\(clickTarget), delivered=\(deliveredEvents), state=\(control.state.rawValue), action=\(model.snapshot.controlActionState)")
             let body = try XCTUnwrap(calls.last?.bodyText)
             let payload = try JSONDecoder().decode([String: ActionValue].self, from: Data(body.utf8))
             XCTAssertEqual(payload["domain"], "light")
