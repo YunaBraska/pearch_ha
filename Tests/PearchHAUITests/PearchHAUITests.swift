@@ -5661,6 +5661,14 @@ final class PearchHAUITests: XCTestCase {
             XCTAssertTrue(control.isEnabled)
             XCTAssertEqual(control.state, service == "turn_on" ? .off : .on)
             let point = control.convert(NSPoint(x: control.bounds.midX, y: control.bounds.midY), to: nil)
+            let content = try XCTUnwrap(panel.contentView)
+            let hitPoint = content.superview?.convert(point, from: nil) ?? point
+            let hit = content.hitTest(hitPoint)
+            let clickTarget = "point=\(point), switchBounds=\(control.bounds), switchFrame=\(control.frame), "
+                + "visibleRect=\(control.visibleRect), hit=\(String(describing: hit)), "
+                + "hitsSwitch=\(hit === control || hit?.isDescendant(of: control) == true), "
+                + "visible=\(panel.isVisible), key=\(panel.isKeyWindow), active=\(NSApp.isActive)"
+            var deliveredEvents: [String] = []
             for (eventIndex, type) in [NSEvent.EventType.leftMouseDown, .leftMouseUp].enumerated() {
                 let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point,
                     modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber,
@@ -5672,13 +5680,15 @@ final class PearchHAUITests: XCTestCase {
                                              until: .distantPast, inMode: .default, dequeue: true) {
                 XCTAssertTrue(event.window === panel, "Native click must target the current panel")
                 panel.sendEvent(event)
+                deliveredEvents.append("\(event.type):state=\(control.state.rawValue)")
             }
             await spinUntil("light switch sends \(service)") {
                 let calls = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
                 return calls.count == index + 1 && model.snapshot.controlActionState == .idle
             }
             let calls = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
-            XCTAssertEqual(calls.count, index + 1)
+            XCTAssertEqual(calls.count, index + 1,
+                           "\(clickTarget), delivered=\(deliveredEvents), state=\(control.state.rawValue), action=\(model.snapshot.controlActionState)")
             let body = try XCTUnwrap(calls.last?.bodyText)
             let payload = try JSONDecoder().decode([String: ActionValue].self, from: Data(body.utf8))
             XCTAssertEqual(payload["domain"], "light")
