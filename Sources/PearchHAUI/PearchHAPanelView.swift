@@ -73,26 +73,16 @@ private struct PearchHAInlineHistoryPreview: View {
 
     var body: some View {
         let _ = historyObserver.revision
-        let historyState = model.historyState(for: entity.id)
         Button {
             model.presentHistoryDetail(entity.id)
         } label: {
             preview
                 .frame(width: TelemetryRowMetrics.previewWidth, height: TelemetryRowMetrics.previewHeight)
                 .contentShape(Rectangle())
-                .overlay(alignment: .topTrailing) {
-                    if let symbol = historyState.statusSymbolName {
-                        Image(systemName: symbol)
-                            .font(.system(size: 9))
-                            .foregroundStyle(palette.textSecondary)
-                            .accessibilityHidden(true)
-                    }
-                }
         }
         .buttonStyle(.plain)
-        .help(historyState.statusHelp ?? "Show history for \(entity.name)")
+        .help("Show history for \(entity.name)")
         .accessibilityLabel("Show history for \(entity.name)")
-        .accessibilityValue(historyState.statusHelp ?? "")
     }
 
     @ViewBuilder
