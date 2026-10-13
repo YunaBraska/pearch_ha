@@ -9611,7 +9611,7 @@ final class PearchHAUITests: XCTestCase {
         let release = ConnectionGate()
         let calls = CallCounter()
         let clock = TestPearchClock()
-        var model: PearchHAPanelModel? = PearchHAPanelModel(
+        let currentModel = PearchHAPanelModel(
             connector: { _ in
                 let n = await calls.next()
                 // The initial connect is call 1; the first scheduled periodic
@@ -9623,13 +9623,9 @@ final class PearchHAUITests: XCTestCase {
                 }
                 return .success(rooms: selectionRooms())
             },
-            historyProvider: { _, _, _ in .unavailable("no history") },
-            clock: clock
+            clock: clock,
+            bulkSyncConfiguration: .disabled
         )
-        guard let currentModel = model else {
-            XCTFail("expected model")
-            return
-        }
         currentModel.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await currentModel.connect()
         switch currentModel.snapshot.phase {
@@ -9640,7 +9636,7 @@ final class PearchHAUITests: XCTestCase {
         }
 
         currentModel.setPanelActive(true)
-        await spinUntil { await clock.sleepingTaskCount() == 2 }
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: .seconds(45))
         // Wait until the background sync is genuinely in flight (connector blocked).
         await entered.wait()
@@ -9658,8 +9654,6 @@ final class PearchHAUITests: XCTestCase {
             if case .connected = currentModel.snapshot.connectionState { return true } else { return false }
         }
         currentModel.signOut()
-        await Task.yield()
-        model = nil
         await spinUntil { await clock.sleepingTaskCount() == 0 }
     }
 
@@ -11562,6 +11556,7 @@ final class PearchHAUITests: XCTestCase {
         let model = PearchHAPanelModel(
             connector: { _ in await outcomes.next() },
             clock: clock,
+            bulkSyncConfiguration: .disabled,
             periodicRefreshConfiguration: PearchHAPeriodicRefreshConfiguration(interval: interval, maximumBackoff: .seconds(300))
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
@@ -11569,7 +11564,7 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.retryBackoffState, .connected)
 
         model.setPanelActive(true)
-        await spinUntil("periodic refresh loop should arm at least one sleeper") { await clock.sleepingTaskCount() >= 1 }
+        await spinUntil("periodic refresh loop should arm one sleeper") { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: interval)
         await spinUntil("periodic refresh failure should publish backing-off state") {
             if case .backingOff = model.retryBackoffState { return true } else { return false }
@@ -11598,18 +11593,19 @@ final class PearchHAUITests: XCTestCase {
         let model = PearchHAPanelModel(
             connector: { _ in await outcomes.next() },
             clock: clock,
+            bulkSyncConfiguration: .disabled,
             periodicRefreshConfiguration: PearchHAPeriodicRefreshConfiguration(interval: interval, maximumBackoff: .seconds(300))
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
         model.setPanelActive(true)
-        await spinUntil("periodic refresh loop should arm at least one sleeper") { await clock.sleepingTaskCount() >= 1 }
+        await spinUntil("periodic refresh loop should arm one sleeper") { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: interval)
         await spinUntil("periodic refresh failure should be recorded in diagnostics") {
             model.diagnosticEvents.contains { $0.kind == .refreshFailed }
         }
-        await spinUntil("backoff delay should re-arm the periodic refresh loop") { await clock.sleepingTaskCount() >= 1 }
+        await spinUntil("backoff delay should re-arm the periodic refresh loop") { await clock.sleepingTaskCount() == 1 }
 
         // Wake the backed-off sleep (failure doubled the base interval).
         _ = await clock.advance(by: interval)
