@@ -29,6 +29,7 @@ set -- \
   --verify-signature \
   --package-dmg \
   --dmg-output "dist/PearchHA-${version}.dmg" \
+  --zip-output "dist/PearchHA-${version}.zip" \
   --verify-dmg \
   --verify-dmg-contents \
   --release-manifest dist/pearchha-release-manifest.json \
@@ -45,4 +46,3 @@ fi
 swift run pearchha-package-app "$@"
 swift run pearchha-package-app --verify-release-manifest dist/pearchha-release-manifest.json
 codesign --verify --deep --verbose=2 dist/PearchHA.app
-ditto -c -k --sequesterRsrc --keepParent dist/PearchHA.app "dist/PearchHA-${version}.zip"

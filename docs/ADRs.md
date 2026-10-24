@@ -86,7 +86,7 @@ Alternatives: Fixed polling and wall-clock sleeps were rejected.
 
 Context: PearchHA needs normal macOS trust behavior and may need menu bar freedoms that are awkward in the Mac App Store.
 
-Decision: Ship a Developer ID signed and notarized app. Use a DMG for v1. Add Sparkle only after the core release path is stable.
+Decision: Ship Developer ID signed and notarized ZIP and DMG artifacts. Add Sparkle only after the core release path is stable.
 
 Consequences: Direct install is viable; automatic updates are deferred until they earn the added dependency and release work.
 

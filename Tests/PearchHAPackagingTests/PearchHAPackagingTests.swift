@@ -925,13 +925,14 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertTrue(package.contains("--sign-identity \"${identity}\""))
         XCTAssertTrue(package.contains("--notary-profile \"${notary_profile}\""))
         XCTAssertTrue(package.contains("--package-dmg"))
+        XCTAssertTrue(package.contains("--zip-output \"dist/PearchHA-${version}.zip\""))
         XCTAssertTrue(package.contains("--executable dist/PearchHA"))
         XCTAssertTrue(package.contains("--release-manifest dist/pearchha-release-manifest.json"))
         XCTAssertTrue(package.contains("--bundle-release-evidence dist/pearchha-release-evidence"))
         XCTAssertTrue(package.contains("--snapshot-dir .build/pearchha-snapshots/current"))
         XCTAssertTrue(package.contains("--verify-release-manifest dist/pearchha-release-manifest.json"))
         XCTAssertTrue(package.contains("codesign --verify --deep"))
-        XCTAssertTrue(package.contains("ditto -c -k"))
+        XCTAssertFalse(package.contains("ditto -c -k"))
         XCTAssertTrue(package.contains("PearchHA-${version}.zip"))
         XCTAssertTrue(package.contains("PearchHA-${version}.dmg"))
     }
@@ -1451,6 +1452,107 @@ final class PearchHAPackagingTests: XCTestCase {
             )
         ) { error in
             XCTAssertEqual(error as? PearchHANotaryError, .staplerFailed(status: 1, output: "ticket unavailable"))
+        }
+    }
+
+    func testArchiveBuilderCreatesAppZipAndRejectsUnsafeReplacements() throws {
+        let directory = temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let bundle = try testBundle(
+            in: directory,
+            callbackScheme: "pearchha-test",
+            bundleIdentifier: "dev.pearchha.tests.archive"
+        )
+        let dittoURL = try fakeExecutable(in: directory, name: "ditto")
+        let archiveURL = directory.appendingPathComponent("PearchHA.zip", isDirectory: false)
+        let runner = RecordingCommandRunner { _, arguments in
+            XCTAssertEqual(
+                arguments,
+                ["-c", "-k", "--sequesterRsrc", "--keepParent", bundle.appURL.path, archiveURL.path]
+            )
+            try Data("zip".utf8).write(to: archiveURL)
+            return PearchHACommandResult(status: 0, output: "archived")
+        }
+        let builder = PearchHAArchiveBuilder(dittoURL: dittoURL, commandRunner: runner)
+
+        let result = try builder.build(
+            PearchHAArchiveBuildConfiguration(appURL: bundle.appURL, outputURL: archiveURL)
+        )
+
+        XCTAssertEqual(result.appURL.path, bundle.appURL.path)
+        XCTAssertEqual(result.archiveURL.path, archiveURL.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: archiveURL.path))
+        XCTAssertEqual(runner.invocations.count, 1)
+        XCTAssertThrowsError(
+            try builder.build(PearchHAArchiveBuildConfiguration(appURL: bundle.appURL, outputURL: archiveURL))
+        ) { error in
+            XCTAssertEqual(error as? PearchHAArchiveBuildError, .outputExists(archiveURL.path))
+        }
+        let replacement = try builder.build(
+            PearchHAArchiveBuildConfiguration(appURL: bundle.appURL, outputURL: archiveURL, replaceExisting: true)
+        )
+        XCTAssertEqual(replacement.archiveURL.path, archiveURL.path)
+        XCTAssertEqual(runner.invocations.count, 2)
+    }
+
+    func testArchiveBuilderRejectsMissingInputsAndCommandFailures() throws {
+        let directory = temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let missingAppURL = directory.appendingPathComponent("Missing.app", isDirectory: true)
+        let archiveURL = directory.appendingPathComponent("PearchHA.zip", isDirectory: false)
+        let dittoURL = try fakeExecutable(in: directory, name: "ditto")
+
+        XCTAssertThrowsError(
+            try PearchHAArchiveBuilder(dittoURL: dittoURL).build(
+                PearchHAArchiveBuildConfiguration(appURL: missingAppURL, outputURL: archiveURL)
+            )
+        ) { error in
+            XCTAssertEqual(error as? PearchHAArchiveBuildError, .appBundleMissing(missingAppURL.path))
+        }
+
+        let bundle = try testBundle(
+            in: directory.appendingPathComponent("bundle", isDirectory: true),
+            callbackScheme: "pearchha-test",
+            bundleIdentifier: "dev.pearchha.tests.archive-errors"
+        )
+        let missingDittoURL = directory.appendingPathComponent("missing-ditto", isDirectory: false)
+        XCTAssertThrowsError(
+            try PearchHAArchiveBuilder(dittoURL: missingDittoURL).build(
+                PearchHAArchiveBuildConfiguration(appURL: bundle.appURL, outputURL: archiveURL)
+            )
+        ) { error in
+            XCTAssertEqual(error as? PearchHAArchiveBuildError, .dittoMissing(missingDittoURL.path))
+        }
+
+        let failureRunner = RecordingCommandRunner { _, _ in
+            PearchHACommandResult(status: 65, output: "archive failed")
+        }
+        XCTAssertThrowsError(
+            try PearchHAArchiveBuilder(dittoURL: dittoURL, commandRunner: failureRunner).build(
+                PearchHAArchiveBuildConfiguration(appURL: bundle.appURL, outputURL: archiveURL)
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? PearchHAArchiveBuildError,
+                .dittoFailed(status: 65, output: "archive failed")
+            )
+        }
+
+        let noArchiveRunner = RecordingCommandRunner { _, _ in
+            PearchHACommandResult(status: 0, output: "archived")
+        }
+        XCTAssertThrowsError(
+            try PearchHAArchiveBuilder(dittoURL: dittoURL, commandRunner: noArchiveRunner).build(
+                PearchHAArchiveBuildConfiguration(appURL: bundle.appURL, outputURL: archiveURL)
+            )
+        ) { error in
+            XCTAssertEqual(error as? PearchHAArchiveBuildError, .archiveMissing(archiveURL.path))
         }
     }
 

@@ -527,6 +527,7 @@ public struct HAMirrorCaptureService: Sendable {
         try Task.checkCancellation()
         // Finish the wait directly. A task group would also wait for URLSession's
         // cancelled receive, which may never resume after an unresponsive peer.
+        let completion = HAMirrorWebSocketReceiveCompletion()
         let stream = AsyncThrowingStream<URLSessionWebSocketTask.Message, Error> { continuation in
             let timer = Task {
                 do {
@@ -534,14 +535,22 @@ public struct HAMirrorCaptureService: Sendable {
                 } catch {
                     return
                 }
+                guard completion.claim() else {
+                    return
+                }
                 continuation.finish(throwing: HAMirrorCaptureError.webSocketTimeout)
-            }
-            continuation.onTermination = { termination in
-                timer.cancel()
-                if case .finished(nil) = termination { return }
                 task.cancel()
             }
+            continuation.onTermination = { _ in
+                timer.cancel()
+                if completion.claim() {
+                    task.cancel()
+                }
+            }
             task.receive { result in
+                guard completion.claim() else {
+                    return
+                }
                 switch result {
                 case let .success(message):
                     continuation.yield(message)
@@ -553,6 +562,23 @@ public struct HAMirrorCaptureService: Sendable {
         }
         for try await message in stream { return message }
         throw CancellationError()
+    }
+}
+
+private final class HAMirrorWebSocketReceiveCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        guard !claimed else {
+            return false
+        }
+        claimed = true
+        return true
     }
 }
 
