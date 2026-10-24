@@ -2574,6 +2574,102 @@ public struct PearchHANotarySubmitter {
     }
 }
 
+/// Reports a rejected or incomplete app ZIP archive build.
+public enum PearchHAArchiveBuildError: Error, Equatable, CustomStringConvertible, Sendable {
+    case appBundleMissing(String)
+    case outputExists(String)
+    case dittoMissing(String)
+    case dittoFailed(status: Int32, output: String)
+    case archiveMissing(String)
+
+    public var description: String {
+        switch self {
+        case let .appBundleMissing(path):
+            "app bundle does not exist: \(path)"
+        case let .outputExists(path):
+            "output archive already exists: \(path)"
+        case let .dittoMissing(path):
+            "ditto does not exist: \(path)"
+        case let .dittoFailed(status, output):
+            "ditto archive failed with status \(status): \(output)"
+        case let .archiveMissing(path):
+            "archive does not exist: \(path)"
+        }
+    }
+}
+
+/// Configures a ZIP archive that preserves one app bundle.
+public struct PearchHAArchiveBuildConfiguration: Equatable, Sendable {
+    public let appURL: URL
+    public let outputURL: URL
+    public let replaceExisting: Bool
+
+    /// Creates a configuration for the source app, destination archive, and overwrite policy.
+    public init(appURL: URL, outputURL: URL, replaceExisting: Bool = false) {
+        self.appURL = appURL
+        self.outputURL = outputURL
+        self.replaceExisting = replaceExisting
+    }
+}
+
+/// Identifies the app and ZIP archive produced by a completed build.
+public struct PearchHAArchiveBuildResult: Equatable, Sendable {
+    public let archiveURL: URL
+    public let appURL: URL
+}
+
+/// Creates ZIP archives suitable for macOS app distribution and notarization.
+public struct PearchHAArchiveBuilder {
+    public static let defaultDittoURL = URL(fileURLWithPath: "/usr/bin/ditto")
+
+    private let fileManager: FileManager
+    private let dittoURL: URL
+    private let commandRunner: any PearchHACommandRunning
+
+    /// Creates an archive builder with the provided filesystem and command boundary.
+    public init(
+        fileManager: FileManager = .default,
+        dittoURL: URL = Self.defaultDittoURL,
+        commandRunner: any PearchHACommandRunning = PearchHAFoundationCommandRunner()
+    ) {
+        self.fileManager = fileManager
+        self.dittoURL = dittoURL
+        self.commandRunner = commandRunner
+    }
+
+    /// Archives the configured app bundle or throws an actionable packaging error.
+    public func build(_ configuration: PearchHAArchiveBuildConfiguration) throws -> PearchHAArchiveBuildResult {
+        let appURL = URL(fileURLWithPath: configuration.appURL.path).standardizedFileURL.resolvingSymlinksInPath()
+        let outputURL = URL(fileURLWithPath: configuration.outputURL.path)
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: appURL.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw PearchHAArchiveBuildError.appBundleMissing(appURL.path)
+        }
+        if fileManager.fileExists(atPath: outputURL.path) {
+            guard configuration.replaceExisting else {
+                throw PearchHAArchiveBuildError.outputExists(outputURL.path)
+            }
+            try fileManager.removeItem(at: outputURL)
+        }
+        guard fileManager.isExecutableFile(atPath: dittoURL.path) else {
+            throw PearchHAArchiveBuildError.dittoMissing(dittoURL.path)
+        }
+        try fileManager.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        let result = try commandRunner.run(
+            executableURL: dittoURL,
+            arguments: ["-c", "-k", "--sequesterRsrc", "--keepParent", appURL.path, outputURL.path]
+        )
+        guard result.status == 0 else {
+            throw PearchHAArchiveBuildError.dittoFailed(status: result.status, output: result.output)
+        }
+        guard fileManager.fileExists(atPath: outputURL.path) else {
+            throw PearchHAArchiveBuildError.archiveMissing(outputURL.path)
+        }
+        return PearchHAArchiveBuildResult(archiveURL: outputURL, appURL: appURL)
+    }
+}
+
 public enum PearchHADMGBuildError: Error, Equatable, CustomStringConvertible, Sendable {
     case appBundleMissing(String)
     case outputExists(String)

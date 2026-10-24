@@ -78,7 +78,7 @@ long-session stability. Remaining evidence gaps belong in [ROADMAP.md](ROADMAP.m
 ## Release evidence
 
 The [packaging script](../scripts/package.sh) builds both architectures, signs the
-app, verifies the DMG and mounted contents, and emits a manifest plus portable
+app, notarizes and staples the ZIP app and DMG, verifies the DMG and mounted contents, and emits a manifest plus portable
 screenshots/evidence. Reverify a retained bundle with:
 
 ```sh
