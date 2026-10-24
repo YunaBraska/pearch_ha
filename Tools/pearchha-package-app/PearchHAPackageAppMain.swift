@@ -152,7 +152,8 @@ struct PearchHAPackageAppCommand {
                     keychainProfile: notaryProfile,
                     waitForCompletion: shouldWait,
                     timeout: options.value(for: "--notary-timeout"),
-                    staple: shouldWait && !options.flags.contains("--skip-staple")
+                    staple: shouldWait && !options.flags.contains("--skip-staple"),
+                    stapleURL: result.appURL
                 )
             )
             appNotarySubmission = submission
