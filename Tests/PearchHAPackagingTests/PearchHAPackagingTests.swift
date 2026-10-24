@@ -1343,7 +1343,7 @@ final class PearchHAPackagingTests: XCTestCase {
         }
     }
 
-    func testNotarySubmitterRunsNotarytoolWaitsAndStaplesArtifact() throws {
+    func testNotarySubmitterRunsNotarytoolWaitsAndStaplesConfiguredTarget() throws {
         let directory = temporaryDirectory()
         defer {
             try? FileManager.default.removeItem(at: directory)
