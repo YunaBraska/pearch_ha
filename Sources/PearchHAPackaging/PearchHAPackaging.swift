@@ -2478,19 +2478,22 @@ public struct PearchHANotarySubmissionConfiguration: Equatable, Sendable {
     public let waitForCompletion: Bool
     public let timeout: String?
     public let staple: Bool
+    public let stapleURL: URL?
 
     public init(
         artifactURL: URL,
         keychainProfile: String,
         waitForCompletion: Bool = true,
         timeout: String? = nil,
-        staple: Bool = true
+        staple: Bool = true,
+        stapleURL: URL? = nil
     ) {
         self.artifactURL = artifactURL
         self.keychainProfile = keychainProfile
         self.waitForCompletion = waitForCompletion
         self.timeout = timeout
         self.staple = staple
+        self.stapleURL = stapleURL
     }
 }
 
@@ -2556,9 +2559,13 @@ public struct PearchHANotarySubmitter {
         }
 
         if configuration.staple {
+            let stapleURL = URL(fileURLWithPath: (configuration.stapleURL ?? artifactURL).path)
+            guard fileManager.fileExists(atPath: stapleURL.path) else {
+                throw PearchHANotaryError.artifactMissing(stapleURL.path)
+            }
             let stapleResult = try commandRunner.run(
                 executableURL: xcrunURL,
-                arguments: ["stapler", "staple", artifactURL.path]
+                arguments: ["stapler", "staple", stapleURL.path]
             )
             guard stapleResult.status == 0 else {
                 throw PearchHANotaryError.staplerFailed(status: stapleResult.status, output: stapleResult.output)

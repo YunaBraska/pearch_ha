@@ -1351,10 +1351,12 @@ final class PearchHAPackagingTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let dmgURL = directory.appendingPathComponent("PearchHA.dmg", isDirectory: false)
         try Data("dmg".utf8).write(to: dmgURL)
+        let appURL = directory.appendingPathComponent("PearchHA.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: appURL, withIntermediateDirectories: true)
         let xcrunURL = try fakeExecutable(in: directory, name: "xcrun")
         let runner = RecordingCommandRunner { _, arguments in
             if arguments.first == "stapler" {
-                XCTAssertEqual(arguments, ["stapler", "staple", dmgURL.path])
+                XCTAssertEqual(arguments, ["stapler", "staple", appURL.path])
                 return PearchHACommandResult(status: 0, output: "stapled")
             }
             XCTAssertEqual(
@@ -1379,7 +1381,8 @@ final class PearchHAPackagingTests: XCTestCase {
                 keychainProfile: " pearchha-release ",
                 waitForCompletion: true,
                 timeout: "30m",
-                staple: true
+                staple: true,
+                stapleURL: appURL
             )
         )
 
