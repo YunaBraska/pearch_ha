@@ -5642,30 +5642,11 @@ final class PearchHAUITests: XCTestCase {
     }
 
     func testAppShellLightSwitchSendsOnAndOffAfterReopeningPanel() async throws {
-        func click(_ control: NSSwitch, in panel: NSPanel) throws -> [String] {
-            let point = control.convert(NSPoint(x: control.bounds.midX, y: control.bounds.midY), to: nil)
-            for (eventIndex, type) in [NSEvent.EventType.leftMouseDown, .leftMouseUp].enumerated() {
-                let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point,
-                    modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber,
-                    context: nil, eventNumber: eventIndex + 1, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0))
-                NSApp.postEvent(event, atStart: false)
-            }
-            var deliveredEvents: [String] = []
-            let deadline = Date(timeIntervalSinceNow: 0.1)
-            // AppKit may track the press synchronously, so mouse-up must already be queued.
-            // Preserve queued AppKit window events before dispatching the synthetic click.
-            // Allow deferred event delivery instead of returning at an initially empty queue.
-            while let event = NSApp.nextEvent(matching: .any,
-                                             until: deadline, inMode: .default, dequeue: true) {
-                if event.type == .leftMouseDown || event.type == .leftMouseUp {
-                    XCTAssertTrue(event.window === panel, "Native click must target the current panel")
-                }
-                NSApp.sendEvent(event)
-                // Match the window update performed after each event by NSApplication.run().
-                NSApp.updateWindows()
-                deliveredEvents.append("\(event.type):state=\(control.state.rawValue)")
-            }
-            return deliveredEvents
+        func click(_ control: NSSwitch, in panel: NSPanel) -> [String] {
+            XCTAssertTrue(control.window === panel, "Native switch must belong to the current panel")
+            control.performClick(nil)
+            NSApp.updateWindows()
+            return ["performClick:state=\(control.state.rawValue)"]
         }
         let server = try FakeHAWebSocketServer()
         server.start()
@@ -5693,7 +5674,7 @@ final class PearchHAUITests: XCTestCase {
                 + "visibleRect=\(control.visibleRect), hit=\(String(describing: hit)), "
                 + "hitsSwitch=\(hit === control || hit?.isDescendant(of: control) == true), "
                 + "visible=\(panel.isVisible), key=\(panel.isKeyWindow), active=\(NSApp.isActive)"
-            let deliveredEvents = try click(control, in: panel)
+            let deliveredEvents = click(control, in: panel)
             await spinUntil("light switch sends \(service)") {
                 let calls = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
                 return calls.count == index + 1 && model.snapshot.controlActionState == .idle
