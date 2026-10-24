@@ -75,7 +75,9 @@ struct PearchHAPackageAppCommand {
             buildVersion: options.value(for: "--build-version") ?? "1",
             minimumSystemVersion: options.value(for: "--minimum-system-version") ?? "13.0",
             callbackURLScheme: options.value(for: "--callback-scheme") ?? "pearchha",
-            iconFileName: iconURL?.deletingPathExtension().lastPathComponent
+            iconFileName: iconURL?.deletingPathExtension().lastPathComponent,
+            updateFeedURL: options.value(for: "--update-feed-url"),
+            updatePublicKey: options.value(for: "--update-public-key")
         )
         let result = try PearchHAAppBundleBuilder().build(
             PearchHAAppBundleBuildConfiguration(
@@ -87,6 +89,7 @@ struct PearchHAPackageAppCommand {
             )
         )
         print("created \(result.appURL.path)")
+        try embedFrameworks(options.values(for: "--framework"), in: result.appURL)
         if options.flags.contains("--verify-launch-services") {
             let verification = try PearchHALaunchServicesVerifier().verify(
                 PearchHALaunchServicesVerificationConfiguration(
@@ -265,7 +268,7 @@ struct PearchHAPackageAppCommand {
       pearchha-package-app --write-oauth-site PATH [--oauth-env PATH] [--replace]
       pearchha-package-app --verify-oauth-site PATH [--oauth-env PATH]
       pearchha-package-app --verify-published-oauth-site [--oauth-env PATH]
-      pearchha-package-app [--executable PATH] [--output PATH] [--callback-scheme SCHEME] [--replace] [--verify-launch-services] [--sign-identity IDENTITY|--sign-ad-hoc] [--verify-signature] [--package-dmg] [--verify-dmg] [--verify-dmg-contents] [--release-manifest PATH] [--verify-release-manifest PATH] [--bundle-release-evidence PATH] [--oauth-site PATH] [--require-screenshot NAME] [--notary-profile PROFILE]
+      pearchha-package-app [--executable PATH] [--output PATH] [--callback-scheme SCHEME] [--framework PATH] [--update-feed-url URL --update-public-key KEY] [--replace] [--verify-launch-services] [--sign-identity IDENTITY|--sign-ad-hoc] [--verify-signature] [--package-dmg] [--verify-dmg] [--verify-dmg-contents] [--release-manifest PATH] [--verify-release-manifest PATH] [--bundle-release-evidence PATH] [--oauth-site PATH] [--require-screenshot NAME] [--notary-profile PROFILE]
 
     Options:
       --write-oauth-site PATH       Write a deployable OAuth client-website HTML artifact from exported OAuth env values or an env file.
@@ -282,6 +285,9 @@ struct PearchHAPackageAppCommand {
       --codesign PATH               codesign executable. Default: /usr/bin/codesign
       --xcrun PATH                  xcrun executable. Default: /usr/bin/xcrun
       --callback-scheme SCHEME      OAuth callback URL scheme. Default: pearchha
+      --framework PATH              Embed a framework in Contents/Frameworks before signing. May be repeated.
+      --update-feed-url URL         Sparkle appcast URL. Requires --update-public-key.
+      --update-public-key KEY       Sparkle Ed25519 public key. Requires --update-feed-url.
       --bundle-id ID                Bundle identifier. Default: dev.pearchha.app
       --version VERSION             CFBundleShortVersionString. Default: 0.1.0
       --build-version VERSION       CFBundleVersion. Default: 1
@@ -415,6 +421,27 @@ struct PearchHAPackageAppCommand {
             if !verifiesPublishedSite {
                 throw CommandError.requiresOption("--oauth-env", "--write-oauth-site or --verify-oauth-site or --verify-published-oauth-site")
             }
+        }
+    }
+
+    private static func embedFrameworks(_ paths: [String], in appURL: URL) throws {
+        guard !paths.isEmpty else {
+            return
+        }
+        let fileManager = FileManager.default
+        let destination = appURL.appendingPathComponent("Contents/Frameworks", isDirectory: true)
+        try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+        for path in paths {
+            let source = URL(fileURLWithPath: path, isDirectory: true)
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: source.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                throw CommandError.invalidOption("--framework", "does not name a framework directory: \(path)")
+            }
+            let framework = destination.appendingPathComponent(source.lastPathComponent, isDirectory: true)
+            if fileManager.fileExists(atPath: framework.path) {
+                try fileManager.removeItem(at: framework)
+            }
+            try fileManager.copyItem(at: source, to: framework)
         }
     }
 
@@ -623,6 +650,9 @@ struct PearchHAPackageAppCommand {
                     "--executable",
                     "--output",
                     "--callback-scheme",
+                    "--framework",
+                    "--update-feed-url",
+                    "--update-public-key",
                     "--bundle-id",
                     "--version",
                     "--build-version",

@@ -26,6 +26,9 @@ let package = Package(
         .library(name: "FakeHA", targets: ["FakeHA"]),
         .executable(name: "pearchha-package-app", targets: ["pearchha-package-app"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0")
+    ],
     targets: [
         .executableTarget(
             name: "PearchHAApp",
@@ -39,7 +42,8 @@ let package = Package(
                 "PearchHACore",
                 "PearchHAClient",
                 "PearchHAPersistence",
-                "PearchHAUI"
+                "PearchHAUI",
+                .product(name: "Sparkle", package: "Sparkle")
             ],
             resources: [
                 .copy("Resources/PearchHA.icns")

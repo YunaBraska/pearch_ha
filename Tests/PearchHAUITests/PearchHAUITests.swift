@@ -35,6 +35,14 @@ final class PearchHAUITests: XCTestCase {
         return model
     }
 
+    private func applicationForTest(configStore: ConfigStore?) -> PearchHAApplication {
+        PearchHAApplication(
+            configStore: configStore,
+            connector: { _ in .success(rooms: []) },
+            protectedActionValueStore: InMemoryProtectedActionValueStore()
+        )
+    }
+
     func testControlsDispatchAdvertisedServicePayloadsThroughWebSocket() async throws {
         let server = try FakeHAWebSocketServer()
         server.start()
@@ -4390,7 +4398,7 @@ final class PearchHAUITests: XCTestCase {
             loadedConfiguration: PearchHAConfiguration(customActions: [action]),
             saveError: .writeFailed(URL(fileURLWithPath: "/tmp/pearchha-config.json"), message: "disk full")
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -4418,7 +4426,7 @@ final class PearchHAUITests: XCTestCase {
         let store = FailingConfigStore(
             loadedConfiguration: PearchHAConfiguration(customActions: [action])
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -5885,7 +5893,7 @@ final class PearchHAUITests: XCTestCase {
     }
 
     func test_t_app_shell_launch_wires_status_item_panel_and_cleanup() {
-        let application = PearchHAApplication()
+        let application = applicationForTest(configStore: nil)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -5936,7 +5944,7 @@ final class PearchHAUITests: XCTestCase {
             )
         )
 
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -6553,7 +6561,7 @@ final class PearchHAUITests: XCTestCase {
     }
 
     func test_t_app_shell_no_promotion_shows_single_fallback_item() {
-        let application = PearchHAApplication()
+        let application = applicationForTest(configStore: nil)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -8297,7 +8305,7 @@ final class PearchHAUITests: XCTestCase {
                 menuBarEntityIDs: ["sensor.office_humidity"]
             )
         )
-        let firstApplication = PearchHAApplication(configStore: store)
+        let firstApplication = applicationForTest(configStore: store)
         firstApplication.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         var firstApplicationIsRunning = true
         defer {
@@ -8321,7 +8329,7 @@ final class PearchHAUITests: XCTestCase {
         firstApplication.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
         firstApplicationIsRunning = false
 
-        let secondApplication = PearchHAApplication(configStore: store)
+        let secondApplication = applicationForTest(configStore: store)
         secondApplication.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             secondApplication.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -8345,7 +8353,7 @@ final class PearchHAUITests: XCTestCase {
             try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
         }
         let store = JSONConfigStore(fileURL: url)
-        let firstApplication = PearchHAApplication(configStore: store)
+        let firstApplication = applicationForTest(configStore: store)
         firstApplication.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         var firstApplicationIsRunning = true
         defer {
@@ -8821,7 +8829,7 @@ final class PearchHAUITests: XCTestCase {
         let store = FailingConfigStore(
             loadError: .malformedConfig(URL(fileURLWithPath: "/tmp/pearchha-bad-config.json"), message: "bad json")
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -8858,7 +8866,7 @@ final class PearchHAUITests: XCTestCase {
             ),
             saveError: .writeFailed(URL(fileURLWithPath: "/tmp/pearchha-config.json"), message: "disk full")
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -8891,7 +8899,7 @@ final class PearchHAUITests: XCTestCase {
         let store = FailingConfigStore(
             saveError: .writeFailed(URL(fileURLWithPath: "/tmp/pearchha-config.json"), message: "disk full")
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -8923,7 +8931,7 @@ final class PearchHAUITests: XCTestCase {
         let store = FailingConfigStore(
             saveError: .writeFailed(URL(fileURLWithPath: "/tmp/pearchha-config.json"), message: "disk full")
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -8950,7 +8958,7 @@ final class PearchHAUITests: XCTestCase {
         let store = FailingConfigStore(
             saveError: .writeFailed(URL(fileURLWithPath: "/tmp/pearchha-config.json"), message: "disk full")
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -8980,7 +8988,7 @@ final class PearchHAUITests: XCTestCase {
         let store = FailingConfigStore(
             saveError: .writeFailed(URL(fileURLWithPath: "/tmp/pearchha-config.json"), message: "disk full")
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -9010,7 +9018,7 @@ final class PearchHAUITests: XCTestCase {
         let store = FailingConfigStore(
             saveError: .writeFailed(URL(fileURLWithPath: "/tmp/pearchha-config.json"), message: "disk full")
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
