@@ -2478,6 +2478,7 @@ public struct PearchHANotarySubmissionConfiguration: Equatable, Sendable {
     public let waitForCompletion: Bool
     public let timeout: String?
     public let staple: Bool
+    /// Optional packaged member that receives Apple's ticket after artifact submission.
     public let stapleURL: URL?
 
     public init(
