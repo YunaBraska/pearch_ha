@@ -8,7 +8,9 @@ final class PearchHAPackagingTests: XCTestCase {
     func testInfoPlistDeclaresCallbackURLSchemeAndMenuBarAgent() throws {
         let manifest = try PearchHAAppBundleManifest(
             callbackURLScheme: "pearchha-test",
-            iconFileName: "PearchHA"
+            iconFileName: "PearchHA",
+            updateFeedURL: "https://example.invalid/appcast.xml",
+            updatePublicKey: "public-key"
         )
 
         let plist = try propertyList(from: manifest.propertyListData())
@@ -20,11 +22,26 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertEqual(plist["CFBundleIconFile"] as? String, "PearchHA")
         XCTAssertEqual(plist["LSMinimumSystemVersion"] as? String, "13.0")
         XCTAssertEqual(plist["LSUIElement"] as? Bool, true)
+        XCTAssertEqual(plist["SUFeedURL"] as? String, "https://example.invalid/appcast.xml")
+        XCTAssertEqual(plist["SUPublicEDKey"] as? String, "public-key")
         let urlTypes = try XCTUnwrap(plist["CFBundleURLTypes"] as? [[String: Any]])
         XCTAssertEqual(urlTypes.count, 1)
         XCTAssertEqual(urlTypes.first?["CFBundleTypeRole"] as? String, "Viewer")
         XCTAssertEqual(urlTypes.first?["CFBundleURLName"] as? String, "dev.pearchha.app.oauth")
         XCTAssertEqual(urlTypes.first?["CFBundleURLSchemes"] as? [String], ["pearchha-test"])
+    }
+
+    func testManifestRejectsIncompleteUpdateConfiguration() {
+        XCTAssertThrowsError(
+            try PearchHAAppBundleManifest(updateFeedURL: "https://example.invalid/appcast.xml")
+        ) { error in
+            XCTAssertEqual(error as? PearchHAAppBundleManifestError, .incompleteUpdateConfiguration)
+        }
+        XCTAssertThrowsError(
+            try PearchHAAppBundleManifest(updatePublicKey: "public-key")
+        ) { error in
+            XCTAssertEqual(error as? PearchHAAppBundleManifestError, .incompleteUpdateConfiguration)
+        }
     }
 
     func testAppBundleBuilderCreatesBundleWithExecutableInfoPlistAndPkgInfo() throws {
@@ -375,11 +392,13 @@ final class PearchHAPackagingTests: XCTestCase {
             shift
           done
           mkdir -p "$scratch/custom products"
+          mkdir -p "$scratch/Sparkle.framework"
           printf '%s\n' 'executable' > "$scratch/custom products/PearchHA"
           printf '%s\n' "$PWD/$scratch/custom products"
           exit
         fi
         shift 2
+        printf '%s\n' "$@" >> "$PWD/package-arguments"
         if [ "$1" = --verify-release-manifest ]; then
           test -f "$(cat "$2")"
           exit
@@ -411,7 +430,7 @@ final class PearchHAPackagingTests: XCTestCase {
         for input do test -f "$input"; done
         printf '%s\n' 'universal executable' > "$output"
         """#.write(to: lipo, atomically: true, encoding: .utf8)
-        for name in ["codesign", "ditto"] {
+        for name in ["codesign", "ditto", "install_name_tool"] {
             let tool = try fakeExecutable(in: directory, name: name)
             try "#!/bin/sh\nexit 0\n".write(to: tool, atomically: true, encoding: .utf8)
         }
@@ -428,6 +447,12 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent(artifact).path),
                       "the packaged artifact referenced by release evidence must still exist after the script finishes")
         XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("dist/PearchHA-2026.10.13.dmg").path))
+        let packageArguments = try String(
+            contentsOf: directory.appendingPathComponent("package-arguments"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(packageArguments.contains("--framework"))
+        XCTAssertTrue(packageArguments.contains("Sparkle.framework"))
     }
 
     func testXcodePreflightReportsBlockedWhenOnlyCommandLineToolsAreSelected() throws {

@@ -4,6 +4,7 @@ import Foundation
 public enum PearchHAAppBundleManifestError: Error, Equatable, CustomStringConvertible, Sendable {
     case blankField(String)
     case invalidCallbackURLScheme(String)
+    case incompleteUpdateConfiguration
 
     public var description: String {
         switch self {
@@ -11,6 +12,8 @@ public enum PearchHAAppBundleManifestError: Error, Equatable, CustomStringConver
             "\(name) is required"
         case let .invalidCallbackURLScheme(value):
             "invalid callback URL scheme: \(value)"
+        case .incompleteUpdateConfiguration:
+            "update feed URL and public key must be provided together"
         }
     }
 }
@@ -24,6 +27,8 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
     public let minimumSystemVersion: String
     public let callbackURLScheme: String
     public let iconFileName: String?
+    public let updateFeedURL: String?
+    public let updatePublicKey: String?
 
     public init(
         appName: String = "PearchHA",
@@ -33,7 +38,9 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
         buildVersion: String = "1",
         minimumSystemVersion: String = "13.0",
         callbackURLScheme: String = "pearchha",
-        iconFileName: String? = nil
+        iconFileName: String? = nil,
+        updateFeedURL: String? = nil,
+        updatePublicKey: String? = nil
     ) throws {
         self.appName = try Self.required(appName, name: "appName")
         self.bundleIdentifier = try Self.required(bundleIdentifier, name: "bundleIdentifier")
@@ -47,6 +54,13 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
         }
         self.callbackURLScheme = normalizedScheme
         self.iconFileName = try Self.optional(iconFileName, name: "iconFileName")
+        let updateFeedURL = try Self.optional(updateFeedURL, name: "updateFeedURL")
+        let updatePublicKey = try Self.optional(updatePublicKey, name: "updatePublicKey")
+        guard (updateFeedURL == nil) == (updatePublicKey == nil) else {
+            throw PearchHAAppBundleManifestError.incompleteUpdateConfiguration
+        }
+        self.updateFeedURL = updateFeedURL
+        self.updatePublicKey = updatePublicKey
     }
 
     public func propertyListData() throws -> Data {
@@ -58,7 +72,9 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
             buildVersion: buildVersion,
             minimumSystemVersion: minimumSystemVersion,
             callbackURLScheme: callbackURLScheme,
-            iconFileName: iconFileName
+            iconFileName: iconFileName,
+            updateFeedURL: updateFeedURL,
+            updatePublicKey: updatePublicKey
         )
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .xml
@@ -2991,6 +3007,8 @@ private struct PearchHAInfoPlist: Encodable {
     let highResolutionCapable = true
     let agentApplication = true
     let iconFileName: String?
+    let updateFeedURL: String?
+    let updatePublicKey: String?
     let urlTypes: [PearchHAInfoPlistURLType]
 
     init(
@@ -3001,7 +3019,9 @@ private struct PearchHAInfoPlist: Encodable {
         buildVersion: String,
         minimumSystemVersion: String,
         callbackURLScheme: String,
-        iconFileName: String?
+        iconFileName: String?,
+        updateFeedURL: String?,
+        updatePublicKey: String?
     ) {
         self.appName = appName
         self.bundleIdentifier = bundleIdentifier
@@ -3010,6 +3030,8 @@ private struct PearchHAInfoPlist: Encodable {
         self.buildVersion = buildVersion
         self.minimumSystemVersion = minimumSystemVersion
         self.iconFileName = iconFileName
+        self.updateFeedURL = updateFeedURL
+        self.updatePublicKey = updatePublicKey
         self.urlTypes = [
             PearchHAInfoPlistURLType(
                 name: "\(bundleIdentifier).oauth",
@@ -3031,6 +3053,8 @@ private struct PearchHAInfoPlist: Encodable {
         case highResolutionCapable = "NSHighResolutionCapable"
         case agentApplication = "LSUIElement"
         case iconFileName = "CFBundleIconFile"
+        case updateFeedURL = "SUFeedURL"
+        case updatePublicKey = "SUPublicEDKey"
         case urlTypes = "CFBundleURLTypes"
     }
 }
