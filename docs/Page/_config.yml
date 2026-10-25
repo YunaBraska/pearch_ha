@@ -1,3 +1,8 @@
 title: PearchHA
+product: PearchHA
 description: Native Home Assistant dashboard for the macOS menu bar.
-theme: jekyll-theme-minimal
+repository: https://github.com/YunaBraska/pearch_ha
+support: https://github.com/YunaBraska/pearch_ha/issues
+accent: "#078dcc"
+accent_soft: "#e3f6ff"
+color_scheme: light
