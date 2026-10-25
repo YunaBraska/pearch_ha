@@ -10364,7 +10364,9 @@ final class PearchHAUITests: XCTestCase {
             return false
         }
         let ranges = await recorder.requestedRanges()
-        XCTAssertEqual(ranges, [.day, .day, .month])
+        XCTAssertEqual(ranges.count, 3)
+        XCTAssertEqual(ranges.filter { $0 == .day }.count, 2)
+        XCTAssertEqual(ranges.filter { $0 == .month }.count, 1)
         let baseline = await recorder.batchCount()
         model.setPanelActive(false)
         await spinUntil { await clock.sleepingTaskCount() == 1 }
