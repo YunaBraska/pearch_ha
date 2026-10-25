@@ -1291,6 +1291,7 @@ final class PearchHAPackagingTests: XCTestCase {
                 arguments,
                 [
                     "--force",
+                    "--deep",
                     "--timestamp",
                     "--options", "runtime",
                     "--entitlements", entitlementsURL.path,

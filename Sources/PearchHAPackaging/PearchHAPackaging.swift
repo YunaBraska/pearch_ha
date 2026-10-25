@@ -2358,6 +2358,7 @@ public struct PearchHACodeSigner {
         if configuration.force {
             arguments.append("--force")
         }
+        arguments.append("--deep")
         if configuration.timestamp {
             arguments.append("--timestamp")
         }
