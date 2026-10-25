@@ -57,7 +57,7 @@ else
   set -- "$@" --sign-identity "${identity}"
 fi
 if [ -n "${notary_profile}" ]; then
-  set -- "$@" --notary-profile "${notary_profile}"
+  set -- "$@" --notary-profile "${notary_profile}" --notary-timeout 90m
 fi
 swift run pearchha-package-app "$@"
 swift run pearchha-package-app --verify-release-manifest dist/pearchha-release-manifest.json

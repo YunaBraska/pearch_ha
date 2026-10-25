@@ -949,6 +949,7 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertTrue(package.contains("--sign-ad-hoc"))
         XCTAssertTrue(package.contains("--sign-identity \"${identity}\""))
         XCTAssertTrue(package.contains("--notary-profile \"${notary_profile}\""))
+        XCTAssertTrue(package.contains("--notary-timeout 90m"))
         XCTAssertTrue(package.contains("--package-dmg"))
         XCTAssertTrue(package.contains("--zip-output \"dist/PearchHA-${version}.zip\""))
         XCTAssertTrue(package.contains("--executable dist/PearchHA"))
@@ -1393,11 +1394,13 @@ final class PearchHAPackagingTests: XCTestCase {
                     "--keychain-profile",
                     "pearchha-release",
                     "--no-progress",
+                    "--output-format",
+                    "json",
                     "--wait",
                     "--timeout", "30m"
                 ]
             )
-            return PearchHACommandResult(status: 0, output: "accepted")
+            return PearchHACommandResult(status: 0, output: #"{"id":"submission-id","status":"Accepted"}"#)
         }
 
         let result = try PearchHANotarySubmitter(xcrunURL: xcrunURL, commandRunner: runner).submit(
@@ -1416,6 +1419,35 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertTrue(result.waitedForCompletion)
         XCTAssertTrue(result.stapled)
         XCTAssertEqual(runner.invocations.count, 2)
+    }
+
+    func testNotarySubmitterRejectsAnUnacceptedSubmissionBeforeStapling() throws {
+        let directory = temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let archiveURL = directory.appendingPathComponent("PearchHA.zip", isDirectory: false)
+        try Data("archive".utf8).write(to: archiveURL)
+        let xcrunURL = try fakeExecutable(in: directory, name: "xcrun")
+        let runner = RecordingCommandRunner { _, _ in
+            PearchHACommandResult(
+                status: 0,
+                output: #"{"id":"submission-id","status":"Invalid"}"#
+            )
+        }
+
+        XCTAssertThrowsError(
+            try PearchHANotarySubmitter(xcrunURL: xcrunURL, commandRunner: runner).submit(
+                PearchHANotarySubmissionConfiguration(artifactURL: archiveURL, keychainProfile: "release")
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? PearchHANotaryError,
+                .notarySubmissionNotAccepted(#"{"id":"submission-id","status":"Invalid"}"#)
+            )
+        }
+        XCTAssertEqual(runner.invocations.count, 1)
     }
 
     func testNotarySubmitterRejectsMissingInputsAndReportsCommandFailures() throws {
@@ -1471,7 +1503,7 @@ final class PearchHAPackagingTests: XCTestCase {
 
         let staplerFailureRunner = RecordingCommandRunner { _, arguments in
             arguments.first == "notarytool"
-                ? PearchHACommandResult(status: 0, output: "accepted")
+                ? PearchHACommandResult(status: 0, output: #"{"id":"submission-id","status":"Accepted"}"#)
                 : PearchHACommandResult(status: 1, output: "ticket unavailable")
         }
         XCTAssertThrowsError(
@@ -1479,7 +1511,13 @@ final class PearchHAPackagingTests: XCTestCase {
                 PearchHANotarySubmissionConfiguration(artifactURL: dmgURL, keychainProfile: "profile")
             )
         ) { error in
-            XCTAssertEqual(error as? PearchHANotaryError, .staplerFailed(status: 1, output: "ticket unavailable"))
+            XCTAssertEqual(
+                error as? PearchHANotaryError,
+                .staplerFailed(
+                    status: 1,
+                    output: "ticket unavailable\nnotary submission: {\"id\":\"submission-id\",\"status\":\"Accepted\"}"
+                )
+            )
         }
     }
 
