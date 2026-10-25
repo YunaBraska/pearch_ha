@@ -2585,7 +2585,13 @@ public struct PearchHANotarySubmitter {
                 from: Data(submitResult.output.utf8)
             )
             guard response?.status == "Accepted" else {
-                throw PearchHANotaryError.notarySubmissionNotAccepted(submitResult.output)
+                throw PearchHANotaryError.notarySubmissionNotAccepted(
+                    notaryDiagnostic(
+                        submission: response,
+                        submissionOutput: submitResult.output,
+                        keychainProfile: keychainProfile
+                    )
+                )
             }
         }
 
@@ -2613,9 +2619,42 @@ public struct PearchHANotarySubmitter {
             stapled: configuration.staple
         )
     }
+
+    private func notaryDiagnostic(
+        submission: PearchHANotarySubmissionResponse?,
+        submissionOutput: String,
+        keychainProfile: String
+    ) -> String {
+        guard let identifier = submission?.id,
+              !identifier.isEmpty else {
+            return submissionOutput
+        }
+        let logURL = fileManager.temporaryDirectory
+            .appendingPathComponent("pearchha-notary-\(UUID().uuidString).json", isDirectory: false)
+        defer {
+            try? fileManager.removeItem(at: logURL)
+        }
+        guard let result = try? commandRunner.run(
+            executableURL: xcrunURL,
+            arguments: [
+                "notarytool",
+                "log",
+                identifier,
+                "--keychain-profile",
+                keychainProfile,
+                "--no-progress",
+                logURL.path
+            ]
+        ) else {
+            return submissionOutput
+        }
+        let log = (try? String(contentsOf: logURL, encoding: .utf8)) ?? result.output
+        return "\(submissionOutput)\nnotary log: \(log)"
+    }
 }
 
 private struct PearchHANotarySubmissionResponse: Decodable {
+    let id: String?
     let status: String
 }
 

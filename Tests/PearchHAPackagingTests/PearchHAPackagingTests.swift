@@ -1430,10 +1430,19 @@ final class PearchHAPackagingTests: XCTestCase {
         let archiveURL = directory.appendingPathComponent("PearchHA.zip", isDirectory: false)
         try Data("archive".utf8).write(to: archiveURL)
         let xcrunURL = try fakeExecutable(in: directory, name: "xcrun")
-        let runner = RecordingCommandRunner { _, _ in
-            PearchHACommandResult(
+        let runner = RecordingCommandRunner { _, arguments in
+            if arguments[1] == "submit" {
+                return PearchHACommandResult(
+                    status: 0,
+                    output: #"{"id":"submission-id","status":"Invalid"}"#
+                )
+            }
+            try Data(#"{"issues":[{"message":"invalid signature"}]}"#.utf8).write(
+                to: URL(fileURLWithPath: try XCTUnwrap(arguments.last))
+            )
+            return PearchHACommandResult(
                 status: 0,
-                output: #"{"id":"submission-id","status":"Invalid"}"#
+                output: "Successfully downloaded submission log"
             )
         }
 
@@ -1444,10 +1453,28 @@ final class PearchHAPackagingTests: XCTestCase {
         ) { error in
             XCTAssertEqual(
                 error as? PearchHANotaryError,
-                .notarySubmissionNotAccepted(#"{"id":"submission-id","status":"Invalid"}"#)
+                .notarySubmissionNotAccepted(
+                    #"{"id":"submission-id","status":"Invalid"}"# +
+                        "\nnotary log: " +
+                        #"{"issues":[{"message":"invalid signature"}]}"#
+                )
             )
         }
-        XCTAssertEqual(runner.invocations.count, 1)
+        XCTAssertEqual(runner.invocations.count, 2)
+        let logArguments = runner.invocations[1].arguments
+        XCTAssertEqual(
+            Array(logArguments.dropLast()),
+            [
+                "notarytool",
+                "log",
+                "submission-id",
+                "--keychain-profile",
+                "release",
+                "--no-progress"
+            ]
+        )
+        XCTAssertTrue(logArguments.last?.hasPrefix(FileManager.default.temporaryDirectory.path) == true)
+        XCTAssertTrue(logArguments.last?.hasSuffix(".json") == true)
     }
 
     func testNotarySubmitterRejectsMissingInputsAndReportsCommandFailures() throws {
