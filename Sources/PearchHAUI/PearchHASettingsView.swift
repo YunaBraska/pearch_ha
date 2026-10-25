@@ -595,7 +595,7 @@ public struct PearchHASettingsView: View {
                             .fixedSize()
                             .accessibilityLabel("Default history range")
                         }
-                        Text("Used for inline charts and the history popover unless a value has its own range.")
+                        Text("Used when opening history unless a value has its own range. Inline previews always show the day.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -744,7 +744,7 @@ public struct PearchHASettingsView: View {
 
     /// Diagnostics: real connection status, entity health (the warning count and
     /// a deduped, capped list of affected entities), the last-updated timestamp
-    /// with a manual refresh action, and the read-only history-prefetch
+    /// with a manual refresh action, and the read-only history-cache
     /// reference. All values come from the live snapshot; nothing is fabricated.
     /// This is the only place a manual refresh lives.
     private var diagnosticsTab: some View {
@@ -1894,7 +1894,7 @@ public struct PearchHASettingsView: View {
     }
 
     /// A compact, collapsed entity row: selection checkbox, domain icon, name,
-    /// a type/unit caption, a menu-bar-visible pill, reorder controls, and a
+    /// a type/unit caption, status indicators, reorder controls, and a
     /// disclosure toggle that opens this entity's inspector. Clicking the row
     /// (or the disclosure) opens the single inspector inline beneath the row;
     /// only one inspector is open at a time.
@@ -1932,6 +1932,13 @@ public struct PearchHASettingsView: View {
                 Spacer(minLength: 8)
                 if hasAverageLinks {
                     averageLinkedPill
+                }
+                if let controlHelp = PearchHAEntityControlField.controlHelp(for: entity) {
+                    collapsedEntityStatusPill(
+                        systemImage: "slider.horizontal.3",
+                        color: palette.textSecondary,
+                        accessibilityLabel: controlHelp
+                    )
                 }
                 if isPromoted {
                     menuBarVisiblePill

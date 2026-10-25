@@ -4,6 +4,7 @@ import Foundation
 public enum PearchHAAppBundleManifestError: Error, Equatable, CustomStringConvertible, Sendable {
     case blankField(String)
     case invalidCallbackURLScheme(String)
+    case incompleteUpdateConfiguration
 
     public var description: String {
         switch self {
@@ -11,6 +12,8 @@ public enum PearchHAAppBundleManifestError: Error, Equatable, CustomStringConver
             "\(name) is required"
         case let .invalidCallbackURLScheme(value):
             "invalid callback URL scheme: \(value)"
+        case .incompleteUpdateConfiguration:
+            "update feed URL and public key must be provided together"
         }
     }
 }
@@ -24,6 +27,8 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
     public let minimumSystemVersion: String
     public let callbackURLScheme: String
     public let iconFileName: String?
+    public let updateFeedURL: String?
+    public let updatePublicKey: String?
 
     public init(
         appName: String = "PearchHA",
@@ -33,7 +38,9 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
         buildVersion: String = "1",
         minimumSystemVersion: String = "13.0",
         callbackURLScheme: String = "pearchha",
-        iconFileName: String? = nil
+        iconFileName: String? = nil,
+        updateFeedURL: String? = nil,
+        updatePublicKey: String? = nil
     ) throws {
         self.appName = try Self.required(appName, name: "appName")
         self.bundleIdentifier = try Self.required(bundleIdentifier, name: "bundleIdentifier")
@@ -47,6 +54,13 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
         }
         self.callbackURLScheme = normalizedScheme
         self.iconFileName = try Self.optional(iconFileName, name: "iconFileName")
+        let updateFeedURL = try Self.optional(updateFeedURL, name: "updateFeedURL")
+        let updatePublicKey = try Self.optional(updatePublicKey, name: "updatePublicKey")
+        guard (updateFeedURL == nil) == (updatePublicKey == nil) else {
+            throw PearchHAAppBundleManifestError.incompleteUpdateConfiguration
+        }
+        self.updateFeedURL = updateFeedURL
+        self.updatePublicKey = updatePublicKey
     }
 
     public func propertyListData() throws -> Data {
@@ -58,7 +72,9 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
             buildVersion: buildVersion,
             minimumSystemVersion: minimumSystemVersion,
             callbackURLScheme: callbackURLScheme,
-            iconFileName: iconFileName
+            iconFileName: iconFileName,
+            updateFeedURL: updateFeedURL,
+            updatePublicKey: updatePublicKey
         )
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .xml
@@ -2342,6 +2358,7 @@ public struct PearchHACodeSigner {
         if configuration.force {
             arguments.append("--force")
         }
+        arguments.append("--deep")
         if configuration.timestamp {
             arguments.append("--timestamp")
         }
@@ -2452,6 +2469,7 @@ public enum PearchHANotaryError: Error, Equatable, CustomStringConvertible, Send
     case stapleRequiresCompletedSubmission
     case xcrunMissing(String)
     case notaryToolFailed(status: Int32, output: String)
+    case notarySubmissionNotAccepted(String)
     case staplerFailed(status: Int32, output: String)
 
     public var description: String {
@@ -2466,6 +2484,8 @@ public enum PearchHANotaryError: Error, Equatable, CustomStringConvertible, Send
             "xcrun does not exist: \(path)"
         case let .notaryToolFailed(status, output):
             "notarytool submit failed with status \(status): \(output)"
+        case let .notarySubmissionNotAccepted(output):
+            "notarytool submit did not accept the artifact: \(output)"
         case let .staplerFailed(status, output):
             "stapler staple failed with status \(status): \(output)"
         }
@@ -2478,19 +2498,23 @@ public struct PearchHANotarySubmissionConfiguration: Equatable, Sendable {
     public let waitForCompletion: Bool
     public let timeout: String?
     public let staple: Bool
+    /// Optional packaged member that receives Apple's ticket after artifact submission.
+    public let stapleURL: URL?
 
     public init(
         artifactURL: URL,
         keychainProfile: String,
         waitForCompletion: Bool = true,
         timeout: String? = nil,
-        staple: Bool = true
+        staple: Bool = true,
+        stapleURL: URL? = nil
     ) {
         self.artifactURL = artifactURL
         self.keychainProfile = keychainProfile
         self.waitForCompletion = waitForCompletion
         self.timeout = timeout
         self.staple = staple
+        self.stapleURL = stapleURL
     }
 }
 
@@ -2540,7 +2564,9 @@ public struct PearchHANotarySubmitter {
             artifactURL.path,
             "--keychain-profile",
             keychainProfile,
-            "--no-progress"
+            "--no-progress",
+            "--output-format",
+            "json"
         ]
         if configuration.waitForCompletion {
             submitArguments.append("--wait")
@@ -2554,14 +2580,36 @@ public struct PearchHANotarySubmitter {
         guard submitResult.status == 0 else {
             throw PearchHANotaryError.notaryToolFailed(status: submitResult.status, output: submitResult.output)
         }
+        if configuration.waitForCompletion {
+            let response = try? JSONDecoder().decode(
+                PearchHANotarySubmissionResponse.self,
+                from: Data(submitResult.output.utf8)
+            )
+            guard response?.status == "Accepted" else {
+                throw PearchHANotaryError.notarySubmissionNotAccepted(
+                    notaryDiagnostic(
+                        submission: response,
+                        submissionOutput: submitResult.output,
+                        keychainProfile: keychainProfile
+                    )
+                )
+            }
+        }
 
         if configuration.staple {
+            let stapleURL = URL(fileURLWithPath: (configuration.stapleURL ?? artifactURL).path)
+            guard fileManager.fileExists(atPath: stapleURL.path) else {
+                throw PearchHANotaryError.artifactMissing(stapleURL.path)
+            }
             let stapleResult = try commandRunner.run(
                 executableURL: xcrunURL,
-                arguments: ["stapler", "staple", artifactURL.path]
+                arguments: ["stapler", "staple", stapleURL.path]
             )
             guard stapleResult.status == 0 else {
-                throw PearchHANotaryError.staplerFailed(status: stapleResult.status, output: stapleResult.output)
+                throw PearchHANotaryError.staplerFailed(
+                    status: stapleResult.status,
+                    output: "\(stapleResult.output)\nnotary submission: \(submitResult.output)"
+                )
             }
         }
 
@@ -2571,6 +2619,139 @@ public struct PearchHANotarySubmitter {
             waitedForCompletion: configuration.waitForCompletion,
             stapled: configuration.staple
         )
+    }
+
+    private func notaryDiagnostic(
+        submission: PearchHANotarySubmissionResponse?,
+        submissionOutput: String,
+        keychainProfile: String
+    ) -> String {
+        guard let identifier = submission?.id,
+              !identifier.isEmpty else {
+            return submissionOutput
+        }
+        let logURL = fileManager.temporaryDirectory
+            .appendingPathComponent("pearchha-notary-\(UUID().uuidString).json", isDirectory: false)
+        defer {
+            try? fileManager.removeItem(at: logURL)
+        }
+        guard let result = try? commandRunner.run(
+            executableURL: xcrunURL,
+            arguments: [
+                "notarytool",
+                "log",
+                identifier,
+                "--keychain-profile",
+                keychainProfile,
+                "--no-progress",
+                logURL.path
+            ]
+        ) else {
+            return submissionOutput
+        }
+        let log = (try? String(contentsOf: logURL, encoding: .utf8)) ?? result.output
+        return "\(submissionOutput)\nnotary log: \(log)"
+    }
+}
+
+private struct PearchHANotarySubmissionResponse: Decodable {
+    let id: String?
+    let status: String
+}
+
+/// Reports a rejected or incomplete app ZIP archive build.
+public enum PearchHAArchiveBuildError: Error, Equatable, CustomStringConvertible, Sendable {
+    case appBundleMissing(String)
+    case outputExists(String)
+    case dittoMissing(String)
+    case dittoFailed(status: Int32, output: String)
+    case archiveMissing(String)
+
+    public var description: String {
+        switch self {
+        case let .appBundleMissing(path):
+            "app bundle does not exist: \(path)"
+        case let .outputExists(path):
+            "output archive already exists: \(path)"
+        case let .dittoMissing(path):
+            "ditto does not exist: \(path)"
+        case let .dittoFailed(status, output):
+            "ditto archive failed with status \(status): \(output)"
+        case let .archiveMissing(path):
+            "archive does not exist: \(path)"
+        }
+    }
+}
+
+/// Configures a ZIP archive that preserves one app bundle.
+public struct PearchHAArchiveBuildConfiguration: Equatable, Sendable {
+    public let appURL: URL
+    public let outputURL: URL
+    public let replaceExisting: Bool
+
+    /// Creates a configuration for the source app, destination archive, and overwrite policy.
+    public init(appURL: URL, outputURL: URL, replaceExisting: Bool = false) {
+        self.appURL = appURL
+        self.outputURL = outputURL
+        self.replaceExisting = replaceExisting
+    }
+}
+
+/// Identifies the app and ZIP archive produced by a completed build.
+public struct PearchHAArchiveBuildResult: Equatable, Sendable {
+    public let archiveURL: URL
+    public let appURL: URL
+}
+
+/// Creates ZIP archives suitable for macOS app distribution and notarization.
+public struct PearchHAArchiveBuilder {
+    public static let defaultDittoURL = URL(fileURLWithPath: "/usr/bin/ditto")
+
+    private let fileManager: FileManager
+    private let dittoURL: URL
+    private let commandRunner: any PearchHACommandRunning
+
+    /// Creates an archive builder with the provided filesystem and command boundary.
+    public init(
+        fileManager: FileManager = .default,
+        dittoURL: URL = Self.defaultDittoURL,
+        commandRunner: any PearchHACommandRunning = PearchHAFoundationCommandRunner()
+    ) {
+        self.fileManager = fileManager
+        self.dittoURL = dittoURL
+        self.commandRunner = commandRunner
+    }
+
+    /// Archives the configured app bundle or throws an actionable packaging error.
+    public func build(_ configuration: PearchHAArchiveBuildConfiguration) throws -> PearchHAArchiveBuildResult {
+        let appURL = URL(fileURLWithPath: configuration.appURL.path).standardizedFileURL.resolvingSymlinksInPath()
+        let outputURL = URL(fileURLWithPath: configuration.outputURL.path)
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: appURL.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw PearchHAArchiveBuildError.appBundleMissing(appURL.path)
+        }
+        if fileManager.fileExists(atPath: outputURL.path) {
+            guard configuration.replaceExisting else {
+                throw PearchHAArchiveBuildError.outputExists(outputURL.path)
+            }
+            try fileManager.removeItem(at: outputURL)
+        }
+        guard fileManager.isExecutableFile(atPath: dittoURL.path) else {
+            throw PearchHAArchiveBuildError.dittoMissing(dittoURL.path)
+        }
+        try fileManager.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        let result = try commandRunner.run(
+            executableURL: dittoURL,
+            arguments: ["-c", "-k", "--sequesterRsrc", "--keepParent", appURL.path, outputURL.path]
+        )
+        guard result.status == 0 else {
+            throw PearchHAArchiveBuildError.dittoFailed(status: result.status, output: result.output)
+        }
+        guard fileManager.fileExists(atPath: outputURL.path) else {
+            throw PearchHAArchiveBuildError.archiveMissing(outputURL.path)
+        }
+        return PearchHAArchiveBuildResult(archiveURL: outputURL, appURL: appURL)
     }
 }
 
@@ -2887,6 +3068,8 @@ private struct PearchHAInfoPlist: Encodable {
     let highResolutionCapable = true
     let agentApplication = true
     let iconFileName: String?
+    let updateFeedURL: String?
+    let updatePublicKey: String?
     let urlTypes: [PearchHAInfoPlistURLType]
 
     init(
@@ -2897,7 +3080,9 @@ private struct PearchHAInfoPlist: Encodable {
         buildVersion: String,
         minimumSystemVersion: String,
         callbackURLScheme: String,
-        iconFileName: String?
+        iconFileName: String?,
+        updateFeedURL: String?,
+        updatePublicKey: String?
     ) {
         self.appName = appName
         self.bundleIdentifier = bundleIdentifier
@@ -2906,6 +3091,8 @@ private struct PearchHAInfoPlist: Encodable {
         self.buildVersion = buildVersion
         self.minimumSystemVersion = minimumSystemVersion
         self.iconFileName = iconFileName
+        self.updateFeedURL = updateFeedURL
+        self.updatePublicKey = updatePublicKey
         self.urlTypes = [
             PearchHAInfoPlistURLType(
                 name: "\(bundleIdentifier).oauth",
@@ -2927,6 +3114,8 @@ private struct PearchHAInfoPlist: Encodable {
         case highResolutionCapable = "NSHighResolutionCapable"
         case agentApplication = "LSUIElement"
         case iconFileName = "CFBundleIconFile"
+        case updateFeedURL = "SUFeedURL"
+        case updatePublicKey = "SUPublicEDKey"
         case urlTypes = "CFBundleURLTypes"
     }
 }

@@ -8,6 +8,7 @@ import PearchHASupport
 import PearchHAUI
 import Security
 import ServiceManagement
+import Sparkle
 import SwiftUI
 
 private enum AppShellLayout {
@@ -1093,6 +1094,18 @@ public final class PearchHAASWebAuthenticationSessionPresenter: NSObject, Pearch
 
 @MainActor
 public final class PearchHAApplication: NSObject, NSApplicationDelegate {
+    private lazy var updater: SPUStandardUpdaterController? = {
+        guard let publicKey = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String,
+              !publicKey.isEmpty
+        else {
+            return nil
+        }
+        let controller = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
+        controller.updater.automaticallyChecksForUpdates = true
+        controller.updater.automaticallyDownloadsUpdates = false
+        controller.startUpdater()
+        return controller
+    }()
     private var statusItems: [PearchHAStatusItemEntry] = []
     private var pendingStatusItemSnapshot: PearchHAPanelSnapshot?
     private var pendingStatusItemRefreshSignature: PearchHAStatusItemRefreshSignature?
@@ -1292,6 +1305,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        _ = updater
         releaseShell()
         configuration = loadConfiguration()
         applyAppearancePreferences()

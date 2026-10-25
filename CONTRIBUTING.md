@@ -1,65 +1,38 @@
-# Contributing to PearchHA
+# Contributing
 
-Thanks for helping. Keep changes small, tested, and documented.
+Keep changes scoped to observable behavior. Prefer extending or simplifying the
+existing implementation. Update its tests and owning document when behavior changes.
 
-## Development setup
+## Development
+
+Use Swift 6 and full Xcode for native verification:
 
 ```sh
 git clone https://github.com/YunaBraska/pearch_ha.git
 cd pearch_ha
-
-swift build -Xswiftc -warnings-as-errors
-swift test -Xswiftc -warnings-as-errors
-swift run pearchha-repo-audit
-PEARCHHA_SMOKE_SNAPSHOT_DIR=.build/pearchha-snapshots swift run pearchha-smoke
+open PearchHA.xcodeproj
+sh scripts/check.sh
 ```
 
-Full native verification needs full Xcode selected:
+[TESTING.md](docs/TESTING.md) defines the gates, focused checks, and evidence limits.
+Use a branch from `main`, run the relevant checks, and include their results and any
+remaining limitations in the pull request. Prefer terse present-tense commits.
+
+To build and run a local app, set `MACOS_SIGNING_IDENTITY` to an existing signing
+identity name or hash. Reuse it for subsequent builds:
 
 ```sh
-sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-swift run pearchha-xcode-doctor --json --strict
-swift test --disable-swift-testing --enable-xctest list
-swift test --disable-swift-testing --enable-xctest -Xswiftc -warnings-as-errors --enable-code-coverage
+swift build -c release --product PearchHA
+bin_path=$(swift build -c release --product PearchHA --show-bin-path)
+swift run pearchha-package-app --executable "$bin_path/PearchHA" \
+  --output .build/PearchHA.app --callback-scheme pearchha --replace \
+  --sign-identity "$MACOS_SIGNING_IDENTITY"
+open .build/PearchHA.app
 ```
 
-## Pull requests
+Keep the bundle identifier, signing identity, install path, and profile stable for
+permission tests. Ad-hoc signing is suitable only for tests that do not depend on
+persistent macOS permissions. Local signing does not replace notarized distribution.
 
-1. Branch from `main`.
-2. Keep scope tight.
-3. Add or update tests for behavior changes.
-4. Update the relevant doc in [`docs/README.md`](docs/README.md) when behavior, release steps, or verification changes.
-5. Run the relevant local checks before opening the PR.
-
-## Required checks for most changes
-
-```sh
-swift build -Xswiftc -warnings-as-errors
-swift test -Xswiftc -warnings-as-errors
-swift run pearchha-repo-audit
-```
-
-Also run these when the touched area needs them:
-
-- `PEARCHHA_SMOKE_SNAPSHOT_DIR=.build/pearchha-snapshots swift run pearchha-smoke`
-- `swift run hamirror verify --fixtures Fixtures/public/m2-minimal`
-- `swift build -c release`
-- `swift run pearchha-package-app --help`
-
-## Documentation rule
-
-README is the fast entrypoint. The real contract lives in `docs/`.
-
-- Build order: `docs/ROADMAP.md`
-- Architecture: `docs/ARCHITECTURE.md`
-- Home Assistant integration: `docs/HA_API.md`
-- Testing and traceability: `docs/TESTING.md`
-- Decision records: `docs/ADRs.md`
-
-## Commit style
-
-Prefer terse present-tense commits, for example:
-
-- `feat: add release evidence bundler`
-- `fix: rewrite bundled manifest paths`
-- `test: cover nested release manifest relocation`
+The [documentation index](docs/README.md) identifies the canonical home for each
+contract. Update that source instead of adding parallel notes or checklists.

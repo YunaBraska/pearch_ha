@@ -1025,8 +1025,8 @@ public struct HomeAssistantClient: HAClient {
             ],
             input: input
         ) { response in
-            decode(path: "/api/history/period", response: response, as: [[HAHistoryStateDTO]].self).map { groups in
-                let samples = groups
+            decode(path: "/api/history/period", response: response, as: HAHistoryResponseDTO.self).map { history in
+                let samples = history.groups
                     .flatMap { $0 }
                     .filter { $0.entityID == nil || $0.entityID == entityID.rawValue }
                     .map(\.sample)
@@ -1228,12 +1228,12 @@ public struct HomeAssistantClient: HAClient {
             ],
             input: input
         ) { response in
-            decode(path: "/api/history/period", response: response, as: [[HAHistoryStateDTO]].self)
+            decode(path: "/api/history/period", response: response, as: HAHistoryResponseDTO.self)
         }
         let groups: [[HAHistoryStateDTO]]
         switch result {
         case let .success(decoded):
-            groups = decoded
+            groups = decoded.groups
         case let .failure(failure):
             return .failure(failure)
         }
@@ -2240,7 +2240,8 @@ private struct HAStateDTO: Decodable {
             name: attributes?.friendlyName ?? entityID,
             state: state,
             unit: attributes?.unitOfMeasurement,
-            currentPosition: attributes?.currentPosition
+            currentPosition: attributes?.currentPosition,
+            controlAttributes: attributes?.controlAttributes
         )
     }
 
@@ -2255,12 +2256,15 @@ private struct HAStateAttributesDTO: Decodable {
     let friendlyName: String?
     let unitOfMeasurement: String?
     let currentPosition: Int?
+    let controlAttributes: [String: ActionValue]
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         friendlyName = try container.decodeIfPresent(String.self, forKey: .friendlyName)
         unitOfMeasurement = try container.decodeIfPresent(String.self, forKey: .unitOfMeasurement)
         currentPosition = Self.decodeCurrentPosition(from: container)
+        let values = try decoder.singleValueContainer().decode([String: ActionValue].self)
+        controlAttributes = values.filter { Self.controlAttributeKeys.contains($0.key) }
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -2268,6 +2272,21 @@ private struct HAStateAttributesDTO: Decodable {
         case unitOfMeasurement = "unit_of_measurement"
         case currentPosition = "current_position"
     }
+
+    // Only retain fields used by built-in controls. Device metadata and unrelated
+    // integration payloads do not need to travel through every panel snapshot.
+    private static let controlAttributeKeys: Set<String> = [
+        "supported_features", "hvac_modes", "temperature", "current_temperature",
+        "temperature_unit", "min_temp", "max_temp", "target_temp_step", "precision",
+        "target_temp_low", "target_temp_high", "humidity", "min_humidity", "max_humidity",
+        "target_humidity_step", "fan_modes", "fan_mode", "preset_modes", "preset_mode",
+        "swing_modes", "swing_mode", "swing_horizontal_modes", "swing_horizontal_mode",
+        "min", "max", "step", "options", "supported_color_modes", "brightness",
+        "color_temp_kelvin", "min_color_temp_kelvin", "max_color_temp_kelvin", "rgb_color",
+        "effect_list", "effect", "percentage", "oscillating", "direction",
+        "volume_level", "is_volume_muted", "source_list", "source", "sound_mode_list",
+        "sound_mode", "shuffle", "repeat", "in_progress", "skipped_version"
+    ]
 
     private static func decodeCurrentPosition(from container: KeyedDecodingContainer<CodingKeys>) -> Int? {
         if let value = try? container.decode(Int.self, forKey: .currentPosition) {
@@ -2289,7 +2308,34 @@ private struct HAStateAttributesDTO: Decodable {
     }
 }
 
-private struct HAHistoryStateDTO: Decodable {
+private struct HAHistoryResponseDTO: Decodable {
+    let groups: [[HAHistoryStateDTO]]
+
+    init(from decoder: Decoder) throws {
+        // Each response owns its parsers. Reuse them across rows without sharing
+        // mutable formatters between concurrent history requests.
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let whole = ISO8601DateFormatter()
+        whole.formatOptions = [.withInternetDateTime]
+        let formatters = [fractional, whole]
+        var container = try decoder.unkeyedContainer()
+        var groups: [[HAHistoryStateDTO]] = []
+        groups.reserveCapacity(container.count ?? 0)
+        while !container.isAtEnd {
+            var group = try container.nestedUnkeyedContainer()
+            var states: [HAHistoryStateDTO] = []
+            states.reserveCapacity(group.count ?? 0)
+            while !group.isAtEnd {
+                states.append(try HAHistoryStateDTO(from: group.superDecoder(), formatters: formatters))
+            }
+            groups.append(states)
+        }
+        self.groups = groups
+    }
+}
+
+private struct HAHistoryStateDTO {
     let entityID: String?
     let state: String
     let timestamp: Date
@@ -2309,12 +2355,12 @@ private struct HAHistoryStateDTO: Decodable {
         case lastUpdated = "last_updated"
     }
 
-    init(from decoder: Decoder) throws {
+    init(from decoder: Decoder, formatters: [ISO8601DateFormatter]) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         entityID = try container.decodeIfPresent(String.self, forKey: .entityID)
         state = try container.decode(String.self, forKey: .state)
-        let lastChanged = try container.decodeHistoryDateIfPresent(forKey: .lastChanged)
-        let lastUpdated = try container.decodeHistoryDateIfPresent(forKey: .lastUpdated)
+        let lastChanged = try container.decodeHistoryDateIfPresent(forKey: .lastChanged, formatters: formatters)
+        let lastUpdated = try container.decodeHistoryDateIfPresent(forKey: .lastUpdated, formatters: formatters)
         guard let timestamp = lastChanged ?? lastUpdated else {
             throw DecodingError.dataCorruptedError(
                 forKey: .lastChanged,
@@ -2673,7 +2719,8 @@ private struct HACompactEntityStateDTO: Decodable {
             name: attributes?.friendlyName ?? id.rawValue,
             state: state ?? "",
             unit: attributes?.unitOfMeasurement,
-            currentPosition: attributes?.currentPosition
+            currentPosition: attributes?.currentPosition,
+            controlAttributes: attributes?.controlAttributes
         )
     }
 
@@ -2683,7 +2730,8 @@ private struct HACompactEntityStateDTO: Decodable {
             name: attributes?.friendlyName ?? previous.name,
             state: state ?? previous.state,
             unit: attributes?.unitOfMeasurement ?? previous.unit,
-            currentPosition: attributes?.currentPosition ?? previous.currentPosition
+            currentPosition: attributes?.currentPosition ?? previous.currentPosition,
+            controlAttributes: (previous.controlAttributes ?? [:]).merging(attributes?.controlAttributes ?? [:]) { _, new in new }
         )
     }
 
@@ -2701,29 +2749,17 @@ private struct HACompactEntityDiffDTO: Decodable {
         guard additions != nil || removals != nil else {
             return nil
         }
-        var updated = additions?.updatedState(id: id, previous: previous) ?? previous
-        if removals?.attributes.contains("friendly_name") == true {
-            updated = EntityState(
-                id: id,
-                name: id.rawValue,
-                state: updated.state,
-                unit: updated.unit,
-                currentPosition: updated.currentPosition
-            )
-        }
-        if removals?.attributes.contains("unit_of_measurement") == true {
-            updated = EntityState(
-                id: id,
-                name: updated.name,
-                state: updated.state,
-                unit: nil,
-                currentPosition: updated.currentPosition
-            )
-        }
-        if removals?.attributes.contains("current_position") == true {
-            updated = EntityState(id: id, name: updated.name, state: updated.state, unit: updated.unit)
-        }
-        return updated
+        let updated = additions?.updatedState(id: id, previous: previous) ?? previous
+        let removed = Set(removals?.attributes ?? [])
+        let controls = updated.controlAttributes?.filter { !removed.contains($0.key) }
+        return EntityState(
+            id: id,
+            name: removed.contains("friendly_name") ? id.rawValue : updated.name,
+            state: updated.state,
+            unit: removed.contains("unit_of_measurement") ? nil : updated.unit,
+            currentPosition: removed.contains("current_position") ? nil : updated.currentPosition,
+            controlAttributes: controls
+        )
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -2874,24 +2910,16 @@ private extension HistoryRange {
 }
 
 private extension KeyedDecodingContainer {
-    func decodeHistoryDateIfPresent(forKey key: Key) throws -> Date? {
+    func decodeHistoryDateIfPresent(forKey key: Key, formatters: [ISO8601DateFormatter]) throws -> Date? {
         guard let value = try decodeIfPresent(String.self, forKey: key) else {
             return nil
         }
-        return Self.historyDateFormatterWithFractionalSeconds.date(from: value)
-            ?? Self.historyDateFormatter.date(from: value)
-    }
-
-    private static var historyDateFormatter: ISO8601DateFormatter {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter
-    }
-
-    private static var historyDateFormatterWithFractionalSeconds: ISO8601DateFormatter {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
+        for formatter in formatters {
+            if let date = formatter.date(from: value) {
+                return date
+            }
+        }
+        return nil
     }
 }
 

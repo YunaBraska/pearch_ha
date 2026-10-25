@@ -1360,7 +1360,8 @@ public enum PearchHAEntityAveraging {
             deviceManufacturer: base.deviceManufacturer,
             deviceModel: base.deviceModel,
             deviceDomain: base.deviceDomain,
-            currentPosition: base.currentPosition
+            currentPosition: base.currentPosition,
+            controlAttributes: base.controlAttributes
         )
     }
 

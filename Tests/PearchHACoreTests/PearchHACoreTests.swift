@@ -4,6 +4,20 @@ import PearchHACore
 import PearchHASupport
 
 final class PearchHACoreTests: XCTestCase {
+    func testControlAttributesRoundTripAndOldSnapshotsRemainReadable() throws {
+        let oldState = Data(#"{"id":"climate.office","name":"Office AC","state":"off"}"#.utf8)
+        XCTAssertNil(try JSONDecoder().decode(EntityState.self, from: oldState).controlAttributes)
+        XCTAssertNil(try JSONDecoder().decode(DiscoveredEntity.self, from: oldState).controlAttributes)
+        let state = EntityState(id: "climate.office", name: "Office AC", state: "off", unit: nil,
+                                controlAttributes: ["temperature": 22, "hvac_modes": .array(["cool", "off"])])
+        XCTAssertEqual(try JSONDecoder().decode(EntityState.self, from: JSONEncoder().encode(state)), state)
+        let rooms = RoomResolver().resolve(snapshot: DiscoverySnapshot(areas: [], devices: [], entities: [], states: [state]))
+        let entity = try XCTUnwrap(rooms.first?.entities.first)
+        XCTAssertEqual(entity.controlAttributes, state.controlAttributes)
+        XCTAssertEqual(try JSONDecoder().decode(DiscoveredEntity.self, from: JSONEncoder().encode(entity)), entity)
+        XCTAssertNil(EntityState(id: "sensor.empty", name: "Empty", state: "unknown", unit: nil, controlAttributes: [:]).controlAttributes)
+    }
+
     func testActionValueRoundTripsNestedJSONShapes() throws {
         let payload: ActionValue = .object([
             "sequence": .array([

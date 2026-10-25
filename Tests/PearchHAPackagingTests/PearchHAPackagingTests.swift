@@ -8,7 +8,9 @@ final class PearchHAPackagingTests: XCTestCase {
     func testInfoPlistDeclaresCallbackURLSchemeAndMenuBarAgent() throws {
         let manifest = try PearchHAAppBundleManifest(
             callbackURLScheme: "pearchha-test",
-            iconFileName: "PearchHA"
+            iconFileName: "PearchHA",
+            updateFeedURL: "https://example.invalid/appcast.xml",
+            updatePublicKey: "public-key"
         )
 
         let plist = try propertyList(from: manifest.propertyListData())
@@ -20,11 +22,26 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertEqual(plist["CFBundleIconFile"] as? String, "PearchHA")
         XCTAssertEqual(plist["LSMinimumSystemVersion"] as? String, "13.0")
         XCTAssertEqual(plist["LSUIElement"] as? Bool, true)
+        XCTAssertEqual(plist["SUFeedURL"] as? String, "https://example.invalid/appcast.xml")
+        XCTAssertEqual(plist["SUPublicEDKey"] as? String, "public-key")
         let urlTypes = try XCTUnwrap(plist["CFBundleURLTypes"] as? [[String: Any]])
         XCTAssertEqual(urlTypes.count, 1)
         XCTAssertEqual(urlTypes.first?["CFBundleTypeRole"] as? String, "Viewer")
         XCTAssertEqual(urlTypes.first?["CFBundleURLName"] as? String, "dev.pearchha.app.oauth")
         XCTAssertEqual(urlTypes.first?["CFBundleURLSchemes"] as? [String], ["pearchha-test"])
+    }
+
+    func testManifestRejectsIncompleteUpdateConfiguration() {
+        XCTAssertThrowsError(
+            try PearchHAAppBundleManifest(updateFeedURL: "https://example.invalid/appcast.xml")
+        ) { error in
+            XCTAssertEqual(error as? PearchHAAppBundleManifestError, .incompleteUpdateConfiguration)
+        }
+        XCTAssertThrowsError(
+            try PearchHAAppBundleManifest(updatePublicKey: "public-key")
+        ) { error in
+            XCTAssertEqual(error as? PearchHAAppBundleManifestError, .incompleteUpdateConfiguration)
+        }
     }
 
     func testAppBundleBuilderCreatesBundleWithExecutableInfoPlistAndPkgInfo() throws {
@@ -287,6 +304,155 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertTrue(script.contains("--branch-target PearchHACore=90"))
         XCTAssertTrue(script.contains("PEARCHHA_SMOKE_SNAPSHOT_DIR=.build/pearchha-snapshots swift run pearchha-smoke"))
         XCTAssertTrue(script.contains("swift run pearchha-repo-audit"))
+    }
+
+    func testCheckScriptExportsOnlyTestBinariesAndStopsOnMissingBundlesOrExportFailure() throws {
+        let script = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("scripts/check.sh")
+        let directory = temporaryDirectory().appendingPathComponent("workspace with spaces")
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent()) }
+        let products = directory.appendingPathComponent(".build/products")
+        let coverage = products.appendingPathComponent("codecov")
+        try FileManager.default.createDirectory(at: coverage, withIntermediateDirectories: true)
+        try "last bundle only".write(to: coverage.appendingPathComponent("PearchHA.json"), atomically: true, encoding: .utf8)
+        try Data().write(to: coverage.appendingPathComponent("default.profdata"))
+        for name in ["CoreTests", "ClientTests"] {
+            let binary = products.appendingPathComponent("\(name).xctest/Contents/MacOS/\(name)")
+            try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data().write(to: binary)
+            try FileManager.default.createDirectory(at: binary.appendingPathExtension("dSYM"), withIntermediateDirectories: true)
+        }
+        let swift = try fakeExecutable(in: directory, name: "swift")
+        try #"""
+        #!/bin/sh
+        printf '%s\n' "$*" >> swift-calls
+        case "$*" in
+          *--show-codecov-path*) printf '%s\n' "$PWD/.build/products/codecov/PearchHA.json" ;;
+        esac
+        """#.write(to: swift, atomically: true, encoding: .utf8)
+        let xcrun = try fakeExecutable(in: directory, name: "xcrun")
+        try #"""
+        #!/bin/sh
+        printf '%s\n' "$@" > export-arguments
+        printf '%s\n' 'all test bundles'
+        exit "$COVERAGE_EXIT"
+        """#.write(to: xcrun, atomically: true, encoding: .utf8)
+        for status in [0, 42, 1] {
+            if status == 1 {
+                for name in ["CoreTests", "ClientTests"] {
+                    try FileManager.default.removeItem(at: products.appendingPathComponent("\(name).xctest"))
+                }
+            }
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent("export-arguments"))
+            try Data().write(to: directory.appendingPathComponent("swift-calls"))
+            let process = Process()
+            let errors = Pipe()
+            process.standardError = errors
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            process.arguments = [script.path]
+            process.currentDirectoryURL = directory
+            process.environment = ["PATH": "\(directory.path):/usr/bin:/bin", "COVERAGE_EXIT": String(status)]
+            try process.run()
+            process.waitUntilExit()
+            XCTAssertEqual(process.terminationStatus, Int32(status))
+            XCTAssertEqual(FileManager.default.fileExists(atPath: directory.appendingPathComponent("export-arguments").path), status != 1)
+            if status == 1 {
+                let diagnostic = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                XCTAssertTrue(diagnostic.contains("No XCTest binaries found"))
+            }
+            let calls = try String(contentsOf: directory.appendingPathComponent("swift-calls"), encoding: .utf8)
+            XCTAssertEqual(calls.contains("pearchha-coverage-check"), status == 0)
+            if status == 0 {
+                let arguments = try String(contentsOf: directory.appendingPathComponent("export-arguments"), encoding: .utf8)
+                XCTAssertTrue(arguments.hasPrefix("llvm-cov\nexport\n"))
+                XCTAssertTrue(arguments.contains("CoreTests.xctest/Contents/MacOS/CoreTests"))
+                XCTAssertTrue(arguments.contains("ClientTests.xctest/Contents/MacOS/ClientTests"))
+                XCTAssertFalse(arguments.contains(".dSYM"))
+                XCTAssertEqual(try String(contentsOf: directory.appendingPathComponent(".build/pearchha-codecov.json"), encoding: .utf8), "all test bundles\n")
+            }
+        }
+    }
+
+    func testPackageScriptKeepsManifestArtifactPresentAfterCompletion() throws {
+        let script = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("scripts/package.sh")
+        let directory = temporaryDirectory().appendingPathComponent("release workspace")
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent()) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let swift = try fakeExecutable(in: directory, name: "swift")
+        try #"""
+        #!/bin/sh
+        set -eu
+        if [ "$1" = build ]; then
+          scratch=''
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              --scratch-path) scratch=$2; shift ;;
+            esac
+            shift
+          done
+          mkdir -p "$scratch/custom products"
+          mkdir -p "$scratch/Sparkle.framework"
+          printf '%s\n' 'executable' > "$scratch/custom products/PearchHA"
+          printf '%s\n' "$PWD/$scratch/custom products"
+          exit
+        fi
+        shift 2
+        printf '%s\n' "$@" >> "$PWD/package-arguments"
+        if [ "$1" = --verify-release-manifest ]; then
+          test -f "$(cat "$2")"
+          exit
+        fi
+        app=''
+        dmg=''
+        manifest=''
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --output) app=$2; shift ;;
+            --dmg-output) dmg=$2; shift ;;
+            --release-manifest) manifest=$2; shift ;;
+          esac
+          shift
+        done
+        if [ -z "$dmg" ]; then dmg=${app%.app}.dmg; fi
+        mkdir -p "$app"
+        printf '%s\n' 'disk image' > "$dmg"
+        printf '%s\n' "$dmg" > "$manifest"
+        """#.write(to: swift, atomically: true, encoding: .utf8)
+        let lipo = try fakeExecutable(in: directory, name: "lipo")
+        try #"""
+        #!/bin/sh
+        set -eu
+        if [ "$1" = -info ]; then test -f "$2"; exit; fi
+        shift 2
+        output=$1
+        shift
+        for input do test -f "$input"; done
+        printf '%s\n' 'universal executable' > "$output"
+        """#.write(to: lipo, atomically: true, encoding: .utf8)
+        for name in ["codesign", "ditto", "install_name_tool"] {
+            let tool = try fakeExecutable(in: directory, name: name)
+            try "#!/bin/sh\nexit 0\n".write(to: tool, atomically: true, encoding: .utf8)
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [script.path, "2026.10.13"]
+        process.currentDirectoryURL = directory
+        process.environment = ["PATH": "\(directory.path):/usr/bin:/bin"]
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        let artifact = try String(contentsOf: directory.appendingPathComponent("dist/pearchha-release-manifest.json"), encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent(artifact).path),
+                      "the packaged artifact referenced by release evidence must still exist after the script finishes")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("dist/PearchHA-2026.10.13.dmg").path))
+        let packageArguments = try String(
+            contentsOf: directory.appendingPathComponent("package-arguments"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(packageArguments.contains("--framework"))
+        XCTAssertTrue(packageArguments.contains("Sparkle.framework"))
     }
 
     func testXcodePreflightReportsBlockedWhenOnlyCommandLineToolsAreSelected() throws {
@@ -783,14 +949,16 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertTrue(package.contains("--sign-ad-hoc"))
         XCTAssertTrue(package.contains("--sign-identity \"${identity}\""))
         XCTAssertTrue(package.contains("--notary-profile \"${notary_profile}\""))
+        XCTAssertTrue(package.contains("--notary-timeout 90m"))
         XCTAssertTrue(package.contains("--package-dmg"))
+        XCTAssertTrue(package.contains("--zip-output \"dist/PearchHA-${version}.zip\""))
         XCTAssertTrue(package.contains("--executable dist/PearchHA"))
         XCTAssertTrue(package.contains("--release-manifest dist/pearchha-release-manifest.json"))
         XCTAssertTrue(package.contains("--bundle-release-evidence dist/pearchha-release-evidence"))
         XCTAssertTrue(package.contains("--snapshot-dir .build/pearchha-snapshots/current"))
         XCTAssertTrue(package.contains("--verify-release-manifest dist/pearchha-release-manifest.json"))
         XCTAssertTrue(package.contains("codesign --verify --deep"))
-        XCTAssertTrue(package.contains("ditto -c -k"))
+        XCTAssertFalse(package.contains("ditto -c -k"))
         XCTAssertTrue(package.contains("PearchHA-${version}.zip"))
         XCTAssertTrue(package.contains("PearchHA-${version}.dmg"))
     }
@@ -1123,6 +1291,7 @@ final class PearchHAPackagingTests: XCTestCase {
                 arguments,
                 [
                     "--force",
+                    "--deep",
                     "--timestamp",
                     "--options", "runtime",
                     "--entitlements", entitlementsURL.path,
@@ -1201,7 +1370,7 @@ final class PearchHAPackagingTests: XCTestCase {
         }
     }
 
-    func testNotarySubmitterRunsNotarytoolWaitsAndStaplesArtifact() throws {
+    func testNotarySubmitterRunsNotarytoolWaitsAndStaplesConfiguredTarget() throws {
         let directory = temporaryDirectory()
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -1209,10 +1378,12 @@ final class PearchHAPackagingTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let dmgURL = directory.appendingPathComponent("PearchHA.dmg", isDirectory: false)
         try Data("dmg".utf8).write(to: dmgURL)
+        let appURL = directory.appendingPathComponent("PearchHA.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: appURL, withIntermediateDirectories: true)
         let xcrunURL = try fakeExecutable(in: directory, name: "xcrun")
         let runner = RecordingCommandRunner { _, arguments in
             if arguments.first == "stapler" {
-                XCTAssertEqual(arguments, ["stapler", "staple", dmgURL.path])
+                XCTAssertEqual(arguments, ["stapler", "staple", appURL.path])
                 return PearchHACommandResult(status: 0, output: "stapled")
             }
             XCTAssertEqual(
@@ -1224,11 +1395,13 @@ final class PearchHAPackagingTests: XCTestCase {
                     "--keychain-profile",
                     "pearchha-release",
                     "--no-progress",
+                    "--output-format",
+                    "json",
                     "--wait",
                     "--timeout", "30m"
                 ]
             )
-            return PearchHACommandResult(status: 0, output: "accepted")
+            return PearchHACommandResult(status: 0, output: #"{"id":"submission-id","status":"Accepted"}"#)
         }
 
         let result = try PearchHANotarySubmitter(xcrunURL: xcrunURL, commandRunner: runner).submit(
@@ -1237,7 +1410,8 @@ final class PearchHAPackagingTests: XCTestCase {
                 keychainProfile: " pearchha-release ",
                 waitForCompletion: true,
                 timeout: "30m",
-                staple: true
+                staple: true,
+                stapleURL: appURL
             )
         )
 
@@ -1246,6 +1420,62 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertTrue(result.waitedForCompletion)
         XCTAssertTrue(result.stapled)
         XCTAssertEqual(runner.invocations.count, 2)
+    }
+
+    func testNotarySubmitterRejectsAnUnacceptedSubmissionBeforeStapling() throws {
+        let directory = temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let archiveURL = directory.appendingPathComponent("PearchHA.zip", isDirectory: false)
+        try Data("archive".utf8).write(to: archiveURL)
+        let xcrunURL = try fakeExecutable(in: directory, name: "xcrun")
+        let runner = RecordingCommandRunner { _, arguments in
+            if arguments[1] == "submit" {
+                return PearchHACommandResult(
+                    status: 0,
+                    output: #"{"id":"submission-id","status":"Invalid"}"#
+                )
+            }
+            try Data(#"{"issues":[{"message":"invalid signature"}]}"#.utf8).write(
+                to: URL(fileURLWithPath: try XCTUnwrap(arguments.last))
+            )
+            return PearchHACommandResult(
+                status: 0,
+                output: "Successfully downloaded submission log"
+            )
+        }
+
+        XCTAssertThrowsError(
+            try PearchHANotarySubmitter(xcrunURL: xcrunURL, commandRunner: runner).submit(
+                PearchHANotarySubmissionConfiguration(artifactURL: archiveURL, keychainProfile: "release")
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? PearchHANotaryError,
+                .notarySubmissionNotAccepted(
+                    #"{"id":"submission-id","status":"Invalid"}"# +
+                        "\nnotary log: " +
+                        #"{"issues":[{"message":"invalid signature"}]}"#
+                )
+            )
+        }
+        XCTAssertEqual(runner.invocations.count, 2)
+        let logArguments = runner.invocations[1].arguments
+        XCTAssertEqual(
+            Array(logArguments.dropLast()),
+            [
+                "notarytool",
+                "log",
+                "submission-id",
+                "--keychain-profile",
+                "release",
+                "--no-progress"
+            ]
+        )
+        XCTAssertTrue(logArguments.last?.hasPrefix(FileManager.default.temporaryDirectory.path) == true)
+        XCTAssertTrue(logArguments.last?.hasSuffix(".json") == true)
     }
 
     func testNotarySubmitterRejectsMissingInputsAndReportsCommandFailures() throws {
@@ -1301,7 +1531,7 @@ final class PearchHAPackagingTests: XCTestCase {
 
         let staplerFailureRunner = RecordingCommandRunner { _, arguments in
             arguments.first == "notarytool"
-                ? PearchHACommandResult(status: 0, output: "accepted")
+                ? PearchHACommandResult(status: 0, output: #"{"id":"submission-id","status":"Accepted"}"#)
                 : PearchHACommandResult(status: 1, output: "ticket unavailable")
         }
         XCTAssertThrowsError(
@@ -1309,7 +1539,114 @@ final class PearchHAPackagingTests: XCTestCase {
                 PearchHANotarySubmissionConfiguration(artifactURL: dmgURL, keychainProfile: "profile")
             )
         ) { error in
-            XCTAssertEqual(error as? PearchHANotaryError, .staplerFailed(status: 1, output: "ticket unavailable"))
+            XCTAssertEqual(
+                error as? PearchHANotaryError,
+                .staplerFailed(
+                    status: 1,
+                    output: "ticket unavailable\nnotary submission: {\"id\":\"submission-id\",\"status\":\"Accepted\"}"
+                )
+            )
+        }
+    }
+
+    func testArchiveBuilderCreatesAppZipAndRejectsUnsafeReplacements() throws {
+        let directory = temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let bundle = try testBundle(
+            in: directory,
+            callbackScheme: "pearchha-test",
+            bundleIdentifier: "dev.pearchha.tests.archive"
+        )
+        let dittoURL = try fakeExecutable(in: directory, name: "ditto")
+        let archiveURL = directory.appendingPathComponent("PearchHA.zip", isDirectory: false)
+        let runner = RecordingCommandRunner { _, arguments in
+            XCTAssertEqual(
+                arguments,
+                ["-c", "-k", "--sequesterRsrc", "--keepParent", bundle.appURL.path, archiveURL.path]
+            )
+            try Data("zip".utf8).write(to: archiveURL)
+            return PearchHACommandResult(status: 0, output: "archived")
+        }
+        let builder = PearchHAArchiveBuilder(dittoURL: dittoURL, commandRunner: runner)
+
+        let result = try builder.build(
+            PearchHAArchiveBuildConfiguration(appURL: bundle.appURL, outputURL: archiveURL)
+        )
+
+        XCTAssertEqual(result.appURL.path, bundle.appURL.path)
+        XCTAssertEqual(result.archiveURL.path, archiveURL.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: archiveURL.path))
+        XCTAssertEqual(runner.invocations.count, 1)
+        XCTAssertThrowsError(
+            try builder.build(PearchHAArchiveBuildConfiguration(appURL: bundle.appURL, outputURL: archiveURL))
+        ) { error in
+            XCTAssertEqual(error as? PearchHAArchiveBuildError, .outputExists(archiveURL.path))
+        }
+        let replacement = try builder.build(
+            PearchHAArchiveBuildConfiguration(appURL: bundle.appURL, outputURL: archiveURL, replaceExisting: true)
+        )
+        XCTAssertEqual(replacement.archiveURL.path, archiveURL.path)
+        XCTAssertEqual(runner.invocations.count, 2)
+    }
+
+    func testArchiveBuilderRejectsMissingInputsAndCommandFailures() throws {
+        let directory = temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let missingAppURL = directory.appendingPathComponent("Missing.app", isDirectory: true)
+        let archiveURL = directory.appendingPathComponent("PearchHA.zip", isDirectory: false)
+        let dittoURL = try fakeExecutable(in: directory, name: "ditto")
+
+        XCTAssertThrowsError(
+            try PearchHAArchiveBuilder(dittoURL: dittoURL).build(
+                PearchHAArchiveBuildConfiguration(appURL: missingAppURL, outputURL: archiveURL)
+            )
+        ) { error in
+            XCTAssertEqual(error as? PearchHAArchiveBuildError, .appBundleMissing(missingAppURL.path))
+        }
+
+        let bundle = try testBundle(
+            in: directory.appendingPathComponent("bundle", isDirectory: true),
+            callbackScheme: "pearchha-test",
+            bundleIdentifier: "dev.pearchha.tests.archive-errors"
+        )
+        let missingDittoURL = directory.appendingPathComponent("missing-ditto", isDirectory: false)
+        XCTAssertThrowsError(
+            try PearchHAArchiveBuilder(dittoURL: missingDittoURL).build(
+                PearchHAArchiveBuildConfiguration(appURL: bundle.appURL, outputURL: archiveURL)
+            )
+        ) { error in
+            XCTAssertEqual(error as? PearchHAArchiveBuildError, .dittoMissing(missingDittoURL.path))
+        }
+
+        let failureRunner = RecordingCommandRunner { _, _ in
+            PearchHACommandResult(status: 65, output: "archive failed")
+        }
+        XCTAssertThrowsError(
+            try PearchHAArchiveBuilder(dittoURL: dittoURL, commandRunner: failureRunner).build(
+                PearchHAArchiveBuildConfiguration(appURL: bundle.appURL, outputURL: archiveURL)
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? PearchHAArchiveBuildError,
+                .dittoFailed(status: 65, output: "archive failed")
+            )
+        }
+
+        let noArchiveRunner = RecordingCommandRunner { _, _ in
+            PearchHACommandResult(status: 0, output: "archived")
+        }
+        XCTAssertThrowsError(
+            try PearchHAArchiveBuilder(dittoURL: dittoURL, commandRunner: noArchiveRunner).build(
+                PearchHAArchiveBuildConfiguration(appURL: bundle.appURL, outputURL: archiveURL)
+            )
+        ) { error in
+            XCTAssertEqual(error as? PearchHAArchiveBuildError, .archiveMissing(archiveURL.path))
         }
     }
 
