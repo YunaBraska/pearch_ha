@@ -2468,6 +2468,7 @@ public enum PearchHANotaryError: Error, Equatable, CustomStringConvertible, Send
     case stapleRequiresCompletedSubmission
     case xcrunMissing(String)
     case notaryToolFailed(status: Int32, output: String)
+    case notarySubmissionNotAccepted(String)
     case staplerFailed(status: Int32, output: String)
 
     public var description: String {
@@ -2482,6 +2483,8 @@ public enum PearchHANotaryError: Error, Equatable, CustomStringConvertible, Send
             "xcrun does not exist: \(path)"
         case let .notaryToolFailed(status, output):
             "notarytool submit failed with status \(status): \(output)"
+        case let .notarySubmissionNotAccepted(output):
+            "notarytool submit did not accept the artifact: \(output)"
         case let .staplerFailed(status, output):
             "stapler staple failed with status \(status): \(output)"
         }
@@ -2560,7 +2563,9 @@ public struct PearchHANotarySubmitter {
             artifactURL.path,
             "--keychain-profile",
             keychainProfile,
-            "--no-progress"
+            "--no-progress",
+            "--output-format",
+            "json"
         ]
         if configuration.waitForCompletion {
             submitArguments.append("--wait")
@@ -2574,6 +2579,15 @@ public struct PearchHANotarySubmitter {
         guard submitResult.status == 0 else {
             throw PearchHANotaryError.notaryToolFailed(status: submitResult.status, output: submitResult.output)
         }
+        if configuration.waitForCompletion {
+            let response = try? JSONDecoder().decode(
+                PearchHANotarySubmissionResponse.self,
+                from: Data(submitResult.output.utf8)
+            )
+            guard response?.status == "Accepted" else {
+                throw PearchHANotaryError.notarySubmissionNotAccepted(submitResult.output)
+            }
+        }
 
         if configuration.staple {
             let stapleURL = URL(fileURLWithPath: (configuration.stapleURL ?? artifactURL).path)
@@ -2585,7 +2599,10 @@ public struct PearchHANotarySubmitter {
                 arguments: ["stapler", "staple", stapleURL.path]
             )
             guard stapleResult.status == 0 else {
-                throw PearchHANotaryError.staplerFailed(status: stapleResult.status, output: stapleResult.output)
+                throw PearchHANotaryError.staplerFailed(
+                    status: stapleResult.status,
+                    output: "\(stapleResult.output)\nnotary submission: \(submitResult.output)"
+                )
             }
         }
 
@@ -2596,6 +2613,10 @@ public struct PearchHANotarySubmitter {
             stapled: configuration.staple
         )
     }
+}
+
+private struct PearchHANotarySubmissionResponse: Decodable {
+    let status: String
 }
 
 /// Reports a rejected or incomplete app ZIP archive build.
