@@ -45,7 +45,12 @@ public struct PearchHAEntityControlEditor: View {
         let entity = model.snapshot.availableRooms.flatMap(\.entities).first { $0.id == entityID }
         let fields = entity.map { PearchHAEntityControlField.controls(for: $0) } ?? []
         VStack(alignment: .leading, spacing: PearchHASpacing.md) {
-            HStack {
+            HStack(spacing: PearchHASpacing.sm) {
+                if let entity {
+                    Image(systemName: model.snapshot.effectiveMenuBarItemConfiguration(for: entity).customIconName ?? pearchHAEntityIconName(for: entity))
+                        .foregroundStyle(PearchHATheme.accent)
+                        .accessibilityHidden(true)
+                }
                 Text(entity?.name ?? entityID.rawValue).font(PearchHATypography.body().weight(.semibold))
                 Spacer(minLength: 0)
                 ZStack {
@@ -65,15 +70,20 @@ public struct PearchHAEntityControlEditor: View {
                 Text("No controls available").foregroundStyle(.secondary)
             } else {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: PearchHASpacing.md) {
-                        ForEach(fields) { field in
-                            PearchHAEntityControlInput(field: field, entityName: entity?.name ?? entityID.rawValue, clock: model.clock,
-                                                      isRunning: model.snapshot.controlActionState.isRunning(for: entityID),
-                                                      requestedValue: model.requestedControlValue(for: entityID, controlID: field.id)) { value, confirmed in
-                                model.startEntityControlValue(entityID, controlID: field.id, value: value, confirmed: confirmed)
+                    PearchHACard(cornerRadius: PearchHACornerRadius.card) {
+                        VStack(alignment: .leading, spacing: PearchHASpacing.md) {
+                            ForEach(Array(fields.enumerated()), id: \.element.id) { index, field in
+                                if index > 0 { Divider().accessibilityHidden(true) }
+                                PearchHAEntityControlInput(field: field, entityName: entity?.name ?? entityID.rawValue, clock: model.clock,
+                                                          isRunning: model.snapshot.controlActionState.isRunning(for: entityID),
+                                                          requestedValue: model.requestedControlValue(for: entityID, controlID: field.id)) { value, confirmed in
+                                    model.startEntityControlValue(entityID, controlID: field.id, value: value, confirmed: confirmed)
+                                }
+                                .disabled(model.snapshot.connectionState != .connected || model.snapshot.controlActionState.isRunning)
                             }
-                            .disabled(model.snapshot.connectionState != .connected || model.snapshot.controlActionState.isRunning)
                         }
+                        .padding(PearchHASpacing.md)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .padding(2)
                 }
@@ -84,7 +94,7 @@ public struct PearchHAEntityControlEditor: View {
             }
         }
         .padding(PearchHASpacing.lg)
-        .frame(width: 320)
+        .frame(width: 340)
         .fixedSize(horizontal: false, vertical: true)
         .font(PearchHATypography.body())
         .tint(PearchHATheme.accent)

@@ -6,6 +6,28 @@ import UniformTypeIdentifiers
 import PearchHACore
 import PearchHASupport
 
+private struct PanelSelectionDropDelegate: DropDelegate {
+    let translation: SelectionDropTranslation
+    let setTargeted: (Bool) -> Void
+    let move: () -> Bool
+
+    func validateDrop(info: DropInfo) -> Bool { translation != .unsupported }
+
+    func dropEntered(info: DropInfo) { setTargeted(validateDrop(info: info)) }
+
+    func dropExited(info: DropInfo) { setTargeted(false) }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: validateDrop(info: info) ? .move : .forbidden)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        setTargeted(false)
+        guard validateDrop(info: info) else { return false }
+        return move()
+    }
+}
+
 @MainActor
 private final class PearchHAPanelViewState: ObservableObject {
     @Published private(set) var snapshot: PearchHAPanelSnapshot
@@ -212,6 +234,10 @@ public struct PearchHAPanelView: View {
     @StateObject private var viewState: PearchHAPanelViewState
     @State private var pendingCustomActionID: CustomActionID?
     @State private var expandedModuleIDs: Set<String> = []
+    @State private var draggedSelectionItem: SelectionDragItem?
+    @State private var targetedSelectionItem: SelectionDragItem?
+
+    private static let panelSelectionDragType = UTType(exportedAs: "dev.pearchha.panel-selection")
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.colorScheme) private var colorScheme
@@ -330,6 +356,10 @@ public struct PearchHAPanelView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
             model.endTransientUITracking()
+        }
+        .onDisappear {
+            draggedSelectionItem = nil
+            targetedSelectionItem = nil
         }
     }
 
@@ -541,7 +571,10 @@ public struct PearchHAPanelView: View {
         let cap = curatedRowCap
         let visibleEntities = (isExpanded || cap == nil) ? room.entities : Array(room.entities.prefix(cap ?? total))
         let hiddenCount = total - visibleEntities.count
-        return ModuleBlock(title: room.name) {
+        let block = ModuleBlock(
+            title: room.name,
+            headerDragProvider: { selectionProvider(for: .room(room.id)) }
+        ) {
             ForEach(Array(visibleEntities.enumerated()), id: \.element.id.rawValue) { index, entity in
                 entityRowBlock(entity, showsSeparator: index < visibleEntities.count - 1)
             }
@@ -550,12 +583,18 @@ public struct PearchHAPanelView: View {
                 moreAffordance(roomID: room.id.rawValue, isExpanded: isExpanded, hiddenCount: hiddenCount)
             }
         }
+        return panelDropTarget(
+            block
+                .contextMenu { panelReorderActions(for: .room(room.id)) }
+                .accessibilityActions { panelReorderActions(for: .room(room.id)) },
+            item: .room(room.id)
+        )
     }
 
     private func entityRowBlock(_ entity: DiscoveredEntity, showsSeparator: Bool) -> some View {
         let value = entityValue(entity)
         let contextPresentation = Self.entityContextPresentation(snapshot: snapshot, entityID: entity.id)
-        return VStack(spacing: 0) {
+        let row = VStack(spacing: 0) {
             telemetryRow(entity)
             if showsSeparator {
                 TelemetryRowSeparator()
@@ -564,15 +603,112 @@ public struct PearchHAPanelView: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(entity.name), \(value.text)")
-        .accessibilityAction(named: "Show history") {
-            model.presentHistoryDetail(entity.id)
-        }
-        .accessibilityAction(named: "Hide history") {
-            model.dismissHistoryPopover()
-        }
+        .accessibilityActions { panelReorderActions(for: .entity(entity.id)) }
         .contextMenu {
             entityContextMenu(for: entity, contextPresentation: contextPresentation)
+            Divider()
+            panelReorderActions(for: .entity(entity.id))
         }
+        let accessibleRow: AnyView
+        if entity.id.source == .thisMac {
+            accessibleRow = AnyView(row)
+        } else {
+            accessibleRow = AnyView(
+                row
+                    .accessibilityAction(named: "Show history") {
+                        model.presentHistoryDetail(entity.id)
+                    }
+                    .accessibilityAction(named: "Hide history") {
+                        model.dismissHistoryPopover()
+                    }
+            )
+        }
+        return panelDropTarget(accessibleRow, item: .entity(entity.id))
+    }
+
+    private var panelSelectionTree: [SelectableRoom] {
+        EntitySelectionProjector().selectionTree(
+            rooms: snapshot.availableRooms,
+            configuration: snapshot.selectionConfiguration
+        )
+    }
+
+    private func panelDropTarget<Content: View>(_ content: Content, item: SelectionDragItem) -> some View {
+        let translation = draggedSelectionItem.map {
+            SelectionDropTranslator().translate(source: $0, target: item, tree: panelSelectionTree)
+        } ?? .unsupported
+        let placement: SelectionDropPlacement? = switch translation {
+        case let .room(_, _, placement), let .entity(_, _, placement): placement
+        case .unsupported: nil
+        }
+        return content
+            .overlay(alignment: .top) {
+                if targetedSelectionItem == item, let placement {
+                    Rectangle()
+                        .fill(PearchHATheme.accent)
+                        .frame(height: 2)
+                        .padding(.horizontal, 8)
+                        .frame(maxHeight: .infinity, alignment: placement == .before ? .top : .bottom)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
+            .onDrop(of: [Self.panelSelectionDragType], delegate: PanelSelectionDropDelegate(
+                translation: translation,
+                setTargeted: { isTargeted in
+                    if isTargeted { targetedSelectionItem = item }
+                    else if targetedSelectionItem == item { targetedSelectionItem = nil }
+                },
+                move: {
+                    defer { draggedSelectionItem = nil }
+                    return applyPanelDrop(translation)
+                }
+            ))
+    }
+
+    @ViewBuilder
+    private func panelReorderActions(for item: SelectionDragItem) -> some View {
+        let items: [SelectionDragItem] = switch item {
+        case .room: visibleModules.map { .room($0.id) }
+        case let .entity(id): snapshot.rooms.first { $0.entities.contains { $0.id == id } }?.entities.map { .entity($0.id) } ?? []
+        }
+        if let index = items.firstIndex(of: item) {
+            let isRoom = if case .room = item { true } else { false }
+            if index > 0 {
+                Button(isRoom ? "Move room earlier" : "Move earlier") {
+                    _ = applyPanelDrop(SelectionDropTranslator().translate(source: item, target: items[index - 1], tree: panelSelectionTree))
+                }
+            }
+            if index + 1 < items.count {
+                Button(isRoom ? "Move room later" : "Move later") {
+                    _ = applyPanelDrop(SelectionDropTranslator().translate(source: item, target: items[index + 1], tree: panelSelectionTree))
+                }
+            }
+        }
+    }
+
+    private func applyPanelDrop(_ translation: SelectionDropTranslation) -> Bool {
+        switch translation {
+        case let .room(source, target, placement):
+            return model.moveRoom(source, relativeTo: target, placement: placement)
+        case let .entity(source, target, placement):
+            return model.moveEntity(source, relativeTo: target, placement: placement)
+        case .unsupported:
+            return false
+        }
+    }
+
+    private func selectionProvider(for item: SelectionDragItem) -> NSItemProvider {
+        draggedSelectionItem = item
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(
+            forTypeIdentifier: Self.panelSelectionDragType.identifier,
+            visibility: .ownProcess
+        ) { completion in
+            completion(item.providerText.data(using: .utf8), nil)
+            return nil
+        }
+        return provider
     }
 
     /// A quiet "More" / "Less" affordance that expands or collapses a module in
@@ -626,6 +762,7 @@ public struct PearchHAPanelView: View {
             iconActive: value.status == .available,
             label: entity.name,
             labelAccessories: rowLabelAccessories(contextPresentation: contextPresentation),
+            labelDragProvider: { selectionProvider(for: .entity(entity.id)) },
             subtitle: rowSubtitle(for: entity, value: value),
             secondLine: rowSecondLine(for: entity),
             preview: { rowPreview(for: entity, presentation: presentation) },
@@ -1038,7 +1175,8 @@ public struct PearchHAPanelView: View {
                 Text(value.text)
                     .font(.system(size: 14, weight: .semibold).monospacedDigit())
                     .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
+                    .truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: false)
                     .foregroundStyle(value.status == .available ? rowValueColor(presentation) : palette.textTertiary)
                     .accessibilityHidden(true)
             }

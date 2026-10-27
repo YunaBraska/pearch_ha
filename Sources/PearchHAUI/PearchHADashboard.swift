@@ -255,6 +255,7 @@ public struct ModuleBlock<Rows: View>: View {
     @Environment(\.dashboardPalette) private var palette
     private let title: String
     private let trailingText: String?
+    private let headerDragProvider: (() -> NSItemProvider)?
     private let rows: Rows
 
     /// Creates the module block.
@@ -266,18 +267,29 @@ public struct ModuleBlock<Rows: View>: View {
     public init(
         title: String,
         trailingText: String? = nil,
+        headerDragProvider: (() -> NSItemProvider)? = nil,
         @ViewBuilder rows: () -> Rows
     ) {
         self.title = title
         self.trailingText = trailingText
+        self.headerDragProvider = headerDragProvider
         self.rows = rows()
     }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            ModuleHeader(title, trailingText: trailingText)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 2)
+            Group {
+                if let headerDragProvider {
+                    ModuleHeader(title, trailingText: trailingText)
+                        .frame(minHeight: 20)
+                        .contentShape(Rectangle())
+                        .onDrag { headerDragProvider() }
+                } else {
+                    ModuleHeader(title, trailingText: trailingText)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 2)
             VStack(spacing: 0) {
                 rows
             }
@@ -357,6 +369,7 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
     private let labelAccessories: [TelemetryRowLabelAccessory]
     private let labelAccessorySystemImage: String?
     private let labelAccessoryAccessibilityLabel: String?
+    private let labelDragProvider: (() -> NSItemProvider)?
     private let subtitle: String?
     private let secondLine: AnyView?
     private let preview: Preview
@@ -388,6 +401,7 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
         labelAccessories: [TelemetryRowLabelAccessory] = [],
         labelAccessorySystemImage: String? = nil,
         labelAccessoryAccessibilityLabel: String? = nil,
+        labelDragProvider: (() -> NSItemProvider)? = nil,
         subtitle: String? = nil,
         secondLine: AnyView? = nil,
         @ViewBuilder preview: () -> Preview,
@@ -400,6 +414,7 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
         self.labelAccessories = labelAccessories
         self.labelAccessorySystemImage = labelAccessorySystemImage
         self.labelAccessoryAccessibilityLabel = labelAccessoryAccessibilityLabel
+        self.labelDragProvider = labelDragProvider
         self.subtitle = subtitle
         self.secondLine = secondLine
         self.preview = preview()
@@ -410,6 +425,29 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: PearchHASpacing.sm) {
+                leadingColumn
+                preview
+                    .frame(
+                        width: TelemetryRowMetrics.previewWidth,
+                        height: TelemetryRowMetrics.previewHeight,
+                        alignment: .center
+                    )
+                value
+                    .frame(minWidth: TelemetryRowMetrics.valueMinWidth, alignment: .trailing)
+                control
+                    .frame(width: TelemetryRowMetrics.controlWidth, alignment: .trailing)
+            }
+            secondLine
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, rowDensity == .compact ? 4 : 7)
+        .frame(minHeight: rowDensity == .compact ? 30 : 38)
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private var leadingColumn: some View {
+        let content = HStack(spacing: PearchHASpacing.sm) {
                 Group {
                     if let icon {
                         Image(systemName: icon)
@@ -452,23 +490,15 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .layoutPriority(1)
-                preview
-                    .frame(
-                        width: TelemetryRowMetrics.previewWidth,
-                        height: TelemetryRowMetrics.previewHeight,
-                        alignment: .center
-                    )
-                value
-                    .frame(minWidth: TelemetryRowMetrics.valueMinWidth, alignment: .trailing)
-                control
-                    .frame(width: TelemetryRowMetrics.controlWidth, alignment: .trailing)
-            }
-            secondLine
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, rowDensity == .compact ? 4 : 7)
-        .frame(minHeight: rowDensity == .compact ? 30 : 38)
-        .contentShape(Rectangle())
+        if let labelDragProvider {
+            content
+                .frame(minHeight: 20)
+                .contentShape(Rectangle())
+                .onDrag { labelDragProvider() }
+        } else {
+            content
+        }
     }
 }
 

@@ -388,20 +388,13 @@ public struct PearchHASettingsView: View {
     /// padding, so settings share the dashboard's panel language and no raw
     /// ungrouped form rows are drawn anywhere.
     private func settingsCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
-        return VStack(alignment: .leading, spacing: PearchHASpacing.md) {
-            content()
+        PearchHACard(cornerRadius: PearchHACornerRadius.card) {
+            VStack(alignment: .leading, spacing: PearchHASpacing.md) {
+                content()
+            }
+            .padding(PearchHASpacing.lg)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(PearchHASpacing.lg)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: PearchHACornerRadius.card, style: .continuous)
-                .fill(palette.surfacePanel)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: PearchHACornerRadius.card, style: .continuous)
-                .strokeBorder(palette.borderSubtle, lineWidth: 1)
-        )
     }
 
     // MARK: General
@@ -1574,13 +1567,19 @@ public struct PearchHASettingsView: View {
             if let id = inspectedEntityID,
                let room = snapshot.availableRooms.first(where: { $0.entities.contains { $0.id == id } }),
                let entity = room.entities.first(where: { $0.id == id }) {
-                HStack {
-                    Text(entity.name).font(.headline).textSelection(.enabled)
+                HStack(spacing: PearchHASpacing.sm) {
+                    Image(systemName: snapshot.effectiveMenuBarItemConfiguration(for: entity).customIconName ?? pearchHAEntityIconName(for: entity))
+                        .foregroundStyle(PearchHATheme.accent)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: PearchHASpacing.xs) {
+                        Text(entity.name).font(.headline).textSelection(.enabled)
+                        Text(room.name).font(PearchHATypography.caption().weight(.regular)).foregroundStyle(.secondary)
+                    }
                     Spacer(minLength: 8)
                     Button { inspectedEntityID = nil } label: {
                         Image(systemName: "xmark").frame(width: 20, height: 20)
                     }
-                    .buttonStyle(.borderless)
+                    .buttonStyle(PearchHACircularIconButtonStyle(diameter: 28))
                     .help("Close details").accessibilityLabel("Close entity details")
                 }
                 ScrollView {
@@ -1597,7 +1596,7 @@ public struct PearchHASettingsView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(PearchHATheme.Dashboard.palette(colorScheme).surfacePanel)
+        .background(PearchHATheme.Dashboard.palette(colorScheme).surfaceRoot)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Entity details")
     }
@@ -2099,9 +2098,7 @@ public struct PearchHASettingsView: View {
         }
     }
 
-    /// The shared detail pane for the selected entity: clearly
-    /// labelled Display, Menu bar, Alerts, and Buttons sections with
-    /// accent-tinted headers and accent-tinted controls, separated by hairlines.
+    /// The inspector uses the same grouped cards and control typography as Settings.
     private func entityDetailSections(for entity: DiscoveredEntity, roomName: String) -> some View {
         let configuration = snapshot.effectiveMenuBarItemConfiguration(for: entity)
         let metadata = viewState.presentation(for: entity, roomName: roomName).metadata
@@ -2111,34 +2108,40 @@ public struct PearchHASettingsView: View {
         )
         let isPromoted = snapshot.menuBarDisplayConfiguration.isPromoted(entity.id)
         let showsAverageSection = viewState.canAverageEntity(entity.id)
-        return VStack(alignment: .leading, spacing: 0) {
-            settingsSection(title: "Identity", systemImage: "info.circle") {
-                entityIdentitySection(metadata.inspectorFields, links: links)
-                if let local = LocalMacSensor(entityID: entity.id) {
-                    Text(local.explanation).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    Text(LocalMacText.historyUnavailable.localized()).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        return VStack(alignment: .leading, spacing: PearchHASpacing.md) {
+            settingsCard {
+                settingsSection(title: "Identity", systemImage: "info.circle") {
+                    entityIdentitySection(metadata.inspectorFields, links: links)
+                    if let local = LocalMacSensor(entityID: entity.id) {
+                        Text(local.explanation).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Text(LocalMacText.historyUnavailable.localized()).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
-            settingsSectionDivider
-            settingsSection(title: "Display", systemImage: "textformat.size") {
-                displaySectionControls(for: entity, configuration: configuration, isPromoted: isPromoted)
+            settingsCard {
+                settingsSection(title: "Display", systemImage: "textformat.size") {
+                    displaySectionControls(for: entity, configuration: configuration, isPromoted: isPromoted)
+                }
             }
             if showsAverageSection {
-                settingsSectionDivider
-                settingsSection(title: "Average", systemImage: "sum") {
-                    averageSectionControls(for: entity)
+                settingsCard {
+                    settingsSection(title: "Average", systemImage: "sum") {
+                        averageSectionControls(for: entity)
+                    }
                 }
             }
-            settingsSectionDivider
-            settingsSection(title: "Menu bar", systemImage: "menubar.rectangle") {
-                menuBarSectionControls(for: entity, isPromoted: isPromoted)
+            settingsCard {
+                settingsSection(title: "Menu bar", systemImage: "menubar.rectangle") {
+                    menuBarSectionControls(for: entity, isPromoted: isPromoted)
+                }
             }
-            settingsSectionDivider
-            settingsSection(title: "Thresholds", systemImage: "bell.badge") {
-                menuBarThresholdControls(for: entity, configuration: configuration)
+            settingsCard {
+                settingsSection(title: "Thresholds", systemImage: "bell.badge") {
+                    menuBarThresholdControls(for: entity, configuration: configuration)
+                }
             }
         }
-        .font(.caption)
+        .font(PearchHATypography.body())
         .controlSize(.small)
         .tint(PearchHATheme.accent)
     }
@@ -2147,10 +2150,13 @@ public struct PearchHASettingsView: View {
         _ fields: [PearchHAEntityMetadataPresentation.Field],
         links: PearchHAEntityMetadataLinksPresentation
     ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: PearchHASpacing.sm) {
             ForEach(Array(fields.enumerated()), id: \.offset) { _, field in
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(field.label).foregroundStyle(.secondary)
+                HStack(alignment: .top, spacing: PearchHASpacing.sm) {
+                    Text(field.label)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 84, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
                     VStack(alignment: .leading, spacing: 3) {
                         if let destination = metadataLink(for: field, links: links) {
                             Link(destination: destination) {
@@ -2178,8 +2184,8 @@ public struct PearchHASettingsView: View {
         Text(field.value)
             .font(
                 field.usesMonospacedFont
-                    ? .system(size: 11.5, weight: .regular, design: .monospaced)
-                    : PearchHATypography.caption()
+                    ? .system(size: 12, weight: .regular, design: .monospaced)
+                    : PearchHATypography.body()
             )
             .foregroundStyle(.primary)
             .multilineTextAlignment(.leading)

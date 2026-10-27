@@ -5023,6 +5023,14 @@ final class PearchHAUITests: XCTestCase {
             ),
             .unsupported
         )
+        XCTAssertEqual(
+            translator.translate(source: .entity("sensor.office_temperature"), target: .entity("sensor.office_temperature"), tree: tree),
+            .unsupported
+        )
+        XCTAssertEqual(
+            translator.translate(source: .room("office"), target: .entity("sensor.office_temperature"), tree: tree),
+            .unsupported
+        )
     }
 
     /// A room not in the expanded set is collapsed by default, so the Entities
