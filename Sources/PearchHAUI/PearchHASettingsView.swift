@@ -1400,6 +1400,12 @@ public struct PearchHASettingsView: View {
                             .truncationMode(.middle)
                     }
                     settingsControlRow("Updates") {
+#if PEARCHHA_APP_STORE
+                        Text("Updates are managed by the Mac App Store.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.trailing)
+#else
                         VStack(alignment: .trailing, spacing: 6) {
                             aboutUpdateAction
                             Text(aboutUpdateSummary)
@@ -1408,6 +1414,7 @@ public struct PearchHASettingsView: View {
                                 .multilineTextAlignment(.trailing)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
+#endif
                     }
                 }
             }

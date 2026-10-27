@@ -82,15 +82,15 @@ Consequences: Request load is predictable and timing behavior is testable.
 
 Alternatives: Fixed polling and wall-clock sleeps were rejected.
 
-## ADR-0009 - Release through signed and notarized direct distribution
+## ADR-0009 - Maintain separate direct and Mac App Store channels
 
-Context: PearchHA needs normal macOS trust behavior and may need menu bar freedoms that are awkward in the Mac App Store.
+Context: Direct downloads need Developer ID signing, notarization, and Sparkle. The Mac App Store requires a sandboxed bundle and must use Apple's update channel.
 
-Decision: Ship Developer ID signed and notarized ZIP and DMG artifacts. Add Sparkle only after the core release path is stable.
+Decision: Keep the direct ZIP and DMG release unchanged. A manual Store-package workflow builds a separate sandboxed package with bundle identifier `berlin.yuna.pearchha`, without Sparkle or a GitHub update control. It is packaged and signed for validation only. Store upload follows successful sandbox testing and App Review preparation.
 
-Consequences: Direct install is viable; automatic updates are deferred until they earn the added dependency and release work.
+Consequences: One source tree supports both channels without presenting an external updater in the Store build. The Store channel needs a matching provisioning profile and real-device validation before submission.
 
-Alternatives: Mac App Store first was deferred because sandbox and review constraints can slow this kind of utility.
+Alternatives: Reusing the direct app bundle for the Store was rejected because it would retain Sparkle and two competing update channels.
 
 ## ADR-0010 - Host-scoped self-signed trust, on by default, never trust-all
 
