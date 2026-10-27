@@ -12,6 +12,7 @@ private final class PearchHAPanelViewState: ObservableObject {
     @Published private(set) var oauthSignInState: PearchHAOAuthSignInState
     @Published private(set) var displayPreferences: PearchHADisplayPreferences
     @Published private(set) var isInitialHistoryLoading: Bool
+    private var controlRequestsSubscription: AnyCancellable?
 
     init(model: PearchHAPanelModel) {
         self.snapshot = model.snapshot
@@ -30,6 +31,9 @@ private final class PearchHAPanelViewState: ObservableObject {
         model.$isInitialHistoryLoading
             .receive(on: RunLoop.main)
             .assign(to: &$isInitialHistoryLoading)
+        controlRequestsSubscription = model.requestedControlsPublisher
+            .receive(on: RunLoop.main)
+            .sink { [weak self] in self?.objectWillChange.send() }
     }
 }
 
@@ -805,32 +809,42 @@ public struct PearchHAPanelView: View {
             secondLine: rowSecondLine(for: entity),
             preview: { rowPreview(for: entity, presentation: presentation) },
             value: {
-                if fields.count == 1, let field = fields.first {
-                    PearchHAEntityControlInput(field: field, entityName: entity.name, clock: model.clock, isInline: true,
-                                              isRunning: snapshot.controlActionState.isRunning(for: entity.id)) { value, confirmed in
-                        model.dismissHistoryPopover()
-                        return model.startEntityControlValue(entity.id, controlID: field.id, value: value, confirmed: confirmed)
-                    }
-                    .id(field.id)
-                    .disabled(snapshot.connectionState != .connected || snapshot.controlActionState.isRunning)
-                    .help(PearchHAEntityControlField.controlHelp(for: entity) ?? "No controls available")
-                } else if !fields.isEmpty {
-                    PearchHAEntityControlsButton(model: model, entity: entity) {
-                        HStack(spacing: 5) {
-                            if !hasToggle {
-                                rowValueOrPill(entity: entity, value: value, presentation: presentation)
-                            }
-                            Image(systemName: "slider.horizontal.3")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(PearchHATheme.Dashboard.palette(colorScheme).textSecondary)
-                                .accessibilityHidden(true)
+                HStack(spacing: 5) {
+                    if fields.count == 1, let field = fields.first {
+                        PearchHAEntityControlInput(field: field, entityName: entity.name, clock: model.clock, isInline: true,
+                                                  isRunning: snapshot.controlActionState.isRunning(for: entity.id),
+                                                  requestedValue: model.requestedControlValue(for: entity.id, controlID: field.id),
+                                                  showsRequestedIndicator: !hasToggle) { value, confirmed in
+                            model.dismissHistoryPopover()
+                            return model.startEntityControlValue(entity.id, controlID: field.id, value: value, confirmed: confirmed)
                         }
-                        .frame(minHeight: TelemetryRowMetrics.previewHeight)
-                        .contentShape(Rectangle())
+                        .id(field.id)
+                        .disabled(snapshot.connectionState != .connected || snapshot.controlActionState.isRunning)
+                        .help(PearchHAEntityControlField.controlHelp(for: entity) ?? "No controls available")
+                    } else if !fields.isEmpty {
+                        PearchHAEntityControlsButton(model: model, entity: entity) {
+                            HStack(spacing: 5) {
+                                if !hasToggle {
+                                    rowValueOrPill(entity: entity, value: value, presentation: presentation)
+                                }
+                                Image(systemName: "slider.horizontal.3")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(PearchHATheme.Dashboard.palette(colorScheme).textSecondary)
+                                    .accessibilityHidden(true)
+                                if !hasToggle {
+                                    PearchHARequestedControlIndicator(isRequested: model.hasRequestedControls(for: entity.id))
+                                }
+                            }
+                            .frame(minHeight: TelemetryRowMetrics.previewHeight)
+                            .contentShape(Rectangle())
+                        }
+                    } else if !hasToggle {
+                        rowValueOrPill(entity: entity, value: value, presentation: presentation)
+                            .help(PearchHAEntityControlField.controlHelp(for: entity) ?? "Read-only")
                     }
-                } else if !hasToggle {
-                    rowValueOrPill(entity: entity, value: value, presentation: presentation)
-                        .help(PearchHAEntityControlField.controlHelp(for: entity) ?? "Read-only")
+                    if hasToggle {
+                        PearchHARequestedControlIndicator(isRequested: model.hasRequestedControls(for: entity.id))
+                    }
                 }
             },
             control: { rowControls(for: entity) }
@@ -1083,12 +1097,12 @@ public struct PearchHAPanelView: View {
         )
     }
 
-    private func entityControlHelp(for entity: DiscoveredEntity, control: PearchHAEntityControl) -> String {
+    private func entityControlHelp(for entity: DiscoveredEntity, control: PearchHAEntityControl, isOn: Bool) -> String {
         if snapshot.controlActionState.isRunning {
             return "Waiting for Home Assistant"
         }
         if let failure = control.failureMessage { return failure }
-        return control.isOn ? "Turns \(entity.name) off" : "Turns \(entity.name) on"
+        return isOn ? "Turns \(entity.name) off" : "Turns \(entity.name) on"
     }
 
     private func customActionButton(_ action: EntityCustomAction) -> some View {
@@ -1226,14 +1240,15 @@ public struct PearchHAPanelView: View {
     @ViewBuilder
     private func rowControls(for entity: DiscoveredEntity) -> some View {
         if let control = snapshot.control(for: entity) {
+            let isOn = model.requestedControlValue(for: entity.id, controlID: "state")?.controlString.map { $0 == "on" } ?? control.isOn
             CompactSwitch(
-                isOn: control.isOn,
+                isOn: isOn,
                 isRunning: snapshot.controlActionState.isRunning,
                 onChange: { isOn in model.startEntityControlToggle(entity.id, isOn: isOn) }
             )
-            .help(entityControlHelp(for: entity, control: control))
-            .accessibilityLabel("\(control.isOn ? "Turn off" : "Turn on") \(entity.name)")
-            .accessibilityHint(entityControlHelp(for: entity, control: control))
+            .help(entityControlHelp(for: entity, control: control, isOn: isOn))
+            .accessibilityLabel("\(isOn ? "Turn off" : "Turn on") \(entity.name)")
+            .accessibilityHint(entityControlHelp(for: entity, control: control, isOn: isOn))
         }
         ForEach(model.customActions(for: entity), id: \.id.rawValue) { action in
             customActionButton(action)
@@ -1246,6 +1261,7 @@ public struct PearchHAPanelView: View {
         if let control = snapshot.coverControl(for: entity) {
             PearchHAEntityControlInput(field: .coverPosition(control), entityName: entity.name, clock: model.clock,
                                       isInline: true, isRunning: control.isRunning,
+                                      requestedValue: model.requestedControlValue(for: entity.id, controlID: "position") ?? model.requestedControlValue(for: entity.id, controlID: "state"),
                                       coverMode: model.coverControlMode(for: entity), runCoverCommand: { command in
                 model.startCoverControl(entity.id, command: command)
             }) { value, _ in

@@ -167,11 +167,17 @@ public final class PearchHAPanelModel: ObservableObject {
     private var controlActionTask: Task<Void, Never>?
     private var activeValueControlRequestID: UUID?
     private var pendingControlChange: PendingControlChange?
+    private struct RequestedControlValue: Equatable {
+        let requestID: UUID
+        let value: ActionValue
+    }
+    /// Presentation only. A request is retired by the next report, not by service acceptance.
+    @Published private var requestedControlValues: [EntityID: [String: RequestedControlValue]] = [:]
     private var historyTask: Task<Void, Never>?
     private var historyRequestGeneration = 0
     private var transientUITrackingDepth = 0
-    private var deferredLiveStates: [EntityID: EntityState] = [:]
-    private var deferredBackgroundLiveStates: [EntityID: EntityState] = [:]
+    private var deferredLiveStates: [EntityID: (state: EntityState, requests: [String: RequestedControlValue])] = [:]
+    private var deferredBackgroundLiveStates: [EntityID: (state: EntityState, requests: [String: RequestedControlValue])] = [:]
     private var deferredSilentRefreshRequested = false
     private var protectedValueDrafts: [String: String] = [:]
     /// Whether the panel is currently shown, gating detail refresh and live updates.
@@ -607,9 +613,9 @@ public final class PearchHAPanelModel: ObservableObject {
         }
     }
 
-    private func rebuildAvailableEntityCaches(from rooms: [Room]) {
+    private func rebuildAvailableEntityCaches(from rooms: [Room], refreshingValues: Bool = false) {
         let signature = AvailableEntityIndexSignature(rooms: rooms)
-        guard availableEntityIndexSignature != signature else {
+        guard refreshingValues || availableEntityIndexSignature != signature else {
             return
         }
         let interval = performanceSignposter.beginInterval("RebuildAvailableEntityCaches")
@@ -1124,10 +1130,10 @@ public final class PearchHAPanelModel: ObservableObject {
         guard transientUITrackingDepth == 0 else {
             return
         }
-        let deferredStates = deferredLiveStates.values.sorted { $0.id.rawValue < $1.id.rawValue }
+        let deferredStates = deferredLiveStates.values.sorted { $0.state.id.rawValue < $1.state.id.rawValue }
         deferredLiveStates = [:]
-        for state in deferredStates {
-            _ = applyLiveState(state)
+        for report in deferredStates {
+            _ = applyLiveState(report.state, reporting: report.requests)
         }
         if deferredSilentRefreshRequested, isPanelActive, lastConnectedForm != nil {
             deferredSilentRefreshRequested = false
@@ -2394,6 +2400,53 @@ public final class PearchHAPanelModel: ObservableObject {
         }
     }
 
+    /// Requested presentation values never replace Home Assistant's reported telemetry.
+    func requestedControlValue(for id: EntityID, controlID: String) -> ActionValue? {
+        requestedControlValues[id]?[controlID]?.value
+    }
+
+    func hasRequestedControls(for id: EntityID) -> Bool {
+        requestedControlValues[id]?.isEmpty == false
+    }
+
+    var requestedControlsPublisher: AnyPublisher<Void, Never> {
+        $requestedControlValues.map { _ in () }.eraseToAnyPublisher()
+    }
+
+    private func clearRequestedControls(requestID: UUID) {
+        let remaining = requestedControlValues.mapValues { $0.filter { $0.value.requestID != requestID } }
+            .filter { !$0.value.isEmpty }
+        if remaining != requestedControlValues { requestedControlValues = remaining }
+    }
+
+    private func finishRequestedControls(for id: EntityID, entity: DiscoveredEntity?, reporting requests: [String: RequestedControlValue]) {
+        guard var pending = requestedControlValues[id] else { return }
+        let fields = entity.map(PearchHAEntityControlField.controls(for:)) ?? []
+        for (controlID, request) in requests where pending[controlID]?.requestID == request.requestID {
+            let hasReport: Bool
+            if entity == nil || entity?.state == "unavailable" {
+                hasReport = true
+            } else if controlID == "state" {
+                hasReport = true
+            } else if controlID == "position" {
+                hasReport = entity?.currentPosition != nil
+            } else if let field = fields.first(where: { $0.id == controlID }) {
+                hasReport = field.input.reportedValue != nil || field.actionSpec(value: request.value) == nil
+            } else {
+                hasReport = true // The control is no longer supported.
+            }
+            if hasReport {
+                pending[controlID] = nil
+                if controlID == "state", pendingControlChange?.entityID == id {
+                    pendingControlChange = nil
+                }
+            }
+        }
+        if pending != requestedControlValues[id] {
+            requestedControlValues[id] = pending.isEmpty ? nil : pending
+        }
+    }
+
     /// Schedules a capability-derived control. True means scheduled, not validated or executed.
     /// Returns false while another action is pending; execution failures appear in controlActionState.
     @discardableResult
@@ -2421,10 +2474,16 @@ public final class PearchHAPanelModel: ObservableObject {
         }
         let requestID = UUID()
         activeValueControlRequestID = requestID
+        if let value, field.input.reportsValue {
+            requestedControlValues[id, default: [:]][controlID] = RequestedControlValue(requestID: requestID, value: value)
+        }
         defer {
             if activeValueControlRequestID == requestID {
                 activeValueControlRequestID = nil
-                if Task.isCancelled { applyControlActionState(.idle) }
+                if Task.isCancelled {
+                    clearRequestedControls(requestID: requestID)
+                    applyControlActionState(.idle)
+                }
             }
         }
         applyControlActionState(.running(entityID: id), lastUpdateDescription: "Updating \(entity.name)")
@@ -2442,6 +2501,7 @@ public final class PearchHAPanelModel: ObservableObject {
             }
             return true
         case let .failed(message):
+            clearRequestedControls(requestID: requestID)
             applyControlActionState(.failed(entityID: id, message: message), lastUpdateDescription: "Control failed for \(entity.name)")
             return false
         }
@@ -2485,7 +2545,8 @@ public final class PearchHAPanelModel: ObservableObject {
             )
             return false
         }
-        guard control.isOn != isOn else {
+        let currentIsOn = requestedControlValue(for: id, controlID: "state")?.controlString.map { $0 == "on" } ?? control.isOn
+        guard currentIsOn != isOn else {
             applyControlActionState(.idle)
             return false
         }
@@ -2531,7 +2592,8 @@ public final class PearchHAPanelModel: ObservableObject {
             return false
         }
         if case .setPosition = command {
-            if command.clampedPosition == control.position {
+            let currentPosition = requestedControlValue(for: id, controlID: "position")?.controlNumber.map(Int.init) ?? control.position
+            if command.clampedPosition == currentPosition {
                 applyControlActionState(.idle)
                 return false
             }
@@ -2551,6 +2613,11 @@ public final class PearchHAPanelModel: ObservableObject {
         let id = entity.id
         let previousState = entity.state
         let previousPosition = entity.currentPosition
+        let requestID = UUID()
+        requestedControlValues[id, default: [:]]["state"] = RequestedControlValue(requestID: requestID, value: .string(targetState))
+        if entity.id.domain == "cover", let targetPosition {
+            requestedControlValues[id]?["position"] = RequestedControlValue(requestID: requestID, value: .number(Double(targetPosition)))
+        }
         pendingControlChange = PendingControlChange(
             entityID: id,
             previousState: previousState,
@@ -2576,16 +2643,17 @@ public final class PearchHAPanelModel: ObservableObject {
         switch result {
         case .success:
             pendingControlChange = nil
-            applyControlEntitySnapshot(
-                id,
-                state: targetState,
-                currentPosition: targetPosition,
-                actionState: .idle,
-                lastUpdateDescription: "Updated \(entity.name)"
-            )
+            // A report received during the service call already owns the displayed state.
+            applyControlActionState(.idle, lastUpdateDescription: "Requested \(entity.name)")
             return true
         case let .failed(message):
             pendingControlChange = nil
+            let stillAwaitingReport = requestedControlValues[id]?["state"]?.requestID == requestID
+            clearRequestedControls(requestID: requestID)
+            guard stillAwaitingReport else {
+                applyControlActionState(.failed(entityID: id, message: message))
+                return false
+            }
             applyControlEntitySnapshot(
                 id,
                 state: previousState,
@@ -2603,6 +2671,7 @@ public final class PearchHAPanelModel: ObservableObject {
         controlActionTask?.cancel()
         controlActionTask = nil
         activeValueControlRequestID = nil
+        requestedControlValues = [:]
         if let rollback = pendingControlChange {
             pendingControlChange = nil
             applyControlEntitySnapshot(
@@ -2653,7 +2722,8 @@ public final class PearchHAPanelModel: ObservableObject {
         else {
             return false
         }
-        return control.isOn != isOn
+        let currentIsOn = requestedControlValue(for: id, controlID: "state")?.controlString.map { $0 == "on" } ?? control.isOn
+        return currentIsOn != isOn
     }
 
     private func canRunCoverControl(_ id: EntityID, command: PearchHACoverCommand) -> Bool {
@@ -2666,7 +2736,8 @@ public final class PearchHAPanelModel: ObservableObject {
             guard control.position != nil else {
                 return false
             }
-            return command.clampedPosition != control.position
+            let currentPosition = requestedControlValue(for: id, controlID: "position")?.controlNumber.map(Int.init) ?? control.position
+            return command.clampedPosition != currentPosition
         }
         return true
     }
@@ -2783,6 +2854,7 @@ public final class PearchHAPanelModel: ObservableObject {
         controlActionTask?.cancel()
         controlActionTask = nil
         activeValueControlRequestID = nil
+        requestedControlValues = [:]
         historyTask?.cancel()
         historyTask = nil
         historyRequestGeneration += 1
@@ -2818,6 +2890,7 @@ public final class PearchHAPanelModel: ObservableObject {
     }
 
     public func connect() async {
+        let reporting = requestedControlValues
         lastObservedInstant = await clock.now()
         let form = editableForm
         if let failure = form.validationFailure {
@@ -2837,7 +2910,7 @@ public final class PearchHAPanelModel: ObservableObject {
         guard !Task.isCancelled else {
             return
         }
-        await apply(result: result, form: form, refreshCount: snapshot.refreshCount)
+        await apply(result: result, form: form, refreshCount: snapshot.refreshCount, reporting: reporting)
     }
 
     public func refresh() async {
@@ -2863,6 +2936,7 @@ public final class PearchHAPanelModel: ObservableObject {
             deferredSilentRefreshRequested = true
             return
         }
+        let reporting = requestedControlValues
         lastObservedInstant = await clock.now()
 
         let nextRefreshCount = snapshot.refreshCount + 1
@@ -2892,15 +2966,19 @@ public final class PearchHAPanelModel: ObservableObject {
         guard !Task.isCancelled else {
             return
         }
-        await apply(result: result, form: form, refreshCount: nextRefreshCount)
+        await apply(result: result, form: form, refreshCount: nextRefreshCount, reporting: reporting)
     }
 
     @discardableResult
     public func applyLiveState(_ state: EntityState) -> Bool {
+        applyLiveState(state, reporting: requestedControlValues[state.id] ?? [:])
+    }
+
+    private func applyLiveState(_ state: EntityState, reporting requests: [String: RequestedControlValue]) -> Bool {
         if transientUITrackingDepth > 0 {
             let exists = availableEntityLocations[state.id] != nil
             if exists {
-                deferredLiveStates[state.id] = state
+                deferredLiveStates[state.id] = (state, requests)
             }
             return exists
         }
@@ -2908,7 +2986,7 @@ public final class PearchHAPanelModel: ObservableObject {
             return false
         }
         if shouldDeferBackgroundLiveState(for: state.id) {
-            deferredBackgroundLiveStates[state.id] = state
+            deferredBackgroundLiveStates[state.id] = (state, requests)
             return true
         }
         let signpostID = performanceSignposter.makeSignpostID()
@@ -2935,6 +3013,7 @@ public final class PearchHAPanelModel: ObservableObject {
             currentPosition: state.currentPosition,
             controlAttributes: state.controlAttributes
         )
+        finishRequestedControls(for: state.id, entity: updatedEntity, reporting: requests)
         guard updatedEntity != entity else {
             return true
         }
@@ -2984,10 +3063,10 @@ public final class PearchHAPanelModel: ObservableObject {
         guard !deferredBackgroundLiveStates.isEmpty else {
             return
         }
-        let deferredStates = deferredBackgroundLiveStates.values.sorted { $0.id.rawValue < $1.id.rawValue }
+        let deferredStates = deferredBackgroundLiveStates.values.sorted { $0.state.id.rawValue < $1.state.id.rawValue }
         deferredBackgroundLiveStates = [:]
-        for state in deferredStates {
-            _ = applyLiveState(state)
+        for report in deferredStates {
+            _ = applyLiveState(report.state, reporting: report.requests)
         }
     }
 
@@ -3101,7 +3180,8 @@ public final class PearchHAPanelModel: ObservableObject {
         return updateMenuBarDisplayConfiguration(normalized, persist: true)
     }
 
-    private func apply(result: PearchHAConnectionAttemptResult, form: PearchHAConnectionForm, refreshCount: Int) async {
+    private func apply(result: PearchHAConnectionAttemptResult, form: PearchHAConnectionForm, refreshCount: Int,
+                       reporting: [EntityID: [String: RequestedControlValue]]) async {
         switch result {
         case let .success(rooms):
             let previousEntityIDs = displayedEntityIDs()
@@ -3117,10 +3197,13 @@ public final class PearchHAPanelModel: ObservableObject {
                 evictAllHistory()
                 cancelHistoryBulkSync()
                 pendingControlChange = nil
+                requestedControlValues = [:]
             }
             lastConnectedForm = form
             editableForm = form
             let refreshedRooms = stabilizedRefreshedRooms(rooms, preserving: snapshot.availableRooms)
+            // A full state response replaces values even when entity IDs are unchanged.
+            rebuildAvailableEntityCaches(from: refreshedRooms, refreshingValues: true)
             let normalizedDisplayConfiguration = normalizedMenuBarDisplayConfiguration(
                 snapshot.menuBarDisplayConfiguration,
                 availableRooms: refreshedRooms
@@ -3159,6 +3242,9 @@ public final class PearchHAPanelModel: ObservableObject {
                     draft.controlActionState = .idle
                     draft.serviceMetadata = []
                 }
+            }
+            for (id, requests) in reporting {
+                finishRequestedControls(for: id, entity: availableEntitiesByID[id], reporting: requests)
             }
             if connectionChanged || previousEntityIDs != displayedEntityIDs() {
                 startHistoryBulkSync()

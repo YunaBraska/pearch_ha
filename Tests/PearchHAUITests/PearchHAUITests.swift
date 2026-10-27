@@ -353,20 +353,26 @@ final class PearchHAUITests: XCTestCase {
                 }
                 let buttons = nativeButtons(in: window.contentView)
                 XCTAssertEqual(buttons.count, 1, "The single control exposes its clickable value")
+                if inline, domain == "light" {
+                    let valueButton = try XCTUnwrap(buttons.first)
+                    let toggle = try XCTUnwrap(nativeSwitches(in: window.contentView).first)
+                    let gap = toggle.convert(toggle.bounds, to: nil).minX - valueButton.convert(valueButton.bounds, to: nil).maxX
+                    XCTAssertGreaterThanOrEqual(gap, 17, "The requested indicator must fit between the value and its switch")
+                }
                 try XCTUnwrap(buttons.first).performClick(nil)
                 drainPanelRunLoop()
                 let field = try XCTUnwrap(editableTextFields(in: window.contentView).first)
                 XCTAssertEqual(field.stringValue, label == "-" ? "" : label.replacingOccurrences(of: " %", with: ""))
-                await spinUntil { field.currentEditor() != nil }
+                await spinUntil("\(domain) inline=\(inline) initial=\(label): focus") { field.currentEditor() != nil }
                 XCTAssertNotNil(field.currentEditor(), "Clicking the value must focus precise entry without a second click")
                 try setNativeTextFieldDraft(target.formatted(.number.grouping(.never)), for: field, in: window)
-                await spinUntil { await clock.sleepingTaskCount() == 1 }
+                await spinUntil("\(domain) inline=\(inline) initial=\(label): debounce") { await clock.sleepingTaskCount() == 1 }
                 _ = await clock.advance(by: .milliseconds(599))
                 let beforeDelay = await runner.callCount()
                 XCTAssertEqual(beforeDelay, 0)
                 _ = await clock.advance(by: .milliseconds(1))
-                await spinUntil { await runner.callCount() == 1 }
-                await spinUntil { model.snapshot.controlActionState == .idle }
+                await spinUntil("\(domain) inline=\(inline) initial=\(label): dispatch") { await runner.callCount() == 1 }
+                await spinUntil("\(domain) inline=\(inline) initial=\(label): completion") { model.snapshot.controlActionState == .idle }
                 drainPanelRunLoop()
                 XCTAssertTrue(editableTextFields(in: window.contentView).isEmpty, "Successful entry returns to a quiet value")
                 let actions = await runner.actions()
@@ -378,8 +384,11 @@ final class PearchHAUITests: XCTestCase {
                 try XCTUnwrap(nativeButtons(in: window.contentView).first).performClick(nil)
                 drainPanelRunLoop()
                 let canceledField = try XCTUnwrap(editableTextFields(in: window.contentView).first)
-                try setNativeTextFieldDraft(target.formatted(.number.grouping(.never)), for: canceledField, in: window)
-                await spinUntil { await clock.sleepingTaskCount() == 1 }
+                if label == "-" {
+                    XCTAssertEqual(canceledField.stringValue, target.formatted(.number.grouping(.never)), "Missing telemetry must retain the requested value")
+                }
+                try setNativeTextFieldDraft((target / 2).formatted(.number.grouping(.never)), for: canceledField, in: window)
+                await spinUntil("\(domain) inline=\(inline) initial=\(label): cancellation debounce") { await clock.sleepingTaskCount() == 1 }
                 try XCTUnwrap(canceledField.currentEditor() as? NSTextView).doCommand(by: #selector(NSResponder.cancelOperation(_:)))
                 drainPanelRunLoop()
                 await spinUntil { await clock.sleepingTaskCount() == 0 }
@@ -445,10 +454,265 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(actions.first?.serviceData, ["position": 52])
     }
 
+    func testRequestedNumberSurvivesSubmissionAndPanelRecreationUntilNextReport() async throws {
+        let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+        let refreshEntered = ConnectionGate()
+        let refreshRelease = ConnectionGate()
+        let calls = CallCounter()
+        let entity = DiscoveredEntity(id: "number.office", name: "Target temperature", state: "27", unit: "°C",
+                                      areaID: "office", deviceID: nil, controlAttributes: ["min": 16, "max": 30, "step": 1])
+        let model = PearchHAPanelModel(connector: { _ in
+            if await calls.next() > 1 {
+                await refreshEntered.open()
+                await refreshRelease.wait()
+            }
+            return .success(rooms: [Room(id: "office", name: "Office", entities: [entity])])
+        }, actionRunner: { form, action in await runner.run(form: form, action: action) }, clock: TestPearchClock(),
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+                                      selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        var panel = PearchHAApplication.makePanel(model: model)
+        panel.makeKeyAndOrderFront(nil)
+        defer { panel.orderOut(nil); panel.contentView = nil; panel.contentViewController = nil }
+        drainPanelRunLoop()
+        let field = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
+        let idleFrame = field.convert(field.bounds, to: nil)
+        try setNativeTextFieldValue("30", for: field, in: panel)
+        await spinUntil { await runner.callCount() == 1 }
+        drainPanelRunLoop()
+        XCTAssertEqual(field.stringValue, "30", "Submitting must retain the requested value while HA has not reported again")
+        XCTAssertEqual(field.convert(field.bounds, to: nil), idleFrame, "Waiting for HA must not move or resize the control")
+        XCTAssertEqual(model.snapshot.availableRooms.first?.entities.first?.state, "27", "Requested values are not reported telemetry")
+
+        await runner.releaseNext()
+        await refreshEntered.wait()
+        panel.orderOut(nil)
+        panel.contentView = nil
+        panel.contentViewController = nil
+        panel = PearchHAApplication.makePanel(model: model)
+        panel.makeKeyAndOrderFront(nil)
+        try await Task.sleep(for: .milliseconds(100))
+        drainPanelRunLoop()
+        let reopenedField = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
+        XCTAssertEqual(model.requestedControlValue(for: entity.id, controlID: "set_value.value"), 30)
+        XCTAssertEqual(reopenedField.stringValue, "30", "A recreated panel must retain the request until the next report")
+        XCTAssertEqual(reopenedField.convert(reopenedField.bounds, to: nil), idleFrame)
+        try saveControlSnapshot(panel.contentView, name: "requested-number-panel")
+
+        await refreshRelease.open()
+        await spinUntil { model.snapshot.controlActionState == .idle }
+        drainPanelRunLoop()
+        XCTAssertNil(model.requestedControlValue(for: entity.id, controlID: "set_value.value"))
+        let reportedField = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
+        XCTAssertEqual(reportedField.stringValue, "27", "The next report wins, even when unchanged or different from the request")
+        XCTAssertEqual(reportedField.convert(reportedField.bounds, to: nil), idleFrame, "Clearing the request must not move or resize the control")
+        try saveControlSnapshot(panel.contentView, name: "reported-number-panel")
+    }
+
+    func testRequestedValuesEndOnTheNextReportWithoutRequiringAMatch() async {
+        let cases: [(DiscoveredEntity, String, ActionValue)] = [
+            (entity("climate", state: "heat", attributes: ["hvac_modes": .array(["heat", "dry"])]), "set_hvac_mode.hvac_mode", "dry"),
+            (entity("select", state: "Celsius", attributes: ["options": .array(["Celsius", "Fahrenheit"])]), "select_option.option", "Fahrenheit"),
+            (entity("number", state: "27", attributes: ["min": 16, "max": 30, "step": 1]), "set_value.value", 30),
+            (entity("fan", attributes: ["supported_features": 2, "oscillating": false]), "oscillate.oscillating", true),
+            (entity("light", attributes: ["supported_color_modes": .array(["rgb"]), "rgb_color": .array([1, 2, 3])]), "turn_on.rgb_color", .array([4, 5, 6]))
+        ]
+        for (entity, controlID, value) in cases {
+            let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+            let model = PearchHAPanelModel(connector: { _ in .success(rooms: [Room(id: "office", name: "Office", entities: [entity])]) },
+                                          actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                          bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+            model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+            await model.connect()
+            model.setPanelActive(true)
+            let task = Task { await model.setEntityControlValue(entity.id, controlID: controlID, value: value) }
+            await spinUntil { await runner.callCount() == 1 }
+            XCTAssertEqual(model.requestedControlValue(for: entity.id, controlID: controlID), value)
+            XCTAssertFalse(model.applyLiveState(EntityState(id: "sensor.other", name: "Other", state: "0", unit: nil)))
+            XCTAssertTrue(model.hasRequestedControls(for: entity.id))
+            XCTAssertTrue(model.applyLiveState(EntityState(id: entity.id, name: entity.name, state: entity.state, unit: entity.unit,
+                                                           controlAttributes: entity.controlAttributes)))
+            XCTAssertFalse(model.hasRequestedControls(for: entity.id), "An unchanged report also ends the request for \(controlID)")
+            await runner.releaseNext()
+            let sent = await task.value
+            XCTAssertTrue(sent)
+            XCTAssertFalse(model.hasRequestedControls(for: entity.id), "Service acceptance must not resurrect an already reported request")
+        }
+    }
+
+    func testLightBrightnessRequestEndsOnRefreshedValueWithoutLiveUpdates() async throws {
+        let initial = entity("light", state: "off", attributes: ["supported_color_modes": .array(["brightness"]), "brightness": .null])
+        let reported = entity("light", attributes: ["supported_color_modes": .array(["brightness"]), "brightness": 158])
+        let connector = ConnectionResultRecorder(results: [
+            .success(rooms: [Room(id: "office", name: "Office", entities: [initial])]),
+            .success(rooms: [Room(id: "office", name: "Office", entities: [reported])])
+        ])
+        let runner = ActionRunnerRecorder(results: [.success, .success], waitForRelease: true)
+        let model = PearchHAPanelModel(connector: { _ in await connector.next() },
+                                      actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let task = Task { await model.setEntityControlValue(initial.id, controlID: "turn_on.brightness_pct", value: 62) }
+        await spinUntil { await runner.callCount() == 1 }
+        XCTAssertEqual(model.requestedControlValue(for: initial.id, controlID: "turn_on.brightness_pct"), 62)
+        await runner.releaseNext()
+        let sent = await task.value
+        XCTAssertTrue(sent)
+        XCTAssertEqual(model.snapshot.availableRooms.first?.entities.first?.controlAttributes?["brightness"], 158)
+        XCTAssertFalse(model.hasRequestedControls(for: initial.id), "The new REST brightness must retire the request even with unchanged entity IDs")
+        XCTAssertTrue(model.startEntityControlToggle(initial.id, isOn: false), "Control validation must use the refreshed on state")
+        await spinUntil { await runner.callCount() == 2 }
+        await runner.releaseNext()
+        await spinUntil { model.snapshot.controlActionState == .idle }
+        let actions = await runner.actions()
+        XCTAssertEqual(actions.last?.service, "turn_off", "The newly reported light must be switchable off")
+    }
+
+    func testLightBrightnessRequestEndsWhenHomeAssistantReportsOff() async throws {
+        let initial = entity("light", attributes: ["supported_color_modes": .array(["brightness"]), "brightness": 128])
+        for brightness: ActionValue? in [nil, .null, 0, 128] {
+            for useLiveReport in [false, true] {
+                var attributes: [String: ActionValue] = ["supported_color_modes": .array(["brightness"])]
+                attributes["brightness"] = brightness
+                let reported = entity("light", state: "off", attributes: attributes)
+                let connector = ConnectionResultRecorder(results: [
+                    .success(rooms: [Room(id: "office", name: "Office", entities: [initial])]),
+                    .success(rooms: [Room(id: "office", name: "Office", entities: [reported])])
+                ])
+                let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+                let model = PearchHAPanelModel(connector: { _ in await connector.next() },
+                                              actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                              bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+                model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+                await model.connect()
+                model.setPanelActive(true)
+                let task = Task { await model.setEntityControlValue(initial.id, controlID: "turn_on.brightness_pct", value: 0) }
+                await spinUntil { await runner.callCount() == 1 }
+                XCTAssertEqual(model.requestedControlValue(for: initial.id, controlID: "turn_on.brightness_pct"), 0)
+                if useLiveReport {
+                    XCTAssertTrue(model.applyLiveState(EntityState(id: reported.id, name: reported.name, state: reported.state,
+                                                                   unit: nil, controlAttributes: attributes)))
+                    XCTAssertFalse(model.hasRequestedControls(for: initial.id), "An off report must end brightness waiting")
+                }
+                await runner.releaseNext()
+                let sent = await task.value
+                XCTAssertTrue(sent)
+                XCTAssertFalse(model.hasRequestedControls(for: initial.id), "The refreshed off state must end brightness waiting")
+                let current = try XCTUnwrap(model.snapshot.availableRooms.flatMap(\.entities).first)
+                let field = try XCTUnwrap(PearchHAEntityControlField.controls(for: current).first { $0.id == "turn_on.brightness_pct" })
+                XCTAssertEqual(field.input.reportedValue, 0, "An off light has zero brightness, including when HA retains its previous setting")
+                let actions = await runner.actions()
+                XCTAssertEqual(actions, [ActionSpec(domain: "light", service: "turn_on", targetEntityID: initial.id,
+                                                    serviceData: ["brightness_pct": 0])])
+            }
+        }
+    }
+
+    func testRequestedModeIsVisibleInPanelUntilReported() async throws {
+        let entity = entity("climate", state: "heat", attributes: ["hvac_modes": .array(["heat", "dry"])])
+        let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: [Room(id: "office", name: "Office", entities: [entity])]) },
+                                      actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+                                      selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.setPanelActive(true)
+        let task = Task { await model.setEntityControlValue(entity.id, controlID: "set_hvac_mode.hvac_mode", value: "dry") }
+        await spinUntil { await runner.callCount() == 1 }
+        let window = PearchHAApplication.makePanel(model: model)
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil); window.contentViewController = nil }
+        try await Task.sleep(for: .milliseconds(100))
+        window.contentView?.layoutSubtreeIfNeeded()
+        drainPanelRunLoop()
+        let requestedElements = accessibilityElements(in: try XCTUnwrap(window.contentView))
+        XCTAssertTrue(requestedElements.contains { $0.accessibilityLabel() == "dry" || $0.accessibilityValue() as? String == "dry" }, requestedElements.map { $0.accessibilityLabel() ?? "" }.description)
+        XCTAssertTrue(model.hasRequestedControls(for: entity.id))
+        try saveControlSnapshot(window.contentView, name: "requested-mode-panel")
+        XCTAssertTrue(model.applyLiveState(EntityState(id: entity.id, name: entity.name, state: "heat", unit: nil, controlAttributes: entity.controlAttributes)))
+        drainPanelRunLoop()
+        let reportedElements = accessibilityElements(in: try XCTUnwrap(window.contentView))
+        XCTAssertTrue(reportedElements.contains { $0.accessibilityLabel() == "heat" || $0.accessibilityValue() as? String == "heat" }, reportedElements.map { $0.accessibilityLabel() ?? "" }.description)
+        XCTAssertFalse(model.hasRequestedControls(for: entity.id))
+        await runner.releaseNext()
+        _ = await task.value
+    }
+
+    func testOlderRefreshCannotRetireANewerControlRequest() async {
+        let clock = TestPearchClock()
+        let entered = ConnectionGate()
+        let release = ConnectionGate()
+        let calls = CallCounter()
+        let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+        let entity = entity("number", state: "27", attributes: ["min": 16, "max": 30])
+        let model = PearchHAPanelModel(connector: { _ in
+            if await calls.next() == 2 {
+                await entered.open()
+                await release.wait()
+            }
+            return .success(rooms: [Room(id: "office", name: "Office", entities: [entity])])
+        }, actionRunner: { form, action in await runner.run(form: form, action: action) }, clock: clock,
+                                      bulkSyncConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.setPanelActive(true)
+        defer { model.setPanelActive(false) }
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .seconds(45))
+        await entered.wait()
+        let task = Task { await model.setEntityControlValue(entity.id, controlID: "set_value.value", value: 30) }
+        await spinUntil { await runner.callCount() == 1 }
+        await release.open()
+        await spinUntil { model.snapshot.refreshCount == 1 }
+        XCTAssertEqual(model.requestedControlValue(for: entity.id, controlID: "set_value.value"), 30)
+        XCTAssertTrue(model.applyLiveState(EntityState(id: entity.id, name: entity.name, state: "28", unit: nil, controlAttributes: entity.controlAttributes)))
+        XCTAssertFalse(model.hasRequestedControls(for: entity.id))
+        await runner.releaseNext()
+        _ = await task.value
+    }
+
+    func testRequestedValueSurvivesRefreshFailureButEndsOnCancellationOrServiceFailure() async {
+        let entity = entity("number", state: "27", attributes: ["min": 16, "max": 30])
+        let rooms = [Room(id: "office", name: "Office", entities: [entity])]
+        let connection = ConnectionResultRecorder(results: [.success(rooms: rooms), .failure(.unreachable(host: "localhost")), .success(rooms: rooms)])
+        let runner = ActionRunnerRecorder(results: [.success, .failed("Rejected"), .success], waitForRelease: true)
+        let model = PearchHAPanelModel(connector: { _ in await connection.next() },
+                                      actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let first = Task { await model.setEntityControlValue(entity.id, controlID: "set_value.value", value: 30) }
+        await spinUntil { await runner.callCount() == 1 }
+        await runner.releaseNext()
+        _ = await first.value
+        XCTAssertEqual(model.requestedControlValue(for: entity.id, controlID: "set_value.value"), 30)
+        XCTAssertNotNil(model.snapshot.controlActionState.failureMessage(for: entity.id))
+        await model.refresh()
+        XCTAssertFalse(model.hasRequestedControls(for: entity.id))
+
+        let second = Task { await model.setEntityControlValue(entity.id, controlID: "set_value.value", value: 29) }
+        await spinUntil { await runner.callCount() == 2 }
+        await runner.releaseNext()
+        _ = await second.value
+        XCTAssertFalse(model.hasRequestedControls(for: entity.id))
+        XCTAssertEqual(model.snapshot.controlActionState.failureMessage(for: entity.id), "Rejected")
+
+        let third = Task { await model.setEntityControlValue(entity.id, controlID: "set_value.value", value: 28) }
+        await spinUntil { await runner.callCount() == 3 }
+        third.cancel()
+        await runner.releaseNext()
+        _ = await third.value
+        XCTAssertFalse(model.hasRequestedControls(for: entity.id))
+        XCTAssertEqual(model.snapshot.controlActionState, .idle)
+    }
+
     func testNumericInputsDebounceTypingInPanelAndPopup() async throws {
         for inline in [true, false] {
             let clock = TestPearchClock()
-            let runner = ActionRunnerRecorder(results: [.success])
+            let runner = ActionRunnerRecorder(results: [.success, .success], waitForRelease: true)
             let entity = DiscoveredEntity(id: "number.office", name: "Target temperature", state: "22", unit: "°C",
                                           areaID: "office", deviceID: nil, controlAttributes: ["min": 16, "max": 30, "step": 0.5])
             let model = PearchHAPanelModel(connector: { _ in .success(rooms: [Room(id: "office", name: "Office", entities: [entity])]) },
@@ -457,6 +721,7 @@ final class PearchHAUITests: XCTestCase {
                                           selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
             model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
             await model.connect()
+            model.setPanelActive(true)
             let window: NSWindow
             if inline {
                 window = PearchHAApplication.makePanel(model: model)
@@ -468,6 +733,8 @@ final class PearchHAUITests: XCTestCase {
             defer { window.orderOut(nil); window.contentView = nil; window.contentViewController = nil }
             drainPanelRunLoop()
             let field = try XCTUnwrap(editableTextFields(in: window.contentView).first)
+            let idleFrame = field.convert(field.bounds, to: nil)
+            let idleSize = window.contentView?.fittingSize
             try saveControlSnapshot(window.contentView, name: inline ? "numeric-panel" : "numeric-popup")
             XCTAssertFalse(nativeButtons(in: window.contentView).contains { $0.title == "Set" })
             try setNativeTextFieldDraft("23", for: field, in: window)
@@ -489,6 +756,16 @@ final class PearchHAUITests: XCTestCase {
             let afterDelay = await runner.callCount()
             XCTAssertEqual(afterDelay, 1, "Only the final edit is sent")
 
+            drainPanelRunLoop()
+            XCTAssertEqual(field.convert(field.bounds, to: nil), idleFrame, "The pending indicator must not shift the input")
+            XCTAssertEqual(window.contentView?.fittingSize, idleSize, "Waiting must not resize the panel or editor")
+            XCTAssertTrue(model.applyLiveState(EntityState(id: entity.id, name: entity.name, state: entity.state, unit: entity.unit,
+                                                           controlAttributes: entity.controlAttributes)))
+            drainPanelRunLoop()
+            XCTAssertEqual(field.convert(field.bounds, to: nil), idleFrame)
+            XCTAssertEqual(window.contentView?.fittingSize, idleSize, "A report arriving before service completion must not add a status row")
+            await runner.releaseNext()
+
             await spinUntil { model.snapshot.controlActionState == .idle }
             drainPanelRunLoop()
             let stepper = try XCTUnwrap(nativeSteppers(in: window.contentView).first)
@@ -506,6 +783,8 @@ final class PearchHAUITests: XCTestCase {
             await spinUntil { await runner.callCount() == 2 }
             let steppedActions = await runner.actions()
             XCTAssertEqual(steppedActions.last?.serviceData, ["value": 23.5])
+            await runner.releaseNext()
+            await spinUntil { model.snapshot.controlActionState == .idle }
         }
     }
 
@@ -3011,7 +3290,7 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.entityState("switch.office_lamp"), "off")
     }
 
-    func testBuiltInControlSuccessReassertsTargetStateAfterStaleRefreshDuringInFlightAction() async {
+    func testBuiltInControlKeepsTheNextReportedStateAfterServiceAcceptance() async {
         let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
         let connector = ConnectionResultRecorder(results: [
             .success(rooms: controlRooms()),
@@ -3041,9 +3320,28 @@ final class PearchHAUITests: XCTestCase {
             model.snapshot.controlActionState == .idle
         }
 
-        XCTAssertEqual(model.entityState("switch.office_lamp"), "on")
+        XCTAssertEqual(model.entityState("switch.office_lamp"), "off")
+        XCTAssertFalse(model.hasRequestedControls(for: "switch.office_lamp"))
         let _hoisted23 = await connector.callCount()
         XCTAssertEqual(_hoisted23, 2)
+    }
+
+    func testCancelingControlPreservesItsNextReportedState() async {
+        let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: controlRooms()) },
+                                      actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.setPanelActive(true)
+        XCTAssertTrue(model.startEntityControlToggle("switch.office_lamp", isOn: true))
+        await spinUntil { await runner.callCount() == 1 }
+        XCTAssertTrue(model.applyLiveState(EntityState(id: "switch.office_lamp", name: "Office lamp", state: "on", unit: nil)))
+        XCTAssertFalse(model.hasRequestedControls(for: "switch.office_lamp"))
+        model.cancelInFlightAction()
+        await runner.releaseNext()
+        XCTAssertEqual(model.entityState("switch.office_lamp"), "on", "Cancellation must not roll back an already reported value")
+        XCTAssertEqual(model.snapshot.controlActionState, .idle)
     }
 
     func testBuiltInControlSuccessIgnoresStaleLiveUpdateWhileActionIsInFlight() async {
@@ -3235,7 +3533,7 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.entityPosition("cover.office_blinds"), 42)
     }
 
-    func testBuiltInCoverPositionSuccessReassertsTargetAfterStaleRefreshDuringInFlightAction() async {
+    func testBuiltInCoverPositionKeepsTheNextReportAfterServiceAcceptance() async {
         let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
         let connector = ConnectionResultRecorder(results: [
             .success(rooms: controlRooms()),
@@ -3266,7 +3564,8 @@ final class PearchHAUITests: XCTestCase {
         }
 
         XCTAssertEqual(model.entityState("cover.office_blinds"), "open")
-        XCTAssertEqual(model.entityPosition("cover.office_blinds"), 75)
+        XCTAssertEqual(model.entityPosition("cover.office_blinds"), 42)
+        XCTAssertFalse(model.hasRequestedControls(for: "cover.office_blinds"))
         let _hoisted30 = await connector.callCount()
         XCTAssertEqual(_hoisted30, 2)
     }
@@ -5639,13 +5938,19 @@ final class PearchHAUITests: XCTestCase {
         drainPanelRunLoop()
         let switches = nativeSwitches(in: panel.contentView)
         XCTAssertEqual(switches.count, 3)
+        let idleFrames = switches.map { $0.convert($0.bounds, to: nil) }
         let control = try XCTUnwrap(switches.first)
         control.performClick(nil)
         await spinUntil { await runner.callCount() == 1 }
         await spinUntil("every switch reflects the shared command lock") { switches.allSatisfy { !$0.isEnabled } }
+        drainPanelRunLoop()
+        XCTAssertEqual(switches.map { $0.convert($0.bounds, to: nil) }, idleFrames, "Waiting must not shift toggle controls")
+        try saveControlSnapshot(panel.contentView, name: "requested-switch-panel")
         await runner.releaseNext()
         await spinUntil { !model.snapshot.controlActionState.isRunning }
         await spinUntil("switches recover after the failed command") { switches.allSatisfy(\.isEnabled) }
+        drainPanelRunLoop()
+        XCTAssertEqual(switches.map { $0.convert($0.bounds, to: nil).minX }, idleFrames.map(\.minX), "The failure message must not shift the control column")
         XCTAssertEqual(control.state, .off)
     }
 
@@ -10775,6 +11080,13 @@ final class PearchHAUITests: XCTestCase {
 
     private func editableTextFields(in root: NSView?) -> [NSTextField] {
         nativeViews(in: root, of: NSTextField.self).filter { !$0.isHiddenOrHasHiddenAncestor && $0.isEditable }
+    }
+
+    private func accessibilityElements(in root: Any) -> [any NSAccessibilityProtocol] {
+        guard let element = root as? any NSAccessibilityProtocol else { return [] }
+        let children = element.accessibilityChildren() ?? []
+        let descendants: [Any] = children.isEmpty ? ((root as? NSView)?.subviews ?? []) : children
+        return [element] + descendants.flatMap { accessibilityElements(in: $0) }
     }
 
     private func nativeSteppers(in root: NSView?) -> [NSStepper] {

@@ -101,7 +101,13 @@ edited directly in its row: choices use a dropdown, numbers use a borderless edi
 value and an optional stepper, booleans use a switch, and actions use a named button.
 Position, brightness, fan speed and volume use a slider with a quiet value. Clicking
 that value reveals precise numeric entry. Sliders have no additional stepper and
-commit on release. Multiple settings open an editor from the value marked with a slider icon. Existing on/off
+commit on release. Requested values, including choices and switches, remain visible
+with a small clock and tooltip until Home Assistant next reports that value, even
+if it differs from the request. Service acceptance alone does not clear this status.
+An off light displays zero brightness, including when HA clears its brightness attribute.
+The status space stays reserved so pending feedback does not move the controls.
+Failures clear rejected requests. No extra polling is started.
+Multiple settings open an editor from the value marked with a slider icon. Existing on/off
 switches and cover controls remain inline. Tooltips list the domain and available
 settings, options and numeric bounds. All controls use Home Assistant's current
 feature flags, options and numeric bounds:
