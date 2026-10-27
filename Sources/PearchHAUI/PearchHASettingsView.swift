@@ -6,12 +6,7 @@ import PearchHACore
 import PearchHASupport
 
 
-/// Dedicated, resizable Settings window content for PearchHA.
-///
-/// Organized as a `TabView` with three tabs: Connection, Entities, and About.
-/// Per-entity display and action configuration stays inline inside the
-/// Entities tree, matching the documented UX. This view hosts the settings-only
-/// controls relocated out of the cramped menu-bar panel.
+/// Native settings with a stable entity list and a separate, adaptive inspector.
 public struct PearchHASettingsView: View {
     /// Selectable sections of the Settings window, shown in the sidebar rail in
     /// declaration order.
@@ -61,20 +56,18 @@ public struct PearchHASettingsView: View {
     @State private var draggedSelectionItem: SelectionDragItem?
     @State private var selectedTab: Tab
     /// The single entity whose inspector is open in the Entities tab, or `nil`
-    /// when every row is collapsed. Only one inspector is open at a time.
+    /// when no entity is selected for inspection.
     @State private var inspectedEntityID: EntityID?
+    @State private var selectedRoomID: String = ""
+    @State private var entityDomain: String = ""
+    @State private var entityScope: String = "all"
     /// A one-shot scroll target consumed when Settings was opened for a
     /// specific entity from outside the Entities tab. Once revealed, the list
     /// stays under the user's control instead of snapping back on later view
     /// updates or manual scrolling.
     @State private var pendingRevealEntityID: EntityID?
-    /// Room ids (``RoomID/rawValue``) whose entity rows are collapsed in the
-    /// Entities tab. Rooms default to expanded, so a room is hidden only when it
-    /// appears here. A live search or an open inspector force the affected room
-    /// visible regardless of this set, without mutating it, so clearing the
-    /// search restores the prior collapsed state.
-    /// Rooms the user has explicitly expanded in the Entities tab. Empty by
-    /// default, so every room starts collapsed.
+    /// Rooms expanded by the user. Search and inspection temporarily reveal
+    /// matching rooms without changing this selection.
     @State private var expandedRooms: Set<String> = []
     @State private var displayPreferences: PearchHADisplayPreferences
     @State private var pendingDisplayPreferencesSave: Task<Void, Never>?
@@ -135,7 +128,15 @@ public struct PearchHASettingsView: View {
     }
 
     private var settingsTree: [SelectableRoom] {
-        viewState.settingsSelectionTree
+        viewState.settingsSelectionTree.compactMap { room in
+            guard selectedRoomID.isEmpty || room.id.rawValue == selectedRoomID else { return nil }
+            let entities = room.entities.filter { item in
+                (entityDomain.isEmpty || item.entity.id.domain == entityDomain)
+                    && (entityScope != "selected" || item.isSelected)
+                    && (entityScope != "controllable" || PearchHAEntityControlField.controlHelp(for: item.entity) != nil)
+            }
+            return entities.isEmpty ? nil : SelectableRoom(id: room.id, name: room.name, entities: entities)
+        }
     }
 
     private var oauthState: PearchHAOAuthSignInState {
@@ -202,7 +203,7 @@ public struct PearchHASettingsView: View {
     /// The deterministic left sidebar rail: a fixed-width vertical stack of one
     /// selectable row per ``Tab`` case, in declaration order. Unlike
     /// `NavigationSplitView`, this plain `HStack` rail always renders and never
-    /// auto-collapses in the fixed-size Settings window. Each row is a focusable
+    /// auto-collapses when the Settings window is resized. Each row is a focusable
     /// `Button` carrying a spoken accessibility name; the selected row is
     /// highlighted with the palette accent (filled rounded background, accent
     /// text) and marked with the selected trait. The rail sits on the palette's
@@ -213,6 +214,14 @@ public struct PearchHASettingsView: View {
                 ForEach(Tab.allCases, id: \.self) { tab in
                     sidebarRow(tab)
                 }
+                if selectedTab == .entities {
+                    Divider().padding(.vertical, 10)
+                    Text("Rooms").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 8)
+                    roomFilterButton("All rooms", id: "")
+                    ForEach(snapshot.availableRooms, id: \.id) { room in
+                        roomFilterButton(room.name, id: room.id.rawValue)
+                    }
+                }
             }
             .padding(.horizontal, PearchHASpacing.sm)
             .padding(.vertical, PearchHASpacing.md)
@@ -222,6 +231,25 @@ public struct PearchHASettingsView: View {
         .frame(maxHeight: .infinity)
         .background(railBackground.ignoresSafeArea())
         .accessibilityLabel("Settings sections")
+    }
+
+    private func roomFilterButton(_ title: String, id: String) -> some View {
+        Button {
+            selectedRoomID = id
+            inspectedEntityID = nil
+        } label: {
+            HStack {
+                Text(title).lineLimit(1)
+                Spacer(minLength: 0)
+                if selectedRoomID == id { Image(systemName: "checkmark").accessibilityHidden(true) }
+            }
+            .padding(8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(title)
+        .accessibilityLabel("Filter room: \(title)")
+        .accessibilityAddTraits(selectedRoomID == id ? [.isSelected] : [])
     }
 
     /// A single selectable rail row: SF Symbol + label in a full-width tappable
@@ -427,21 +455,6 @@ public struct PearchHASettingsView: View {
         .overlay(
             RoundedRectangle(cornerRadius: PearchHACornerRadius.card, style: .continuous)
                 .strokeBorder(palette.borderSubtle, lineWidth: 1)
-        )
-    }
-
-    /// A compact card variant used for inline inspectors and nested groups, with
-    /// the slightly more elevated surface so it reads as sitting above a card.
-    private func settingsInsetGroup<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
-        return VStack(alignment: .leading, spacing: PearchHASpacing.sm) {
-            content()
-        }
-        .padding(PearchHASpacing.md)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: PearchHACornerRadius.control, style: .continuous)
-                .fill(palette.surfacePanelElevated)
         )
     }
 
@@ -1158,12 +1171,12 @@ public struct PearchHASettingsView: View {
     // MARK: Privacy
 
     /// Privacy statement: a static, honest summary of what PearchHA reads, where
-    /// credentials live, and the absence of analytics or third-party calls.
+    /// credentials live, and the connections used by each distribution channel.
     private var privacyTab: some View {
         settingsPage(title: "Privacy", systemImage: Tab.privacy.systemImage) {
             settingsCard {
                 settingsSection(title: "What PearchHA reads", systemImage: "doc.text.magnifyingglass") {
-                    Text("PearchHA talks only to the Home Assistant server you configure. It reads your Home Assistant address and the access token (or browser sign-in) you provide, plus the entity states needed to show your values.")
+                    Text("PearchHA connects to the Home Assistant addresses you configure. It reads your Home Assistant address and the access token (or browser sign-in) you provide, plus the entity states needed to show your values.")
                         .font(.callout)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -1174,8 +1187,13 @@ public struct PearchHASettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 settingsSectionDivider
-                settingsSection(title: "No tracking", systemImage: "hand.raised") {
-                    Text("PearchHA makes no analytics, telemetry, or third-party network calls. Nothing is sent anywhere except your own Home Assistant server.")
+                settingsSection(title: "Retention and removal", systemImage: "trash") {
+                    Text("Entity history is cached in memory while the app runs. Your connection and display preferences remain on this Mac until you remove them. Signing out removes the saved sign-in session. You can revoke a token in your Home Assistant profile at any time. Protected custom-action values remain in Keychain until the corresponding action is removed.")
+                        .font(.callout).fixedSize(horizontal: false, vertical: true)
+                }
+                settingsSectionDivider
+                settingsSection(title: "Network and updates", systemImage: "hand.raised") {
+                    Text("PearchHA includes no analytics or advertising. Home Assistant credentials and entity data are not sent to the developer. Direct-download builds contact GitHub and the update feed to check for app updates, which exposes ordinary connection information such as your IP address and app version. App Store builds use Apple’s update system. Links open in your browser only when you choose them.")
                         .font(.callout)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -1464,6 +1482,9 @@ public struct PearchHASettingsView: View {
 
     @ViewBuilder
     private var aboutUpdateAction: some View {
+        #if PEARCHHA_APP_STORE
+        Link("Open App Store updates", destination: URL(string: "macappstore://showUpdatesPage")!)
+        #else
         switch releaseState {
         case let .updateAvailable(update):
             Link(destination: update.downloadURL) {
@@ -1494,9 +1515,13 @@ public struct PearchHASettingsView: View {
             .buttonStyle(PearchHAIconButtonStyle(prominentOnHover: true))
             .accessibilityLabel("Check for updates")
         }
+        #endif
     }
 
     private var aboutUpdateSummary: String {
+        #if PEARCHHA_APP_STORE
+        "App updates are managed by the Mac App Store."
+        #else
         switch releaseState {
         case .idle:
             "Check GitHub for the newest published release."
@@ -1509,6 +1534,7 @@ public struct PearchHASettingsView: View {
         case let .failed(message):
             message
         }
+        #endif
     }
 
     private var aboutUpdateSummaryColor: Color {
@@ -1540,23 +1566,99 @@ public struct PearchHASettingsView: View {
     private static let refreshIntervalOptions = PearchHAMenuBarRefreshInterval.allCases
 
     private var entitiesTab: some View {
-        ScrollViewReader { scrollProxy in
-            settingsPage(title: "Entities", systemImage: Tab.entities.systemImage) {
-                settingsContent
-            }
-            .onAppear {
-                schedulePendingReveal(using: scrollProxy)
+        GeometryReader { geometry in
+            let showsSideInspector = geometry.size.width >= 740
+            HStack(spacing: 0) {
+                ZStack(alignment: .topLeading) {
+                    ScrollViewReader { scrollProxy in
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Entities").font(.title2.weight(.semibold))
+                            entityFilters
+                            ScrollView {
+                                settingsContent
+                                    .padding(.bottom, 16)
+                            }
+                        }
+                        .padding(16)
+                        .onAppear { schedulePendingReveal(using: scrollProxy) }
+                    }
+                    .opacity(!showsSideInspector && inspectedEntityID != nil ? 0 : 1)
+                    .allowsHitTesting(showsSideInspector || inspectedEntityID == nil)
+                    .accessibilityHidden(!showsSideInspector && inspectedEntityID != nil)
+                    if !showsSideInspector, inspectedEntityID != nil { entityInspector }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if showsSideInspector {
+                    Divider()
+                    entityInspector.frame(width: 360)
+                }
             }
         }
+        .toggleStyle(PearchHASwitchToggleStyle())
+    }
+
+    private var entityFilters: some View {
+        VStack(spacing: 10) {
+            PearchHACapsuleField(systemImage: "magnifyingglass") {
+                TextField("Search", text: selectionSearchBinding).textFieldStyle(.plain)
+                    .accessibilityLabel("Search entities by name, ID or room")
+            }
+            HStack {
+                Picker("Type", selection: $entityDomain) {
+                    Text("All types").tag("")
+                    ForEach(Array(Set(snapshot.availableRooms.flatMap(\.entities).map { $0.id.domain })).sorted(), id: \.self) {
+                        Text($0).tag($0)
+                    }
+                }
+                .labelsHidden().accessibilityLabel("Entity type")
+                Picker("Show", selection: $entityScope) {
+                    Text("All entities").tag("all")
+                    Text("In panel").tag("selected")
+                    Text("Controllable").tag("controllable")
+                }
+                .labelsHidden().accessibilityLabel("Entity filter")
+                Spacer(minLength: 0)
+            }
+            .controlSize(.small)
+        }
+    }
+
+    private var entityInspector: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let id = inspectedEntityID,
+               let room = snapshot.availableRooms.first(where: { $0.entities.contains { $0.id == id } }),
+               let entity = room.entities.first(where: { $0.id == id }) {
+                HStack {
+                    Text(entity.name).font(.headline).textSelection(.enabled)
+                    Spacer(minLength: 8)
+                    Button { inspectedEntityID = nil } label: {
+                        Image(systemName: "xmark").frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Close details").accessibilityLabel("Close entity details")
+                }
+                ScrollView {
+                    entityDetailSections(for: entity, roomName: room.name)
+                        .padding(.bottom, 16)
+                }
+            } else {
+                Spacer()
+                Text("Select an entity").font(.headline)
+                Text("Choose a value to edit its display, menu bar, thresholds and actions.")
+                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Spacer()
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(PearchHATheme.Dashboard.palette(colorScheme).surfacePanel)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Entity details")
     }
 
     private var settingsContent: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                PearchHACapsuleField(systemImage: "magnifyingglass") {
-                    TextField("Search", text: selectionSearchBinding)
-                        .textFieldStyle(.plain)
-                }
                 Button {
                     model.setAllEntities(isSelected: true)
                 } label: {
@@ -1697,15 +1799,16 @@ public struct PearchHASettingsView: View {
     }
 
     private var canReorderSelection: Bool {
-        snapshot.canReorderSelectionWithKeyboard
+        snapshot.canReorderSelectionWithKeyboard && !isSelectionFiltered
     }
 
-    /// True while the user is filtering the entity tree. During a search every
+    /// True while the user is filtering the entity tree. While a filter is active, every
     /// rendered room is forced expanded so matches are never hidden behind a
     /// collapsed header; the stored ``expandedRooms`` set is left untouched so
-    /// clearing the search restores the prior state.
-    private var isSelectionSearching: Bool {
+    /// clearing the filters restores the prior state.
+    private var isSelectionFiltered: Bool {
         !snapshot.selectionQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !selectedRoomID.isEmpty || !entityDomain.isEmpty || entityScope != "all"
     }
 
     /// Whether `room` should show its entity rows. Rooms default to collapsed;
@@ -1719,7 +1822,7 @@ public struct PearchHASettingsView: View {
         return SelectionRoomCollapse.isExpanded(
             roomID: room.id.rawValue,
             expandedRoomIDs: expandedRooms,
-            isSearching: isSelectionSearching,
+            isSearching: isSelectionFiltered,
             roomContainsInspectedEntity: containsInspected
         )
     }
@@ -1730,12 +1833,12 @@ public struct PearchHASettingsView: View {
         SelectionRoomCollapse.allCollapsed(
             roomIDs: settingsTree.map { $0.id.rawValue },
             expandedRoomIDs: expandedRooms,
-            isSearching: isSelectionSearching
+            isSearching: isSelectionFiltered
         )
     }
 
     /// A small token-styled control that collapses or expands every room at once.
-    /// While searching it is disabled, since search already forces rooms open.
+    /// While filtering it is disabled, since filters already force rooms open.
     private var collapseAllControl: some View {
         let expandAll = allRoomsCollapsed
         return Button {
@@ -1754,7 +1857,7 @@ public struct PearchHASettingsView: View {
             .labelStyle(.titleAndIcon)
         }
         .buttonStyle(PearchHAIconButtonStyle())
-        .disabled(isSelectionSearching || settingsTree.isEmpty)
+        .disabled(isSelectionFiltered || settingsTree.isEmpty)
         .help(expandAll ? "Show every room's values" : "Hide every room's values")
         .accessibilityLabel(expandAll ? "Expand all rooms" : "Collapse all rooms")
     }
@@ -1879,7 +1982,7 @@ public struct PearchHASettingsView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(isSelectionSearching)
+            .disabled(isSelectionFiltered)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(room.name), \(countLabel)")
             .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
@@ -1903,8 +2006,8 @@ public struct PearchHASettingsView: View {
     /// A compact, collapsed entity row: selection checkbox, domain icon, name,
     /// a type/unit caption, status indicators, reorder controls, and a
     /// disclosure toggle that opens this entity's inspector. Clicking the row
-    /// (or the disclosure) opens the single inspector inline beneath the row;
-    /// only one inspector is open at a time.
+    /// (or the disclosure) selects the independent detail pane. Row geometry
+    /// remains unchanged while another entity is inspected.
     private func selectionEntityRow(
         roomName: String,
         _ selectable: SelectableEntity,
@@ -1980,11 +2083,6 @@ public struct PearchHASettingsView: View {
             .onTapGesture {
                 toggleEntityInspector(entity.id)
             }
-            if isExpanded {
-                settingsInsetGroup {
-                    entityDetailSections(for: entity, roomName: roomName)
-                }
-            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
@@ -2055,7 +2153,7 @@ public struct PearchHASettingsView: View {
         }
     }
 
-    /// The bespoke detail pane shown when an entity row is expanded: clearly
+    /// The shared detail pane for the selected entity: clearly
     /// labelled Display, Menu bar, Alerts, and Buttons sections with
     /// accent-tinted headers and accent-tinted controls, separated by hairlines.
     private func entityDetailSections(for entity: DiscoveredEntity, roomName: String) -> some View {
@@ -2101,8 +2199,9 @@ public struct PearchHASettingsView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(fields.enumerated()), id: \.offset) { _, field in
-                settingsControlRow(field.label) {
-                    VStack(alignment: .trailing, spacing: 3) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(field.label).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 3) {
                         if let destination = metadataLink(for: field, links: links) {
                             Link(destination: destination) {
                                 Label {
@@ -2133,7 +2232,7 @@ public struct PearchHASettingsView: View {
                     : PearchHATypography.caption()
             )
             .foregroundStyle(.primary)
-            .multilineTextAlignment(.trailing)
+            .multilineTextAlignment(.leading)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -3269,7 +3368,10 @@ public struct PearchHASettingsView: View {
     }
 
     private func moveControlHelp(canMove: Bool, boundaryReason: String) -> String {
-        model.snapshot.selectionReorderAccessibilityHint(canMove: canMove, boundaryReason: boundaryReason)
+        if !selectedRoomID.isEmpty || !entityDomain.isEmpty || entityScope != "all" {
+            return "Clear filters to reorder entities and rooms"
+        }
+        return model.snapshot.selectionReorderAccessibilityHint(canMove: canMove, boundaryReason: boundaryReason)
     }
 
     /// The Entities search binding. The field edits view-local state so every

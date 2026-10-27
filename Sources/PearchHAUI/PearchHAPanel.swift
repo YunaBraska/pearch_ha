@@ -1116,11 +1116,6 @@ public final class PearchHAPanelModel: ObservableObject {
         }
     }
 
-    /// Dismisses the current history detail when the panel scrolls.
-    public func notePanelScrollActivity() {
-        dismissHistoryPopover()
-    }
-
     public func beginTransientUITracking() {
         transientUITrackingDepth += 1
     }

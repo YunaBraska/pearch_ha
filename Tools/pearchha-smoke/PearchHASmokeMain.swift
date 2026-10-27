@@ -3413,6 +3413,7 @@ struct PearchHASmoke {
         let median = sortedSamples[sortedSamples.count / 2]
         let maximum = sortedSamples[sortedSamples.index(before: sortedSamples.endIndex)]
 
+        print("Cached panel open: median \(milliseconds(median)) ms, maximum \(milliseconds(maximum)) ms")
         try expect(
             median <= SmokePerformanceBudget.panelOpenMedianNanoseconds,
             "cached panel open median exceeds \(SmokePerformanceBudget.panelOpenMedianMilliseconds) ms: \(milliseconds(median)) ms"

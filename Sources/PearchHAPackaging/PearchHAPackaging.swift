@@ -3062,11 +3062,13 @@ private struct PearchHAInfoPlist: Encodable {
     let infoDictionaryVersion = "6.0"
     let appName: String
     let packageType = "APPL"
+    let applicationCategory = "public.app-category.utilities"
     let version: String
     let buildVersion: String
     let minimumSystemVersion: String
     let highResolutionCapable = true
     let agentApplication = true
+    let localNetworkUsageDescription = "PearchHA connects to your Home Assistant instance on your network."
     let iconFileName: String?
     let updateFeedURL: String?
     let updatePublicKey: String?
@@ -3108,11 +3110,13 @@ private struct PearchHAInfoPlist: Encodable {
         case infoDictionaryVersion = "CFBundleInfoDictionaryVersion"
         case appName = "CFBundleName"
         case packageType = "CFBundlePackageType"
+        case applicationCategory = "LSApplicationCategoryType"
         case version = "CFBundleShortVersionString"
         case buildVersion = "CFBundleVersion"
         case minimumSystemVersion = "LSMinimumSystemVersion"
         case highResolutionCapable = "NSHighResolutionCapable"
         case agentApplication = "LSUIElement"
+        case localNetworkUsageDescription = "NSLocalNetworkUsageDescription"
         case iconFileName = "CFBundleIconFile"
         case updateFeedURL = "SUFeedURL"
         case updatePublicKey = "SUPublicEDKey"

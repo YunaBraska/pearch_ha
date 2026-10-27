@@ -100,6 +100,89 @@ final class PearchHAPersistenceTests: XCTestCase {
         XCTAssertEqual(try store.load(), configuration)
     }
 
+    func testConfigStoreImportsValidatedConfigurationWithoutChangingSource() throws {
+        let sourceURL = temporaryConfigURL()
+        let destinationURL = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: destinationURL.deletingLastPathComponent())
+        }
+        let configuration = PearchHAConfiguration(
+            selectedEntityIDs: ["sensor.office_temperature"],
+            menuBarEntityIDs: ["sensor.office_temperature"],
+            connectionProfile: PearchHAConnectionProfile(urlString: "https://homeassistant.local:8123"),
+            roomOrder: ["office"],
+            entityOrder: ["sensor.office_temperature"],
+            isEntitySelectionExplicit: true,
+            themeMode: .dark,
+            liveUpdatesEnabled: true
+        )
+        let sourceStore = JSONConfigStore(fileURL: sourceURL)
+        let destinationStore = JSONConfigStore(fileURL: destinationURL)
+        try sourceStore.save(configuration)
+        let sourceBytes = try Data(contentsOf: sourceURL)
+
+        XCTAssertEqual(try destinationStore.save(try destinationStore.readImport(from: sourceURL)), configuration)
+        XCTAssertEqual(try destinationStore.load(), configuration)
+        XCTAssertEqual(try Data(contentsOf: sourceURL), sourceBytes)
+
+        XCTAssertEqual(try destinationStore.save(try destinationStore.readImport(from: sourceURL)), configuration)
+        XCTAssertEqual(try Data(contentsOf: sourceURL), sourceBytes)
+    }
+
+    func testConfigStoreImportsConfirmedSnapshotWithoutRereadingChangedSource() throws {
+        let sourceURL = temporaryConfigURL()
+        let destinationURL = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: destinationURL.deletingLastPathComponent())
+        }
+        let sourceStore = JSONConfigStore(fileURL: sourceURL)
+        let destinationStore = JSONConfigStore(fileURL: destinationURL)
+        let confirmed = PearchHAConfiguration(selectedEntityIDs: ["sensor.confirmed"])
+        let changed = PearchHAConfiguration(selectedEntityIDs: ["sensor.changed"])
+        try sourceStore.save(confirmed)
+
+        let snapshot = try destinationStore.readImport(from: sourceURL)
+        try sourceStore.save(changed)
+        XCTAssertEqual(try destinationStore.save(snapshot), confirmed)
+        XCTAssertEqual(try destinationStore.load(), confirmed)
+    }
+
+    func testConfigStoreImportRejectsMissingMalformedUnsupportedAndInvalidSourcesWithoutOverwrite() throws {
+        let sourceURL = temporaryConfigURL()
+        let destinationURL = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: destinationURL.deletingLastPathComponent())
+        }
+        let destinationStore = JSONConfigStore(fileURL: destinationURL)
+        let existing = PearchHAConfiguration(selectedEntityIDs: ["sensor.keep"])
+        try destinationStore.save(existing)
+
+        XCTAssertThrowsError(try destinationStore.readImport(from: sourceURL)) { error in
+            guard case let .readFailed(url, _) = error as? ConfigStoreError else {
+                return XCTFail("expected source read failure, got \(error)")
+            }
+            XCTAssertEqual(url, sourceURL)
+        }
+
+        try FileManager.default.createDirectory(at: sourceURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("not json".utf8).write(to: sourceURL)
+        XCTAssertThrowsError(try destinationStore.readImport(from: sourceURL))
+        XCTAssertEqual(try destinationStore.load(), existing)
+
+        try Data("{\"schemaVersion\": 99}".utf8).write(to: sourceURL)
+        XCTAssertThrowsError(try destinationStore.readImport(from: sourceURL)) { error in
+            XCTAssertEqual(error as? ConfigStoreError, .unsupportedSchemaVersion(99))
+        }
+        XCTAssertEqual(try destinationStore.load(), existing)
+
+        try Data(#"{"schemaVersion":1,"customActions":[{"id":"bad","entityID":"sensor.a","title":" ","action":{"domain":"script","service":"turn_on","targetEntityID":"script.a","serviceData":{}},"requiresConfirmation":false}]}"#.utf8).write(to: sourceURL)
+        XCTAssertThrowsError(try destinationStore.readImport(from: sourceURL))
+        XCTAssertEqual(try destinationStore.load(), existing)
+    }
+
     func testJSONConfigStoreDefaultsMissingHistoryRangeToInheritGlobal() throws {
         let url = temporaryConfigURL()
         defer {

@@ -12,6 +12,7 @@ import ServiceManagement
 import Sparkle
 #endif
 import SwiftUI
+import UniformTypeIdentifiers
 
 private enum AppShellLayout {
     static let panelContentSize = NSSize(width: 384, height: 468)
@@ -35,7 +36,7 @@ public final class PearchHAStatusPanel: NSPanel {
     /// Invoked when the user presses Cmd+, inside the panel, routing to the
     /// app shell's open-settings path. Set by the owning ``PearchHAApplication``.
     public var onOpenSettings: (() -> Void)?
-    public var onScrollWheelEvent: (() -> Void)?
+    public var onNavigateBack: (() -> Bool)?
     public var onFocusChange: ((Bool) -> Void)?
 
     /// Creates a status panel with the menu-bar drop-down style mask used by the
@@ -110,10 +111,6 @@ public final class PearchHAStatusPanel: NSPanel {
         onFocusChange?(false)
     }
 
-    public override func scrollWheel(with event: NSEvent) {
-        onScrollWheelEvent?()
-        super.scrollWheel(with: event)
-    }
 
     public override init(
         contentRect: NSRect,
@@ -139,14 +136,14 @@ public final class PearchHAStatusPanel: NSPanel {
 
     /// Closes the panel when Escape is pressed, matching macOS popover behavior.
     public override func cancelOperation(_ sender: Any?) {
-        orderOut(sender)
+        if onNavigateBack?() != true { orderOut(sender) }
     }
 
     public override func keyDown(with event: NSEvent) {
         // Escape (key code 53) closes the panel even when no field has claimed
         // the event as a cancel operation.
         if event.keyCode == 53 {
-            orderOut(self)
+            cancelOperation(self)
             return
         }
         super.keyDown(with: event)
@@ -196,20 +193,6 @@ public final class PearchHAStatusPanel: NSPanel {
             }
         }
         return super.performKeyEquivalent(with: event)
-    }
-}
-
-private final class PearchHASettingsWindow: NSWindow {
-    var onFocusChange: ((Bool) -> Void)?
-
-    override func becomeKey() {
-        super.becomeKey()
-        onFocusChange?(true)
-    }
-
-    override func resignKey() {
-        super.resignKey()
-        onFocusChange?(false)
     }
 }
 
@@ -1119,7 +1102,6 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
     private var panel: NSPanel?
     private var settingsWindow: NSWindow?
     private var panelInactivityTask: Task<Void, Never>?
-    private var settingsWindowInactivityTask: Task<Void, Never>?
     /// Restores the accessory activation policy when Settings closes.
     private var settingsWindowCloseObserver: NSObjectProtocol?
     private var panelModel: PearchHAPanelModel?
@@ -1144,6 +1126,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
     )
     private var statusItemLogoImageCache: NSImage?
     private var configuration = PearchHAConfiguration.empty
+    private var isQuittingAfterSettingsImport = false
     private var configurationPersistenceState = PearchHAConfigurationPersistenceState.unavailable
     private var lastExternalURLEvent: PearchHAExternalURLEvent?
 
@@ -1286,13 +1269,23 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         application.run()
     }
 
-    /// Builds the minimal main menu an accessory app needs: a standard Edit
-    /// menu so text fields in the Settings window get the system keyboard
-    /// equivalents (cut, copy, paste, select-all, undo, redo).
+    /// Builds the standard application, editing, window and help commands.
+    /// Responder-chain actions work in Settings and the menu-bar panel.
     ///
     /// - Returns: The main menu to install on the shared application.
     public static func standardMainMenu() -> NSMenu {
         let mainMenu = NSMenu()
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu(title: "PearchHA")
+        appItem.submenu = appMenu
+        mainMenu.addItem(appItem)
+        appMenu.addItem(withTitle: "About PearchHA", action: #selector(showAbout(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
+        appMenu.addItem(withTitle: "Import Settings…", action: #selector(chooseSettingsImport(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Hide PearchHA", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit PearchHA", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let editItem = NSMenuItem()
         mainMenu.addItem(editItem)
         let editMenu = NSMenu(title: "Edit")
@@ -1305,7 +1298,86 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        windowItem.submenu = windowMenu
+        mainMenu.addItem(windowItem)
+        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        let helpItem = NSMenuItem()
+        let helpMenu = NSMenu(title: "Help")
+        helpItem.submenu = helpMenu
+        mainMenu.addItem(helpItem)
+        helpMenu.addItem(withTitle: "PearchHA Help", action: #selector(showHelp(_:)), keyEquivalent: "?")
         return mainMenu
+    }
+
+    @objc private func showSettings(_ sender: Any?) { openSettingsWindow(initialTab: .general) }
+    @objc private func showAbout(_ sender: Any?) { openSettingsWindow(initialTab: .about) }
+    @objc private func chooseSettingsImport(_ sender: Any?) {
+        let picker = NSOpenPanel()
+        picker.title = "Import PearchHA Settings"
+        picker.message = "Choose an existing PearchHA config.json. The original file will remain unchanged."
+        picker.allowedContentTypes = [.json]
+        picker.canChooseDirectories = false
+        picker.allowsMultipleSelection = false
+        guard picker.runModal() == .OK, let url = picker.url else { return }
+        let scopedAccess = url.startAccessingSecurityScopedResource()
+        defer { if scopedAccess { url.stopAccessingSecurityScopedResource() } }
+        guard let configStore else { return }
+        let importedConfiguration: PearchHAConfiguration
+        do {
+            importedConfiguration = try configStore.readImport(from: url)
+        } catch {
+            let failure = NSAlert()
+            failure.messageText = "Settings could not be imported"
+            failure.informativeText = String(describing: error)
+            failure.runModal()
+            return
+        }
+        let profile = importedConfiguration.connectionProfile
+        let addresses = profile?.addresses.map(\.urlString).joined(separator: "\n") ?? "No saved Home Assistant address"
+        let trustPolicy = profile?.allowsSelfSignedCertificates == true ? "Self-signed certificates: allowed" : "Self-signed certificates: strict validation"
+        let confirmation = NSAlert()
+        confirmation.messageText = "Replace settings and quit PearchHA?"
+        confirmation.informativeText = "Home Assistant addresses:\n\(addresses)\n\(trustPolicy)\n\nReopen PearchHA to use the imported settings. Passwords and tokens are not copied. An existing saved sign-in may be used for these addresses on reopen."
+        confirmation.addButton(withTitle: "Import and Quit")
+        confirmation.addButton(withTitle: "Cancel")
+        guard confirmation.runModal() == .alertFirstButtonReturn else { return }
+        switch importSettings(importedConfiguration) {
+        case .saved:
+            NSApp.terminate(sender)
+        case let .failed(message):
+            let failure = NSAlert()
+            failure.messageText = "Settings could not be imported"
+            failure.informativeText = message
+            failure.runModal()
+        }
+    }
+
+    /// Saves a validated immutable import snapshot for the next launch.
+    /// The caller must quit and reopen the app after a successful result.
+    @discardableResult
+    public func importSettings(_ configuration: PearchHAConfiguration) -> SelectionPersistenceResult {
+        guard let configStore else { return .failed("configuration store unavailable") }
+        guard !isQuittingAfterSettingsImport else { return .failed("Quit and reopen PearchHA to finish importing settings.") }
+        do {
+            _ = try configStore.save(configuration)
+            isQuittingAfterSettingsImport = true
+            return .saved
+        } catch {
+            return .failed(String(describing: error))
+        }
+    }
+    @objc private func showHelp(_ sender: Any?) {
+        if let url = URL(string: "https://github.com/YunaBraska/pearch_ha/blob/main/docs/Page/help/index.md") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { openSettingsWindow(initialTab: .entities) }
+        return true
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1313,6 +1385,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         _ = updater
 #endif
         releaseShell()
+        isQuittingAfterSettingsImport = false
         configuration = loadConfiguration()
         applyAppearancePreferences()
         let rememberedForm = restoredConnectionForm()
@@ -1896,6 +1969,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
 
     @discardableResult
     public func persist(selection: EntitySelectionConfiguration) -> SelectionPersistenceResult {
+        guard !isQuittingAfterSettingsImport else { return .failed("Settings import is awaiting relaunch.") }
         guard let configStore else {
             configurationPersistenceState = .unavailable
             return .failed("configuration store unavailable")
@@ -1926,6 +2000,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
 
     @discardableResult
     public func persist(menuBarDisplayConfiguration displayConfiguration: MenuBarDisplayConfiguration) -> SelectionPersistenceResult {
+        guard !isQuittingAfterSettingsImport else { return .failed("Settings import is awaiting relaunch.") }
         guard let configStore else {
             configurationPersistenceState = .unavailable
             return .failed("configuration store unavailable")
@@ -1954,6 +2029,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
 
     @discardableResult
     public func persist(customActionConfiguration: CustomActionConfiguration) -> SelectionPersistenceResult {
+        guard !isQuittingAfterSettingsImport else { return .failed("Settings import is awaiting relaunch.") }
         guard let configStore else {
             configurationPersistenceState = .unavailable
             return .failed("configuration store unavailable")
@@ -2017,6 +2093,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
     /// - Returns: The persistence outcome (`.saved`, `.failed`, or unavailable).
     @discardableResult
     public func persist(displayPreferences preferences: PearchHADisplayPreferences) -> SelectionPersistenceResult {
+        guard !isQuittingAfterSettingsImport else { return .failed("Settings import is awaiting relaunch.") }
         guard let configStore else {
             configurationPersistenceState = .unavailable
             return .failed("configuration store unavailable")
@@ -2115,8 +2192,10 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         panel.onVisibilityChange = { [weak model] visible in
             model?.setPanelActive(visible)
         }
-        panel.onScrollWheelEvent = { [weak model] in
-            model?.notePanelScrollActivity()
+        panel.onNavigateBack = { [weak model] in
+            guard let model, model.snapshot.historyPresentationEntityID != nil else { return false }
+            model.dismissHistoryPopover()
+            return true
         }
         // Size to the fixed SwiftUI content so the borderless window matches the
         // rounded surface exactly (no chrome inset). The root paints at this size.
@@ -2176,7 +2255,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         launchAtLoginProvider: @escaping () -> Bool = { false },
         launchAtLoginSink: @escaping (Bool) -> Bool = { _ in false }
     ) -> NSWindow {
-        let window = PearchHASettingsWindow(
+        let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: AppShellLayout.settingsMinContentSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
@@ -2199,7 +2278,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
                 launchAtLoginSink: launchAtLoginSink
             )
         )
-        window.setContentSize(AppShellLayout.settingsMinContentSize)
+        window.setContentSize(NSSize(width: 1120, height: 720))
         return window
     }
 
@@ -2255,18 +2334,6 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
             )
         }
         settingsWindow = window
-        if let window = window as? PearchHASettingsWindow {
-            window.onFocusChange = { [weak self, weak window] focused in
-                guard let self else {
-                    return
-                }
-                if focused {
-                    self.cancelSettingsWindowInactivityClose()
-                } else if let window, window.isVisible {
-                    self.scheduleSettingsWindowInactivityClose(for: window)
-                }
-            }
-        }
         if settingsWindowCloseObserver == nil {
             settingsWindowCloseObserver = NotificationCenter.default.addObserver(
                 forName: NSWindow.willCloseNotification,
@@ -2279,7 +2346,6 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
                     guard let self else {
                         return
                     }
-                    self.cancelSettingsWindowInactivityClose()
                     self.settingsWindow?.contentViewController = nil
                     self.settingsWindow = nil
                     if let observer = self.settingsWindowCloseObserver {
@@ -2374,7 +2440,6 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         statusItemRefreshTask?.cancel()
         statusItemRefreshTask = nil
         cancelPanelInactivityClose()
-        cancelSettingsWindowInactivityClose()
         pendingStatusItemSnapshot = nil
         pendingStatusItemRefreshSignature = nil
         lastStatusItemRefreshAt = nil
@@ -2427,29 +2492,6 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         panelInactivityTask = nil
     }
 
-    private func scheduleSettingsWindowInactivityClose(for window: NSWindow) {
-        cancelSettingsWindowInactivityClose()
-        settingsWindowInactivityTask = Task { @MainActor [weak self, weak window] in
-            let duration = UInt64((AppShellLayout.unfocusedSurfaceCloseInterval * 1_000_000_000).rounded())
-            if duration > 0 {
-                try? await Task.sleep(nanoseconds: duration)
-            }
-            guard let self,
-                  let window,
-                  window.isVisible,
-                  !window.isKeyWindow
-            else {
-                return
-            }
-            window.performClose(nil)
-            self.settingsWindowInactivityTask = nil
-        }
-    }
-
-    private func cancelSettingsWindowInactivityClose() {
-        settingsWindowInactivityTask?.cancel()
-        settingsWindowInactivityTask = nil
-    }
 
     private func scheduleStatusItemRefresh(
         from snapshot: PearchHAPanelSnapshot,
@@ -2901,6 +2943,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
     }
 
     private func rememberConnection(_ form: PearchHAConnectionForm) {
+        guard !isQuittingAfterSettingsImport else { return }
         if !form.trimmedToken.isEmpty {
             rememberAccessToken(form.trimmedToken)
         }

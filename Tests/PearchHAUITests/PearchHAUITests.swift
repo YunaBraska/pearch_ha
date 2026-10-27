@@ -2525,7 +2525,7 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
     }
 
-    func test_t_scroll_activity_closes_history_and_allows_explicit_reopen() async {
+    func test_t_history_dismissal_allows_explicit_reopen() async {
         let clock = TestPearchClock()
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
@@ -2547,7 +2547,7 @@ final class PearchHAUITests: XCTestCase {
         }
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
 
-        model.notePanelScrollActivity()
+        model.dismissHistoryPopover()
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
 
         model.presentHistoryDetail("sensor.office_humidity", range: .hour)
@@ -6005,6 +6005,102 @@ final class PearchHAUITests: XCTestCase {
         }
     }
 
+    func testSettingsInspectorKeepsSearchAndEntityRowsInPlace() async throws {
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: selectionRooms()) })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        var searchFrame: NSRect?
+        for id: EntityID in ["sensor.office_humidity", "sensor.office_temperature"] {
+            let window = PearchHAApplication.makeSettingsWindow(model: model, initialTab: .entities,
+                initiallyExpandedEntityIDs: [id])
+            window.setContentSize(NSSize(width: 1120, height: 700))
+            window.makeKeyAndOrderFront(nil)
+            defer { window.orderOut(nil); window.contentView = nil }
+            try await Task.sleep(for: .milliseconds(100))
+            drainPanelRunLoop()
+            let search = try XCTUnwrap(editableTextFields(in: window.contentView).first { $0.placeholderString == "Search" })
+            let unit = try XCTUnwrap(nativePopUpButtons(in: window.contentView).first { $0.title.hasPrefix("Detected") })
+            let frame = search.convert(search.bounds, to: nil)
+            XCTAssertGreaterThan(unit.convert(unit.bounds, to: nil).minX, frame.maxX,
+                                 "Entity settings must be beside the list, never inserted between its rows")
+            if let searchFrame { XCTAssertEqual(frame, searchFrame, "Changing the inspected entity preserves list geometry") }
+            searchFrame = frame
+            try saveControlSnapshot(window.contentView, name: "entity-inspector-\(id.rawValue)")
+            window.setContentSize(NSSize(width: 660, height: 560))
+            drainPanelRunLoop()
+            XCTAssertNotNil(nativePopUpButtons(in: window.contentView).first { $0.title.hasPrefix("Detected") },
+                            "The inspector stays reachable at minimum window size")
+            try saveControlSnapshot(window.contentView, name: "entity-inspector-narrow")
+        }
+    }
+
+    func testSettingsSearchHandlesMixedFiveHundredEntityInstallation() async throws {
+        let domains = ["sensor", "light", "cover", "climate", "select"]
+        let rooms = (0..<20).map { room in
+            Room(id: RoomID("room_\(room)"), name: "Room \(room)", entities: (0..<25).map { item in
+                DiscoveredEntity(id: EntityID("\(domains[item % domains.count]).room_\(room)_item_\(item)"),
+                    name: "\(item == 24 ? "Long balcony temperature · Temperatur Außenbereich" : "Device \(item)")",
+                    state: item % 17 == 0 ? "unavailable" : "21", unit: item % 5 == 0 ? "°C" : nil,
+                    areaID: AreaID("room_\(room)"), deviceID: DeviceID("device_\(room)_\(item / 3)"),
+                    controlAttributes: ["supported_features": 15, "options": .array(["Celsius", "Fahrenheit"])] )
+            })
+        }
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: rooms) },
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let start = DispatchTime.now().uptimeNanoseconds
+        let window = PearchHAApplication.makeSettingsWindow(model: model, initialTab: .entities,
+            initiallyExpandedEntityIDs: ["sensor.room_0_item_0"])
+        window.makeKeyAndOrderFront(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        let openMilliseconds = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+        defer { window.orderOut(nil); window.contentView = nil }
+        drainPanelRunLoop()
+        let search = try XCTUnwrap(editableTextFields(in: window.contentView).first { $0.placeholderString == "Search" })
+        try setNativeTextFieldValue("room_19_item_24", for: search, in: window)
+        await spinUntil { model.snapshot.selectionQuery == "room_19_item_24" }
+        XCTAssertEqual(model.settingsSelectionTree.flatMap(\.entities).map { $0.entity.id }, ["select.room_19_item_24"])
+        XCTAssertEqual(model.snapshot.availableRooms.flatMap(\.entities).count, 500, "Filtering must not discard discovery data")
+        try setNativeTextFieldValue("", for: search, in: window)
+        await spinUntil { model.snapshot.selectionQuery.isEmpty }
+        XCTAssertEqual(model.settingsSelectionTree.flatMap(\.entities).count, 500)
+        print("Settings open with 500 mixed entities: \(String(format: "%.1f", openMilliseconds)) ms")
+    }
+
+    func testStandardMenusExposeSettingsHelpAndQuit() {
+        let menu = PearchHAApplication.standardMainMenu()
+        XCTAssertEqual(menu.items.compactMap { $0.submenu?.title }, ["PearchHA", "Edit", "Window", "Help"])
+        let appMenu = menu.items.first?.submenu
+        XCTAssertEqual(appMenu?.items.first { $0.title == "Settings…" }?.keyEquivalent, ",")
+        XCTAssertEqual(appMenu?.items.first { $0.title == "Quit PearchHA" }?.keyEquivalent, "q")
+    }
+
+    func testHistoryOpensInsidePanelAndReturnsWithoutClosingPanel() async throws {
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, id, range in .success(historySeries(entityID: id, range: range, value: 44)) },
+            historyDebounce: .milliseconds(0), bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let panel = try XCTUnwrap(PearchHAApplication.makePanel(model: model) as? PearchHAStatusPanel)
+        panel.makeKeyAndOrderFront(nil)
+        defer { panel.orderOut(nil); panel.contentView = nil }
+        model.presentHistoryDetail("sensor.office_humidity")
+        await spinUntil { if case .loaded = model.snapshot.historyState { return true }; return false }
+        try await Task.sleep(for: .milliseconds(100))
+        drainPanelRunLoop()
+        XCTAssertEqual(nativeSegmentedControls(in: panel.contentView).count, 1,
+                       "History range control is inside the same panel window")
+        try saveControlSnapshot(panel.contentView, name: "history-in-panel")
+        panel.cancelOperation(nil)
+        drainPanelRunLoop()
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+        XCTAssertTrue(panel.isVisible, "Escape returns to rooms first")
+        panel.cancelOperation(nil)
+        XCTAssertFalse(panel.isVisible, "A second Escape closes the panel")
+    }
+
     func testSettingsEntitiesTabExposesNativeSearchUnitMenuAndKeyViewLoop() async throws {
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) }
@@ -6231,6 +6327,56 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertFalse(application.snapshot.statusItemHasImage)
         XCTAssertFalse(application.snapshot.hasPanel)
         XCTAssertFalse(application.snapshot.hasPanelModel)
+    }
+
+    func testSettingsImportSurvivesPendingSavesAndRelaunch() throws {
+        let destination = temporaryConfigURL()
+        let source = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: source.deletingLastPathComponent())
+        }
+        let store = JSONConfigStore(fileURL: destination)
+        try store.save(.empty)
+        let imported = PearchHAConfiguration(
+            selectedEntityIDs: ["sensor.office_humidity"],
+            menuBarEntityIDs: ["sensor.office_humidity"],
+            isEntitySelectionExplicit: true,
+            themeMode: .dark
+        )
+        try JSONConfigStore(fileURL: source).save(imported)
+        let sourceBytes = try Data(contentsOf: source)
+        let application = applicationForTest(configStore: store)
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        let importedSnapshot = try store.readImport(from: source)
+        XCTAssertEqual(application.importSettings(importedSnapshot), .saved)
+        // A disappearing Settings view or a late model callback must not write
+        // its pre-import snapshot while the application is quitting.
+        XCTAssertNotEqual(application.persist(displayPreferences: .defaults), .saved)
+        XCTAssertNotEqual(application.persist(selection: PearchHAConfiguration.empty.selectionConfiguration), .saved)
+        XCTAssertNotEqual(application.persist(menuBarDisplayConfiguration: PearchHAConfiguration.empty.menuBarDisplayConfiguration), .saved)
+        XCTAssertNotEqual(application.persist(customActionConfiguration: PearchHAConfiguration.empty.customActionConfiguration), .saved)
+        application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        XCTAssertEqual(try store.load(), imported)
+        XCTAssertEqual(try Data(contentsOf: source), sourceBytes)
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer { application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification)) }
+        XCTAssertEqual(application.snapshot.selectedEntityIDs, imported.selectedEntityIDs)
+        XCTAssertEqual(application.displayPreferences.themeMode, .dark)
+        XCTAssertEqual(application.persist(displayPreferences: .defaults), .saved)
+    }
+
+    func testSettingsImportFailureKeepsCurrentConfigurationEditable() throws {
+        let destination = temporaryConfigURL()
+        defer { try? FileManager.default.removeItem(at: destination.deletingLastPathComponent()) }
+        let store = JSONConfigStore(fileURL: destination)
+        try store.save(.empty)
+        let application = applicationForTest(configStore: store)
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer { application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification)) }
+        XCTAssertNotEqual(application.importSettings(PearchHAConfiguration(schemaVersion: 99)), .saved)
+        XCTAssertEqual(try store.load(), .empty)
+        XCTAssertEqual(application.persist(displayPreferences: .defaults), .saved)
     }
 
     func test_t_app_shell_launch_loads_selection_config() throws {

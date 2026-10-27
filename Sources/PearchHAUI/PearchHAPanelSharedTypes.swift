@@ -175,6 +175,7 @@ public struct PearchHAHistoryPopoverContent: View {
     private let entityName: String
     private let valueText: String
     private let unit: String?
+    private let fillsPanel: Bool
     private let state: PearchHAHistoryPanelState
     private let chartTint: Color?
     private let numericColorForValue: (Double) -> Color?
@@ -194,6 +195,7 @@ public struct PearchHAHistoryPopoverContent: View {
         entityName: String,
         valueText: String,
         unit: String? = nil,
+        fillsPanel: Bool = false,
         state: PearchHAHistoryPanelState,
         chartTint: Color? = nil,
         numericColorForValue: ((Double) -> Color?)? = nil,
@@ -207,6 +209,7 @@ public struct PearchHAHistoryPopoverContent: View {
         self.entityName = entityName
         self.valueText = valueText
         self.unit = unit
+        self.fillsPanel = fillsPanel
         self.state = state
         self.chartTint = chartTint
         self.numericColorForValue = numericColorForValue ?? { _ in nil }
@@ -255,16 +258,17 @@ public struct PearchHAHistoryPopoverContent: View {
                 .frame(minHeight: Self.bodyMinHeight, alignment: .topLeading)
         }
         .padding(14)
-        .frame(width: 280)
+        .frame(width: fillsPanel ? nil : 280)
+        .frame(maxWidth: fillsPanel ? .infinity : nil)
         .environment(\.dashboardPalette, palette)
         .background {
             shape
-                .fill(palette.surfacePanelElevated)
+                .fill(fillsPanel ? palette.surfaceRoot : palette.surfacePanelElevated)
                 .overlay(shape.fill(.ultraThinMaterial).opacity(0.35))
         }
-        .overlay(shape.strokeBorder(palette.borderSubtle, lineWidth: 1))
+        .overlay(shape.strokeBorder(fillsPanel ? .clear : palette.borderSubtle, lineWidth: 1))
         .clipShape(shape)
-        .shadow(color: palette.shadowSoft, radius: 14, x: 0, y: 6)
+        .shadow(color: fillsPanel ? .clear : palette.shadowSoft, radius: 14, x: 0, y: 6)
     }
 
     /// The ranges offered in the segmented selector.
@@ -327,6 +331,7 @@ public struct PearchHAHistoryPopoverContent: View {
                 colorForState: stateColorForTimeline,
                 onHoverReadoutChange: { hoverReadout = $0 }
             )
+            recordedValues(series)
         case let .statistics(series, statistics):
             // Keep a constant height: always show the chart and stats, and float
             // the cursor readout as an overlay on the chart. Swapping the area
@@ -335,6 +340,7 @@ public struct PearchHAHistoryPopoverContent: View {
             VStack(alignment: .leading, spacing: 8) {
                 interactiveChart(series: series)
                 historyStats(statistics)
+                recordedValues(series)
             }
         case let .unavailable(message):
             VStack(alignment: .leading, spacing: 4) {
@@ -356,7 +362,7 @@ public struct PearchHAHistoryPopoverContent: View {
     }
 
     private func interactiveChart(series: HistorySeries) -> some View {
-        let chartHeight: CGFloat = 80
+        let chartHeight: CGFloat = fillsPanel ? 150 : 80
         let peaks = Self.chartPeaks(series: series)
         let geometry = PearchHAHistorySparklineGeometry(series: series)
         return GeometryReader { proxy in
@@ -463,10 +469,45 @@ public struct PearchHAHistoryPopoverContent: View {
         return "\(formattedValue) · \(formattedTimestamp)"
     }
 
+    /// The same samples as the graph, reachable with keyboard and VoiceOver.
+    /// The lazy list does not create an accessibility element for every sample until opened.
+    private func recordedValues(_ series: HistorySeries) -> some View {
+        let samples = series.samples.sorted { $0.timestamp < $1.timestamp }
+        return VStack(alignment: .leading, spacing: 8) {
+            if let first = samples.first, let last = samples.last {
+                HStack {
+                    Text(first.timestamp, format: .dateTime.month(.abbreviated).day().hour().minute())
+                    Spacer()
+                    Text(last.timestamp, format: .dateTime.month(.abbreviated).day().hour().minute())
+                }
+                .font(.caption2).foregroundStyle(.secondary)
+                .accessibilityLabel("Recorded interval")
+            }
+            DisclosureGroup("Recorded values") {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(samples.enumerated()), id: \.offset) { _, sample in
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(sample.timestamp, format: .dateTime.year().month().day().hour().minute().second())
+                                Spacer()
+                                Text(sample.numericValue.map { menuBarNumberLabel($0) + (unit.map { " " + $0 } ?? "") } ?? sample.state)
+                                    .monospacedDigit()
+                            }
+                            .font(.caption)
+                            .accessibilityElement(children: .combine)
+                        }
+                    }.padding(.vertical, 6)
+                }.frame(maxHeight: 160)
+            }
+            .font(.caption)
+            .accessibilityLabel("Recorded values for \(entityName)")
+        }
+    }
+
     private func historyStats(_ statistics: PearchHAHistoryStatistics) -> some View {
         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
             GridRow {
-                statisticLabel("Current")
+                statisticLabel("Last recorded")
                 statisticValue(menuBarNumberLabel(statistics.current))
             }
             GridRow {

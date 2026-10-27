@@ -141,191 +141,7 @@ private struct PearchHAInlineHistoryPreview: View {
     }
 }
 
-@MainActor
-private final class PearchHAHistoryPopoverController: ObservableObject {
-    private static let popoverSize = NSSize(width: 308, height: 244)
-    private weak var model: PearchHAPanelModel?
-    private let onOpenEntitySettings: ((EntityID) -> Void)?
-    private let popover: NSPopover
-    private var snapshotCancellable: AnyCancellable?
-    private var anchors: [EntityID: WeakAnchorView] = [:]
-    private var currentEntityID: EntityID?
-    private weak var currentAnchorView: NSView?
-    private var hostingController: NSHostingController<PearchHAHistoryPopoverRootView>?
-    private var clickOutsideMonitor: Any?
-
-    init(model: PearchHAPanelModel, onOpenEntitySettings: ((EntityID) -> Void)?) {
-        self.model = model
-        self.onOpenEntitySettings = onOpenEntitySettings
-        let popover = NSPopover()
-        popover.behavior = .applicationDefined
-        popover.animates = false
-        self.popover = popover
-        snapshotCancellable = model.$snapshot
-            .receive(on: RunLoop.main)
-            .sink { [weak self] snapshot in
-                self?.update(with: snapshot)
-            }
-    }
-
-    deinit {
-        Task { @MainActor [popover] in
-            if popover.isShown {
-                popover.performClose(nil)
-            }
-        }
-    }
-
-    func register(anchorView: NSView, for entityID: EntityID) {
-        anchors[entityID] = WeakAnchorView(view: anchorView)
-        guard currentEntityID == entityID, let model else {
-            return
-        }
-        update(with: model.snapshot)
-    }
-
-    func unregister(anchorView: NSView, for entityID: EntityID) {
-        guard anchors[entityID]?.view === anchorView else {
-            return
-        }
-        anchors[entityID] = nil
-        if currentEntityID == entityID {
-            dismiss()
-        }
-    }
-
-    private func update(with snapshot: PearchHAPanelSnapshot) {
-        pruneDeadAnchors()
-        guard let model,
-              let entityID = snapshot.historyPresentationEntityID,
-              let anchorView = anchors[entityID]?.view,
-              anchorView.window != nil,
-              let entity = snapshot.rooms
-                .flatMap(\.entities)
-                .first(where: { $0.id == entityID })
-        else {
-            dismiss()
-            return
-        }
-
-        if currentEntityID != entityID || hostingController == nil {
-            let rootView = PearchHAHistoryPopoverRootView(
-                model: model,
-                entity: entity,
-                onOpenEntitySettings: onOpenEntitySettings
-            )
-            let hostingController = NSHostingController(rootView: rootView)
-            hostingController.view.layoutSubtreeIfNeeded()
-            self.hostingController = hostingController
-            popover.contentViewController = hostingController
-            popover.contentSize = Self.popoverSize
-            currentEntityID = entityID
-        }
-
-        let needsReanchor = currentAnchorView !== anchorView
-        currentAnchorView = anchorView
-        if popover.isShown, needsReanchor {
-            popover.performClose(nil)
-        }
-        if !popover.isShown {
-            popover.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .maxX)
-            installClickOutsideMonitor()
-        }
-    }
-
-    private func dismiss() {
-        currentEntityID = nil
-        currentAnchorView = nil
-        hostingController = nil
-        if popover.isShown {
-            popover.performClose(nil)
-        }
-        removeClickOutsideMonitor()
-    }
-
-    private func pruneDeadAnchors() {
-        anchors = anchors.filter { $0.value.view != nil }
-    }
-
-    private func installClickOutsideMonitor() {
-        guard clickOutsideMonitor == nil else {
-            return
-        }
-        clickOutsideMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        ) { [weak self] event in
-            guard let self else {
-                return event
-            }
-            guard popover.isShown else {
-                removeClickOutsideMonitor()
-                return event
-            }
-            if shouldKeepPopoverOpen(for: event) {
-                return event
-            }
-            model?.dismissHistoryPopover()
-            return event
-        }
-    }
-
-    private func removeClickOutsideMonitor() {
-        guard let clickOutsideMonitor else {
-            return
-        }
-        NSEvent.removeMonitor(clickOutsideMonitor)
-        self.clickOutsideMonitor = nil
-    }
-
-    private func shouldKeepPopoverOpen(for event: NSEvent) -> Bool {
-        if let popoverWindow = popover.contentViewController?.view.window,
-           event.window === popoverWindow {
-            return true
-        }
-        guard let anchorView = currentAnchorView,
-              let anchorWindow = anchorView.window,
-              event.window === anchorWindow
-        else {
-            return false
-        }
-        let pointInAnchor = anchorView.convert(event.locationInWindow, from: nil)
-        return anchorView.bounds.contains(pointInAnchor)
-    }
-}
-
-private final class WeakAnchorView {
-    weak var view: NSView?
-
-    init(view: NSView?) {
-        self.view = view
-    }
-}
-
-@MainActor
-private struct PearchHAHistoryPopoverAnchor: NSViewRepresentable {
-    let entityID: EntityID
-    let controller: PearchHAHistoryPopoverController
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.wantsLayer = false
-        controller.register(anchorView: view, for: entityID)
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        controller.register(anchorView: nsView, for: entityID)
-    }
-
-    static func dismantleNSView(_ nsView: NSView, coordinator: ()) {
-        // `NSViewRepresentable` dismantle is static, so unregistration is
-        // driven by the controller pruning dead weak references on the next
-        // snapshot update. That keeps the anchor bookkeeping lightweight.
-    }
-}
-
-private struct PearchHAHistoryPopoverRootView: View {
+private struct PearchHAHistoryDetailView: View {
     @ObservedObject var model: PearchHAPanelModel
     let entity: DiscoveredEntity
     let onOpenEntitySettings: ((EntityID) -> Void)?
@@ -336,6 +152,7 @@ private struct PearchHAHistoryPopoverRootView: View {
             entityName: entity.name,
             valueText: model.formattedValue(for: entity).text,
             unit: entity.unit,
+            fillsPanel: true,
             state: model.snapshot.historyState,
             chartTint: historyChartTint,
             numericColorForValue: historyNumericColor,
@@ -386,7 +203,6 @@ public struct PearchHAPanelView: View {
     private let onOpenSettings: (() -> Void)?
     private let onOpenEntitySettings: ((EntityID) -> Void)?
     @StateObject private var viewState: PearchHAPanelViewState
-    @StateObject private var historyPopoverController: PearchHAHistoryPopoverController
     @State private var pendingCustomActionID: CustomActionID?
     @State private var expandedModuleIDs: Set<String> = []
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
@@ -404,12 +220,7 @@ public struct PearchHAPanelView: View {
         self.onOpenSettings = onOpenSettings
         self.onOpenEntitySettings = onOpenEntitySettings
         _viewState = StateObject(wrappedValue: PearchHAPanelViewState(model: model))
-        _historyPopoverController = StateObject(
-            wrappedValue: PearchHAHistoryPopoverController(
-                model: model,
-                onOpenEntitySettings: onOpenEntitySettings
-            )
-        )
+
     }
 
     private func openSettings() {
@@ -444,7 +255,26 @@ public struct PearchHAPanelView: View {
                 topBar
                 dashboardDivider
             }
-            content
+            ZStack(alignment: .topLeading) {
+                content
+                    .opacity(snapshot.historyPresentationEntityID == nil ? 1 : 0)
+                    .allowsHitTesting(snapshot.historyPresentationEntityID == nil)
+                    .accessibilityHidden(snapshot.historyPresentationEntityID != nil)
+                if let id = snapshot.historyPresentationEntityID,
+                   let entity = snapshot.availableRooms.flatMap(\.entities).first(where: { $0.id == id }) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Button { model.dismissHistoryPopover() } label: {
+                            Label("Back to rooms", systemImage: "chevron.left")
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Back to rooms")
+                        .padding(.horizontal, 16).padding(.top, 12)
+                        ScrollView {
+                            PearchHAHistoryDetailView(model: model, entity: entity, onOpenEntitySettings: onOpenEntitySettings)
+                        }
+                    }
+                }
+            }
             dashboardDivider
             footer
         }
@@ -735,12 +565,6 @@ public struct PearchHAPanelView: View {
             }
         }
         .contentShape(Rectangle())
-        .background(
-            PearchHAHistoryPopoverAnchor(
-                entityID: entity.id,
-                controller: historyPopoverController
-            )
-        )
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(entity.name), \(value.text)")
         .accessibilityAction(named: "Show history") {
@@ -1098,6 +922,7 @@ public struct PearchHAPanelView: View {
     }
 
     private func entityControlHelp(for entity: DiscoveredEntity, control: PearchHAEntityControl, isOn: Bool) -> String {
+        if snapshot.connectionState != .connected { return "Reconnect to Home Assistant to control this entity" }
         if snapshot.controlActionState.isRunning {
             return "Waiting for Home Assistant"
         }
@@ -1246,6 +1071,7 @@ public struct PearchHAPanelView: View {
                 isRunning: snapshot.controlActionState.isRunning,
                 onChange: { isOn in model.startEntityControlToggle(entity.id, isOn: isOn) }
             )
+            .disabled(snapshot.connectionState != .connected || entity.state == "unavailable" || entity.state == "unknown")
             .help(entityControlHelp(for: entity, control: control, isOn: isOn))
             .accessibilityLabel("\(isOn ? "Turn off" : "Turn on") \(entity.name)")
             .accessibilityHint(entityControlHelp(for: entity, control: control, isOn: isOn))

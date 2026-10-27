@@ -1,27 +1,44 @@
 ---
 layout: default
-title: Privacy
-description: How PearchHA handles Home Assistant data.
+help: true
+title: Privacy policy
+description: How PearchHA handles Home Assistant data and local settings.
 ---
 
-<header class="page-heading">
-  <p class="eyebrow">Privacy</p>
-  <h1>Your home stays with your Home Assistant.</h1>
-  <p>PearchHA has no account, advertising, analytics, crash reporting or YunaBraska-hosted home service.</p>
-</header>
+# Privacy policy
 
-<section class="section">
-  <h2>What PearchHA keeps</h2>
-  <p>PearchHA stores the Home Assistant endpoint, display choices and cached home state on your Mac. Its Home Assistant access token is kept in the macOS Keychain. The app uses that data to show the rooms, history and controls you selected.</p>
-</section>
+PearchHA connects your Mac to the Home Assistant addresses you choose. It reads
+entity names, states, capabilities, room assignments and history to display and
+control your installation. Actions you request are sent to your Home Assistant.
+The app does not send these credentials or entity data to its developer.
 
-<section class="section">
-  <h2>Network connections</h2>
-  <p>PearchHA connects directly to the Home Assistant instance you configure. YunaBraska does not receive, store or analyse your Home Assistant data. The direct-download edition checks GitHub for an update. GitHub receives the normal connection metadata, such as your IP address, needed to serve that request. The App Store edition uses Apple's update service instead.</p>
-</section>
+## Storage and retention
 
-<section class="section">
-  <h2>Your choices</h2>
-  <p>Disconnect an instance or remove its data from PearchHA at any time. For help, use <a href="{{ site.support }}">PearchHA support</a>. Never post Home Assistant URLs, access tokens or home data in a public issue.</p>
-  <p>Last updated: 29 October 2026.</p>
-</section>
+Connection and display preferences are stored in Application Support on your Mac.
+Access tokens, refresh tokens and protected custom-action values are stored in
+macOS Keychain. History caches are held in memory while the app runs. PearchHA
+has no developer-operated account or cloud database for your Home Assistant data.
+Home Assistant itself retains data according to the settings of your server.
+
+Signing out removes the saved sign-in session. Remove custom actions to remove
+their protected values. You can also revoke tokens from your Home Assistant
+profile. Removing the app does not automatically erase macOS Keychain entries or
+preferences. You can remove PearchHA entries using Keychain Access and the
+PearchHA preferences folder using Finder. Back up settings you want to keep first.
+
+## Network connections
+
+PearchHA includes no advertising or analytics SDK. Direct-download builds contact
+GitHub and the update feed for application updates. These servers receive ordinary
+connection information such as IP address and app version. App Store builds use
+Apple's update system and do not run the direct-download updater.
+Links you choose open in your browser and are governed by the destination's
+privacy policy. Network access to your Home Assistant is necessary for connected
+features. Local-network permission can be managed in macOS System Settings.
+
+## Support
+
+Diagnostics can include connection outcomes, entity identifiers and error messages.
+Review information before sharing it. Never post access tokens or private Home
+Assistant addresses in a public issue. For privacy questions, contact the project
+through its [support page](https://github.com/YunaBraska/pearch_ha/issues).

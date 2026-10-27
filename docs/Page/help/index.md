@@ -31,7 +31,7 @@ Controls are based on the Home Assistant capability of each entity. PearchHA doe
 
 <a id="history"></a>
 
-Open an entity to see its recent history. Use the detail view when you need an hour, day, week or month of context without leaving the app.
+Click an entity’s history preview to see its recent history. Back or Escape returns to the room overview without losing its scroll position. Expand Recorded values for exact timestamps and values, including keyboard and screen-reader access. Use the detail view when you need an hour, day, week or month of context without leaving the app.
 
 ![Entity history detail]({{ '/assets/help/history.png' | relative_url }})
 
@@ -39,6 +39,13 @@ Open an entity to see its recent history. Use the detail view when you need an h
 
 <a id="settings"></a>
 
-Settings control the Home Assistant connection, timed refreshes, live updates while the panel is open, labels and per-entity presentation. Each choice remains local to your Mac.
+Settings control the Home Assistant connection, timed refreshes, live updates while the panel is open, labels and per-entity presentation. Each choice remains local to your Mac. In Entities, choose a room and use search, type or capability filters to find a value. Select its row to open details without moving the list. Panel selection and menu-bar visibility remain independent. Clear filters before reordering.
 
 ![PearchHA settings]({{ '/assets/help/settings.png' | relative_url }})
+
+To transfer settings from an existing installation, choose **PearchHA > Import Settings…**
+while Settings is open. Select its `config.json`, then confirm **Import and Quit**.
+Reopen PearchHA to apply the imported settings. The original file is unchanged.
+Tokens and protected custom-action values are not copied, so sign in again if
+the new installation cannot access the existing Keychain entries. Direct
+installations keep configuration in `~/Library/Application Support/PearchHA/`.

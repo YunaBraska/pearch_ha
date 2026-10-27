@@ -200,7 +200,8 @@ final class PearchHASettingsViewState: ObservableObject {
                 || previous.canRetry != next.canRetry
                 || previous.failureDescription != next.failureDescription
         case .entities:
-            previous.selectionConfiguration != next.selectionConfiguration
+            previous.availableRooms != next.availableRooms
+                || previous.selectionConfiguration != next.selectionConfiguration
                 || previous.menuBarDisplayConfiguration != next.menuBarDisplayConfiguration
                 || previous.selectionQuery != next.selectionQuery
                 || previous.selectionPersistenceFailureDescription != next.selectionPersistenceFailureDescription

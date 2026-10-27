@@ -181,6 +181,21 @@
 			};
 			name = Release;
 		};
+		A00000000000000000000026 /* AppStore */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				ENABLE_HARDENED_RUNTIME = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = PEARCHHA_APP_STORE;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 6.0;
+			};
+			name = AppStore;
+		};
 		A00000000000000000000024 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -217,6 +232,25 @@
 			};
 			name = Release;
 		};
+		A00000000000000000000027 /* AppStore */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Xcode/PearchHA/PearchHA-AppStore.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Xcode/PearchHA/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.pearchha.app;
+				PRODUCT_NAME = PearchHA;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = PEARCHHA_APP_STORE;
+				SWIFT_VERSION = 6.0;
+			};
+			name = AppStore;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -225,6 +259,7 @@
 			buildConfigurations = (
 				A00000000000000000000024 /* Debug */,
 				A00000000000000000000025 /* Release */,
+				A00000000000000000000027 /* AppStore */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -234,6 +269,7 @@
 			buildConfigurations = (
 				A00000000000000000000022 /* Debug */,
 				A00000000000000000000023 /* Release */,
+				A00000000000000000000026 /* AppStore */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

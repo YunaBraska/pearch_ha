@@ -21,6 +21,11 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertEqual(plist["CFBundlePackageType"] as? String, "APPL")
         XCTAssertEqual(plist["CFBundleIconFile"] as? String, "PearchHA")
         XCTAssertEqual(plist["LSMinimumSystemVersion"] as? String, "13.0")
+        XCTAssertEqual(plist["LSApplicationCategoryType"] as? String, "public.app-category.utilities")
+        XCTAssertEqual(
+            plist["NSLocalNetworkUsageDescription"] as? String,
+            "PearchHA connects to your Home Assistant instance on your network."
+        )
         XCTAssertEqual(plist["LSUIElement"] as? Bool, true)
         XCTAssertEqual(plist["SUFeedURL"] as? String, "https://example.invalid/appcast.xml")
         XCTAssertEqual(plist["SUPublicEDKey"] as? String, "public-key")
@@ -254,6 +259,10 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertEqual(plist["LSMinimumSystemVersion"] as? String, "13.0")
         XCTAssertEqual(plist["LSUIElement"] as? Bool, true)
         XCTAssertEqual(plist["NSPrincipalClass"] as? String, "NSApplication")
+        XCTAssertEqual(
+            plist["NSLocalNetworkUsageDescription"] as? String,
+            "PearchHA connects to your Home Assistant instance on your network."
+        )
         let urlTypes = try XCTUnwrap(plist["CFBundleURLTypes"] as? [[String: Any]])
         XCTAssertEqual(urlTypes.first?["CFBundleTypeRole"] as? String, "Viewer")
         XCTAssertEqual(urlTypes.first?["CFBundleURLSchemes"] as? [String], ["pearchha"])
@@ -274,6 +283,36 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertTrue(entrypoint.contains("import PearchHAAppShell"))
         XCTAssertTrue(entrypoint.contains("PearchHAApplication.main()"))
         XCTAssertEqual(entrypoint, try String(contentsOf: swiftPMEntrypointURL, encoding: .utf8))
+    }
+
+
+    func testAppStoreLaneUsesSandboxNetworkAccessAndSeparatePackageGraph() throws {
+        let rootURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let entitlementsURL = rootURL.appendingPathComponent(
+            "Xcode/PearchHA/PearchHA-AppStore.entitlements",
+            isDirectory: false
+        )
+        let exportURL = rootURL.appendingPathComponent(
+            "Xcode/PearchHA/AppStoreExportOptions.plist",
+            isDirectory: false
+        )
+        let scriptURL = rootURL.appendingPathComponent("scripts/package-app-store.sh", isDirectory: false)
+        let packageURL = rootURL.appendingPathComponent("Package.swift", isDirectory: false)
+        let projectURL = rootURL.appendingPathComponent("PearchHA.xcodeproj/project.pbxproj", isDirectory: false)
+
+        let entitlements = try propertyList(from: Data(contentsOf: entitlementsURL))
+        XCTAssertEqual(entitlements["com.apple.security.app-sandbox"] as? Bool, true)
+        XCTAssertEqual(entitlements["com.apple.security.network.client"] as? Bool, true)
+        let export = try propertyList(from: Data(contentsOf: exportURL))
+        XCTAssertEqual(export["method"] as? String, "app-store")
+        XCTAssertTrue(try String(contentsOf: scriptURL, encoding: .utf8).contains("PEARCHHA_APP_STORE=1"))
+        let package = try String(contentsOf: packageURL, encoding: .utf8)
+        XCTAssertTrue(package.contains("isAppStoreBuild"))
+        XCTAssertTrue(package.contains("packageDependencies"))
+        let project = try String(contentsOf: projectURL, encoding: .utf8)
+        XCTAssertTrue(project.contains("name = AppStore;"))
+        XCTAssertTrue(project.contains("PearchHA-AppStore.entitlements"))
+        XCTAssertTrue(project.contains("SWIFT_ACTIVE_COMPILATION_CONDITIONS = PEARCHHA_APP_STORE;"))
     }
 
     func testCIWorkflowUsesTheSharedBuildContract() throws {

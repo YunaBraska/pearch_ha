@@ -386,6 +386,43 @@ public protocol ConfigStore: Sendable {
     @discardableResult func save(_ configuration: PearchHAConfiguration) throws -> PearchHAConfiguration
 }
 
+public extension ConfigStore {
+    /// Reads and validates a complete configuration from a user-selected JSON file.
+    ///
+    /// The source file is never modified. The returned value is an immutable
+    /// snapshot suitable for confirmation before calling `importConfiguration`.
+    func readImport(from sourceURL: URL) throws -> PearchHAConfiguration {
+        let fileManager = FileManager.default
+        guard let attributes = try? fileManager.attributesOfItem(atPath: sourceURL.path),
+              attributes[.type] as? FileAttributeType == .typeRegular
+        else {
+            throw ConfigStoreError.readFailed(sourceURL, message: "source is not a regular file")
+        }
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: sourceURL)
+        } catch {
+            throw ConfigStoreError.readFailed(sourceURL, message: String(describing: error))
+        }
+
+        let configuration: PearchHAConfiguration
+        do {
+            configuration = try JSONDecoder().decode(PearchHAConfiguration.self, from: data)
+        } catch {
+            throw ConfigStoreError.malformedConfig(sourceURL, message: String(describing: error))
+        }
+        guard configuration.schemaVersion == PearchHAConfiguration.currentSchemaVersion else {
+            throw ConfigStoreError.unsupportedSchemaVersion(configuration.schemaVersion)
+        }
+        if let failure = configuration.customActionConfiguration.validationFailure() {
+            throw ConfigStoreError.invalidConfiguration(message: failure.description)
+        }
+        return configuration
+    }
+
+}
+
 public struct JSONConfigStore: ConfigStore {
     public let fileURL: URL
 

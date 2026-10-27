@@ -37,8 +37,12 @@
 	<string>1</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>PearchHA connects to your Home Assistant instance on your network.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

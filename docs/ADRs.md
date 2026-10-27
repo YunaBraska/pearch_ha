@@ -88,9 +88,9 @@ Context: Direct downloads need Developer ID signing, notarization, and Sparkle. 
 
 Decision: Keep the direct ZIP and DMG release unchanged. A manual Store-package workflow builds a separate sandboxed package with bundle identifier `berlin.yuna.pearchha`, without Sparkle or a GitHub update control. It is packaged and signed for validation only. Store upload follows successful sandbox testing and App Review preparation.
 
-Consequences: One source tree supports both channels without presenting an external updater in the Store build. The Store channel needs a matching provisioning profile and real-device validation before submission.
+Consequences: One source tree supports both channels without presenting an external updater in the Store build. The Store channel needs a matching provisioning profile and real-device validation before submission. Configuration transfer is explicit through Import Settings. The original file is never moved or modified. A validated import replaces the destination atomically and quits the app, blocking pending saves until the next launch. Keychain secrets are not exported or copied. Automatic container migration was rejected because the macOS 27.0.1 runtime probe removed the source file.
 
-Alternatives: Reusing the direct app bundle for the Store was rejected because it would retain Sparkle and two competing update channels.
+Alternatives: Reusing the direct app bundle for the Store was rejected because it would retain Sparkle and two competing update channels. Replacing direct distribution with Mac App Store only was rejected because sandbox and review constraints would remove existing direct-install capabilities.
 
 ## ADR-0010 - Host-scoped self-signed trust, on by default, never trust-all
 
@@ -126,7 +126,9 @@ were replaced after resource measurements. Refresh lifecycle stays in the panel 
 
 Context: The dashboard used a bespoke graphite/navy palette and a flat "Name Value" menu-bar title. User direction: look and behave like iStat Menus, with theme colors that read as Home Assistant.
 
-Decision: The dashboard palettes adopt the Home Assistant theme tokens (dark `#111111`/`#1C1C1C`/`#282828`, light `#FAFAFA`/white, HA text grays, semantic trio `#4CAF50`/`#FF9800`/`#F44336`, 12pt card radius) while layout idioms come from iStat Menus/Stats: accent-colored caps section headers, min/max peak labels pinned on the history chart, a per-entity gear shortcut in the history popover, and the "Show label" menu-bar option rendering as a stacked tiny-caps-label-above-value status item instead of widening the bar with a flat title.
+Decision: The dashboard palettes adopt the Home Assistant theme tokens (dark `#111111`/`#1C1C1C`/`#282828`, light `#FAFAFA`/white, HA text grays, semantic trio `#4CAF50`/`#FF9800`/`#F44336`, 12pt card radius) while layout idioms come from iStat Menus/Stats: accent-colored caps section headers, min/max peak labels pinned on the history chart, a per-entity gear shortcut in the history detail, and the "Show label" menu-bar option rendering as a stacked tiny-caps-label-above-value status item instead of widening the bar with a flat title.
+
+Entity management uses a room rail, a lazy entity list with search/type/scope filters, and an independent detail pane. Narrow windows show the same inspector in place of the list. History opens inside the panel, retains the room view beneath it, and offers recorded samples to keyboard and assistive-technology users. No data, control capabilities, or refresh ownership change.
 
 Consequences: One glance reads as "Home Assistant in an iStat shell". The stacked title changes the persisted-visible rendering of "Show label" (title now carries a line break); the review baseline was regenerated. Severity colors are shared between the panel, thresholds, and menu-bar gauges.
 

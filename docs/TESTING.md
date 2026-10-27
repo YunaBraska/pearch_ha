@@ -88,3 +88,16 @@ swift run pearchha-package-app --verify-release-manifest dist/pearchha-release-e
 Local test signing does not prove Developer ID trust or notarization. The release
 workflow requires production credentials for those checks. CLI `--help` is the
 canonical option reference.
+
+For the Mac App Store channel, run
+`scripts/package-app-store.sh VERSION`. This uses the `AppStore` Xcode
+configuration, applies sandbox, network-client and user-selected read-only file
+entitlements, and exports an
+App Store archive. It requires an installed Apple distribution certificate and
+provisioning profile. Do not use this lane for the direct ZIP/DMG release.
+
+A local UI review can package the Store executable with the existing local test
+identity and existing data profile. That does not verify sandbox migration or
+Store Keychain access. Test those with the actual distribution identity before
+submission. Do not disable library validation to make the direct-channel
+Sparkle framework work with a local test certificate.
