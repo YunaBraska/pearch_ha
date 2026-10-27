@@ -2276,16 +2276,18 @@ public struct PearchHASettingsView: View {
                 entityIconPicker(for: entity, configuration: configuration)
             }
 
-            settingsControlRow("Chart range") {
-                Picker("Chart range", selection: menuBarHistoryRangeBinding(for: entity.id)) {
-                    Text("Auto").tag(HistoryRange?.none)
-                    ForEach(HistoryRange.allCases, id: \.rawValue) { range in
-                        Text(range.displayName).tag(HistoryRange?.some(range))
+            if entity.id.source == .homeAssistant {
+                settingsControlRow("Chart range") {
+                    Picker("Chart range", selection: menuBarHistoryRangeBinding(for: entity.id)) {
+                        Text("Auto").tag(HistoryRange?.none)
+                        ForEach(HistoryRange.allCases, id: \.rawValue) { range in
+                            Text(range.displayName).tag(HistoryRange?.some(range))
+                        }
                     }
+                    .labelsHidden()
+                    .frame(width: 96)
+                    .accessibilityLabel("\(entity.name) chart range")
                 }
-                .labelsHidden()
-                .frame(width: 96)
-                .accessibilityLabel("\(entity.name) chart range")
             }
 
             if isPromoted {
