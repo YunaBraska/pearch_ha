@@ -481,7 +481,6 @@ public struct PearchHAHistoryPopoverContent: View {
                     Text(last.timestamp, format: .dateTime.month(.abbreviated).day().hour().minute())
                 }
                 .font(.caption2).foregroundStyle(.secondary)
-                .accessibilityLabel("Recorded interval")
             }
             DisclosureGroup("Recorded values") {
                 ScrollView {

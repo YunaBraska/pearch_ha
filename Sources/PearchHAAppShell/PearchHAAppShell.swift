@@ -1370,7 +1370,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         }
     }
     @objc private func showHelp(_ sender: Any?) {
-        if let url = URL(string: "https://github.com/YunaBraska/pearch_ha/blob/main/docs/Page/help/index.md") {
+        if let url = URL(string: "https://yunabraska.github.io/pearch_ha/help/") {
             NSWorkspace.shared.open(url)
         }
     }
