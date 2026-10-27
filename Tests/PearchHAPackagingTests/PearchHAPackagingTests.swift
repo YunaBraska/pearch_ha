@@ -29,11 +29,47 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertEqual(plist["LSUIElement"] as? Bool, true)
         XCTAssertEqual(plist["SUFeedURL"] as? String, "https://example.invalid/appcast.xml")
         XCTAssertEqual(plist["SUPublicEDKey"] as? String, "public-key")
+        XCTAssertNil(plist["PEARCHHA_OAUTH_CLIENT_ID"])
+        XCTAssertNil(plist["PEARCHHA_OAUTH_REDIRECT_URI"])
         let urlTypes = try XCTUnwrap(plist["CFBundleURLTypes"] as? [[String: Any]])
         XCTAssertEqual(urlTypes.count, 1)
         XCTAssertEqual(urlTypes.first?["CFBundleTypeRole"] as? String, "Viewer")
         XCTAssertEqual(urlTypes.first?["CFBundleURLName"] as? String, "dev.pearchha.app.oauth")
         XCTAssertEqual(urlTypes.first?["CFBundleURLSchemes"] as? [String], ["pearchha-test"])
+    }
+
+    func testInfoPlistEmbedsOnlyValidatedPublicOAuthMetadata() throws {
+        let oauthClient = try PearchHAOAuthClientWebsiteManifest(
+            clientID: "https://pearchha.dev/app",
+            redirectURI: "pearchha://auth"
+        )
+        let manifest = try PearchHAAppBundleManifest(
+            callbackURLScheme: "pearchha",
+            oauthClient: oauthClient
+        )
+
+        let plist = try propertyList(from: manifest.propertyListData())
+
+        XCTAssertEqual(plist["PEARCHHA_OAUTH_CLIENT_ID"] as? String, "https://pearchha.dev/app")
+        XCTAssertEqual(plist["PEARCHHA_OAUTH_REDIRECT_URI"] as? String, "pearchha://auth")
+        XCTAssertNil(plist["PEARCHHA_ACCESS_TOKEN"])
+        XCTAssertNil(plist["PEARCHHA_REFRESH_TOKEN"])
+    }
+
+    func testManifestRejectsOAuthRedirectSchemeMismatch() throws {
+        let oauthClient = try PearchHAOAuthClientWebsiteManifest(
+            clientID: "https://pearchha.dev/app",
+            redirectURI: "other-app://auth"
+        )
+
+        XCTAssertThrowsError(
+            try PearchHAAppBundleManifest(callbackURLScheme: "pearchha", oauthClient: oauthClient)
+        ) { error in
+            XCTAssertEqual(
+                error as? PearchHAAppBundleManifestError,
+                .oauthRedirectSchemeMismatch(expected: "pearchha", actual: "other-app")
+            )
+        }
     }
 
     func testManifestRejectsIncompleteUpdateConfiguration() {
@@ -83,6 +119,57 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertEqual(plist["CFBundleIconFile"] as? String, "PearchHA")
         let urlTypes = try XCTUnwrap(plist["CFBundleURLTypes"] as? [[String: Any]])
         XCTAssertEqual(urlTypes.first?["CFBundleURLSchemes"] as? [String], ["pearchha"])
+    }
+
+    func testAppBundleBuilderCopiesPrivacyManifestIntoResources() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executableURL = directory.appendingPathComponent("PearchHA-source", isDirectory: false)
+        let privacyManifestURL = directory.appendingPathComponent("PrivacyInfo.xcprivacy", isDirectory: false)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executableURL)
+        try Data("privacy-manifest".utf8).write(to: privacyManifestURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executableURL.path)
+        let outputURL = directory.appendingPathComponent("PearchHA.app", isDirectory: true)
+
+        let result = try PearchHAAppBundleBuilder().build(
+            PearchHAAppBundleBuildConfiguration(
+                executableURL: executableURL,
+                outputURL: outputURL,
+                manifest: try PearchHAAppBundleManifest(),
+                privacyManifestURL: privacyManifestURL
+            )
+        )
+
+        let bundledPrivacyURL = result.appURL.appendingPathComponent(
+            "Contents/Resources/PrivacyInfo.xcprivacy",
+            isDirectory: false
+        )
+        XCTAssertEqual(try Data(contentsOf: bundledPrivacyURL), Data("privacy-manifest".utf8))
+    }
+
+    func testAppBundleBuilderRejectsMissingPrivacyManifest() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executableURL = directory.appendingPathComponent("PearchHA-source", isDirectory: false)
+        let missingPrivacyManifestURL = directory.appendingPathComponent("MissingPrivacyInfo.xcprivacy", isDirectory: false)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executableURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executableURL.path)
+        let outputURL = directory.appendingPathComponent("PearchHA.app", isDirectory: true)
+
+        XCTAssertThrowsError(
+            try PearchHAAppBundleBuilder().build(
+                PearchHAAppBundleBuildConfiguration(
+                    executableURL: executableURL,
+                    outputURL: outputURL,
+                    manifest: try PearchHAAppBundleManifest(),
+                    privacyManifestURL: missingPrivacyManifestURL
+                )
+            )
+        ) { error in
+            XCTAssertEqual(error as? PearchHAAppBundleBuildError, .privacyManifestMissing(missingPrivacyManifestURL.path))
+        }
     }
 
     func testAppBundleBuilderRejectsMissingConfiguredIcon() throws {

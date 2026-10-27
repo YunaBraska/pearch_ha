@@ -88,6 +88,8 @@ Context: Direct downloads need Developer ID signing, notarization, and Sparkle. 
 
 Decision: Keep the direct ZIP and DMG release unchanged. A manual Store-package workflow builds a separate sandboxed package with bundle identifier `berlin.yuna.pearchha`, without Sparkle or a GitHub update control. It is packaged and signed for validation only. Store upload follows successful sandbox testing and App Review preparation.
 
+Both channels embed only the public OAuth client website and redirect URI in the signed bundle. Finder launches must not depend on a working-directory env file. Explicit environment overrides remain available for development. The public redirect declaration is deployed and verified separately from the app.
+
 Consequences: One source tree supports both channels without presenting an external updater in the Store build. The Store channel needs a matching provisioning profile and real-device validation before submission. Configuration transfer is explicit through Import Settings. The original file is never moved or modified. A validated import replaces the destination atomically and quits the app, blocking pending saves until the next launch. Keychain secrets are not exported or copied. Automatic container migration was rejected because the macOS 27.0.1 runtime probe removed the source file.
 
 Alternatives: Reusing the direct app bundle for the Store was rejected because it would retain Sparkle and two competing update channels. Replacing direct distribution with Mac App Store only was rejected because sandbox and review constraints would remove existing direct-install capabilities.

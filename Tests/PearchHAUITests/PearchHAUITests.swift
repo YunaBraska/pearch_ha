@@ -7470,6 +7470,67 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(try sessionStore.load().clientID, "https://pearchha.dev/app")
     }
 
+    func testPackagedOAuthConfigurationLoadsWithoutShellEnvironment() throws {
+        let bundle = try oauthTestBundle([
+            "PEARCHHA_OAUTH_CLIENT_ID": "https://example.invalid/pearchha/",
+            "PEARCHHA_OAUTH_REDIRECT_URI": "pearchha://auth"
+        ])
+        defer { try? FileManager.default.removeItem(at: bundle.bundleURL.deletingLastPathComponent()) }
+        let configuration = try XCTUnwrap(PearchHAOAuthApplicationConfiguration.fromEnvironment([:], bundle: bundle))
+        XCTAssertEqual(configuration.clientID, "https://example.invalid/pearchha/")
+        XCTAssertEqual(configuration.redirectURI, "pearchha://auth")
+        XCTAssertTrue(configuration.acceptsCallbackURL(try XCTUnwrap(URL(string: "pearchha://auth?code=test&state=test"))))
+    }
+
+    func testPackagedOAuthConfigurationCanBeOverriddenExplicitlyForDevelopment() throws {
+        let bundle = try oauthTestBundle([
+            "PEARCHHA_OAUTH_CLIENT_ID": "https://example.invalid/packaged/",
+            "PEARCHHA_OAUTH_REDIRECT_URI": "pearchha://auth"
+        ])
+        defer { try? FileManager.default.removeItem(at: bundle.bundleURL.deletingLastPathComponent()) }
+        let configuration = try XCTUnwrap(PearchHAOAuthApplicationConfiguration.fromEnvironment([
+            "PEARCHHA_OAUTH_CLIENT_ID": "https://example.invalid/development/",
+            "PEARCHHA_OAUTH_REDIRECT_URI": "pearchha-development://auth"
+        ], bundle: bundle))
+        XCTAssertEqual(configuration.clientID, "https://example.invalid/development/")
+        XCTAssertEqual(configuration.redirectURI, "pearchha-development://auth")
+    }
+
+    func testPackagedOAuthConfigurationWithoutMetadataIsUnavailable() throws {
+        let bundle = try oauthTestBundle([:])
+        defer { try? FileManager.default.removeItem(at: bundle.bundleURL.deletingLastPathComponent()) }
+        XCTAssertNil(try PearchHAOAuthApplicationConfiguration.fromEnvironment([:], bundle: bundle))
+    }
+
+    func testPackagedOAuthConfigurationRejectsInvalidMetadata() throws {
+        let cases: [([String: String], String)] = [
+            (["PEARCHHA_OAUTH_CLIENT_ID": "https://example.invalid/app/"], "OAuth redirect URI is invalid"),
+            (["PEARCHHA_OAUTH_CLIENT_ID": "$(PEARCHHA_OAUTH_CLIENT_ID)", "PEARCHHA_OAUTH_REDIRECT_URI": "pearchha://auth"], "OAuth client ID must be an application website URL"),
+            (["PEARCHHA_OAUTH_CLIENT_ID": "https://example.invalid/app/", "PEARCHHA_OAUTH_REDIRECT_URI": "other-app://auth"], "OAuth callback scheme is not declared by this app")
+        ]
+        for (metadata, message) in cases {
+            let bundle = try oauthTestBundle(metadata)
+            defer { try? FileManager.default.removeItem(at: bundle.bundleURL.deletingLastPathComponent()) }
+            XCTAssertThrowsError(try PearchHAOAuthApplicationConfiguration.fromEnvironment([:], bundle: bundle)) { error in
+                XCTAssertEqual(error as? PearchHAOAuthSignInFailure, .configuration(message))
+            }
+        }
+    }
+
+    private func oauthTestBundle(_ configuration: [String: String]) throws -> Bundle {
+        let directory = try temporaryEnvironmentFileURL().deletingLastPathComponent()
+        let bundleURL = directory.appendingPathComponent("PearchHA.app")
+        let contents = bundleURL.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        var metadata: [String: Any] = configuration
+        metadata["CFBundleIdentifier"] = "dev.pearchha.tests.oauth.\(UUID().uuidString)"
+        metadata["CFBundlePackageType"] = "APPL"
+        metadata["CFBundleURLTypes"] = [["CFBundleURLSchemes": ["pearchha"]]]
+        try PropertyListSerialization.data(fromPropertyList: metadata, format: .xml, options: 0)
+            .write(to: contents.appendingPathComponent("Info.plist"))
+        return try XCTUnwrap(Bundle(url: bundleURL))
+    }
+
     func testOAuthApplicationConfigurationLoadsFromExplicitEnvironmentFile() throws {
         let fileURL = try temporaryEnvironmentFileURL()
         defer {

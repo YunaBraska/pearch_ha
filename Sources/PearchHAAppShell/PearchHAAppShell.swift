@@ -706,7 +706,29 @@ public struct PearchHAOAuthApplicationConfiguration: Equatable, Sendable {
             && callbackComponents.password == expectedRedirectComponents.password
     }
 
-    public static func fromEnvironment(_ environment: [String: String] = ProcessInfo.processInfo.environment) throws -> PearchHAOAuthApplicationConfiguration? {
+    /// Loads the public client configuration embedded in an installed app.
+    /// Explicit environment values or an environment-file path override it for development.
+    /// Only unbundled development runs consult a relative `.env.local` file.
+    public static func fromEnvironment(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment,
+        bundle: Bundle = .main
+    ) throws -> PearchHAOAuthApplicationConfiguration? {
+        let hasExplicitOverride = [clientIDEnvironmentKey, redirectURIEnvironmentKey, environmentFileEnvironmentKey]
+            .contains { environment[$0] != nil }
+        if !hasExplicitOverride, bundle.bundleURL.pathExtension == "app" {
+            let clientID = nonBlank(bundle.object(forInfoDictionaryKey: clientIDEnvironmentKey) as? String)
+            let redirectURI = nonBlank(bundle.object(forInfoDictionaryKey: redirectURIEnvironmentKey) as? String)
+            guard clientID != nil || redirectURI != nil else { return nil }
+            let configuration = try PearchHAOAuthApplicationConfiguration(
+                clientID: clientID ?? "", redirectURI: redirectURI ?? ""
+            )
+            let urlTypes = bundle.object(forInfoDictionaryKey: "CFBundleURLTypes") as? [[String: Any]] ?? []
+            let schemes = urlTypes.flatMap { $0["CFBundleURLSchemes"] as? [String] ?? [] }
+            guard schemes.contains(where: { $0.caseInsensitiveCompare(configuration.callbackURLScheme) == .orderedSame }) else {
+                throw PearchHAOAuthSignInFailure.configuration("OAuth callback scheme is not declared by this app")
+            }
+            return configuration
+        }
         let environmentClientID = environmentValue(for: clientIDEnvironmentKey, environment: environment)
         let environmentRedirectURI = environmentValue(for: redirectURIEnvironmentKey, environment: environment)
         if environmentClientID != nil, environmentRedirectURI != nil {

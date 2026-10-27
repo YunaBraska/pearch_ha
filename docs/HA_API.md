@@ -27,7 +27,26 @@ Code exchange also requires `refresh_token`. Keychain stores the session and cli
 ID. Authentication failure triggers one refresh and one retry. Failed refresh
 clears the stored session and requires reconnecting.
 
-Native sign-in reads the application client website and callback URI from `PEARCHHA_OAUTH_CLIENT_ID` and `PEARCHHA_OAUTH_REDIRECT_URI`. Exported process values win; otherwise the app reads those keys from a local ignored env file, or from the exported `PEARCHHA_ENV_FILE` path. The packaged `.app` must declare the callback scheme in `CFBundleURLTypes` with `CFBundleTypeRole=Viewer`; `pearchha-package-app --verify-launch-services` writes that metadata, registers the generated bundle, and verifies macOS records the callback scheme claim for that bundle. The app shell accepts delivered callback URLs only when their scheme and redirect base match the configured redirect URI, and records only a redacted ingress event. The client website must publish the redirect URI according to the Home Assistant native-app registration rules before this can pass real-HA sign-in verification.
+Installed apps read the public application client website and callback URI from
+`PEARCHHA_OAUTH_CLIENT_ID` and `PEARCHHA_OAUTH_REDIRECT_URI` in `Info.plist`, so
+Finder launches do not require a shell environment. Explicit process values or
+`PEARCHHA_ENV_FILE` retain the development override. Only unbundled development
+runs fall back to a relative `.env.local` file.
+
+For direct bundles, export both public values during packaging or pass
+`pearchha-package-app --oauth-env <local-env-file>`. Only those two fields are
+embedded. Tokens and other env-file contents are never bundled. The Store
+packaging script requires both exported values and passes them as Xcode build
+settings. Unconfigured local builds can continue to use token sign-in.
+
+The packaged `.app` must declare the callback scheme in `CFBundleURLTypes` with
+`CFBundleTypeRole=Viewer`. Packaging and runtime reject a bundled redirect whose
+scheme is not declared. `pearchha-package-app --verify-launch-services` registers
+the generated bundle and verifies macOS records the scheme claim. The app shell
+accepts delivered callback URLs only when their scheme and redirect base match
+the configured redirect URI, and records only a redacted ingress event. The
+client website must publish the redirect URI according to the Home Assistant
+native-app registration rules before real-HA sign-in verification.
 
 For native callback schemes such as `pearchha://auth`, the application website must include a redirect declaration in the first 10kB of HTML:
 

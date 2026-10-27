@@ -94,7 +94,11 @@ For the Mac App Store channel, run
 configuration, applies sandbox, network-client and user-selected read-only file
 entitlements, and exports an
 App Store archive. It requires an installed Apple distribution certificate and
-provisioning profile. Do not use this lane for the direct ZIP/DMG release.
+provisioning profile, plus exported `PEARCHHA_OAUTH_CLIENT_ID` and
+`PEARCHHA_OAUTH_REDIRECT_URI` public configuration. Verify the deployed client
+website with `pearchha-package-app --verify-published-oauth-site` first. The
+packaged app must retain both public values and its matching callback scheme
+without a shell environment. Do not use this lane for the direct ZIP/DMG release.
 
 A local UI review can package the Store executable with the existing local test
 identity and existing data profile. That does not verify sandbox migration or

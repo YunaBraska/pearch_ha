@@ -6,6 +6,7 @@ import PearchHASupport
 @main
 struct PearchHAPackageAppCommand {
     private static let defaultAppIconURL = URL(fileURLWithPath: "Xcode/PearchHA/PearchHA.icns", isDirectory: false)
+    private static let defaultPrivacyManifestURL = URL(fileURLWithPath: "Xcode/PearchHA/PrivacyInfo.xcprivacy", isDirectory: false)
 
     static func main() {
         do {
@@ -69,6 +70,14 @@ struct PearchHAPackageAppCommand {
         let iconURL = FileManager.default.fileExists(atPath: defaultAppIconURL.path)
             ? defaultAppIconURL
             : nil
+        let privacyManifestURL = FileManager.default.fileExists(atPath: defaultPrivacyManifestURL.path)
+            ? defaultPrivacyManifestURL
+            : nil
+        let environment = ProcessInfo.processInfo.environment
+        let includesOAuth = options.value(for: "--oauth-env") != nil
+            || environment["PEARCHHA_OAUTH_CLIENT_ID"] != nil
+            || environment["PEARCHHA_OAUTH_REDIRECT_URI"] != nil
+        let oauthClient = includesOAuth ? try oauthSiteManifest(options: options) : nil
         let manifest = try PearchHAAppBundleManifest(
             bundleIdentifier: options.value(for: "--bundle-id") ?? "dev.pearchha.app",
             version: options.value(for: "--version") ?? "0.1.0",
@@ -77,7 +86,8 @@ struct PearchHAPackageAppCommand {
             callbackURLScheme: options.value(for: "--callback-scheme") ?? "pearchha",
             iconFileName: iconURL?.deletingPathExtension().lastPathComponent,
             updateFeedURL: options.value(for: "--update-feed-url"),
-            updatePublicKey: options.value(for: "--update-public-key")
+            updatePublicKey: options.value(for: "--update-public-key"),
+            oauthClient: oauthClient
         )
         let result = try PearchHAAppBundleBuilder().build(
             PearchHAAppBundleBuildConfiguration(
@@ -85,6 +95,7 @@ struct PearchHAPackageAppCommand {
                 outputURL: URL(fileURLWithPath: options.value(for: "--output") ?? ".build/PearchHA.app"),
                 manifest: manifest,
                 iconURL: iconURL,
+                privacyManifestURL: privacyManifestURL,
                 replaceExisting: options.flags.contains("--replace")
             )
         )
@@ -274,7 +285,8 @@ struct PearchHAPackageAppCommand {
       --write-oauth-site PATH       Write a deployable OAuth client-website HTML artifact from exported OAuth env values or an env file.
       --verify-oauth-site PATH      Verify an OAuth client-website HTML artifact against exported OAuth env values or an env file.
       --verify-published-oauth-site Fetch the configured OAuth client website URL and verify the published HTML declaration against the configured redirect URI.
-      --oauth-env PATH              Env file path used for OAuth site generation or verification. Default: .env.local or PEARCHHA_ENV_FILE.
+      --oauth-env PATH              Env file path used for OAuth site generation, verification, or bundle metadata. Default: .env.local or PEARCHHA_ENV_FILE.
+                                    When packaging, pass this option or export an OAuth key to opt in. Only the public client ID and redirect URI are copied into Info.plist.
       --executable PATH             SwiftPM-built PearchHA executable. Default: .build/debug/PearchHA
       --output PATH                 Output .app bundle. Default: .build/PearchHA.app
       --dmg-output PATH             Output DMG path. Default: app output path with .dmg extension
@@ -416,11 +428,6 @@ struct PearchHAPackageAppCommand {
         }
         if verifiesPublishedSite && verifyPath != nil {
             throw CommandError.conflictingOptions("--verify-published-oauth-site", "--verify-oauth-site")
-        }
-        if options.value(for: "--oauth-env") != nil && writePath == nil && verifyPath == nil {
-            if !verifiesPublishedSite {
-                throw CommandError.requiresOption("--oauth-env", "--write-oauth-site or --verify-oauth-site or --verify-published-oauth-site")
-            }
         }
     }
 

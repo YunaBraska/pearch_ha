@@ -390,7 +390,7 @@ public extension ConfigStore {
     /// Reads and validates a complete configuration from a user-selected JSON file.
     ///
     /// The source file is never modified. The returned value is an immutable
-    /// snapshot suitable for confirmation before calling `importConfiguration`.
+    /// snapshot suitable for confirmation before saving it to the destination store.
     func readImport(from sourceURL: URL) throws -> PearchHAConfiguration {
         let fileManager = FileManager.default
         guard let attributes = try? fileManager.attributesOfItem(atPath: sourceURL.path),

@@ -4,6 +4,7 @@ import Foundation
 public enum PearchHAAppBundleManifestError: Error, Equatable, CustomStringConvertible, Sendable {
     case blankField(String)
     case invalidCallbackURLScheme(String)
+    case oauthRedirectSchemeMismatch(expected: String, actual: String)
     case incompleteUpdateConfiguration
 
     public var description: String {
@@ -12,6 +13,8 @@ public enum PearchHAAppBundleManifestError: Error, Equatable, CustomStringConver
             "\(name) is required"
         case let .invalidCallbackURLScheme(value):
             "invalid callback URL scheme: \(value)"
+        case let .oauthRedirectSchemeMismatch(expected, actual):
+            "OAuth redirect URI scheme \(actual) does not match callback URL scheme \(expected)"
         case .incompleteUpdateConfiguration:
             "update feed URL and public key must be provided together"
         }
@@ -29,6 +32,7 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
     public let iconFileName: String?
     public let updateFeedURL: String?
     public let updatePublicKey: String?
+    public let oauthClient: PearchHAOAuthClientWebsiteManifest?
 
     public init(
         appName: String = "PearchHA",
@@ -40,7 +44,8 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
         callbackURLScheme: String = "pearchha",
         iconFileName: String? = nil,
         updateFeedURL: String? = nil,
-        updatePublicKey: String? = nil
+        updatePublicKey: String? = nil,
+        oauthClient: PearchHAOAuthClientWebsiteManifest? = nil
     ) throws {
         self.appName = try Self.required(appName, name: "appName")
         self.bundleIdentifier = try Self.required(bundleIdentifier, name: "bundleIdentifier")
@@ -59,8 +64,20 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
         guard (updateFeedURL == nil) == (updatePublicKey == nil) else {
             throw PearchHAAppBundleManifestError.incompleteUpdateConfiguration
         }
+        if let oauthClient {
+            guard let redirectScheme = URL(string: oauthClient.redirectURI)?.scheme,
+                  redirectScheme.caseInsensitiveCompare(normalizedScheme) == .orderedSame
+            else {
+                let actualScheme = URL(string: oauthClient.redirectURI)?.scheme ?? ""
+                throw PearchHAAppBundleManifestError.oauthRedirectSchemeMismatch(
+                    expected: normalizedScheme,
+                    actual: actualScheme
+                )
+            }
+        }
         self.updateFeedURL = updateFeedURL
         self.updatePublicKey = updatePublicKey
+        self.oauthClient = oauthClient
     }
 
     public func propertyListData() throws -> Data {
@@ -74,7 +91,8 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
             callbackURLScheme: callbackURLScheme,
             iconFileName: iconFileName,
             updateFeedURL: updateFeedURL,
-            updatePublicKey: updatePublicKey
+            updatePublicKey: updatePublicKey,
+            oauthClient: oauthClient
         )
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .xml
@@ -110,6 +128,7 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
 public enum PearchHAAppBundleBuildError: Error, Equatable, CustomStringConvertible, Sendable {
     case executableMissing(String)
     case iconMissing(String)
+    case privacyManifestMissing(String)
     case outputExists(String)
 
     public var description: String {
@@ -118,6 +137,8 @@ public enum PearchHAAppBundleBuildError: Error, Equatable, CustomStringConvertib
             "executable does not exist: \(path)"
         case let .iconMissing(path):
             "icon file does not exist: \(path)"
+        case let .privacyManifestMissing(path):
+            "privacy manifest does not exist: \(path)"
         case let .outputExists(path):
             "output app already exists: \(path)"
         }
@@ -129,6 +150,7 @@ public struct PearchHAAppBundleBuildConfiguration: Equatable, Sendable {
     public let outputURL: URL
     public let manifest: PearchHAAppBundleManifest
     public let iconURL: URL?
+    public let privacyManifestURL: URL?
     public let replaceExisting: Bool
 
     public init(
@@ -136,12 +158,14 @@ public struct PearchHAAppBundleBuildConfiguration: Equatable, Sendable {
         outputURL: URL,
         manifest: PearchHAAppBundleManifest,
         iconURL: URL? = nil,
+        privacyManifestURL: URL? = nil,
         replaceExisting: Bool = false
     ) {
         self.executableURL = executableURL
         self.outputURL = outputURL
         self.manifest = manifest
         self.iconURL = iconURL
+        self.privacyManifestURL = privacyManifestURL
         self.replaceExisting = replaceExisting
     }
 }
@@ -486,6 +510,11 @@ public struct PearchHAAppBundleBuilder {
         {
             throw PearchHAAppBundleBuildError.iconMissing(iconURL.path)
         }
+        if let privacyManifestURL = configuration.privacyManifestURL,
+           !fileManager.fileExists(atPath: privacyManifestURL.path)
+        {
+            throw PearchHAAppBundleBuildError.privacyManifestMissing(privacyManifestURL.path)
+        }
         if fileManager.fileExists(atPath: configuration.outputURL.path) {
             guard configuration.replaceExisting else {
                 throw PearchHAAppBundleBuildError.outputExists(configuration.outputURL.path)
@@ -507,6 +536,12 @@ public struct PearchHAAppBundleBuilder {
             try fileManager.copyItem(
                 at: iconURL,
                 to: resourcesURL.appendingPathComponent(iconURL.lastPathComponent, isDirectory: false)
+            )
+        }
+        if let privacyManifestURL = configuration.privacyManifestURL {
+            try fileManager.copyItem(
+                at: privacyManifestURL,
+                to: resourcesURL.appendingPathComponent("PrivacyInfo.xcprivacy", isDirectory: false)
             )
         }
 
@@ -3072,6 +3107,8 @@ private struct PearchHAInfoPlist: Encodable {
     let iconFileName: String?
     let updateFeedURL: String?
     let updatePublicKey: String?
+    let oauthClientID: String?
+    let oauthRedirectURI: String?
     let urlTypes: [PearchHAInfoPlistURLType]
 
     init(
@@ -3084,7 +3121,8 @@ private struct PearchHAInfoPlist: Encodable {
         callbackURLScheme: String,
         iconFileName: String?,
         updateFeedURL: String?,
-        updatePublicKey: String?
+        updatePublicKey: String?,
+        oauthClient: PearchHAOAuthClientWebsiteManifest?
     ) {
         self.appName = appName
         self.bundleIdentifier = bundleIdentifier
@@ -3095,6 +3133,8 @@ private struct PearchHAInfoPlist: Encodable {
         self.iconFileName = iconFileName
         self.updateFeedURL = updateFeedURL
         self.updatePublicKey = updatePublicKey
+        self.oauthClientID = oauthClient?.clientID
+        self.oauthRedirectURI = oauthClient?.redirectURI
         self.urlTypes = [
             PearchHAInfoPlistURLType(
                 name: "\(bundleIdentifier).oauth",
@@ -3120,6 +3160,8 @@ private struct PearchHAInfoPlist: Encodable {
         case iconFileName = "CFBundleIconFile"
         case updateFeedURL = "SUFeedURL"
         case updatePublicKey = "SUPublicEDKey"
+        case oauthClientID = "PEARCHHA_OAUTH_CLIENT_ID"
+        case oauthRedirectURI = "PEARCHHA_OAUTH_REDIRECT_URI"
         case urlTypes = "CFBundleURLTypes"
     }
 }
