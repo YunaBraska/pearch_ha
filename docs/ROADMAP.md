@@ -31,4 +31,5 @@ remaining work and release evidence gaps.
 ## Planned
 
 - Raise client coverage toward 95% without weakening the existing gates.
-- Decide localization scope before claiming broader language support.
+- Extend localization beyond the German/English **This Mac** source before claiming
+  whole-app language support.

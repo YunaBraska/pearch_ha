@@ -135,3 +135,27 @@ Entity management uses a room rail, a lazy entity list with search/type/scope fi
 Consequences: Shared surface tokens prevent visual drift between navigation and details. Opaque content removes the redundant material overlay and respects reduced transparency without a second rendering path. Severity colors remain shared between the panel, thresholds and menu-bar gauges. The stacked menu-bar title still uses a line break when "Show label" is enabled.
 
 Alternatives: Cloning iStat 7's ring-heavy dropdown was rejected — its density cost is the most criticized part of iStat 7. A full theme-pack system was rejected as disproportionate; the accent stays user-configurable.
+
+## ADR-0013 - Read-only local Mac source
+
+Context: Menu-bar values should also describe the current Mac without requiring
+a Home Assistant connection or private hardware APIs.
+
+Decision: Reuse selection, formatting, gauges, thresholds and menu-bar presentation.
+Stable `local-mac:` entity IDs identify their source and cannot collide with HA's
+`domain.object_id` identifiers. Labels and raw state codes remain separate, with
+English and German resources. The app shell reads documented Mach, IOPowerSources
+and ProcessInfo APIs. The panel model owns the cancellable sampling loop and
+rejects results from superseded requests. Native notification subscriptions belong
+to the shell and are released with it.
+
+Consequences: Local values work offline and survive HA reconnects and sign-out.
+They are opt-in, read-only, excluded from HA requests, and never recorded to disk.
+CPU requires two samples. Memory is active, wired and compressed pages as a share
+of physical RAM, not memory pressure. Battery readings require an internal battery.
+Thermal load is a state, not a temperature. Both packaging channels embed the same
+localization bundle. App Store signing and review remain separate release gates.
+
+Alternatives: Fake HA entities, a separate selection store, persistent local history,
+private SMC access, fan control and a general plugin framework are unnecessary for
+this scope.

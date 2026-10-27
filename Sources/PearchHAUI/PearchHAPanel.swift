@@ -33,6 +33,8 @@ public final class PearchHAPanelModel: ObservableObject {
     public typealias SnapshotSink = @MainActor (PearchHAPanelSnapshot, Bool) -> Void
     /// Clears the persisted authentication session when the user signs out.
     public typealias SignOutHandler = @MainActor () -> Void
+    /// Reads requested local OS metrics. Never receives credentials or an HA endpoint.
+    public typealias LocalSensorProvider = @Sendable (Set<String>) async -> [String: String]
 
     @Published public private(set) var snapshot: PearchHAPanelSnapshot {
         didSet {
@@ -143,6 +145,12 @@ public final class PearchHAPanelModel: ObservableObject {
     private let protectedActionValueStore: any ProtectedActionValueStore
     private let snapshotSink: SnapshotSink
     private let signOutHandler: SignOutHandler
+    private let localSensorProvider: LocalSensorProvider?
+    private var localSensorTask: Task<Void, Never>?
+    private var localSensorGeneration = 0
+    private var localRoom: Room?
+    private var localSensorsStarting = false
+    private var localSensorsVisibleInSettings = false
     private static let inlineSparklineSampleBudget = 48
     private let performanceSignposter = OSSignposter(
         logger: Logger(subsystem: "dev.yuna.pearchha", category: "Performance")
@@ -212,6 +220,7 @@ public final class PearchHAPanelModel: ObservableObject {
         historyProvider: @escaping HistoryProvider = { _, _, _ in .unavailable("history client is not configured") },
         bulkHistoryProvider: @escaping BulkHistoryProvider = { _, _, _ in [:] },
         serviceMetadataProvider: @escaping ServiceMetadataProvider = { _ in .success([]) },
+        localSensorProvider: LocalSensorProvider? = nil,
         liveUpdateStreamer: LiveUpdateStreamer? = nil,
         actionRunner: @escaping ActionRunner = { _, _ in .failed("action client is not configured") },
         oauthSignInRunner: @escaping OAuthSignInRunner = { _ in .failed("OAuth sign-in is not configured") },
@@ -236,6 +245,7 @@ public final class PearchHAPanelModel: ObservableObject {
     ) {
         self.snapshotSink = snapshotSink
         self.signOutHandler = signOutHandler
+        self.localSensorProvider = localSensorProvider
         if let failure = customActionConfiguration.validationFailure() {
             self.customActionConfiguration = CustomActionConfiguration()
             self.customActionPersistenceFailureDescription = failure.description
@@ -299,6 +309,91 @@ public final class PearchHAPanelModel: ObservableObject {
         bulkSyncTask?.cancel()
         periodicRefreshTask?.cancel()
         liveUpdateTask?.cancel()
+        localSensorTask?.cancel()
+    }
+
+    /// Discovers this Mac once. Metrics remain opt-in and need no HA session.
+    public func startLocalSensors() async {
+        guard let localSensorProvider, localRoom == nil, !localSensorsStarting else { return }
+        localSensorsStarting = true
+        defer { localSensorsStarting = false }
+        let readings = await localSensorProvider(Set(LocalMacSensor.allCases.map(\.rawValue)))
+        guard !Task.isCancelled else { return }
+        let metrics = LocalMacSensor.allCases.filter {
+            $0 != .batteryLevel && $0 != .batteryCharging || readings[$0.rawValue] != nil
+        }
+        localRoom = Room(id: LocalMacSensor.roomID, name: LocalMacText.thisMac.localized(),
+                         entities: metrics.map { $0.entity(state: readings[$0.rawValue] ?? "unavailable") })
+        updateSnapshot { _ in }
+        reconcileLocalSensorRefresh()
+    }
+
+    /// Settings is a temporary consumer. Selected panel and pinned menu values
+    /// remain consumers when all windows are closed.
+    public func setLocalSensorsVisibleInSettings(_ visible: Bool) {
+        guard visible != localSensorsVisibleInSettings else { return }
+        localSensorsVisibleInSettings = visible
+        reconcileLocalSensorRefresh()
+    }
+
+    private var requestedLocalMetrics: Set<String> {
+        guard let localRoom else { return [] }
+        let ids = Set(snapshot.rooms.flatMap(\.entities).map(\.id))
+            .union(snapshot.menuBarDisplayConfiguration.promotedEntityIDs)
+        return Set(localRoom.entities.compactMap { entity in
+            guard localSensorsVisibleInSettings || ids.contains(entity.id) else { return nil }
+            return LocalMacSensor(entityID: entity.id)?.rawValue
+        })
+    }
+
+    /// Refreshes cached local readings. Rendering never calls the OS reader.
+    public func refreshLocalSensors() async {
+        guard let localSensorProvider, let previous = localRoom else { return }
+        let metrics = requestedLocalMetrics
+        guard !metrics.isEmpty else { return }
+        localSensorGeneration &+= 1
+        let generation = localSensorGeneration
+        let readings = await localSensorProvider(metrics)
+        guard !Task.isCancelled, generation == localSensorGeneration, metrics == requestedLocalMetrics else { return }
+        let entities = previous.entities.map { entity -> DiscoveredEntity in
+            guard let metric = LocalMacSensor(entityID: entity.id), metrics.contains(metric.rawValue) else { return entity }
+            return metric.entity(state: readings[metric.rawValue] ?? "unavailable")
+        }
+        let next = Room(id: previous.id, name: previous.name, entities: entities)
+        guard next != localRoom else { return }
+        localRoom = next
+        let combined = snapshot.availableRooms.filter { $0.id != LocalMacSensor.roomID } + [next]
+        rebuildAvailableEntityCaches(from: combined, refreshingValues: true)
+        updateSnapshot { _ in }
+    }
+
+    /// One cancellable loop owns passive local sampling. Reuses the existing
+    /// data interval and stops when no local value has a consumer.
+    private func reconcileLocalSensorRefresh() {
+        localSensorTask?.cancel()
+        localSensorTask = nil
+        localSensorGeneration &+= 1
+        guard localRoom != nil, let localSensorProvider else { return }
+        let hasConsumers = !requestedLocalMetrics.isEmpty
+        let delay = PearchDuration.seconds(Int64(displayPreferences.dataSyncInterval.rawValue))
+        localSensorTask = Task { @MainActor [weak self, clock] in
+            if !hasConsumers {
+                _ = await localSensorProvider([]) // Reset the CPU delta before a future sampling session.
+                return
+            }
+            await self?.refreshLocalSensors()
+            while !Task.isCancelled {
+                do { _ = try await clock.sleep(for: delay) } catch { return }
+                guard !Task.isCancelled, self?.requestedLocalMetrics.isEmpty == false else { return }
+                await self?.refreshLocalSensors()
+            }
+        }
+    }
+
+    public func stopLocalSensors() {
+        localSensorTask?.cancel()
+        localSensorTask = nil
+        localSensorGeneration &+= 1
     }
 
     public func updateConnectionForm(
@@ -514,6 +609,7 @@ public final class PearchHAPanelModel: ObservableObject {
         let liveUpdateSettingChanged = previousPreferences.liveUpdatesEnabled != preferences.liveUpdatesEnabled
         if previousPreferences.dataSyncInterval != preferences.dataSyncInterval {
             reconcilePeriodicRefreshLoop(refreshImmediately: false)
+            reconcileLocalSensorRefresh()
         }
         if previousPreferences.historyDetailRefreshInterval != preferences.historyDetailRefreshInterval
             || previousPreferences.dataSyncInterval != preferences.dataSyncInterval {
@@ -574,7 +670,7 @@ public final class PearchHAPanelModel: ObservableObject {
             showsUnit: configuration.showsUnit,
             minValue: configuration.minValue,
             maxValue: configuration.maxValue
-        ).format(displayedEntity(for: entity), isStale: snapshot.valuesAreStale)
+        ).format(displayedEntity(for: entity), isStale: snapshot.valuesAreStale && entity.id.source == .homeAssistant)
         formattedValueCache[key] = value
         return value
     }
@@ -680,7 +776,7 @@ public final class PearchHAPanelModel: ObservableObject {
     public func setEntity(_ id: EntityID, isSelected: Bool) {
         let currentIDs = snapshot.selectionConfiguration.isExplicit
             ? snapshot.selectionConfiguration.selectedEntityIDs
-            : orderedAvailableEntityIDs()
+            : orderedAvailableEntityIDs().filter { $0.source == .homeAssistant }
         var selected = Set(currentIDs)
         if isSelected {
             selected.insert(id)
@@ -1095,6 +1191,7 @@ public final class PearchHAPanelModel: ObservableObject {
     ///   - id: The entity whose history should be shown.
     ///   - range: An explicit range, or `nil` to use the entity's default.
     public func presentHistoryDetail(_ id: EntityID, range: HistoryRange? = nil) {
+        guard id.source == .homeAssistant else { return }
         let resolvedRange = range ?? historyRange(for: id)
         historyTask?.cancel()
         primeHistoryPresentation(entityID: id, range: resolvedRange)
@@ -1155,6 +1252,7 @@ public final class PearchHAPanelModel: ObservableObject {
     }
 
     public func loadHistory(_ id: EntityID, range: HistoryRange? = nil) async {
+        guard id.source == .homeAssistant else { return }
         let resolvedRange = range ?? historyRange(for: id)
         let cacheKey = PearchHAHistoryCacheKey(entityID: id, range: resolvedRange)
         let waitingGeneration = historyRequestGeneration
@@ -1434,7 +1532,7 @@ public final class PearchHAPanelModel: ObservableObject {
 
     /// Keep selected daily previews and the open detail available between refreshes.
     private func protectedHistoryKeys() -> Set<PearchHAHistoryCacheKey> {
-        var keys = Set(displayedEntityIDs().map { PearchHAHistoryCacheKey(entityID: $0, range: .day) })
+        var keys = Set(displayedEntityIDs().filter { $0.source == .homeAssistant }.map { PearchHAHistoryCacheKey(entityID: $0, range: .day) })
         if let key = presentedHistoryKey {
             keys.insert(key)
         }
@@ -1554,8 +1652,8 @@ public final class PearchHAPanelModel: ObservableObject {
         guard effectivePeriodicRefreshInterval.nanoseconds > 0, lastConnectedForm != nil else {
             return false
         }
-        return isPanelActive || !snapshot.menuBarDisplayConfiguration.promotedEntityIDs.isEmpty
-            || (bulkSyncConfiguration.isEnabled && !snapshot.rooms.isEmpty)
+        return isPanelActive || snapshot.menuBarDisplayConfiguration.promotedEntityIDs.contains { $0.source == .homeAssistant }
+            || (bulkSyncConfiguration.isEnabled && displayedEntityIDs().contains { $0.source == .homeAssistant })
     }
 
     private func reconcilePeriodicRefreshLoop(refreshImmediately: Bool) {
@@ -1973,7 +2071,7 @@ public final class PearchHAPanelModel: ObservableObject {
     }
 
     public func customActions(for entity: DiscoveredEntity) -> [EntityCustomAction] {
-        customActionConfiguration.actions(for: entity.id)
+        entity.id.source == .homeAssistant ? customActionConfiguration.actions(for: entity.id) : []
     }
 
     public var orphanedCustomActions: [EntityCustomAction] {
@@ -2023,6 +2121,10 @@ public final class PearchHAPanelModel: ObservableObject {
 
     @discardableResult
     public func setCustomAction(_ action: EntityCustomAction) -> Bool {
+        guard action.entityID.source == .homeAssistant, action.action.targetEntityID?.source != .thisMac else {
+            customActionPersistenceFailureDescription = LocalMacText.readOnly.localized()
+            return false
+        }
         let existingAction = customActionConfiguration.action(id: action.id)
         let sanitized: SanitizedCustomAction
         do {
@@ -2322,6 +2424,7 @@ public final class PearchHAPanelModel: ObservableObject {
     @discardableResult
     public func startCustomAction(_ id: CustomActionID, confirmed: Bool = false) -> Bool {
         guard let action = customActionConfiguration.action(id: id),
+              action.entityID.source == .homeAssistant, action.action.targetEntityID?.source != .thisMac,
               confirmed || !action.requiresConfirmation else { return false }
         return startControlAction { await $0.runCustomAction(id, confirmed: confirmed) }
     }
@@ -2342,7 +2445,8 @@ public final class PearchHAPanelModel: ObservableObject {
         guard !snapshot.controlActionState.isRunning else {
             return false
         }
-        guard let action = customActionConfiguration.action(id: id) else {
+        guard let action = customActionConfiguration.action(id: id),
+              action.entityID.source == .homeAssistant, action.action.targetEntityID?.source != .thisMac else {
             return false
         }
         guard confirmed || !action.requiresConfirmation else {
@@ -2970,6 +3074,7 @@ public final class PearchHAPanelModel: ObservableObject {
     }
 
     private func applyLiveState(_ state: EntityState, reporting requests: [String: RequestedControlValue]) -> Bool {
+        guard state.id.source == .homeAssistant else { return false }
         if transientUITrackingDepth > 0 {
             let exists = availableEntityLocations[state.id] != nil
             if exists {
@@ -3196,7 +3301,10 @@ public final class PearchHAPanelModel: ObservableObject {
             }
             lastConnectedForm = form
             editableForm = form
-            let refreshedRooms = stabilizedRefreshedRooms(rooms, preserving: snapshot.availableRooms)
+            let remoteRooms = rooms.filter { $0.id != LocalMacSensor.roomID }.map { room in
+                Room(id: room.id, name: room.name, entities: room.entities.filter { $0.id.source == .homeAssistant })
+            }
+            let refreshedRooms = stabilizedRefreshedRooms(remoteRooms + (localRoom.map { [$0] } ?? []), preserving: snapshot.availableRooms)
             // A full state response replaces values even when entity IDs are unchanged.
             rebuildAvailableEntityCaches(from: refreshedRooms, refreshingValues: true)
             let normalizedDisplayConfiguration = normalizedMenuBarDisplayConfiguration(
@@ -3347,10 +3455,16 @@ public final class PearchHAPanelModel: ObservableObject {
     }
 
     private func updateSnapshot(_ update: (inout PearchHAPanelSnapshot.Draft) -> Void) {
-        snapshot = snapshot.updating { draft in
+        let next = snapshot.updating { draft in
             draft.hasTokenInput = hasToken(in: editableForm)
             update(&draft)
+            if let localRoom {
+                draft.availableRooms = draft.availableRooms.filter { $0.id != LocalMacSensor.roomID } + [localRoom]
+                let remoteRooms = draft.connectionState == .disconnected ? [] : draft.rooms.filter { $0.id != LocalMacSensor.roomID }
+                draft.rooms = selectedRooms(from: remoteRooms + [localRoom], using: draft.selectionConfiguration)
+            }
         }
+        if next != snapshot { snapshot = next }
     }
 
     func protectedValueDraft(
@@ -3760,6 +3874,7 @@ public final class PearchHAPanelModel: ObservableObject {
         }
         startHistoryBulkSync()
         reconcilePeriodicRefreshLoop(refreshImmediately: false)
+        reconcileLocalSensorRefresh()
         return true
     }
 
@@ -3842,6 +3957,7 @@ public final class PearchHAPanelModel: ObservableObject {
             }
         }
         reconcilePeriodicRefreshLoop(refreshImmediately: false)
+        reconcileLocalSensorRefresh()
         return true
     }
 
@@ -3853,8 +3969,10 @@ public final class PearchHAPanelModel: ObservableObject {
         EntitySelectionProjector().selectedRooms(
             rooms: snapshot.availableRooms,
             configuration: EntitySelectionConfiguration(
+                selectedEntityIDs: snapshot.availableRooms.flatMap(\.entities).map(\.id),
                 roomOrder: snapshot.selectionConfiguration.roomOrder,
-                entityOrder: snapshot.selectionConfiguration.entityOrder
+                entityOrder: snapshot.selectionConfiguration.entityOrder,
+                isExplicit: true
             )
         )
         .flatMap(\.entities)

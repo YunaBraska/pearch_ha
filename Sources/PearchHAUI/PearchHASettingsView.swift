@@ -185,11 +185,17 @@ public struct PearchHASettingsView: View {
         }
         .onAppear {
             viewState.setActiveTab(selectedTab)
+            model.setLocalSensorsVisibleInSettings(selectedTab == .entities && selectedRoomID == LocalMacSensor.roomID.rawValue)
         }
         .onChange(of: selectedTab) { tab in
             viewState.setActiveTab(tab)
+            model.setLocalSensorsVisibleInSettings(tab == .entities && selectedRoomID == LocalMacSensor.roomID.rawValue)
+        }
+        .onChange(of: selectedRoomID) { roomID in
+            model.setLocalSensorsVisibleInSettings(selectedTab == .entities && roomID == LocalMacSensor.roomID.rawValue)
         }
         .onDisappear {
+            model.setLocalSensorsVisibleInSettings(false)
             flushPendingDisplayPreferencesSave()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
@@ -216,9 +222,13 @@ public struct PearchHASettingsView: View {
                 }
                 if selectedTab == .entities {
                     Divider().padding(.vertical, 10)
+                    if let localRoom = snapshot.availableRooms.first(where: { $0.id == LocalMacSensor.roomID }) {
+                        roomFilterButton(localRoom.name, id: localRoom.id.rawValue)
+                        Divider().padding(.vertical, 6)
+                    }
                     Text("Rooms").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 8)
                     roomFilterButton("All rooms", id: "")
-                    ForEach(snapshot.availableRooms, id: \.id) { room in
+                    ForEach(snapshot.availableRooms.filter { $0.id != LocalMacSensor.roomID }, id: \.id) { room in
                         roomFilterButton(room.name, id: room.id.rawValue)
                     }
                 }
@@ -239,6 +249,9 @@ public struct PearchHASettingsView: View {
             inspectedEntityID = nil
         } label: {
             HStack {
+                if id == LocalMacSensor.roomID.rawValue {
+                    Image(systemName: "laptopcomputer").accessibilityHidden(true)
+                }
                 Text(title).lineLimit(1)
                 Spacer(minLength: 0)
                 if selectedRoomID == id { Image(systemName: "checkmark").accessibilityHidden(true) }
@@ -248,7 +261,7 @@ public struct PearchHASettingsView: View {
         }
         .buttonStyle(.plain)
         .help(title)
-        .accessibilityLabel("Filter room: \(title)")
+        .accessibilityLabel(id == LocalMacSensor.roomID.rawValue ? title : "Filter room: \(title)")
         .accessibilityAddTraits(selectedRoomID == id ? [.isSelected] : [])
     }
 
@@ -2101,6 +2114,10 @@ public struct PearchHASettingsView: View {
         return VStack(alignment: .leading, spacing: 0) {
             settingsSection(title: "Identity", systemImage: "info.circle") {
                 entityIdentitySection(metadata.inspectorFields, links: links)
+                if let local = LocalMacSensor(entityID: entity.id) {
+                    Text(local.explanation).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text(LocalMacText.historyUnavailable.localized()).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
             }
             settingsSectionDivider
             settingsSection(title: "Display", systemImage: "textformat.size") {

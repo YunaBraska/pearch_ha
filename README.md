@@ -13,6 +13,8 @@ A native macOS menu bar app for Home Assistant.
 ## Features
 
 - Configurable menu bar values and gauges, with a panel grouped by room.
+- Optional read-only CPU, memory, battery and thermal readings under **This Mac**,
+  available without Home Assistant, with English and German labels.
 - Optional live updates while the panel is open, or cheaper timed refreshes.
 - History previews and on-demand detail for hour, day, week, and month.
 - Capability-derived native controls and custom Home Assistant service actions.
@@ -23,7 +25,7 @@ A native macOS menu bar app for Home Assistant.
 ## Requirements
 
 - macOS 13 or newer.
-- A reachable Home Assistant instance.
+- A reachable Home Assistant instance for connected-device features.
 
 ## Run it
 

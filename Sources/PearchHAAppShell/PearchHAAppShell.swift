@@ -1135,6 +1135,10 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
     private let bulkHistoryProvider: PearchHAPanelModel.BulkHistoryProvider
     private let serviceMetadataProvider: PearchHAPanelModel.ServiceMetadataProvider
     private let liveUpdateStreamer: PearchHAPanelModel.LiveUpdateStreamer?
+    private let localSensorProvider: PearchHAPanelModel.LocalSensorProvider?
+    private var localSensorObservation: PearchHALocalSensorObservation?
+    private var localSensorStartTask: Task<Void, Never>?
+    private var localSensorChangeTask: Task<Void, Never>?
     private let actionRunner: PearchHAPanelModel.ActionRunner
     private let oauthSignInRunner: PearchHAPanelModel.OAuthSignInRunner
     private let releaseUpdateChecker: PearchHAPanelModel.ReleaseUpdateChecker
@@ -1157,6 +1161,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
     }
 
     public convenience init(configStore: ConfigStore?) {
+        let localSensorReader = PearchHALocalSensorReader()
         let authSessionStore = PearchHAAuthSessionStore()
         let gateway = PearchHAAuthorizedHomeAssistantGateway(authSessionStore: authSessionStore)
         let oauthSignInRunner: PearchHAPanelModel.OAuthSignInRunner
@@ -1181,6 +1186,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
             bulkHistoryProvider: gateway.bulkHistory(form:entityIDs:range:),
             serviceMetadataProvider: gateway.services(form:),
             liveUpdateStreamer: gateway.streamLiveUpdates(form:onEvent:),
+            localSensorProvider: { await localSensorReader.sample(metrics: $0) },
             actionRunner: gateway.action(form:action:),
             releaseUpdateChecker: { currentVersion in
                 await PearchHAGitHubReleaseUpdateChecker().checkLatest(currentVersion: currentVersion)
@@ -1250,6 +1256,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         bulkHistoryProvider: @escaping PearchHAPanelModel.BulkHistoryProvider = { _, _, _ in [:] },
         serviceMetadataProvider: @escaping PearchHAPanelModel.ServiceMetadataProvider = { _ in .success([]) },
         liveUpdateStreamer: PearchHAPanelModel.LiveUpdateStreamer? = nil,
+        localSensorProvider: PearchHAPanelModel.LocalSensorProvider? = nil,
         actionRunner: @escaping PearchHAPanelModel.ActionRunner = PearchHAApplication.action(form:action:),
         releaseUpdateChecker: @escaping PearchHAPanelModel.ReleaseUpdateChecker = { currentVersion in
             await PearchHAGitHubReleaseUpdateChecker().checkLatest(currentVersion: currentVersion)
@@ -1267,6 +1274,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         self.bulkHistoryProvider = bulkHistoryProvider
         self.serviceMetadataProvider = serviceMetadataProvider
         self.liveUpdateStreamer = liveUpdateStreamer
+        self.localSensorProvider = localSensorProvider
         self.actionRunner = actionRunner
         self.releaseUpdateChecker = releaseUpdateChecker
         self.protectedActionValueStore = protectedActionValueStore
@@ -1438,6 +1446,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
             historyProvider: historyProvider,
             bulkHistoryProvider: bulkHistoryProvider,
             serviceMetadataProvider: serviceMetadataProvider,
+            localSensorProvider: localSensorProvider,
             liveUpdateStreamer: liveUpdateStreamer,
             actionRunner: actionRunner,
             oauthSignInRunner: oauthSignInRunner,
@@ -1465,6 +1474,13 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         )
         model.applyDisplayPreferences(configuration.displayPreferences)
         panelModel = model
+        if localSensorProvider != nil {
+            localSensorStartTask = Task { @MainActor [weak model] in await model?.startLocalSensors() }
+            localSensorObservation = PearchHALocalSensorObservation { [weak self, weak model] in
+                self?.localSensorChangeTask?.cancel()
+                self?.localSensorChangeTask = Task { @MainActor [weak model] in await model?.refreshLocalSensors() }
+            }
+        }
         panel = Self.makePanel(
             model: model,
             onOpenSettings: { [weak self] in
@@ -2459,6 +2475,13 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
     }
 
     private func releaseShell() {
+        localSensorStartTask?.cancel()
+        localSensorStartTask = nil
+        localSensorChangeTask?.cancel()
+        localSensorChangeTask = nil
+        localSensorObservation?.invalidate()
+        localSensorObservation = nil
+        panelModel?.stopLocalSensors()
         statusItemRefreshTask?.cancel()
         statusItemRefreshTask = nil
         cancelPanelInactivityClose()

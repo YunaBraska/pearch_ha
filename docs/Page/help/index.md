@@ -27,6 +27,13 @@ Choose the values, gauges and entities you want to see. The drop-down panel grou
 
 Controls are based on the Home Assistant capability of each entity. PearchHA does not guess which action is safe or meaningful.
 
+For local values, open **Settings > Entities > This Mac**. Select CPU, memory,
+battery or thermal readings for the panel, or enable their menu-bar visibility.
+These read-only sensors also work without Home Assistant. Battery entries appear
+only on Macs with an internal battery. Thermal state is a macOS load category,
+not a temperature. Local values have no recorded history. Their labels follow
+the Mac's preferred language, with German and English available.
+
 ## History
 
 <a id="history"></a>

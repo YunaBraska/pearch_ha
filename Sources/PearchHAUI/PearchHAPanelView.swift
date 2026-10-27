@@ -77,16 +77,23 @@ private struct PearchHAInlineHistoryPreview: View {
 
     var body: some View {
         let _ = historyObserver.revision
-        Button {
-            model.presentHistoryDetail(entity.id)
-        } label: {
+        if entity.id.source == .thisMac {
             preview
                 .frame(width: TelemetryRowMetrics.previewWidth, height: TelemetryRowMetrics.previewHeight)
-                .contentShape(Rectangle())
+                .help(LocalMacText.historyUnavailable.localized())
+                .accessibilityLabel(LocalMacText.readOnly.localized())
+        } else {
+            Button {
+                model.presentHistoryDetail(entity.id)
+            } label: {
+                preview
+                    .frame(width: TelemetryRowMetrics.previewWidth, height: TelemetryRowMetrics.previewHeight)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Show history for \(entity.name)")
+            .accessibilityLabel("Show history for \(entity.name)")
         }
-        .buttonStyle(.plain)
-        .help("Show history for \(entity.name)")
-        .accessibilityLabel("Show history for \(entity.name)")
     }
 
     @ViewBuilder
@@ -107,7 +114,7 @@ private struct PearchHAInlineHistoryPreview: View {
             return PearchHATheme.color(for: HistoryStateColorKind.classify(state))
         }
         if case let .gauge(gauge) = presentation,
-           gauge.style != .ring,
+           (gauge.style != .ring || entity.id.source == .thisMac),
            PearchHADashboardPreview.meterShows(for: value.status) {
             MicroMeter(
                 fraction: gauge.fraction,
@@ -422,12 +429,13 @@ public struct PearchHAPanelView: View {
     }
 
     private var connectionStatusColor: Color {
-        PearchHATheme.Dashboard.palette(colorScheme).connectionColor(snapshot.connectionState)
+        let palette = PearchHATheme.Dashboard.palette(colorScheme)
+        return snapshot.isLocalOnly ? palette.accentPrimary : palette.connectionColor(snapshot.connectionState)
     }
 
     @ViewBuilder
     private var content: some View {
-        switch PearchHAStateViewKind.forContent(phase: snapshot.phase) {
+        switch snapshot.hasLocalValues ? .data : PearchHAStateViewKind.forContent(phase: snapshot.phase) {
         case .loading:
             loadingState
         case .connectionForm:
@@ -436,7 +444,7 @@ public struct PearchHAPanelView: View {
             connectedEmptyState
         case .data:
             ZStack {
-                if viewState.isInitialHistoryLoading {
+                if viewState.isInitialHistoryLoading && !snapshot.hasLocalValues {
                     Text("Loading")
                         .font(.system(size: 13))
                         .foregroundStyle(PearchHATheme.Dashboard.palette(colorScheme).textSecondary)
@@ -653,7 +661,7 @@ public struct PearchHAPanelView: View {
                         }
                     } else if !hasToggle {
                         rowValueOrPill(entity: entity, value: value, presentation: presentation)
-                            .help(PearchHAEntityControlField.controlHelp(for: entity) ?? "Read-only")
+                            .help(entity.id.source == .thisMac ? LocalMacText.readOnly.localized() : PearchHAEntityControlField.controlHelp(for: entity) ?? "Read-only")
                     }
                     if hasToggle {
                         PearchHARequestedControlIndicator(isRequested: model.hasRequestedControls(for: entity.id))
@@ -968,6 +976,7 @@ public struct PearchHAPanelView: View {
     /// never hidden; the calm "updated" timestamp is suppressed when the user
     /// turns off the footer-timestamp display preference.
     private var footerUpdatedText: String {
+        if snapshot.isLocalOnly { return LocalMacText.readOnly.localized() }
         if let problem = snapshot.problemDescription {
             return problem
         }

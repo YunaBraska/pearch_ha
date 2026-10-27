@@ -151,6 +151,7 @@ public struct PearchHAAppBundleBuildConfiguration: Equatable, Sendable {
     public let manifest: PearchHAAppBundleManifest
     public let iconURL: URL?
     public let privacyManifestURL: URL?
+    public let resourceBundleURLs: [URL]
     public let replaceExisting: Bool
 
     public init(
@@ -159,6 +160,7 @@ public struct PearchHAAppBundleBuildConfiguration: Equatable, Sendable {
         manifest: PearchHAAppBundleManifest,
         iconURL: URL? = nil,
         privacyManifestURL: URL? = nil,
+        resourceBundleURLs: [URL] = [],
         replaceExisting: Bool = false
     ) {
         self.executableURL = executableURL
@@ -166,6 +168,7 @@ public struct PearchHAAppBundleBuildConfiguration: Equatable, Sendable {
         self.manifest = manifest
         self.iconURL = iconURL
         self.privacyManifestURL = privacyManifestURL
+        self.resourceBundleURLs = resourceBundleURLs
         self.replaceExisting = replaceExisting
     }
 }
@@ -543,6 +546,10 @@ public struct PearchHAAppBundleBuilder {
                 at: privacyManifestURL,
                 to: resourcesURL.appendingPathComponent("PrivacyInfo.xcprivacy", isDirectory: false)
             )
+        }
+
+        for bundleURL in configuration.resourceBundleURLs {
+            try fileManager.copyItem(at: bundleURL, to: resourcesURL.appendingPathComponent(bundleURL.lastPathComponent, isDirectory: true))
         }
 
         let infoPlistURL = contentsURL.appendingPathComponent("Info.plist", isDirectory: false)

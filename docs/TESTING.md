@@ -31,6 +31,7 @@ component instead of maintaining a second list of test names here:
 | REST, WebSocket, auth, fallback, history, controls | [Client](../Tests/PearchHAClientTests), [FakeHA](../Tests/FakeHATests) |
 | Config migration, atomic writes, Keychain, protected action values | [Persistence](../Tests/PearchHAPersistenceTests) |
 | Native panel/settings, focus, action cancellation, refresh lifecycle | [UI and AppShell](../Tests/PearchHAUITests) |
+| Local OS readings, source isolation, sampling lifecycle, translations | [Local reader](../Tests/PearchHAUITests/PearchHALocalSensorReaderTests.swift), [integration](../Tests/PearchHAUITests/PearchHALocalSensorIntegrationTests.swift) |
 | Universal app, signing, DMG, OAuth site, release evidence | [Packaging](../Tests/PearchHAPackagingTests) |
 | Clocks, rate limits, backoff, coalescing, redaction | [Support](../Tests/PearchHASupportTests) |
 | Coverage and repository policy | [Coverage](../Tests/PearchHACoverageCheckTests), [Audit](../Tests/PearchHARepoAuditTests) |

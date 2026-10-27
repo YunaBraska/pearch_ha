@@ -1,5 +1,6 @@
 import Foundation
 import PearchHAClient
+import PearchHACore
 import PearchHAPackaging
 import PearchHASupport
 
@@ -96,6 +97,7 @@ struct PearchHAPackageAppCommand {
                 manifest: manifest,
                 iconURL: iconURL,
                 privacyManifestURL: privacyManifestURL,
+                resourceBundleURLs: [LocalMacText.resourceBundleURL],
                 replaceExisting: options.flags.contains("--replace")
             )
         )

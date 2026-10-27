@@ -12,6 +12,11 @@ entity names, states, capabilities, room assignments and history to display and
 control your installation. Actions you request are sent to your Home Assistant.
 The app does not send these credentials or entity data to its developer.
 
+Optional **This Mac** sensors read aggregate CPU and memory usage, internal battery
+level and charging status, and the thermal state reported by macOS. These readings
+stay in memory on this Mac. They are not sent to Home Assistant or the developer,
+and no local sensor history is recorded. Selection and display preferences are saved.
+
 ## Storage and retention
 
 Connection and display preferences are stored in Application Support on your Mac.

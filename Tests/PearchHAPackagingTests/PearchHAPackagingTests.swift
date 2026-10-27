@@ -148,6 +148,22 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: bundledPrivacyURL), Data("privacy-manifest".utf8))
     }
 
+    func testAppBundleBuilderPreservesLocalizedResources() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let bundle = directory.appendingPathComponent("PearchHA_PearchHACore.bundle")
+        let localized = bundle.appendingPathComponent("de.lproj")
+        try FileManager.default.createDirectory(at: localized, withIntermediateDirectories: true)
+        let strings = Data("\"thisMac\" = \"Dieser Mac\";".utf8)
+        try strings.write(to: localized.appendingPathComponent("LocalMac.strings"))
+        let executable = directory.appendingPathComponent("PearchHA-source")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        let output = directory.appendingPathComponent("PearchHA.app")
+        _ = try PearchHAAppBundleBuilder().build(.init(executableURL: executable, outputURL: output,
+                                                    manifest: PearchHAAppBundleManifest(), resourceBundleURLs: [bundle]))
+        XCTAssertEqual(try Data(contentsOf: output.appendingPathComponent("Contents/Resources/PearchHA_PearchHACore.bundle/de.lproj/LocalMac.strings")), strings)
+    }
+
     func testAppBundleBuilderRejectsMissingPrivacyManifest() throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

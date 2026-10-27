@@ -635,6 +635,7 @@ enum PearchHASliderValueFormatting {
 }
 
 public func pearchHAEntityIconName(for entity: DiscoveredEntity) -> String {
+    if let local = LocalMacSensor(entityID: entity.id) { return local.symbol }
     let domain = entity.id.domain
     let name = entity.name.lowercased()
     let unit = (entity.unit ?? "").lowercased()

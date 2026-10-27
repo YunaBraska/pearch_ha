@@ -22,7 +22,7 @@ PearchHAApp -> PearchHAAppShell -> PearchHAUI -> PearchHACore
 - `PearchHAPersistence`: config store and secret storage.
 - `PearchHAUI`: panel, settings, controls, charts, and local view helpers.
 - `PearchHAApp`: application entrypoint.
-- `PearchHAAppShell`: lifecycle, status items, windows, panel placement, and release/update wiring.
+- `PearchHAAppShell`: lifecycle, status items, windows, local macOS readings, panel placement, and release/update wiring.
 - `PearchHASupport`: clocks, rate limiting, backoff, request coalescing, redaction, and command-line support.
 
 ## State and flow
@@ -32,14 +32,15 @@ PearchHAApp -> PearchHAAppShell -> PearchHAUI -> PearchHACore
 Flow:
 
 ```text
-Home Assistant or user input
--> client/service result
+Home Assistant, local macOS APIs, or user input
+-> client/service or local reader result
 -> panel model mutation
 -> immutable snapshot
 -> SwiftUI/AppKit render
 ```
 
 UI surfaces do not talk to Home Assistant directly.
+The local reader is injected at the same panel-model boundary, without credentials.
 
 ## Runtime rules
 
@@ -51,6 +52,11 @@ UI surfaces do not talk to Home Assistant directly.
 - History refreshes only when due. Cached graphs remain visible during updates and failures. Only the open history detail shows refresh and failure indicators. The first completed load, including an empty result or failure, ends the initial Loading presentation.
 - The history cache evicts unprotected entries by capacity. Selected daily previews and the open detail are protected and may exceed that limit. Expired entries remain available for stale display.
 - Secrets stay in Keychain, never in tracked config, fixtures, or docs.
+- Local sensors are opt-in. The panel model samples selected or promoted local
+  values at the data interval, even while closed. Opening **This Mac** in Settings
+  temporarily samples its available values. No consumers means no sampling loop.
+  Thermal and battery notifications request fresh values through the same reader.
+  Local readings remain in memory and never enter HA history or service requests.
 
 ## Focus and lifetime
 
