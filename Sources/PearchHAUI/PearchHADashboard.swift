@@ -225,12 +225,12 @@ public struct ModuleHeader: View {
 
     public var body: some View {
         HStack(spacing: 6) {
-            // Accent-colored caps, the iStat Menus section-header signature.
+            // Section names use readable ink; controls and selection carry the accent.
             Text(title)
                 .font(.system(size: 10.5, weight: .semibold))
                 .textCase(.uppercase)
                 .tracking(0.8)
-                .foregroundStyle(palette.accentPrimary)
+                .foregroundStyle(palette.textSecondary)
                 .lineLimit(1)
             Spacer(minLength: 0)
             if let trailingText {
@@ -311,11 +311,11 @@ public enum TelemetryRowMetrics {
     /// The fixed leading icon column width.
     public static let iconWidth: CGFloat = 16
     /// The reserved history-preview column width (micro chart or placeholder).
-    public static let previewWidth: CGFloat = 92
+    public static let previewWidth: CGFloat = 72
     /// The reserved history-preview column height.
     public static let previewHeight: CGFloat = 24
     /// The reserved value/status column minimum width, right-aligned.
-    public static let valueMinWidth: CGFloat = 66
+    public static let valueMinWidth: CGFloat = 60
     /// The reserved trailing control column width so toggles align across rows.
     public static let controlWidth: CGFloat = 38
 }
@@ -341,7 +341,7 @@ public struct TelemetryRowLabelAccessory {
 ///
 /// Layout is a fixed-column reserved grid so every row lines up like a table and
 /// nothing reflows when cached data arrives:
-/// `[icon 16] [label (+ subtitle), flexible] [preview 92×24] [value ≥66] [control 38]`.
+/// `[icon 16] [label (+ subtitle), flexible] [preview 72×24] [value ≥60] [control 38]`.
 /// Each non-flexible column is a reserved fixed (or fixed-min) width that is
 /// always present, so a row that has no cached history shows a muted placeholder
 /// in the same footprint a chart would occupy. The `preview`, `value`, and
@@ -409,7 +409,7 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 10) {
+            HStack(spacing: PearchHASpacing.sm) {
                 Group {
                     if let icon {
                         Image(systemName: icon)
@@ -424,10 +424,10 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
                 VStack(alignment: .leading, spacing: 0) {
                     HStack(spacing: 5) {
                         Text(label)
-                            .font(.system(size: 12.5, weight: .medium))
+                            .font(PearchHATypography.body().weight(.medium))
                             .foregroundStyle(palette.textPrimary)
                             .lineLimit(1)
-                            .minimumScaleFactor(0.85)
+                            .help(label)
                         ForEach(Array(labelAccessories.enumerated()), id: \.offset) { _, accessory in
                             Image(systemName: accessory.systemImage)
                                 .font(.system(size: 10.5, weight: .medium))

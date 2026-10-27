@@ -4054,19 +4054,13 @@ struct PearchHASmoke {
         let size: NSSize
         if variant == .historyLoadedLight || variant == .historyLoadedLightIncreasedContrast {
             view = AnyView(
-                PearchHAHistoryPopoverContent(
-                    entityID: "sensor.office_humidity",
-                    entityName: "Office humidity",
-                    valueText: "44%",
-                    state: .loaded(SmokePanelSnapshotVariant.loadedHistorySeries),
-                    increaseContrastOverride: variant.colorSchemeContrast == .increased,
-                    selectedRange: .constant(.day)
+                PearchHAPanelView(
+                    model: model,
+                    accessibilityPreferencesOverride: variant.accessibilityPreferences
                 )
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .background(Color(nsColor: NSColor.windowBackgroundColor))
                 .environment(\.colorScheme, variant.colorScheme)
             )
-            size = NSSize(width: 360, height: 420)
+            size = NSSize(width: 384, height: 468)
         } else if variant == .settingsSelectionLight || variant == .settingsAboutUpdateLight {
             let tab: PearchHASettingsView.Tab = variant == .settingsAboutUpdateLight ? .about : .entities
             view = AnyView(
@@ -4076,12 +4070,9 @@ struct PearchHASmoke {
                     initialTab: tab,
                     initiallyExpandedEntityIDs: ["sensor.office_humidity"]
                 )
-                .tabContentForSnapshot(tab)
                 .environment(\.colorScheme, variant.colorScheme)
             )
-            size = variant == .settingsAboutUpdateLight
-                ? NSSize(width: 520, height: 620)
-                : NSSize(width: 520, height: 560)
+            size = NSSize(width: 1120, height: 720)
         } else {
             view = AnyView(
                 PearchHAPanelView(

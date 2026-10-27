@@ -124,14 +124,14 @@ independently of the Live Updates preference.
 Alternatives: An always-on subscription and eager loading of every history range
 were replaced after resource measurements. Refresh lifecycle stays in the panel model.
 
-## ADR-0012 - Home Assistant palette on an iStat-style layout
+## ADR-0012 - Shared Cyan surfaces and compact telemetry layout
 
-Context: The dashboard used a bespoke graphite/navy palette and a flat "Name Value" menu-bar title. User direction: look and behave like iStat Menus, with theme colors that read as Home Assistant.
+Context: The compact telemetry layout works, but separate gray treatments made the panel, Settings and entity details feel unrelated. The current design direction is consistent Cyan with all controls and customization retained.
 
-Decision: The dashboard palettes adopt the Home Assistant theme tokens (dark `#111111`/`#1C1C1C`/`#282828`, light `#FAFAFA`/white, HA text grays, semantic trio `#4CAF50`/`#FF9800`/`#F44336`, 12pt card radius) while layout idioms come from iStat Menus/Stats: accent-colored caps section headers, min/max peak labels pinned on the history chart, a per-entity gear shortcut in the history detail, and the "Show label" menu-bar option rendering as a stacked tiny-caps-label-above-value status item instead of widening the bar with a flat title.
+Decision: One adaptive palette owns the panel, Settings, inspector and control/history details. Pale Cyan and cool graphite surfaces use opaque fills, readable secondary text and the saved user accent. Semantic threshold and connection colors remain distinct. Fixed preview, value and control slots preserve alignment while history or requested-value feedback changes. Settings keeps its icon-and-label sidebar and a single connection summary. Screenshots render the production views at their real sizes. Chart min/max labels, the entity settings shortcut and the stacked menu-bar label/value option remain available.
 
 Entity management uses a room rail, a lazy entity list with search/type/scope filters, and an independent detail pane. Narrow windows show the same inspector in place of the list. History opens inside the panel, retains the room view beneath it, and offers recorded samples to keyboard and assistive-technology users. No data, control capabilities, or refresh ownership change.
 
-Consequences: One glance reads as "Home Assistant in an iStat shell". The stacked title changes the persisted-visible rendering of "Show label" (title now carries a line break); the review baseline was regenerated. Severity colors are shared between the panel, thresholds, and menu-bar gauges.
+Consequences: Shared surface tokens prevent visual drift between navigation and details. Opaque content removes the redundant material overlay and respects reduced transparency without a second rendering path. Severity colors remain shared between the panel, thresholds and menu-bar gauges. The stacked menu-bar title still uses a line break when "Show label" is enabled.
 
 Alternatives: Cloning iStat 7's ring-heavy dropdown was rejected — its density cost is the most criticized part of iStat 7. A full theme-pack system was rejected as disproportionate; the accent stays user-configurable.

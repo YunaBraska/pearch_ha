@@ -267,7 +267,7 @@ public struct PearchHASettingsView: View {
                     .frame(width: 20, alignment: .center)
                     .foregroundStyle(isSelected ? palette.accentPrimary : palette.textSecondary)
                 Text(tab.title)
-                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .font(PearchHATypography.body().weight(isSelected ? .semibold : .regular))
                     .lineLimit(1)
                     .foregroundStyle(isSelected ? palette.textPrimary : palette.textSecondary)
                 Spacer(minLength: 0)
@@ -277,7 +277,7 @@ public struct PearchHASettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: PearchHACornerRadius.control, style: .continuous)
-                    .fill(isSelected ? palette.accentPrimary.opacity(colorScheme == .dark ? 0.22 : 0.14) : Color.clear)
+                    .fill(isSelected ? palette.surfaceControlActive : Color.clear)
             )
             .overlay(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
@@ -295,7 +295,7 @@ public struct PearchHASettingsView: View {
     /// The rail's surface fill, resolved against the current appearance so it
     /// reads as a distinct rail that matches the dashboard panel in light/dark.
     private var railBackground: Color {
-        PearchHATheme.Dashboard.palette(colorScheme).surfacePanel
+        PearchHATheme.Dashboard.palette(colorScheme).surfaceRoot
     }
 
     /// Routes a section to its detail content.
@@ -322,34 +322,8 @@ public struct PearchHASettingsView: View {
         )
     }
 
-    /// Renders a single tab's content (without the surrounding `TabView` chrome)
-    /// on an opaque full-bleed background. Used to capture deterministic settings
-    /// snapshots that avoid the platform tab-strip's transparent regions.
-    @ViewBuilder
-    public func tabContentForSnapshot(_ tab: Tab) -> some View {
-        let content: AnyView = switch tab {
-        case .general: AnyView(generalTab)
-        case .connection: AnyView(connectionTab)
-        case .entities: AnyView(entitiesTab)
-        case .appearance: AnyView(appearanceTab)
-        case .diagnostics: AnyView(diagnosticsTab)
-        case .privacy: AnyView(privacyTab)
-        case .about: AnyView(aboutTab)
-        }
-        content
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(PearchHATheme.Dashboard.palette(colorScheme).surfaceRoot.ignoresSafeArea())
-            .environment(\.dashboardPalette, PearchHATheme.Dashboard.palette(colorScheme))
-            .contrast(accessibilityPreferences.contrastPolicy == .increased ? 1.12 : 1)
-    }
-
     private var connectionTab: some View {
         settingsPage(title: "Connection", systemImage: Tab.connection.systemImage) {
-            settingsCard {
-                settingsSection(title: "Status", systemImage: "antenna.radiowaves.left.and.right") {
-                    connectionStatusContent
-                }
-            }
             settingsCard {
                 settingsSection(title: "Addresses & access", systemImage: "network") {
                     PearchHAConnectionFormFields(
@@ -358,55 +332,14 @@ public struct PearchHASettingsView: View {
                         oauthSignInState: oauthState
                     )
                         .textFieldStyle(.roundedBorder)
+                    settingsControlRow("Last update") {
+                        Text(snapshot.lastUpdateDescription)
+                            .font(PearchHATypography.bodyValue())
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
-    }
-
-    /// The connection status card content: a status pill, the connected host
-    /// (when known), and the last successful update — all derived from the live
-    /// snapshot. No stored secret is ever surfaced.
-    private var connectionStatusContent: some View {
-        let status = connectionDiagnostic
-        let host = connectionSummaryHost
-        return VStack(alignment: .leading, spacing: PearchHASpacing.sm) {
-            HStack(spacing: 8) {
-                StatusPill(
-                    status.label,
-                    systemImage: status.systemImage,
-                    color: status.color,
-                    accessibilityLabel: "Connection \(status.label)"
-                )
-                Spacer(minLength: 0)
-            }
-            if let host {
-                settingsControlRow("Server") {
-                    Text(host)
-                        .font(PearchHATypography.bodyValue())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
-            settingsControlRow("Last update") {
-                Text(snapshot.lastUpdateDescription)
-                    .font(PearchHATypography.bodyValue())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    /// The connected server host shown in the Connection status card, derived
-    /// from the stored connection URL. Never exposes the access token.
-    private var connectionSummaryHost: String? {
-        let urlString = snapshot.connectionForm.urlString
-        if let host = URL(string: urlString)?.host, !host.isEmpty {
-            return host
-        }
-        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// A page scaffold shared by every section: a leading-aligned scroll view
@@ -2089,7 +2022,7 @@ public struct PearchHASettingsView: View {
         .background(
             isExpanded
                 ? RoundedRectangle(cornerRadius: PearchHACornerRadius.control, style: .continuous)
-                    .fill(palette.accentPrimary.opacity(colorScheme == .dark ? 0.10 : 0.06))
+                    .fill(palette.surfaceControlActive)
                 : nil
         )
     }

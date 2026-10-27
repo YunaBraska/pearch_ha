@@ -281,9 +281,8 @@ public struct PearchHAPanelView: View {
         .frame(width: 384, height: 468, alignment: .top)
         .environment(\.dashboardPalette, palette)
         .environment(\.dashboardRowDensity, panelDisplayPreferences.dashboardRowDensity)
-        .background(
-            dashboardBackground(palette)
-        )
+        .tint(PearchHATheme.accent)
+        .background(palette.surfaceRoot)
         .clipShape(shape)
         .overlay {
             shape.strokeBorder(
@@ -375,16 +374,6 @@ public struct PearchHAPanelView: View {
                 }
             }
         )
-    }
-
-    /// The appearance-aware base fill plus a thin translucent material, painted
-    /// edge-to-edge so the popover reads as a designed instrument panel (graphite
-    /// in dark, light translucent graphite in light) and never shows a transparent
-    /// seam. The SwiftUI root clips the rounded corners and provides the shadow;
-    /// the base fill keeps every edge opaque against the borderless window.
-    private func dashboardBackground(_ palette: PearchHATheme.DashboardPalette) -> some View {
-        palette.popoverBackground
-            .overlay(Rectangle().fill(.ultraThinMaterial).opacity(0.5))
     }
 
     private var dashboardDivider: some View {

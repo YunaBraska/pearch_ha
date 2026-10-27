@@ -65,6 +65,8 @@ lifecycles, request volume, history debounce/cache behavior, and status-item red
 Timing tests use injected clocks. Async tests wait for observable progress.
 
 Snapshots and a contact sheet are written under `.build/pearchha-snapshots/current`.
+Panel and history captures use the production 384×468 view. Settings captures
+include the sidebar and inspector at the production 1120×720 window size.
 The comparison baseline is [release-review-baseline.json](release-review-baseline.json).
 A different macOS version can skip the pixel comparison. Render success then needs
 separate visual review. Use `--update-review-baseline` only for an intentional,

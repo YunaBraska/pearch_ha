@@ -227,16 +227,16 @@ public struct PearchHAHistoryPopoverContent: View {
     }
 
     public var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
-        return VStack(alignment: .leading, spacing: 12) {
+        let shape = RoundedRectangle(cornerRadius: PearchHACornerRadius.card, style: .continuous)
+        return VStack(alignment: .leading, spacing: PearchHASpacing.md) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(entityName)
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .font(PearchHATypography.body().weight(.semibold))
                     .foregroundStyle(palette.textPrimary)
                     .lineLimit(1)
                 Spacer(minLength: 8)
                 Text(valueText)
-                    .font(.system(size: 16, weight: .semibold).monospacedDigit())
+                    .font(PearchHATypography.primaryValue())
                     .foregroundStyle(palette.textPrimary)
                 if let onOpenSettings {
                     Button(action: onOpenSettings) {
@@ -257,14 +257,14 @@ public struct PearchHAHistoryPopoverContent: View {
             historyBody
                 .frame(minHeight: Self.bodyMinHeight, alignment: .topLeading)
         }
-        .padding(14)
+        .padding(PearchHASpacing.lg)
         .frame(width: fillsPanel ? nil : 280)
         .frame(maxWidth: fillsPanel ? .infinity : nil)
         .environment(\.dashboardPalette, palette)
         .background {
             shape
                 .fill(fillsPanel ? palette.surfaceRoot : palette.surfacePanelElevated)
-                .overlay(shape.fill(.ultraThinMaterial).opacity(0.35))
+
         }
         .overlay(shape.strokeBorder(fillsPanel ? .clear : palette.borderSubtle, lineWidth: 1))
         .clipShape(shape)

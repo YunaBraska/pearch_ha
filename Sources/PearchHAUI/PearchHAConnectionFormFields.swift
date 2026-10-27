@@ -226,19 +226,19 @@ struct PearchHAConnectionFormFields: View {
     }
 
     private var connectedState: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        let isConnected = snapshot.connectionState == .connected
+        return VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 3) {
-                Label {
-                    Text("Connected")
+                HStack(spacing: 6) {
+                    Image(systemName: isConnected ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath")
+                        .foregroundStyle(isConnected ? PearchHATheme.ok : PearchHATheme.warn)
+                    Text(snapshot.connectionSummary)
                         .font(.headline)
-                } icon: {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
                 }
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(connectedAccessibilityLabel)
                 if let connectedHost {
-                    Text("Connected to \(connectedHost)")
+                    Text(isConnected ? "Connected to \(connectedHost)" : "Server: \(connectedHost)")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -273,9 +273,11 @@ struct PearchHAConnectionFormFields: View {
 
     private var connectedAccessibilityLabel: String {
         if let connectedHost {
-            return "Connected to \(connectedHost)"
+            return snapshot.connectionState == .connected
+                ? "Connected to \(connectedHost)"
+                : "\(snapshot.connectionSummary), server \(connectedHost)"
         }
-        return "Connected"
+        return snapshot.connectionSummary
     }
 
     private var tokenAccessDivider: some View {

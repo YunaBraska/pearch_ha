@@ -33,6 +33,7 @@ struct PearchHAEntityControlsButton<Label: View>: View {
 public struct PearchHAEntityControlEditor: View {
     @ObservedObject private var model: PearchHAPanelModel
     private let entityID: EntityID
+    @Environment(\.colorScheme) private var colorScheme
 
     /// Creates an editor that follows live state for the selected entity.
     public init(model: PearchHAPanelModel, entityID: EntityID) {
@@ -43,9 +44,9 @@ public struct PearchHAEntityControlEditor: View {
     public var body: some View {
         let entity = model.snapshot.availableRooms.flatMap(\.entities).first { $0.id == entityID }
         let fields = entity.map { PearchHAEntityControlField.controls(for: $0) } ?? []
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: PearchHASpacing.md) {
             HStack {
-                Text(entity?.name ?? entityID.rawValue).font(.headline)
+                Text(entity?.name ?? entityID.rawValue).font(PearchHATypography.body().weight(.semibold))
                 Spacer(minLength: 0)
                 ZStack {
                     if model.snapshot.controlActionState.isRunning(for: entityID) && !model.hasRequestedControls(for: entityID) {
@@ -64,7 +65,7 @@ public struct PearchHAEntityControlEditor: View {
                 Text("No controls available").foregroundStyle(.secondary)
             } else {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: PearchHASpacing.md) {
                         ForEach(fields) { field in
                             PearchHAEntityControlInput(field: field, entityName: entity?.name ?? entityID.rawValue, clock: model.clock,
                                                       isRunning: model.snapshot.controlActionState.isRunning(for: entityID),
@@ -82,9 +83,12 @@ public struct PearchHAEntityControlEditor: View {
                 Text(failure).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(16)
+        .padding(PearchHASpacing.lg)
         .frame(width: 320)
         .fixedSize(horizontal: false, vertical: true)
+        .font(PearchHATypography.body())
+        .tint(PearchHATheme.accent)
+        .background(PearchHATheme.Dashboard.palette(colorScheme).surfaceRoot)
     }
 }
 
