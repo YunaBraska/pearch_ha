@@ -1,6 +1,21 @@
 // swift-tools-version: 6.0
 
+import Foundation
 import PackageDescription
+
+let isAppStoreBuild = ProcessInfo.processInfo.environment["PEARCHHA_APP_STORE"] == "1"
+let packageDependencies: [Package.Dependency] = isAppStoreBuild
+    ? []
+    : [.package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0")]
+let appShellDependencies: [Target.Dependency] = [
+    "PearchHACore",
+    "PearchHAClient",
+    "PearchHAPersistence",
+    "PearchHAUI"
+] + (isAppStoreBuild ? [] : [.product(name: "Sparkle", package: "Sparkle")])
+let appStoreSettings: [SwiftSetting] = isAppStoreBuild
+    ? [.define("PEARCHHA_APP_STORE")]
+    : []
 
 let package = Package(
     name: "PearchHA",
@@ -26,9 +41,7 @@ let package = Package(
         .library(name: "FakeHA", targets: ["FakeHA"]),
         .executable(name: "pearchha-package-app", targets: ["pearchha-package-app"])
     ],
-    dependencies: [
-        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0")
-    ],
+    dependencies: packageDependencies,
     targets: [
         .executableTarget(
             name: "PearchHAApp",
@@ -38,16 +51,11 @@ let package = Package(
         ),
         .target(
             name: "PearchHAAppShell",
-            dependencies: [
-                "PearchHACore",
-                "PearchHAClient",
-                "PearchHAPersistence",
-                "PearchHAUI",
-                .product(name: "Sparkle", package: "Sparkle")
-            ],
+            dependencies: appShellDependencies,
             resources: [
                 .copy("Resources/PearchHA.icns")
-            ]
+            ],
+            swiftSettings: appStoreSettings
         ),
         .target(
             name: "PearchHACore",
@@ -76,7 +84,8 @@ let package = Package(
         ),
         .target(
             name: "PearchHAUI",
-            dependencies: ["PearchHACore"]
+            dependencies: ["PearchHACore"],
+            swiftSettings: appStoreSettings
         ),
         .target(
             name: "PearchHACoverageCheck",
