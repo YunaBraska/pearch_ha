@@ -2166,6 +2166,7 @@ public struct PearchHASettingsView: View {
                                     Image(systemName: "arrow.up.right.square")
                                         .font(.system(size: 10, weight: .semibold))
                                 }
+                                .foregroundStyle(PearchHATheme.accent)
                             }
                             .accessibilityLabel(accessibilityLabel(for: field))
                             .fixedSize(horizontal: false, vertical: true)

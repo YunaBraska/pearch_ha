@@ -3105,6 +3105,7 @@ private struct PearchHAInfoPlist: Encodable {
     let appName: String
     let packageType = "APPL"
     let applicationCategory = "public.app-category.utilities"
+    let exportedTypeDeclarations = [PearchHAInfoPlistExportedTypeDeclaration()]
     let version: String
     let buildVersion: String
     let minimumSystemVersion: String
@@ -3158,6 +3159,7 @@ private struct PearchHAInfoPlist: Encodable {
         case appName = "CFBundleName"
         case packageType = "CFBundlePackageType"
         case applicationCategory = "LSApplicationCategoryType"
+        case exportedTypeDeclarations = "UTExportedTypeDeclarations"
         case version = "CFBundleShortVersionString"
         case buildVersion = "CFBundleVersion"
         case minimumSystemVersion = "LSMinimumSystemVersion"
@@ -3170,6 +3172,18 @@ private struct PearchHAInfoPlist: Encodable {
         case oauthClientID = "PEARCHHA_OAUTH_CLIENT_ID"
         case oauthRedirectURI = "PEARCHHA_OAUTH_REDIRECT_URI"
         case urlTypes = "CFBundleURLTypes"
+    }
+}
+
+private struct PearchHAInfoPlistExportedTypeDeclaration: Encodable {
+    let identifier = "dev.pearchha.panel-selection"
+    let conformsTo = ["public.data"]
+    let description = "PearchHA panel selection"
+
+    private enum CodingKeys: String, CodingKey {
+        case identifier = "UTTypeIdentifier"
+        case conformsTo = "UTTypeConformsTo"
+        case description = "UTTypeDescription"
     }
 }
 

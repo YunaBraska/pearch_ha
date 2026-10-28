@@ -585,6 +585,7 @@ private struct PearchHAHistoryRangeSegmentedControl: NSViewRepresentable {
     }
 
     private func sync(_ control: NSSegmentedControl) {
+        control.selectedSegmentBezelColor = NSColor(PearchHATheme.accent)
         for (index, range) in options.enumerated() {
             control.setSelected(range == selection, forSegment: index)
             control.setEnabled(!disabledRanges.contains(range), forSegment: index)

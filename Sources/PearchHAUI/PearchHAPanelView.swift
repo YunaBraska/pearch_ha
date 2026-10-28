@@ -11,7 +11,9 @@ private struct PanelSelectionDropDelegate: DropDelegate {
     let setTargeted: (Bool) -> Void
     let move: () -> Bool
 
-    func validateDrop(info: DropInfo) -> Bool { translation != .unsupported }
+    func validateDrop(info: DropInfo) -> Bool {
+        return translation != .unsupported
+    }
 
     func dropEntered(info: DropInfo) { setTargeted(validateDrop(info: info)) }
 
@@ -237,7 +239,7 @@ public struct PearchHAPanelView: View {
     @State private var draggedSelectionItem: SelectionDragItem?
     @State private var targetedSelectionItem: SelectionDragItem?
 
-    private static let panelSelectionDragType = UTType(exportedAs: "dev.pearchha.panel-selection")
+    private static let panelSelectionDragType = UTType(exportedAs: PearchHAPanelDrag.typeIdentifier, conformingTo: .data)
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.colorScheme) private var colorScheme
@@ -571,9 +573,14 @@ public struct PearchHAPanelView: View {
         let cap = curatedRowCap
         let visibleEntities = (isExpanded || cap == nil) ? room.entities : Array(room.entities.prefix(cap ?? total))
         let hiddenCount = total - visibleEntities.count
+        let roomIndex = visibleModules.firstIndex { $0.id == room.id }
+        let earlier = roomIndex.flatMap { $0 > 0 ? visibleModules[$0 - 1] : nil }
+        let later = roomIndex.flatMap { $0 + 1 < visibleModules.count ? visibleModules[$0 + 1] : nil }
         let block = ModuleBlock(
             title: room.name,
-            headerDragProvider: { selectionProvider(for: .room(room.id)) }
+            headerDrag: panelDrag(for: .room(room.id), title: room.name),
+            moveEarlier: earlier.map { target in { _ = model.moveRoom(room.id, relativeTo: target.id, placement: .before) } },
+            moveLater: later.map { target in { _ = model.moveRoom(room.id, relativeTo: target.id, placement: .after) } }
         ) {
             ForEach(Array(visibleEntities.enumerated()), id: \.element.id.rawValue) { index, entity in
                 entityRowBlock(entity, showsSeparator: index < visibleEntities.count - 1)
@@ -583,12 +590,7 @@ public struct PearchHAPanelView: View {
                 moreAffordance(roomID: room.id.rawValue, isExpanded: isExpanded, hiddenCount: hiddenCount)
             }
         }
-        return panelDropTarget(
-            block
-                .contextMenu { panelReorderActions(for: .room(room.id)) }
-                .accessibilityActions { panelReorderActions(for: .room(room.id)) },
-            item: .room(room.id)
-        )
+        return panelDropTarget(block, item: .room(room.id))
     }
 
     private func entityRowBlock(_ entity: DiscoveredEntity, showsSeparator: Bool) -> some View {
@@ -603,11 +605,11 @@ public struct PearchHAPanelView: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(entity.name), \(value.text)")
-        .accessibilityActions { panelReorderActions(for: .entity(entity.id)) }
+        .accessibilityActions { panelReorderActions(for: entity.id) }
         .contextMenu {
             entityContextMenu(for: entity, contextPresentation: contextPresentation)
             Divider()
-            panelReorderActions(for: .entity(entity.id))
+            panelReorderActions(for: entity.id)
         }
         let accessibleRow: AnyView
         if entity.id.source == .thisMac {
@@ -667,20 +669,17 @@ public struct PearchHAPanelView: View {
     }
 
     @ViewBuilder
-    private func panelReorderActions(for item: SelectionDragItem) -> some View {
-        let items: [SelectionDragItem] = switch item {
-        case .room: visibleModules.map { .room($0.id) }
-        case let .entity(id): snapshot.rooms.first { $0.entities.contains { $0.id == id } }?.entities.map { .entity($0.id) } ?? []
-        }
+    private func panelReorderActions(for entityID: EntityID) -> some View {
+        let item = SelectionDragItem.entity(entityID)
+        let items = snapshot.rooms.first { $0.entities.contains { $0.id == entityID } }?.entities.map { SelectionDragItem.entity($0.id) } ?? []
         if let index = items.firstIndex(of: item) {
-            let isRoom = if case .room = item { true } else { false }
             if index > 0 {
-                Button(isRoom ? "Move room earlier" : "Move earlier") {
+                Button("Move earlier") {
                     _ = applyPanelDrop(SelectionDropTranslator().translate(source: item, target: items[index - 1], tree: panelSelectionTree))
                 }
             }
             if index + 1 < items.count {
-                Button(isRoom ? "Move room later" : "Move later") {
+                Button("Move later") {
                     _ = applyPanelDrop(SelectionDropTranslator().translate(source: item, target: items[index + 1], tree: panelSelectionTree))
                 }
             }
@@ -698,17 +697,20 @@ public struct PearchHAPanelView: View {
         }
     }
 
-    private func selectionProvider(for item: SelectionDragItem) -> NSItemProvider {
-        draggedSelectionItem = item
-        let provider = NSItemProvider()
-        provider.registerDataRepresentation(
-            forTypeIdentifier: Self.panelSelectionDragType.identifier,
-            visibility: .ownProcess
-        ) { completion in
-            completion(item.providerText.data(using: .utf8), nil)
-            return nil
-        }
-        return provider
+    private func panelDrag(for item: SelectionDragItem, title: String) -> PearchHAPanelDrag {
+        PearchHAPanelDrag(
+            payload: item.providerText,
+            title: title,
+            onBegin: {
+                draggedSelectionItem = item
+                model.beginTransientUITracking()
+            },
+            onEnd: { _ in
+                draggedSelectionItem = nil
+                targetedSelectionItem = nil
+                model.endTransientUITracking()
+            }
+        )
     }
 
     /// A quiet "More" / "Less" affordance that expands or collapses a module in
@@ -762,7 +764,7 @@ public struct PearchHAPanelView: View {
             iconActive: value.status == .available,
             label: entity.name,
             labelAccessories: rowLabelAccessories(contextPresentation: contextPresentation),
-            labelDragProvider: { selectionProvider(for: .entity(entity.id)) },
+            labelDrag: panelDrag(for: .entity(entity.id), title: entity.name),
             subtitle: rowSubtitle(for: entity, value: value),
             secondLine: rowSecondLine(for: entity),
             preview: { rowPreview(for: entity, presentation: presentation) },

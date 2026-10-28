@@ -2466,8 +2466,11 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Reattaching the lazily loaded hosting controller can leave a zero
+        // frame until layout. Anchor the fixed panel size on its first opening.
+        let size = AppShellLayout.panelContentSize
+        panel.setContentSize(size)
         let buttonFrame = window.convertToScreen(sender.frame)
-        let size = panel.frame.size
         let x = min(max(buttonFrame.midX - size.width / 2, screenFrame.minX + 8), screenFrame.maxX - size.width - 8)
         let anchorY = max(buttonFrame.minY, window.frame.minY)
         let y = anchorY - size.height + 2

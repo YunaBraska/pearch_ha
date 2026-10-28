@@ -22,6 +22,10 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertEqual(plist["CFBundleIconFile"] as? String, "PearchHA")
         XCTAssertEqual(plist["LSMinimumSystemVersion"] as? String, "13.0")
         XCTAssertEqual(plist["LSApplicationCategoryType"] as? String, "public.app-category.utilities")
+        let exportedTypes = try XCTUnwrap(plist["UTExportedTypeDeclarations"] as? [[String: Any]])
+        XCTAssertEqual(exportedTypes.count, 1)
+        XCTAssertEqual(exportedTypes.first?["UTTypeIdentifier"] as? String, "dev.pearchha.panel-selection")
+        XCTAssertEqual(exportedTypes.first?["UTTypeConformsTo"] as? [String], ["public.data"])
         XCTAssertEqual(
             plist["NSLocalNetworkUsageDescription"] as? String,
             "PearchHA connects to your Home Assistant instance on your network."
@@ -361,6 +365,10 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertEqual(plist["CFBundlePackageType"] as? String, "APPL")
         XCTAssertEqual(plist["LSMinimumSystemVersion"] as? String, "13.0")
         XCTAssertEqual(plist["LSUIElement"] as? Bool, true)
+        let exportedTypes = try XCTUnwrap(plist["UTExportedTypeDeclarations"] as? [[String: Any]])
+        XCTAssertEqual(exportedTypes.count, 1)
+        XCTAssertEqual(exportedTypes.first?["UTTypeIdentifier"] as? String, "dev.pearchha.panel-selection")
+        XCTAssertEqual(exportedTypes.first?["UTTypeConformsTo"] as? [String], ["public.data"])
         XCTAssertEqual(plist["NSPrincipalClass"] as? String, "NSApplication")
         XCTAssertEqual(
             plist["NSLocalNetworkUsageDescription"] as? String,

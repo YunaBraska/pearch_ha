@@ -252,10 +252,11 @@ public struct ModuleHeader: View {
 /// and no rounded box — it is nearly integrated into the single popover surface.
 /// The only internal decoration is an almost-invisible hairline between rows.
 public struct ModuleBlock<Rows: View>: View {
-    @Environment(\.dashboardPalette) private var palette
     private let title: String
     private let trailingText: String?
-    private let headerDragProvider: (() -> NSItemProvider)?
+    private let headerDrag: PearchHAPanelDrag?
+    private let moveEarlier: (() -> Void)?
+    private let moveLater: (() -> Void)?
     private let rows: Rows
 
     /// Creates the module block.
@@ -267,33 +268,43 @@ public struct ModuleBlock<Rows: View>: View {
     public init(
         title: String,
         trailingText: String? = nil,
-        headerDragProvider: (() -> NSItemProvider)? = nil,
+        headerDrag: PearchHAPanelDrag? = nil,
+        moveEarlier: (() -> Void)? = nil,
+        moveLater: (() -> Void)? = nil,
         @ViewBuilder rows: () -> Rows
     ) {
         self.title = title
         self.trailingText = trailingText
-        self.headerDragProvider = headerDragProvider
+        self.headerDrag = headerDrag
+        self.moveEarlier = moveEarlier
+        self.moveLater = moveLater
         self.rows = rows()
     }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Group {
-                if let headerDragProvider {
-                    ModuleHeader(title, trailingText: trailingText)
-                        .frame(minHeight: 20)
-                        .contentShape(Rectangle())
-                        .onDrag { headerDragProvider() }
-                } else {
-                    ModuleHeader(title, trailingText: trailingText)
+            ModuleHeader(title, trailingText: trailingText)
+                .frame(minHeight: 20)
+                .contentShape(Rectangle())
+                .overlay {
+                    if let headerDrag { PearchHAPanelDragSource(configuration: headerDrag) }
                 }
-            }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 2)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(title)
+                .accessibilityActions { reorderActions }
+                .contextMenu { reorderActions }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 2)
             VStack(spacing: 0) {
                 rows
             }
         }
+    }
+
+    @ViewBuilder
+    private var reorderActions: some View {
+        if let moveEarlier { Button("Move room earlier", action: moveEarlier) }
+        if let moveLater { Button("Move room later", action: moveLater) }
     }
 }
 
@@ -369,7 +380,7 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
     private let labelAccessories: [TelemetryRowLabelAccessory]
     private let labelAccessorySystemImage: String?
     private let labelAccessoryAccessibilityLabel: String?
-    private let labelDragProvider: (() -> NSItemProvider)?
+    private let labelDrag: PearchHAPanelDrag?
     private let subtitle: String?
     private let secondLine: AnyView?
     private let preview: Preview
@@ -401,7 +412,7 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
         labelAccessories: [TelemetryRowLabelAccessory] = [],
         labelAccessorySystemImage: String? = nil,
         labelAccessoryAccessibilityLabel: String? = nil,
-        labelDragProvider: (() -> NSItemProvider)? = nil,
+        labelDrag: PearchHAPanelDrag? = nil,
         subtitle: String? = nil,
         secondLine: AnyView? = nil,
         @ViewBuilder preview: () -> Preview,
@@ -414,7 +425,7 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
         self.labelAccessories = labelAccessories
         self.labelAccessorySystemImage = labelAccessorySystemImage
         self.labelAccessoryAccessibilityLabel = labelAccessoryAccessibilityLabel
-        self.labelDragProvider = labelDragProvider
+        self.labelDrag = labelDrag
         self.subtitle = subtitle
         self.secondLine = secondLine
         self.preview = preview()
@@ -491,11 +502,11 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .layoutPriority(1)
         }
-        if let labelDragProvider {
+        if let labelDrag {
             content
                 .frame(minHeight: 20)
                 .contentShape(Rectangle())
-                .onDrag { labelDragProvider() }
+                .overlay { PearchHAPanelDragSource(configuration: labelDrag) }
         } else {
             content
         }

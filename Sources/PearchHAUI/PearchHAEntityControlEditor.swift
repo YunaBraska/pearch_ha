@@ -290,7 +290,7 @@ struct PearchHAEntityControlInput: View {
                                 .multilineTextAlignment(.trailing)
                                 .foregroundStyle(isEditingNumber && numberValue.flatMap { field.actionSpec(value: .number($0)) } == nil ? Color.red : Color.primary)
                                 .overlay(alignment: .bottom) {
-                                    Rectangle().fill(Color.accentColor).frame(height: 1).opacity(isEditingNumber ? 1 : 0)
+                                    Rectangle().fill(PearchHATheme.accent).frame(height: 1).opacity(isEditingNumber ? 1 : 0)
                                 }
                                 .task {
                                     guard usesSlider else { return }

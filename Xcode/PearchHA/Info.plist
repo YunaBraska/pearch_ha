@@ -41,6 +41,19 @@
 	<string>public.app-category.utilities</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>dev.pearchha.panel-selection</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>PearchHA panel selection</string>
+		</dict>
+	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>PearchHA connects to your Home Assistant instance on your network.</string>
 	<key>NSPrincipalClass</key>
