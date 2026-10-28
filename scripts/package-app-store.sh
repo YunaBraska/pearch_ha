@@ -14,7 +14,6 @@ app_dir="${dist_dir}/PearchHA.app"
 : "${APP_STORE_BUNDLE_ID:?}"
 : "${APP_STORE_TEAM_ID:?}"
 : "${MACOS_APP_STORE_APPLICATION_IDENTITY:?}"
-: "${MACOS_APP_STORE_INSTALLER_IDENTITY:?}"
 : "${MACOS_APP_STORE_PROFILE_PATH:?}"
 
 trap 'rm -rf "${build_dir}" "${stage_dir}"' EXIT HUP INT TERM
@@ -62,5 +61,3 @@ if strings "${app_dir}/Contents/MacOS/PearchHA" | grep -q 'Sparkle'; then
   echo 'App Store build must not contain Sparkle.' >&2
   exit 1
 fi
-productbuild --component "${app_dir}" /Applications --sign "${MACOS_APP_STORE_INSTALLER_IDENTITY}" "${dist_dir}/PearchHA.pkg"
-pkgutil --check-signature "${dist_dir}/PearchHA.pkg"
