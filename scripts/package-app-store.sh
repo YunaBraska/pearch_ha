@@ -38,6 +38,7 @@ lipo -create \
   "${x86_64_bin}/PearchHA"
 lipo -info "${stage_dir}/PearchHA"
 
+swift build -c release --product pearchha-package-app --scratch-path .build-app-store-tools
 tool_bin=$(swift build -c release --product pearchha-package-app --scratch-path .build-app-store-tools --show-bin-path)
 "${tool_bin}/pearchha-package-app" \
   --executable "${stage_dir}/PearchHA" \
