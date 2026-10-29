@@ -57,9 +57,9 @@ final class PearchHAColdLaunchTests: XCTestCase {
             let root = app.descendants(matching: .any).matching(identifier: "pearchha.menuPopover").firstMatch
             let statusItem = app.statusItems.matching(NSPredicate(format: "label == %@", "PearchHA")).firstMatch
             XCTAssertTrue(statusItem.waitForExistence(timeout: 15), "A clean production launch must expose its fallback status item")
-            let coldClick = try statusCoordinate(statusItem, from: finder.menuBars.firstMatch)
             record("Cold session \(session): before first click", app: app, activations: activations)
             XCTAssertFalse(root.exists)
+            let coldClick = try statusCoordinate(statusItem, from: finder.menuBars.firstMatch)
             XCTAssertFalse(launched.isActive, "The cold app must remain inactive until the physical status click")
             XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.bundleIdentifier, "com.apple.finder")
             XCTAssertFalse(activations.withLock { $0.contains { $0.bundleIdentifier == "dev.pearchha.app" } },
@@ -135,6 +135,9 @@ final class PearchHAColdLaunchTests: XCTestCase {
         let click = origin.withOffset(CGVector(dx: frame.midX - originPoint.x, dy: frame.midY - originPoint.y))
         XCTAssertEqual(click.screenPoint.x, frame.midX, accuracy: 0.5)
         XCTAssertEqual(click.screenPoint.y, frame.midY, accuracy: 0.5)
+        let currentFrame = statusItem.frame
+        XCTAssertTrue(currentFrame.insetBy(dx: 1, dy: 1).contains(click.screenPoint),
+                      "The status item moved while resolving its click target: point=\(click.screenPoint), frame=\(currentFrame)")
         return click
     }
 

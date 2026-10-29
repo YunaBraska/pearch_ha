@@ -6192,7 +6192,8 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertNotNil(model.snapshot.historyPresentationEntityID)
         XCTAssertFalse(reopenedWindow.frame.intersects(outsideWindow.frame), "The outside target must be separate from the popover")
         XCTAssertTrue(presentation.popover.isShown, "Preparing the outside target must not dismiss history")
-        XCTAssertTrue(NSApp.keyWindow === reopenedWindow, "The popover must own keyboard focus before the outside click")
+        XCTAssertTrue(reopenedWindow.isKeyWindow,
+                      "The popover must own keyboard focus before the outside click: active=\(NSApp.isActive), expectedWindow=\(reopenedWindow.windowNumber), appKeyWindow=\(String(describing: NSApp.keyWindow?.windowNumber))")
         // Queue the release before dispatching the press so native tracking can consume it.
         for type: NSEvent.EventType in [.leftMouseUp, .leftMouseDown] {
             let outsideClick = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: NSPoint(x: 20, y: 20),
