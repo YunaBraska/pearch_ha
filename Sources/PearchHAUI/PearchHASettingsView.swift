@@ -1370,6 +1370,10 @@ public struct PearchHASettingsView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
+                    settingsControlRow("Privacy policy") {
+                        Link("Read privacy policy", destination: Self.privacyPolicyURL)
+                            .accessibilityLabel("Privacy policy, opens in browser")
+                    }
                     settingsControlRow("Updates") {
 #if PEARCHHA_APP_STORE
                         Text("Updates are managed by the Mac App Store.")
@@ -1502,6 +1506,7 @@ public struct PearchHASettingsView: View {
     }
 
     private static let repositoryURL = URL(string: "https://github.com/YunaBraska/pearch_ha")!
+    private static let privacyPolicyURL = URL(string: "https://yunabraska.github.io/pearch_ha/privacy.html")!
     private static let licenseURL = URL(string: "https://github.com/YunaBraska/pearch_ha/blob/main/LICENSE")!
     private static let issuesURL = URL(string: "https://github.com/YunaBraska/pearch_ha/issues")!
     private static let sponsorsURL = URL(string: "https://github.com/sponsors/YunaBraska")!
