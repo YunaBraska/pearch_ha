@@ -157,13 +157,23 @@ final class PearchHAColdLaunchTests: XCTestCase {
 
     private func record(_ title: String, app: XCUIApplication, activations: OSAllocatedUnfairLock<[Activation]>) {
         XCTContext.runActivity(named: title) { activity in
+            let running = NSRunningApplication.runningApplications(withBundleIdentifier: "dev.pearchha.app").first
+            var focusedWindow: CFTypeRef?
+            let focusResult = running.map {
+                AXUIElementCopyAttributeValue(AXUIElementCreateApplication($0.processIdentifier),
+                                             kAXFocusedWindowAttribute as CFString, &focusedWindow)
+            }
+            var focusedElement: CFTypeRef?
+            let systemFocusResult = AXUIElementCopyAttributeValue(AXUIElementCreateSystemWide(),
+                                                                  kAXFocusedUIElementAttribute as CFString, &focusedElement)
+            let focus = "active=\(running?.isActive ?? false), AX trusted=\(AXIsProcessTrusted()), focusedWindowResult=\(String(describing: focusResult)), focusedWindow=\(String(describing: focusedWindow)), systemFocusResult=\(systemFocusResult), focusedElement=\(String(describing: focusedElement))"
             let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
             screenshot.lifetime = .keepAlways
             activity.add(screenshot)
             let trace = activations.withLock { values in
                 values.map { "\($0.timestamp): \($0.bundleIdentifier)" }.joined(separator: "\n")
             }
-            let state = XCTAttachment(string: "frontmost=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "none")\n\(trace)\n\(app.debugDescription)")
+            let state = XCTAttachment(string: "frontmost=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "none")\n\(focus)\n\(trace)\n\(app.debugDescription)")
             state.lifetime = .keepAlways
             activity.add(state)
         }

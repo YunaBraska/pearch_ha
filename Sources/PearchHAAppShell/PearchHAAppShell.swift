@@ -26,14 +26,6 @@ private final class PearchHAFirstMouseHostingView<Content: View>: NSHostingView<
     override func cancelOperation(_ sender: Any?) {
         if let cancelHandler { cancelHandler() } else { super.cancelOperation(sender) }
     }
-
-    override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53, let cancelHandler {
-            cancelHandler()
-        } else {
-            super.keyDown(with: event)
-        }
-    }
 }
 
 private final class PearchHAFirstMouseHostingController<Content: View>: NSHostingController<Content> {
@@ -71,16 +63,6 @@ public final class PearchHAStatusPopover: NSPopover, NSPopoverDelegate {
     public override func cancelOperation(_ sender: Any?) {
         if onNavigateBack?() != true { close() }
     }
-
-    public override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 {
-            cancelOperation(self)
-            return
-        }
-        super.keyDown(with: event)
-    }
-
-
 }
 
 /// An observable description of a single live menu-bar status item.
