@@ -13,6 +13,43 @@ import PearchHARepoAudit
 import PearchHASupport
 import PearchHAUI
 
+@MainActor
+private final class SmokePopoverPresentation {
+    let popover: PearchHAStatusPopover
+    let anchorWindow: NSWindow
+    let window: NSWindow
+
+    init(model: PearchHAPanelModel) throws {
+        _ = NSApplication.shared
+        guard let visibleFrame = NSScreen.main?.visibleFrame else {
+            throw SmokeFailure("A visible screen is required for native popover smoke checks")
+        }
+        let anchorWindow = NSWindow(contentRect: NSRect(x: visibleFrame.midX, y: visibleFrame.maxY - 80, width: 40, height: 40),
+                                    styleMask: [.titled], backing: .buffered, defer: false)
+        anchorWindow.isReleasedWhenClosed = false
+        let anchor = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+        anchorWindow.contentView = anchor
+        anchorWindow.orderFront(nil)
+        let popover = PearchHAApplication.makePopover(model: model)
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        guard let window = popover.contentViewController?.view.window, popover.isShown else {
+            popover.close()
+            anchorWindow.close()
+            throw SmokeFailure("Popover did not present from its visible smoke anchor")
+        }
+        self.popover = popover
+        self.anchorWindow = anchorWindow
+        self.window = window
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func close() {
+        popover.close()
+        popover.contentViewController = nil
+        anchorWindow.close()
+    }
+}
+
 @main
 struct PearchHASmoke {
     static func main() async {
@@ -2952,26 +2989,17 @@ struct PearchHASmoke {
     @MainActor
     private static func verifyAppShellPanelFactory() throws {
         _ = NSApplication.shared
-        let panel = PearchHAApplication.makePanel(model: PearchHAPanelModel())
-        defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
-        }
+        let presentation = try SmokePopoverPresentation(model: PearchHAPanelModel())
+        let panel = presentation.window
+        defer { presentation.close() }
 
-        let frameSize = panel.frame.size
-        try expect(panel.canBecomeKey, "app shell panel accepts first-run text focus")
-        try expect(panel.canBecomeMain, "app shell panel can become main while open")
-        try expect(panel.styleMask.contains(.nonactivatingPanel), "app shell panel is nonactivating")
-        try expect(panel.styleMask.contains(.borderless), "app shell panel is borderless (SwiftUI paints the rounded surface)")
-        try expect(!panel.styleMask.contains(.titled), "app shell panel has no titled window chrome")
-        try expect(!panel.isOpaque, "app shell panel is transparent so the rounded corners show")
-        try expect(panel.backgroundColor == .clear, "app shell panel clears its window background")
-        try expect(!panel.hasShadow, "app shell panel defers its shadow to the SwiftUI root")
-        try expect(panel.isFloatingPanel, "app shell panel floats above normal windows")
-        try expect(panel.hidesOnDeactivate, "app shell panel hides on deactivate")
-        try expect(panel.contentViewController != nil, "app shell hosts SwiftUI content")
-        try expect(Int(frameSize.width.rounded()) == 384, "app shell panel frame width is stable")
-        try expect(Int(frameSize.height.rounded()) >= 468, "app shell panel frame height fits first-run content")
+        try expect(presentation.popover.behavior == .transient, "app shell uses native transient dismissal")
+        try expect(!presentation.popover.animates, "app shell popover has deterministic presentation")
+        try expect(presentation.popover.isShown, "app shell presents from its visible anchor")
+        try expect(panel.canBecomeKey, "popover accepts keyboard focus")
+        try expect(presentation.popover.contentViewController != nil, "app shell hosts SwiftUI content")
+        try expect(Int(presentation.popover.contentSize.width.rounded()) == 384, "popover content width is stable")
+        try expect(Int(presentation.popover.contentSize.height.rounded()) == 468, "popover content height is stable")
 
         // The panel no longer hosts the connection form (it points to
         // Settings); the fields live in the Settings window's Connection tab.
@@ -3143,11 +3171,9 @@ struct PearchHASmoke {
             ),
             "custom-action smoke fixture stores the panel action"
         )
-        let panel = PearchHAApplication.makePanel(model: model)
-        defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
-        }
+        let presentation = try SmokePopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
 
         panel.makeKeyAndOrderFront(nil)
         drainMainRunLoop()
@@ -3169,11 +3195,9 @@ struct PearchHASmoke {
     private static func verifyBuiltInControlsPanelFactory() async throws {
         _ = NSApplication.shared
         let model = try await panelSnapshotModel(for: .builtInControlsLight)
-        let panel = PearchHAApplication.makePanel(model: model)
-        defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
-        }
+        let presentation = try SmokePopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
 
         panel.makeKeyAndOrderFront(nil)
         drainMainRunLoop()
@@ -3430,15 +3454,27 @@ struct PearchHASmoke {
             snapshot: SmokePanelSnapshotVariant.connectedLight.snapshot,
             customActionConfiguration: SmokePanelSnapshotVariant.connectedLight.customActionConfiguration
         )
+        guard let visibleFrame = NSScreen.main?.visibleFrame else {
+            throw SmokeFailure("A visible screen is required for the popover opening benchmark")
+        }
+        let anchorWindow = NSWindow(contentRect: NSRect(x: visibleFrame.midX, y: visibleFrame.maxY - 80, width: 40, height: 40),
+                                    styleMask: [.titled], backing: .buffered, defer: false)
+        anchorWindow.isReleasedWhenClosed = false
+        let anchor = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+        anchorWindow.contentView = anchor
+        anchorWindow.orderFront(nil)
+        defer { anchorWindow.close() }
+        // The real status-item anchor already exists before the user opens the popover.
         let start = DispatchTime.now().uptimeNanoseconds
-        let panel = PearchHAApplication.makePanel(model: model)
-        panel.orderFrontRegardless()
-        panel.contentView?.layoutSubtreeIfNeeded()
-        panel.displayIfNeeded()
-        let elapsed = DispatchTime.now().uptimeNanoseconds - start
-        panel.orderOut(nil)
-        panel.contentViewController = nil
-        return elapsed
+        let popover = PearchHAApplication.makePopover(model: model)
+        defer { popover.close(); popover.contentViewController = nil }
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        guard let window = popover.contentViewController?.view.window, popover.isShown else {
+            throw SmokeFailure("The opening benchmark could not present its native popover")
+        }
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        return DispatchTime.now().uptimeNanoseconds - start
     }
 
     private static func milliseconds(_ nanoseconds: UInt64) -> String {
@@ -4457,10 +4493,8 @@ struct PearchHASmoke {
         try expect(snapshot.statusItemHasAction, "app launch wires status item action")
         try expect(snapshot.hasPanel, "app launch creates panel")
         try expect(snapshot.hasPanelModel, "app launch creates panel model")
-        try expect(snapshot.panelCanBecomeKey, "app launch creates key-capable panel")
-        try expect(snapshot.panelCanBecomeMain, "app launch creates main-capable panel")
-        try expect(snapshot.panelIsFloating, "app launch creates floating panel")
-        try expect(snapshot.panelHidesOnDeactivate, "app launch creates dismissible panel")
+        try expect(snapshot.panelIsTransient, "app launch creates native transient popover")
+        try expect(!snapshot.panelIsShown, "app launch keeps the popover closed")
         try expect(snapshot.panelContentWidth == 384, "app launch preserves panel content width")
         try expect(snapshot.panelContentHeight == 468, "app launch preserves panel content height")
         try expect(snapshot.menuBarEntityIDs.isEmpty, "app launch starts without promoted menu bar entities")

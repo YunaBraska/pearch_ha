@@ -14,6 +14,45 @@ import PearchHATestSupport
 @testable import PearchHAUI
 
 @MainActor
+private final class PearchHATestPopoverPresentation {
+    let popover: PearchHAStatusPopover
+    let anchor: NSView
+    let anchorWindow: NSWindow
+    let window: NSWindow
+
+    init(model: PearchHAPanelModel) throws {
+        _ = NSApplication.shared
+        guard let visibleFrame = NSScreen.main?.visibleFrame else {
+            throw NSError(domain: "PearchHAUITests", code: 2, userInfo: [NSLocalizedDescriptionKey: "A visible screen is required for native popover tests"])
+        }
+        let anchorWindow = NSWindow(contentRect: NSRect(x: visibleFrame.midX, y: visibleFrame.maxY - 80, width: 40, height: 40),
+                                    styleMask: [.titled], backing: .buffered, defer: false)
+        anchorWindow.isReleasedWhenClosed = false
+        let anchor = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+        anchorWindow.contentView = anchor
+        anchorWindow.orderFront(nil)
+        let popover = PearchHAApplication.makePopover(model: model)
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        guard let window = popover.contentViewController?.view.window, popover.isShown else {
+            popover.close()
+            anchorWindow.close()
+            throw NSError(domain: "PearchHAUITests", code: 1, userInfo: [NSLocalizedDescriptionKey: "Popover did not present from its visible test anchor"])
+        }
+        self.popover = popover
+        self.anchor = anchor
+        self.anchorWindow = anchorWindow
+        self.window = window
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func close() {
+        popover.close()
+        popover.contentViewController = nil
+        anchorWindow.close()
+    }
+}
+
+@MainActor
 final class PearchHAUITests: XCTestCase {
     private func entity(_ domain: String, state: String = "on", attributes: [String: ActionValue] = [:]) -> DiscoveredEntity {
         DiscoveredEntity(id: EntityID("\(domain).office"), name: "Office \(domain)", state: state,
@@ -303,9 +342,10 @@ final class PearchHAUITests: XCTestCase {
                                       selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [light.id, number.id], isExplicit: true))
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        let panel = PearchHAApplication.makePanel(model: model)
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
         panel.makeKeyAndOrderFront(nil)
-        defer { panel.orderOut(nil); panel.contentViewController = nil }
         drainPanelRunLoop()
         let previousField = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
         XCTAssertTrue(panel.makeFirstResponder(previousField))
@@ -337,16 +377,22 @@ final class PearchHAUITests: XCTestCase {
                 model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
                 await model.connect()
                 model.applyDisplayPreferences(.defaults.with(textSize: textSize))
+                let presentation: PearchHATestPopoverPresentation?
                 let window: NSWindow
                 if inline {
-                    window = PearchHAApplication.makePanel(model: model)
+                    presentation = try PearchHATestPopoverPresentation(model: model)
+                    window = try XCTUnwrap(presentation).window
                 } else {
+                    presentation = nil
                     window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 220), styleMask: [.titled], backing: .buffered, defer: false)
                     window.contentView = NSHostingView(rootView: PearchHAEntityControlEditor(model: model, entityID: entity.id)
                         .environment(\.pearchHATextSize, textSize))
                 }
                 window.makeKeyAndOrderFront(nil)
-                defer { window.orderOut(nil); window.contentView = nil; window.contentViewController = nil }
+                defer {
+                    if let presentation { presentation.close() }
+                    else { window.orderOut(nil); window.contentView = nil; window.contentViewController = nil }
+                }
                 drainPanelRunLoop()
                 XCTAssertTrue(editableTextFields(in: window.contentView).isEmpty, "\(domain) should show a quiet value until clicked")
                 XCTAssertTrue(nativeSteppers(in: window.contentView).isEmpty, "The slider replaces extra stepper arrows")
@@ -413,9 +459,10 @@ final class PearchHAUITests: XCTestCase {
                                       selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        let panel = PearchHAApplication.makePanel(model: model)
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
         panel.makeKeyAndOrderFront(nil)
-        defer { panel.orderOut(nil); panel.contentViewController = nil }
         drainPanelRunLoop()
         XCTAssertTrue(editableTextFields(in: panel.contentView).isEmpty)
         XCTAssertTrue(nativeSteppers(in: panel.contentView).isEmpty)
@@ -474,9 +521,10 @@ final class PearchHAUITests: XCTestCase {
                                       selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        var panel = PearchHAApplication.makePanel(model: model)
+        var presentation = try PearchHATestPopoverPresentation(model: model)
+        var panel = presentation.window
+        defer { presentation.close() }
         panel.makeKeyAndOrderFront(nil)
-        defer { panel.orderOut(nil); panel.contentView = nil; panel.contentViewController = nil }
         drainPanelRunLoop()
         let field = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
         let idleFrame = field.convert(field.bounds, to: nil)
@@ -489,10 +537,9 @@ final class PearchHAUITests: XCTestCase {
 
         await runner.releaseNext()
         await refreshEntered.wait()
-        panel.orderOut(nil)
-        panel.contentView = nil
-        panel.contentViewController = nil
-        panel = PearchHAApplication.makePanel(model: model)
+        presentation.close()
+        presentation = try PearchHATestPopoverPresentation(model: model)
+        panel = presentation.window
         panel.makeKeyAndOrderFront(nil)
         try await Task.sleep(for: .milliseconds(100))
         drainPanelRunLoop()
@@ -624,9 +671,10 @@ final class PearchHAUITests: XCTestCase {
         model.setPanelActive(true)
         let task = Task { await model.setEntityControlValue(entity.id, controlID: "set_hvac_mode.hvac_mode", value: "dry") }
         await spinUntil { await runner.callCount() == 1 }
-        let window = PearchHAApplication.makePanel(model: model)
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let window = presentation.window
+        defer { presentation.close() }
         window.makeKeyAndOrderFront(nil)
-        defer { window.orderOut(nil); window.contentViewController = nil }
         try await Task.sleep(for: .milliseconds(100))
         window.contentView?.layoutSubtreeIfNeeded()
         drainPanelRunLoop()
@@ -724,15 +772,21 @@ final class PearchHAUITests: XCTestCase {
             model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
             await model.connect()
             model.setPanelActive(true)
+            let presentation: PearchHATestPopoverPresentation?
             let window: NSWindow
             if inline {
-                window = PearchHAApplication.makePanel(model: model)
+                presentation = try PearchHATestPopoverPresentation(model: model)
+                window = try XCTUnwrap(presentation).window
             } else {
+                presentation = nil
                 window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 220), styleMask: [.titled], backing: .buffered, defer: false)
                 window.contentView = NSHostingView(rootView: PearchHAEntityControlEditor(model: model, entityID: entity.id))
             }
             window.makeKeyAndOrderFront(nil)
-            defer { window.orderOut(nil); window.contentView = nil; window.contentViewController = nil }
+            defer {
+                if let presentation { presentation.close() }
+                else { window.orderOut(nil); window.contentView = nil; window.contentViewController = nil }
+            }
             drainPanelRunLoop()
             let field = try XCTUnwrap(editableTextFields(in: window.contentView).first)
             let idleFrame = field.convert(field.bounds, to: nil)
@@ -801,9 +855,10 @@ final class PearchHAUITests: XCTestCase {
                                       selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        let panel = PearchHAApplication.makePanel(model: model)
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
         panel.makeKeyAndOrderFront(nil)
-        defer { panel.orderOut(nil); panel.contentViewController = nil }
         drainPanelRunLoop()
         let field = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
         for invalid in ["23junk", "40", 22.25.formatted(.number.grouping(.never)), "22"] {
@@ -846,9 +901,10 @@ final class PearchHAUITests: XCTestCase {
         }, selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        let panel = PearchHAApplication.makePanel(model: model)
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
         panel.makeKeyAndOrderFront(nil)
-        defer { panel.orderOut(nil); panel.contentViewController = nil }
         drainPanelRunLoop()
         let view = try XCTUnwrap(panel.contentView)
         view.layoutSubtreeIfNeeded()
@@ -877,10 +933,12 @@ final class PearchHAUITests: XCTestCase {
                                       selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        let panel = PearchHAApplication.makePanel(model: model)
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
         panel.makeKeyAndOrderFront(nil)
         model.setPanelActive(true)
-        defer { model.setPanelActive(false); panel.orderOut(nil); panel.contentViewController = nil }
+        defer { model.setPanelActive(false) }
         drainPanelRunLoop()
         let view = try XCTUnwrap(panel.contentView)
         view.layoutSubtreeIfNeeded()
@@ -5738,29 +5796,16 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertFalse(snapshot.redactedForDiagnostics().accessibilitySummary.contains("secret-token"))
     }
 
-    func testAppShellPanelCanBecomeKeyForFirstRunTextEntry() {
-        let panel = PearchHAApplication.makePanel(model: PearchHAPanelModel())
-        defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
-        }
-        let frameSize = panel.frame.size
-
-        XCTAssertTrue(panel.canBecomeKey)
-        XCTAssertTrue(panel.canBecomeMain)
-        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
-        // The panel is borderless so the SwiftUI root paints the rounded
-        // dashboard surface itself: no titlebar, no window frame/background.
-        XCTAssertTrue(panel.styleMask.contains(.borderless))
-        XCTAssertFalse(panel.styleMask.contains(.titled))
-        XCTAssertFalse(panel.isOpaque)
-        XCTAssertEqual(panel.backgroundColor, .clear)
-        XCTAssertFalse(panel.hasShadow)
-        XCTAssertTrue(panel.isFloatingPanel)
-        XCTAssertTrue(panel.hidesOnDeactivate)
-        XCTAssertNotNil(panel.contentViewController)
-        XCTAssertEqual(Int(frameSize.width.rounded()), 384)
-        XCTAssertGreaterThanOrEqual(Int(frameSize.height.rounded()), 468)
+    func testAppShellPopoverHostsKeyCapableContent() throws {
+        let presentation = try PearchHATestPopoverPresentation(model: PearchHAPanelModel())
+        defer { presentation.close() }
+        XCTAssertEqual(presentation.popover.behavior, .transient)
+        XCTAssertFalse(presentation.popover.animates)
+        XCTAssertTrue(presentation.popover.isShown)
+        XCTAssertTrue(presentation.window.canBecomeKey)
+        XCTAssertNotNil(presentation.popover.contentViewController)
+        XCTAssertEqual(Int(presentation.popover.contentSize.width.rounded()), 384)
+        XCTAssertEqual(Int(presentation.popover.contentSize.height.rounded()), 468)
     }
 
     func testAppShellConnectionFormNormalizesFrontendURLsThroughNativeTextFields() throws {
@@ -5899,8 +5944,10 @@ final class PearchHAUITests: XCTestCase {
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        let panel = PearchHAApplication.makePanel(model: model)
-        defer { panel.orderOut(nil); panel.contentViewController = nil }
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
+
         panel.makeKeyAndOrderFront(nil)
         drainPanelRunLoop()
         panel.contentView?.layoutSubtreeIfNeeded()
@@ -5942,8 +5989,10 @@ final class PearchHAUITests: XCTestCase {
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        let panel = PearchHAApplication.makePanel(model: model)
-        defer { panel.orderOut(nil); panel.contentViewController = nil }
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
+
         panel.makeKeyAndOrderFront(nil)
         drainPanelRunLoop()
         let switches = nativeSwitches(in: panel.contentView)
@@ -5965,7 +6014,7 @@ final class PearchHAUITests: XCTestCase {
     }
 
     func testAppShellLightSwitchSendsOnAndOffAfterReopeningPanel() async throws {
-        func click(_ control: NSSwitch, in panel: NSPanel) -> [String] {
+        func click(_ control: NSSwitch, in panel: NSWindow) -> [String] {
             XCTAssertTrue(control.window === panel, "Native switch must belong to the current panel")
             control.performClick(nil)
             NSApp.updateWindows()
@@ -5981,8 +6030,10 @@ final class PearchHAUITests: XCTestCase {
         ])
         let model = await connectedModel([lamp], server: server)
         for (index, service) in ["turn_on", "turn_off"].enumerated() {
-            let panel = PearchHAApplication.makePanel(model: model)
-            defer { panel.orderOut(nil); panel.contentViewController = nil }
+            let presentation = try PearchHATestPopoverPresentation(model: model)
+            let panel = presentation.window
+            defer { presentation.close() }
+
             panel.makeKeyAndOrderFront(nil)
             drainPanelRunLoop()
             panel.contentView?.layoutSubtreeIfNeeded()
@@ -6093,9 +6144,11 @@ final class PearchHAUITests: XCTestCase {
             historyDebounce: .milliseconds(0), bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        let panel = try XCTUnwrap(PearchHAApplication.makePanel(model: model) as? PearchHAStatusPanel)
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
         panel.makeKeyAndOrderFront(nil)
-        defer { panel.orderOut(nil); panel.contentView = nil }
+
         model.presentHistoryDetail("sensor.office_humidity")
         await spinUntil { if case .loaded = model.snapshot.historyState { return true }; return false }
         try await Task.sleep(for: .milliseconds(100))
@@ -6103,12 +6156,12 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(nativeSegmentedControls(in: panel.contentView).count, 1,
                        "History range control is inside the same panel window")
         try saveControlSnapshot(panel.contentView, name: "history-in-panel")
-        panel.cancelOperation(nil)
+        presentation.popover.cancelOperation(nil)
         drainPanelRunLoop()
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
-        XCTAssertTrue(panel.isVisible, "Escape returns to rooms first")
-        panel.cancelOperation(nil)
-        XCTAssertFalse(panel.isVisible, "A second Escape closes the panel")
+        XCTAssertTrue(presentation.popover.isShown, "Escape returns to rooms first")
+        presentation.popover.cancelOperation(nil)
+        XCTAssertFalse(presentation.popover.isShown, "A second Escape closes the panel")
     }
 
     func testSettingsEntitiesTabExposesNativeSearchUnitMenuAndKeyViewLoop() async throws {
@@ -6349,11 +6402,9 @@ final class PearchHAUITests: XCTestCase {
         await model.connect()
         XCTAssertTrue(model.setCustomAction(sensorCustomAction(requiresConfirmation: true)))
 
-        let panel = PearchHAApplication.makePanel(model: model)
-        defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
-        }
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
 
         panel.makeKeyAndOrderFront(nil)
         drainPanelRunLoop()
@@ -6388,10 +6439,8 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertTrue(snapshot.statusItemHasAction)
         XCTAssertTrue(snapshot.hasPanel)
         XCTAssertTrue(snapshot.hasPanelModel)
-        XCTAssertTrue(snapshot.panelCanBecomeKey)
-        XCTAssertTrue(snapshot.panelCanBecomeMain)
-        XCTAssertTrue(snapshot.panelIsFloating)
-        XCTAssertTrue(snapshot.panelHidesOnDeactivate)
+        XCTAssertTrue(snapshot.panelIsTransient)
+        XCTAssertFalse(snapshot.panelIsShown)
         XCTAssertEqual(snapshot.panelContentWidth, 384)
         XCTAssertEqual(snapshot.panelContentHeight, 468)
         XCTAssertEqual(snapshot.selectedEntityIDs, [])
@@ -6639,6 +6688,7 @@ final class PearchHAUITests: XCTestCase {
     }
 
     func test_t_app_shell_persists_and_reloads_display_preferences() async throws {
+        _ = NSApplication.shared
         let url = temporaryConfigURL()
         defer {
             try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
@@ -6648,7 +6698,22 @@ final class PearchHAUITests: XCTestCase {
             configStore: store,
             connector: { _ in .success(rooms: selectionRooms()) }
         )
+        let previousAppearance = NSApp.appearance
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+            NSApp.appearance = previousAppearance
+        }
+        XCTAssertEqual(application.persist(displayPreferences: application.displayPreferences.with(themeMode: .light)), .saved)
+        let button = try XCTUnwrap(NSApp.windows.flatMap { nativeViews(in: $0.contentView, of: NSStatusBarButton.self) }
+            .first { $0.target === application })
+        await spinUntil("the shell status anchor is visible") { button.window?.isVisible == true && !button.visibleRect.isEmpty }
+        drainPanelRunLoop()
+        let existingWindows = Set(NSApp.windows.map(\.windowNumber))
+        button.performClick(nil)
+        XCTAssertTrue(application.snapshot.panelIsShown)
+        let contentWindow = try XCTUnwrap(NSApp.windows.first { !existingWindows.contains($0.windowNumber) && $0.isVisible })
+        XCTAssertEqual(contentWindow.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .aqua)
 
         let preferences = PearchHADisplayPreferences(
             menuBarAppearance: .iconOnly,
@@ -6665,6 +6730,15 @@ final class PearchHAUITests: XCTestCase {
         )
         XCTAssertEqual(application.persist(displayPreferences: preferences), .saved)
         XCTAssertEqual(application.displayPreferences, preferences)
+        drainPanelRunLoop()
+        XCTAssertEqual(contentWindow.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .darkAqua,
+                       "Changing the theme updates the retained native popover")
+        button.performClick(nil)
+        XCTAssertFalse(application.snapshot.panelIsShown)
+        button.performClick(nil)
+        XCTAssertTrue(application.snapshot.panelIsShown)
+        XCTAssertEqual(contentWindow.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .darkAqua,
+                       "Reopening retains the current native appearance")
         application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
 
         let reloaded = try store.load()
@@ -6743,77 +6817,62 @@ final class PearchHAUITests: XCTestCase {
         )
     }
 
-    func testAppShellCancelledInactivityDoesNotCloseReopenedPanel() async throws {
+    func testAppShellStatusButtonOpensClosesAndReopensPopover() async throws {
         _ = NSApplication.shared
-        let activationPolicy = NSApp.activationPolicy()
-        NSApp.setActivationPolicy(.accessory)
-        let existingWindows = Set(NSApp.windows.map(\.windowNumber))
         let application = applicationForTest(configStore: nil)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
-        let otherWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
-                                   styleMask: [.titled], backing: .buffered, defer: false)
-        defer {
-            otherWindow.orderOut(nil)
-            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
-            NSApp.setActivationPolicy(activationPolicy)
-        }
-        let panel = try XCTUnwrap(NSApp.windows.compactMap { $0 as? PearchHAStatusPanel }
-            .first { !existingWindows.contains($0.windowNumber) })
+        defer { application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification)) }
         let button = try XCTUnwrap(NSApp.windows.flatMap { nativeViews(in: $0.contentView, of: NSStatusBarButton.self) }
             .first { $0.target === application })
-
-        button.performClick(nil)
-        await spinUntil("the status click activates the application") { NSApp.isActive }
-        XCTAssertTrue(panel.isVisible, "One status-item click opens the panel")
-        otherWindow.makeKeyAndOrderFront(nil)
-        XCTAssertTrue(otherWindow.isKeyWindow)
-        XCTAssertFalse(panel.isKeyWindow)
-        await Task.yield()
-
-        panel.makeKeyAndOrderFront(nil)
-        XCTAssertTrue(panel.isKeyWindow)
-        otherWindow.makeKeyAndOrderFront(nil)
-        XCTAssertFalse(panel.isKeyWindow)
-        // Let cancelled work resume after a replacement timeout has been armed.
-        for _ in 0..<20 { await Task.yield() }
-        XCTAssertTrue(panel.isVisible, "Cancelled inactivity must not dismiss the panel before the new timeout")
-
-        button.performClick(nil)
-        XCTAssertFalse(panel.isVisible)
-        button.performClick(nil)
-        for _ in 0..<20 { await Task.yield() }
-        XCTAssertTrue(panel.isVisible, "One click reopens the panel after dismissal")
+        await spinUntil("the shell status anchor is visible") { button.window?.isVisible == true && !button.visibleRect.isEmpty }
+        drainPanelRunLoop()
+        for _ in 0..<3 {
+            button.performClick(nil)
+            XCTAssertTrue(application.snapshot.panelIsShown, "One status action opens the popover; anchorVisible=\(button.window?.isVisible == true) rect=\(button.visibleRect)")
+            button.performClick(nil)
+            XCTAssertFalse(application.snapshot.panelIsShown, "One status action closes the popover")
+        }
     }
 
-    func test_t_status_panel_escape_closes_and_command_comma_opens_settings() {
-        var openedSettings = 0
-        let panel = PearchHAStatusPanel()
-        panel.onOpenSettings = {
-            openedSettings += 1
-        }
-        panel.makeKeyAndOrderFront(nil)
-        XCTAssertTrue(panel.isVisible)
+    func testStatusPopoverEscapeCloses() throws {
+        let presentation = try PearchHATestPopoverPresentation(model: PearchHAPanelModel())
+        defer { presentation.close() }
+        XCTAssertTrue(presentation.popover.isShown)
+        presentation.popover.cancelOperation(nil)
+        XCTAssertFalse(presentation.popover.isShown, "Escape closes the native popover")
+    }
 
-        panel.cancelOperation(nil)
-        XCTAssertFalse(panel.isVisible, "Escape (cancelOperation) closes the panel")
-
-        let commaEvent = NSEvent.keyEvent(
-            with: .keyDown,
-            location: .zero,
-            modifierFlags: .command,
-            timestamp: 0,
-            windowNumber: 0,
-            context: nil,
-            characters: ",",
-            charactersIgnoringModifiers: ",",
-            isARepeat: false,
-            keyCode: 43
-        )
-        XCTAssertNotNil(commaEvent)
-        if let commaEvent {
-            XCTAssertTrue(panel.performKeyEquivalent(with: commaEvent), "Cmd+, is handled by the panel")
+    func testAppShellCommandCommaOpensSettingsFromPopover() async throws {
+        _ = NSApplication.shared
+        let previousDelegate = NSApp.delegate
+        let previousMenu = NSApp.mainMenu
+        let previousPolicy = NSApp.activationPolicy()
+        let application = applicationForTest(configStore: nil)
+        NSApp.delegate = application
+        NSApp.mainMenu = PearchHAApplication.standardMainMenu()
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+            NSApp.delegate = previousDelegate
+            NSApp.mainMenu = previousMenu
+            NSApp.setActivationPolicy(previousPolicy)
         }
-        XCTAssertEqual(openedSettings, 1, "Cmd+, routes to the open-settings path")
+        let button = try XCTUnwrap(NSApp.windows.flatMap { nativeViews(in: $0.contentView, of: NSStatusBarButton.self) }
+            .first { $0.target === application })
+        await spinUntil("the shell status anchor is visible") { button.window?.isVisible == true && !button.visibleRect.isEmpty }
+        drainPanelRunLoop()
+        button.performClick(nil)
+        XCTAssertTrue(application.snapshot.panelIsShown)
+        await spinUntil("the popover application is active") { NSApp.isActive }
+        let existingWindows = Set(NSApp.windows.map(\.windowNumber))
+        let commaEvent = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: NSApp.keyWindow?.windowNumber ?? 0, context: nil,
+            characters: ",", charactersIgnoringModifiers: ",", isARepeat: false, keyCode: 43))
+        NSApp.sendEvent(commaEvent)
+        await spinUntil("Cmd+, opens the Settings window") {
+            NSApp.windows.contains { !existingWindows.contains($0.windowNumber) && $0.isVisible && $0.title == "PearchHA Settings" }
+        }
+        XCTAssertFalse(application.snapshot.panelIsShown, "Opening Settings dismisses the popover")
     }
 
     func test_t_menu_bar_presenter_reads_promotions_from_live_snapshot() {
@@ -10774,12 +10833,10 @@ final class PearchHAUITests: XCTestCase {
             bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: .milliseconds(250)), panelActive: true
         )
         model.setAllEntities(isSelected: true)
-        let panel = PearchHAApplication.makePanel(model: model)
-        defer {
-            model.setPanelActive(false)
-            panel.orderOut(nil)
-            panel.contentViewController = nil
-        }
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
+        defer { model.setPanelActive(false) }
         panel.makeKeyAndOrderFront(nil)
         drainPanelRunLoop()
         await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .milliseconds(250), untilBatches: 1)
@@ -11250,40 +11307,44 @@ final class PearchHAUITests: XCTestCase {
         model.setPanelActive(false)
     }
 
-    func test_t_status_panel_reports_visibility_changes_on_every_dismissal_path() {
-        let panel = PearchHAStatusPanel()
+    func testStatusPopoverReportsVisibilityChangesOnEveryDismissalPath() throws {
+        let presentation = try PearchHATestPopoverPresentation(model: PearchHAPanelModel())
+        defer { presentation.close() }
         var reported: [Bool] = []
-        panel.onVisibilityChange = { reported.append($0) }
-
-        panel.makeKeyAndOrderFront(nil)
-        XCTAssertEqual(reported, [true])
-
-        // Escape routes through cancelOperation -> orderOut.
-        panel.cancelOperation(nil)
-        XCTAssertEqual(reported, [true, false])
-
-        // Repeated hides do not re-report; only genuine changes fire.
-        panel.orderOut(nil)
-        XCTAssertEqual(reported, [true, false])
+        presentation.popover.onVisibilityChange = { reported.append($0) }
+        presentation.popover.cancelOperation(nil)
+        XCTAssertEqual(reported, [false])
+        presentation.popover.show(relativeTo: presentation.anchor.bounds, of: presentation.anchor, preferredEdge: .minY)
+        XCTAssertEqual(reported, [false, true])
+        presentation.popover.close()
+        presentation.popover.close()
+        XCTAssertEqual(reported, [false, true, false])
     }
 
-    func test_t_panel_dismissal_stops_background_work_without_status_item_toggle() async {
-        let model = PearchHAPanelModel(
-            connector: { _ in .success(rooms: prefetchRooms(count: 1)) }
-        )
-        let panel = PearchHAApplication.makePanel(model: model)
-        defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
+    func testPopoverDismissalStopsBackgroundWorkWithoutStatusItemToggle() throws {
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: prefetchRooms(count: 1)) })
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        defer { presentation.close() }
+        XCTAssertTrue(model.isPanelActive)
+        presentation.popover.cancelOperation(nil)
+        XCTAssertFalse(model.isPanelActive, "Native dismissal stops panel-only background work")
+    }
+
+    func testAppDeactivationDismissesPanelAndAllowsImmediateReopening() async throws {
+        _ = NSApplication.shared
+        let application = applicationForTest(configStore: nil)
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer { application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification)) }
+        let button = try XCTUnwrap(NSApp.windows.flatMap { nativeViews(in: $0.contentView, of: NSStatusBarButton.self) }
+            .first { $0.target === application })
+        await spinUntil("the shell status anchor is visible") { button.window?.isVisible == true && !button.visibleRect.isEmpty }
+        drainPanelRunLoop()
+        for _ in 0..<2 {
+            button.performClick(nil)
+            XCTAssertTrue(application.snapshot.panelIsShown, "anchorVisible=\(button.window?.isVisible == true) rect=\(button.visibleRect)")
+            application.applicationDidResignActive(Notification(name: NSApplication.didResignActiveNotification, object: NSApp))
+            XCTAssertFalse(application.snapshot.panelIsShown, "App deactivation closes the native popover")
         }
-
-        panel.makeKeyAndOrderFront(nil)
-        XCTAssertTrue(model.isPanelActive, "showing the panel activates background sync")
-
-        // Escape (or click-away auto-hide) must deactivate the model even though
-        // the status-item toggle never ran — this leaked background loops before.
-        panel.cancelOperation(nil)
-        XCTAssertFalse(model.isPanelActive, "hiding the panel deactivates detail refresh and live updates")
     }
 
     func test_t_periodic_refresh_backs_off_after_failure() async {

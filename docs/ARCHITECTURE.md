@@ -3,9 +3,9 @@
 ## Stack
 
 - Swift package as the source of truth.
-- SwiftUI for view code, hosted inside AppKit windows and panels.
+- SwiftUI for view code, hosted inside AppKit windows and popovers.
 - `NSStatusItem` for menu bar presence.
-- `NSPanel` for the drop-down surface and `NSWindow` for Settings.
+- Transient `NSPopover` for the drop-down surface and `NSWindow` for Settings.
 - Foundation networking plus Home Assistant REST and WebSocket calls.
 - JSON config for non-secrets, Keychain for secrets.
 
@@ -22,7 +22,7 @@ PearchHAApp -> PearchHAAppShell -> PearchHAUI -> PearchHACore
 - `PearchHAPersistence`: config store and secret storage.
 - `PearchHAUI`: panel, settings, controls, charts, and local view helpers.
 - `PearchHAApp`: application entrypoint.
-- `PearchHAAppShell`: lifecycle, status items, windows, local macOS readings, panel placement, and release/update wiring.
+- `PearchHAAppShell`: lifecycle, status items, windows, local macOS readings, popover presentation, and release/update wiring.
 - `PearchHASupport`: clocks, rate limiting, backoff, request coalescing, redaction, and command-line support.
 
 ## State and flow
@@ -60,9 +60,9 @@ The local reader is injected at the same panel-model boundary, without credentia
 
 ## Focus and lifetime
 
-- The panel is a transient surface. Closing it stops panel-only refresh loops.
+- The panel is a native transient popover. Status-item clicks toggle its actual shown state. App deactivation closes it. Show/close delegate callbacks start and stop panel-only refresh loops.
 - Settings is a real window, but it should not keep expensive live-update behavior alive on its own.
-- Unfocused transient surfaces are allowed to close themselves after a long idle period to keep the app from lingering forever in the background.
+- Ordinary closes retain the content tree. Opening Settings and shutdown release it. AppKit owns positioning and dismissal, with no inactivity timer or occlusion-based visibility inference.
 
 ## Failure boundaries
 

@@ -12,15 +12,15 @@ Consequences: Best native fidelity and lowest expected overhead. macOS only.
 
 Alternatives: Electron and Tauri were rejected because the app is a small ambient utility, not a cross-platform web shell.
 
-## ADR-0002 - `NSStatusItem` plus custom `NSPanel`
+## ADR-0002 - `NSStatusItem` plus native `NSPopover`
 
-Context: PearchHA needs multiple menu bar items, gauges, hover behavior, sliders, charts, and rich keyboard support.
+Context: PearchHA needs multiple menu bar items, gauges, sliders, charts, and keyboard support. The former nonactivating `NSPanel` could be hidden by app deactivation before the status-item action arrived. Its visibility flag then caused a close click to reopen the panel.
 
-Decision: Use `NSStatusItem` for menu bar items and a custom borderless `NSPanel` hosting SwiftUI for the drop-down.
+Decision: Use `NSStatusItem` for menu bar items and a transient `NSPopover` hosting the same SwiftUI content. AppKit owns anchoring and presentation. Explicit toggles and app deactivation close the popover, including nested control popovers. Delegate callbacks own the model's visible state. Escape returns from history before closing the root, and Cmd+, opens Settings.
 
-Consequences: More AppKit glue, but full control over layout and interaction.
+Consequences: The native frame includes an anchor arrow. Content stays attached across ordinary closes to preserve scroll and expansion state. Settings and shutdown release it. Manual positioning, occlusion inference and the inactivity timer are removed.
 
-Alternatives: `MenuBarExtra` is simpler but too constrained for the full panel and independent bar widgets.
+Alternatives: `MenuBarExtra` is too constrained for independent bar widgets. Timing thresholds and extra mouse monitors would make the former panel's event ordering more fragile.
 
 ## ADR-0003 - Token-normalized Home Assistant auth
 

@@ -15,14 +15,24 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 private enum AppShellLayout {
-    static let panelContentSize = PearchHAPanelView.preferredContentSize(textSize: .standard)
     static let settingsMinContentSize = NSSize(width: 660, height: 560)
-    static let unfocusedSurfaceCloseInterval: TimeInterval = 300
 }
 
 private final class PearchHAFirstMouseHostingView<Content: View>: NSHostingView<Content> {
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-        true
+    var cancelHandler: (() -> Void)?
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func cancelOperation(_ sender: Any?) {
+        if let cancelHandler { cancelHandler() } else { super.cancelOperation(sender) }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53, let cancelHandler {
+            cancelHandler()
+        } else {
+            super.keyDown(with: event)
+        }
     }
 }
 
@@ -32,116 +42,37 @@ private final class PearchHAFirstMouseHostingController<Content: View>: NSHostin
     }
 }
 
-public final class PearchHAStatusPanel: NSPanel {
-    /// Invoked when the user presses Cmd+, inside the panel, routing to the
-    /// app shell's open-settings path. Set by the owning ``PearchHAApplication``.
-    public var onOpenSettings: (() -> Void)?
+/// The native menu-bar popover owns presentation and dismissal. Its content
+/// remains attached across ordinary closes so expansion and scroll state survive.
+public final class PearchHAStatusPopover: NSPopover, NSPopoverDelegate {
     public var onNavigateBack: (() -> Bool)?
-    public var onFocusChange: ((Bool) -> Void)?
-
-    /// Creates a status panel with the menu-bar drop-down style mask used by the
-    /// app shell. Exposed so the interaction behavior (Escape to close, Cmd+, to
-    /// open settings) can be exercised directly.
-    public convenience init() {
-        self.init(
-            contentRect: NSRect(origin: .zero, size: AppShellLayout.panelContentSize),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: true
-        )
-        isFloatingPanel = true
-        hidesOnDeactivate = true
-        // The SwiftUI root paints the rounded dashboard surface and its shadow, so
-        // the window itself is a clear, chrome-free host: no titlebar, no traffic
-        // lights, no opaque background to bleed past the rounded corners.
-        isOpaque = false
-        backgroundColor = .clear
-        hasShadow = false
-    }
-
-    public override var canBecomeKey: Bool {
-        true
-    }
-
-    public override var canBecomeMain: Bool {
-        true
-    }
-
-    /// Called with the panel's visibility whenever it genuinely changes.
-    ///
-    /// Every dismissal path funnels through here — Escape, the status-item
-    /// toggle, programmatic `orderOut`, and the auto-hide that fires when the
-    /// app deactivates (click-away) — so the shell can stop background work the
-    /// moment the panel disappears instead of only on explicit toggles.
     public var onVisibilityChange: ((Bool) -> Void)?
 
-    private var lastReportedVisibility: Bool?
-
-    private func reportVisibilityIfChanged() {
-        let visible = isVisible
-        guard visible != lastReportedVisibility else {
-            return
-        }
-        lastReportedVisibility = visible
-        onVisibilityChange?(visible)
+    public override init() {
+        super.init()
+        behavior = .transient
+        animates = false
     }
 
-    public override func order(_ place: NSWindow.OrderingMode, relativeTo otherWin: Int) {
-        super.order(place, relativeTo: otherWin)
-        reportVisibilityIfChanged()
+    public required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        behavior = .transient
+        animates = false
     }
 
-    public override func orderOut(_ sender: Any?) {
-        super.orderOut(sender)
-        reportVisibilityIfChanged()
+    public func popoverDidShow(_ notification: Notification) {
+        onVisibilityChange?(true)
     }
 
-    public override func makeKeyAndOrderFront(_ sender: Any?) {
-        super.makeKeyAndOrderFront(sender)
-        reportVisibilityIfChanged()
+    public func popoverDidClose(_ notification: Notification) {
+        onVisibilityChange?(false)
     }
 
-    public override func becomeKey() {
-        super.becomeKey()
-        onFocusChange?(true)
-    }
-
-    public override func resignKey() {
-        super.resignKey()
-        onFocusChange?(false)
-    }
-
-
-    public override init(
-        contentRect: NSRect,
-        styleMask style: NSWindow.StyleMask,
-        backing backingStoreType: NSWindow.BackingStoreType,
-        defer flag: Bool
-    ) {
-        super.init(contentRect: contentRect, styleMask: style, backing: backingStoreType, defer: flag)
-        // The auto-hide that `hidesOnDeactivate` performs on click-away does not
-        // route through the public ordering overrides, but it does flip the
-        // occlusion state — observe it so click-away also reports visibility.
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(windowVisibilityMayHaveChanged(_:)),
-            name: NSWindow.didChangeOcclusionStateNotification,
-            object: self
-        )
-    }
-
-    @objc private func windowVisibilityMayHaveChanged(_ notification: Notification) {
-        reportVisibilityIfChanged()
-    }
-
-    /// Closes the panel when Escape is pressed, matching macOS popover behavior.
     public override func cancelOperation(_ sender: Any?) {
-        if onNavigateBack?() != true { orderOut(sender) }
+        if onNavigateBack?() != true { close() }
     }
 
     public override func keyDown(with event: NSEvent) {
-        // Escape (key code 53) closes the panel even when no field has claimed
-        // the event as a cancel operation.
         if event.keyCode == 53 {
             cancelOperation(self)
             return
@@ -149,51 +80,7 @@ public final class PearchHAStatusPanel: NSPanel {
         super.keyDown(with: event)
     }
 
-    public override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard event.type == .keyDown,
-              event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command),
-              let characters = event.charactersIgnoringModifiers?.lowercased()
-        else {
-            return super.performKeyEquivalent(with: event)
-        }
 
-        // Cmd+, opens Settings, mirroring the standard macOS Preferences shortcut.
-        if characters == ",", let onOpenSettings {
-            onOpenSettings()
-            return true
-        }
-
-        let action: Selector?
-        switch characters {
-        case "x":
-            action = #selector(NSText.cut(_:))
-        case "c":
-            action = #selector(NSText.copy(_:))
-        case "v":
-            action = #selector(NSText.paste(_:))
-        case "a":
-            action = #selector(NSText.selectAll(_:))
-        case "z":
-            action = event.modifierFlags.contains(.shift)
-                ? Selector(("redo:"))
-                : Selector(("undo:"))
-        default:
-            action = nil
-        }
-
-        if let action {
-            // Route to this panel's own first responder (the focused field's
-            // field editor) so editing shortcuts work whether or not the panel
-            // is the application's key window; fall back to the responder chain.
-            if let firstResponder, NSApp.sendAction(action, to: firstResponder, from: self) {
-                return true
-            }
-            if NSApp.sendAction(action, to: nil, from: self) {
-                return true
-            }
-        }
-        return super.performKeyEquivalent(with: event)
-    }
 }
 
 /// An observable description of a single live menu-bar status item.
@@ -246,10 +133,8 @@ public struct PearchHAApplicationSnapshot: Equatable, Sendable {
     public let menuBarItems: [PearchHAMenuBarStatusItemSnapshot]
     public let hasPanel: Bool
     public let hasPanelModel: Bool
-    public let panelCanBecomeKey: Bool
-    public let panelCanBecomeMain: Bool
-    public let panelIsFloating: Bool
-    public let panelHidesOnDeactivate: Bool
+    public let panelIsShown: Bool
+    public let panelIsTransient: Bool
     public let panelContentWidth: Int?
     public let panelContentHeight: Int?
     public let selectedEntityIDs: [EntityID]
@@ -1121,9 +1006,8 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
     private var statusItemRefreshTask: Task<Void, Never>?
     private var lastStatusItemRefreshAt: Date?
     private var lastRenderedStatusItemRefreshSignature: PearchHAStatusItemRefreshSignature?
-    private var panel: NSPanel?
+    private var popover: PearchHAStatusPopover?
     private var settingsWindow: NSWindow?
-    private var panelInactivityTask: Task<Void, Never>?
     /// Restores the accessory activation policy when Settings closes.
     private var settingsWindowCloseObserver: NSObjectProtocol?
     private var panelModel: PearchHAPanelModel?
@@ -1481,33 +1365,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
                 self?.localSensorChangeTask = Task { @MainActor [weak model] in await model?.refreshLocalSensors() }
             }
         }
-        panel = Self.makePanel(
-            model: model,
-            onOpenSettings: { [weak self] in
-                self?.openSettingsWindow()
-            },
-            onOpenEntitySettings: { [weak self] entityID in
-                self?.openSettingsWindow(
-                    initialTab: .entities,
-                    initiallyExpandedEntityIDs: [entityID]
-                )
-            }
-        )
-        if let panel = panel as? PearchHAStatusPanel {
-            panel.onVisibilityChange = { [weak model] visible in
-                model?.setPanelActive(visible)
-            }
-            panel.onFocusChange = { [weak self, weak panel] focused in
-                guard let self else {
-                    return
-                }
-                if focused {
-                    self.cancelPanelInactivityClose()
-                } else if let panel, panel.isVisible {
-                    self.schedulePanelInactivityClose(for: panel)
-                }
-            }
-        }
+        ensurePopoverSurfaceLoaded()
         scheduleStatusItemRefresh(from: model.snapshot, force: true)
         autoConnectTask = startAutoConnect(form: rememberedForm, model: model)
     }
@@ -1650,6 +1508,10 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         releaseShell()
     }
 
+    public func applicationDidResignActive(_ notification: Notification) {
+        popover?.close()
+    }
+
     public func application(_ application: NSApplication, open urls: [URL]) {
         handleExternalURLs(urls)
     }
@@ -1666,7 +1528,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
     public var snapshot: PearchHAApplicationSnapshot {
         let menuBarItems = statusItems.map { statusItemSnapshot(for: $0.item) }
         let first = menuBarItems.first
-        let contentSize = panel.map { $0.contentRect(forFrameRect: $0.frame).size }
+        let contentSize = popover?.contentSize
         return PearchHAApplicationSnapshot(
             statusItemTitle: first?.title,
             statusItemAccessibilityLabel: first?.accessibilityLabel,
@@ -1678,12 +1540,10 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
             statusItemTargetIsApplication: first?.targetIsApplication ?? false,
             statusItemHasAction: first?.hasAction ?? false,
             menuBarItems: menuBarItems,
-            hasPanel: panel != nil,
+            hasPanel: popover != nil,
             hasPanelModel: panelModel != nil,
-            panelCanBecomeKey: panel?.canBecomeKey ?? false,
-            panelCanBecomeMain: panel?.canBecomeMain ?? false,
-            panelIsFloating: panel?.isFloatingPanel ?? false,
-            panelHidesOnDeactivate: panel?.hidesOnDeactivate ?? false,
+            panelIsShown: popover?.isShown ?? false,
+            panelIsTransient: popover?.behavior == .transient,
             panelContentWidth: contentSize.map { Int($0.width.rounded()) },
             panelContentHeight: contentSize.map { Int($0.height.rounded()) },
             selectedEntityIDs: panelModel?.snapshot.selectionConfiguration.selectedEntityIDs ?? [],
@@ -2104,6 +1964,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
     /// choice immediately.
     private func applyAppearancePreferences() {
         NSApplication.shared.appearance = appearance(for: configuration.themeMode)
+        popover?.appearance = NSApp.appearance
         PearchHATheme.apply(accentColor: configuration.accentColor)
     }
 
@@ -2157,19 +2018,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
                 panelModel.applyDisplayPreferences(preferences)
                 scheduleStatusItemRefresh(from: panelModel.snapshot, force: true)
             }
-            if let panel {
-                let preferred = PearchHAPanelView.preferredContentSize(textSize: preferences.textSize)
-                if let screen = panel.screen?.visibleFrame {
-                    let size = NSSize(width: min(preferred.width, screen.width - 16),
-                                      height: min(preferred.height, screen.height - 16))
-                    panel.setContentSize(size)
-                    panel.setFrameOrigin(NSPoint(
-                        x: min(max(panel.frame.minX, screen.minX + 8), screen.maxX - size.width - 8),
-                        y: min(max(panel.frame.minY, screen.minY + 8), screen.maxY - size.height - 8)))
-                } else {
-                    panel.setContentSize(preferred)
-                }
-            }
+            popover?.contentSize = PearchHAPanelView.preferredContentSize(textSize: preferences.textSize)
             performanceSignposter.endInterval("PersistDisplayPreferences", interval)
             return .saved
         } catch {
@@ -2213,25 +2062,12 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         }
     }
 
-    public static func makePanel(
+    public static func makePopover(
         model: PearchHAPanelModel,
         onOpenSettings: (() -> Void)? = nil,
         onOpenEntitySettings: ((EntityID) -> Void)? = nil
-    ) -> NSPanel {
-        let panel = PearchHAStatusPanel(
-            contentRect: NSRect(origin: .zero, size: AppShellLayout.panelContentSize),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: true
-        )
-        // A borderless, transparent host: the SwiftUI root paints the rounded
-        // dashboard surface, clips to it, and provides the soft shadow, so the
-        // window contributes no titlebar, traffic lights, or opaque frame.
-        panel.isFloatingPanel = true
-        panel.hidesOnDeactivate = true
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = false
+    ) -> PearchHAStatusPopover {
+        let popover = PearchHAStatusPopover()
         let hostingController = PearchHAFirstMouseHostingController(
             rootView: PearchHAPanelView(
                 model: model,
@@ -2239,60 +2075,35 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
                 onOpenEntitySettings: onOpenEntitySettings
             )
         )
-        hostingController.view.wantsLayer = true
-        hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
-        panel.contentViewController = hostingController
-        // Route the panel-local Cmd+, shortcut to the same open-settings path.
-        panel.onOpenSettings = onOpenSettings
-        // Gate background work on real window visibility so every dismissal
-        // path — Escape, click-away auto-hide, status-item toggle — stops the
-        // model's sync loops, not just the explicit toggle.
-        panel.onVisibilityChange = { [weak model] visible in
-            model?.setPanelActive(visible)
+        if let view = hostingController.view as? PearchHAFirstMouseHostingView<PearchHAPanelView> {
+            view.cancelHandler = { [weak popover] in popover?.cancelOperation(nil) }
         }
-        panel.onNavigateBack = { [weak model] in
+        popover.contentViewController = hostingController
+        popover.appearance = NSApp.appearance
+        popover.onVisibilityChange = { [weak model] visible in model?.setPanelActive(visible) }
+        popover.onNavigateBack = { [weak model] in
             guard let model, model.snapshot.historyPresentationEntityID != nil else { return false }
             model.dismissHistoryPopover()
             return true
         }
-        // Size the borderless window for the selected text size so its bounds
-        // match the rounded content surface without a chrome inset.
-        panel.setContentSize(PearchHAPanelView.preferredContentSize(textSize: model.displayPreferences.textSize))
-        return panel
+        popover.contentSize = PearchHAPanelView.preferredContentSize(textSize: model.displayPreferences.textSize)
+        return popover
     }
 
-    private func makePanelContentController(model: PearchHAPanelModel) -> NSViewController {
-        let hostingController = PearchHAFirstMouseHostingController(
-            rootView: PearchHAPanelView(
-                model: model,
-                onOpenSettings: { [weak self] in
-                    self?.openSettingsWindow()
-                },
-                onOpenEntitySettings: { [weak self] entityID in
-                    self?.openSettingsWindow(
-                        initialTab: .entities,
-                        initiallyExpandedEntityIDs: [entityID]
-                    )
-                }
-            )
+    private func ensurePopoverSurfaceLoaded() {
+        guard popover?.contentViewController == nil, let panelModel else { return }
+        popover = Self.makePopover(
+            model: panelModel,
+            onOpenSettings: { [weak self] in self?.openSettingsWindow() },
+            onOpenEntitySettings: { [weak self] entityID in
+                self?.openSettingsWindow(initialTab: .entities, initiallyExpandedEntityIDs: [entityID])
+            }
         )
-        hostingController.view.wantsLayer = true
-        hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
-        return hostingController
     }
 
-    private func ensurePanelSurfaceLoaded() {
-        guard let panel, panel.contentViewController == nil, let panelModel else {
-            return
-        }
-        panel.contentViewController = makePanelContentController(model: panelModel)
-    }
-
-    private func suspendPanelSurfaceIfHidden() {
-        guard let panel, !panel.isVisible else {
-            return
-        }
-        panel.contentViewController = nil
+    private func suspendPopoverSurfaceIfHidden() {
+        guard let popover, !popover.isShown else { return }
+        popover.contentViewController = nil
     }
 
     /// Builds the resizable Settings window hosting the SwiftUI settings tree.
@@ -2350,9 +2161,8 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         panelModel.dismissHistoryPopover()
         // Opening Settings dismisses the drop-down panel so the two windows do
         // not overlap.
-        panel?.orderOut(nil)
-        panelModel.setPanelActive(false)
-        suspendPanelSurfaceIfHidden()
+        popover?.close()
+        suspendPopoverSurfaceIfHidden()
         let window = settingsWindow ?? Self.makeSettingsWindow(
             model: panelModel,
             initialTab: initialTab,
@@ -2451,52 +2261,17 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         return NSImage(contentsOf: iconURL)
     }
 
-    // TODO: A system-wide global hotkey to toggle the panel from any app is
-    // intentionally not implemented. Doing so cleanly requires either Carbon's
-    // `RegisterEventHotKey` (a deprecated, low-level C API that is fiddly to
-    // unregister safely) or the Accessibility/Input-Monitoring permission with a
-    // `CGEventTap` (which prompts the user for a sensitive system permission and
-    // is overkill for a menu-bar utility). A third-party dependency
-    // (e.g. KeyboardShortcuts) would also solve it but is disallowed here. Until
-    // one of those trade-offs is accepted, only the panel-local Cmd+, and Escape
-    // shortcuts are supported; the status-item click below toggles the panel.
     @objc private func togglePanel(_ sender: NSStatusBarButton) {
-        guard let panel else {
-            return
-        }
+        ensurePopoverSurfaceLoaded()
+        guard let popover else { return }
         panelModel?.dismissHistoryPopover()
-        if panel.isVisible && NSApp.isActive {
-            cancelPanelInactivityClose()
-            panel.orderOut(sender)
-            panelModel?.setPanelActive(false)
+        if popover.isShown {
+            // close() also dismisses nested control popovers.
+            popover.close()
             return
         }
-
-        ensurePanelSurfaceLoaded()
-        position(panel: panel, relativeTo: sender)
-        cancelPanelInactivityClose()
-        panel.makeKeyAndOrderFront(sender)
-        panelModel?.setPanelActive(true)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    private func position(panel: NSPanel, relativeTo sender: NSStatusBarButton) {
-        guard let window = sender.window, let screenFrame = window.screen?.visibleFrame else {
-            panel.center()
-            return
-        }
-
-        // Reattaching the lazily loaded hosting controller can leave a zero
-        // frame until layout. Anchor the preferred panel size on its first opening.
-        let preferred = PearchHAPanelView.preferredContentSize(textSize: configuration.textSize)
-        let size = NSSize(width: min(preferred.width, screenFrame.width - 16),
-                          height: min(preferred.height, screenFrame.height - 16))
-        panel.setContentSize(size)
-        let buttonFrame = window.convertToScreen(sender.frame)
-        let x = min(max(buttonFrame.midX - size.width / 2, screenFrame.minX + 8), screenFrame.maxX - size.width - 8)
-        let anchorY = max(buttonFrame.minY, window.frame.minY)
-        let y = anchorY - size.height + 2
-        panel.setFrameOrigin(NSPoint(x: x, y: max(y, screenFrame.minY + 8)))
+        popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+        if popover.isShown { NSApp.activate(ignoringOtherApps: true) }
     }
 
     private func releaseShell() {
@@ -2509,7 +2284,6 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         panelModel?.stopLocalSensors()
         statusItemRefreshTask?.cancel()
         statusItemRefreshTask = nil
-        cancelPanelInactivityClose()
         pendingStatusItemSnapshot = nil
         pendingStatusItemRefreshSignature = nil
         lastStatusItemRefreshAt = nil
@@ -2517,10 +2291,9 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         autoConnectTask?.cancel()
         autoConnectTask = nil
         panelModel?.cancelInFlightAction()
-        panelModel?.setPanelActive(false)
-        panel?.orderOut(nil)
-        panel?.contentViewController = nil
-        panel = nil
+        popover?.close()
+        popover?.contentViewController = nil
+        popover = nil
         settingsWindow?.orderOut(nil)
         settingsWindow?.contentViewController = nil
         settingsWindow = nil
@@ -2535,35 +2308,6 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         }
         statusItems = []
     }
-
-    private func schedulePanelInactivityClose(for panel: NSPanel) {
-        cancelPanelInactivityClose()
-        panelInactivityTask = Task { @MainActor [weak self, weak panel] in
-            let duration = UInt64((AppShellLayout.unfocusedSurfaceCloseInterval * 1_000_000_000).rounded())
-            if duration > 0 {
-                try? await Task.sleep(nanoseconds: duration)
-            }
-            // Cancellation wakes the sleeper but is not an expired timeout.
-            guard !Task.isCancelled,
-                  let self,
-                  let panel,
-                  panel.isVisible,
-                  !panel.isKeyWindow
-            else {
-                return
-            }
-            self.panelModel?.dismissHistoryPopover()
-            self.panelModel?.setPanelActive(false)
-            panel.orderOut(nil)
-            self.panelInactivityTask = nil
-        }
-    }
-
-    private func cancelPanelInactivityClose() {
-        panelInactivityTask?.cancel()
-        panelInactivityTask = nil
-    }
-
 
     private func scheduleStatusItemRefresh(
         from snapshot: PearchHAPanelSnapshot,
