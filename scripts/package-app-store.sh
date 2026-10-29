@@ -51,7 +51,7 @@ tool_bin=$(swift build -c release --product pearchha-package-app --scratch-path 
 
 cp "${MACOS_APP_STORE_PROFILE_PATH}" "${app_dir}/Contents/embedded.provisionprofile"
 entitlements="${stage_dir}/PearchHA-AppStore.entitlements"
-cp "${workspace_dir}/scripts/PearchHA-AppStore.entitlements" "${entitlements}"
+cp "${workspace_dir}/Xcode/PearchHA/PearchHA-AppStore.entitlements" "${entitlements}"
 /usr/libexec/PlistBuddy -c "Add :com.apple.application-identifier string ${APP_STORE_TEAM_ID}.${APP_STORE_BUNDLE_ID}" "${entitlements}"
 /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string ${APP_STORE_TEAM_ID}" "${entitlements}"
 /usr/libexec/PlistBuddy -c 'Add :keychain-access-groups array' "${entitlements}"

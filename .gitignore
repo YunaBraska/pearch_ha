@@ -10,6 +10,7 @@ dist/
 DerivedData/
 *.xcuserstate
 xcuserdata/
+PearchHA.xcodeproj/project.xcworkspace/
 
 Fixtures/private/
 *.log
