@@ -1204,12 +1204,12 @@ public final class PearchHAPanelModel: ObservableObject {
             } catch {
                 return
             }
+            guard !Task.isCancelled else { return }
             applyHistoryPresentationEntityID(id)
             await loadHistory(id, range: resolvedRange)
+            guard !Task.isCancelled else { return }
             startHistoryBulkSync()
-            if !Task.isCancelled {
-                historyTask = nil
-            }
+            historyTask = nil
         }
     }
 
@@ -3319,6 +3319,10 @@ public final class PearchHAPanelModel: ObservableObject {
             let refreshedRooms = stabilizedRefreshedRooms(remoteRooms + (localRoom.map { [$0] } ?? []), preserving: snapshot.availableRooms)
             // A full state response replaces values even when entity IDs are unchanged.
             rebuildAvailableEntityCaches(from: refreshedRooms, refreshingValues: true)
+            if !connectionChanged, let presentedEntityID = snapshot.historyPresentationEntityID,
+               availableEntitiesByID[presentedEntityID] == nil {
+                dismissHistoryPopover()
+            }
             let normalizedDisplayConfiguration = normalizedMenuBarDisplayConfiguration(
                 snapshot.menuBarDisplayConfiguration,
                 availableRooms: refreshedRooms

@@ -2513,6 +2513,131 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
     }
 
+    func testHistoryDismissalBeforeDebounceTaskStartsRemainsDismissed() async {
+        let recorder = HistoryProviderRecorder(results: [])
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { form, entityID, range in
+                await recorder.provide(form: form, entityID: entityID, range: range)
+            },
+            historyDebounce: .milliseconds(0),
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
+        model.dismissHistoryPopover()
+        for _ in 0..<20 { await Task.yield() }
+
+        XCTAssertNil(model.snapshot.historyPresentationEntityID, "Canceled detail work must not restore the dismissed history surface")
+        XCTAssertEqual(model.snapshot.historyState, .idle)
+        let callCount = await recorder.callCount()
+        XCTAssertEqual(callCount, 0)
+    }
+
+    func testHistoryReplacementBeforeDebounceTaskStartsNeverRestoresOldSelection() async {
+        var presentedEntities: [EntityID] = []
+        let recorder = HistoryProviderRecorder(results: [
+            .success(historySeries(entityID: "sensor.office_humidity", range: .hour, value: 46.0))
+        ])
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { form, entityID, range in
+                await recorder.provide(form: form, entityID: entityID, range: range)
+            },
+            historyDebounce: .milliseconds(0),
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+            snapshotSink: { snapshot, _ in
+                if let entityID = snapshot.historyPresentationEntityID { presentedEntities.append(entityID) }
+            }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
+        model.presentHistoryDetail("sensor.office_humidity", range: .hour)
+        presentedEntities.removeAll()
+        await spinUntil {
+            if case let .loaded(series) = model.snapshot.historyState { return series.entityID == "sensor.office_humidity" }
+            return false
+        }
+        for _ in 0..<20 { await Task.yield() }
+
+        XCTAssertFalse(presentedEntities.contains("sensor.office_temperature"), "Canceled detail work must not republish the replaced selection")
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
+        let callCount = await recorder.callCount()
+        XCTAssertEqual(callCount, 1)
+    }
+
+    func testRefreshRemovingPresentedHistoryEntityDismissesAndCancelsDetail() async {
+        let clock = TestPearchClock()
+        let roomsWithoutTemperature = selectionRooms().map { room in
+            Room(id: room.id, name: room.name, entities: room.entities.filter { $0.id != "sensor.office_temperature" })
+        }
+        let connections = ConnectionResultRecorder(results: [
+            .success(rooms: selectionRooms()), .success(rooms: roomsWithoutTemperature)
+        ])
+        let history = HistoryProviderRecorder(results: [])
+        let model = PearchHAPanelModel(
+            connector: { _ in await connections.next() },
+            historyProvider: { form, entityID, range in
+                await history.provide(form: form, entityID: entityID, range: range)
+            },
+            clock: clock, historyDebounce: .seconds(1),
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+
+        await model.refresh()
+
+        XCTAssertFalse(model.snapshot.availableRooms.flatMap(\.entities).contains { $0.id == "sensor.office_temperature" })
+        XCTAssertTrue(model.snapshot.rooms.flatMap(\.entities).contains { $0.id == "sensor.office_humidity" })
+        XCTAssertNil(model.snapshot.historyPresentationEntityID, "Missing detail content must reveal the rooms view")
+        XCTAssertEqual(model.snapshot.historyState, .idle)
+        await spinUntil("removed history detail cancels its debounce") { await clock.sleepingTaskCount() == 0 }
+        _ = await clock.advance(by: .seconds(2))
+        for _ in 0..<20 { await Task.yield() }
+        let historyCalls = await history.callCount()
+        XCTAssertEqual(historyCalls, 0)
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+    }
+
+    func testRefreshKeepsAvailableHistoryEntityAfterUnselectionAndUnpinning() async {
+        let clock = TestPearchClock()
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, entityID, range in
+                .success(historySeries(entityID: entityID, range: range, value: 21.4))
+            },
+            clock: clock, historyDebounce: .seconds(1),
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        XCTAssertTrue(model.setMenuBarEntity("sensor.office_temperature", isVisible: true))
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        model.setEntity("sensor.office_temperature", isSelected: false)
+        XCTAssertTrue(model.setMenuBarEntity("sensor.office_temperature", isVisible: false))
+
+        await model.refresh()
+
+        XCTAssertFalse(model.snapshot.rooms.flatMap(\.entities).contains { $0.id == "sensor.office_temperature" })
+        XCTAssertFalse(model.snapshot.menuBarDisplayConfiguration.isPromoted("sensor.office_temperature"))
+        XCTAssertTrue(model.snapshot.availableRooms.flatMap(\.entities).contains { $0.id == "sensor.office_temperature" })
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+        _ = await clock.advance(by: .seconds(1))
+        await spinUntil {
+            if case let .loaded(series) = model.snapshot.historyState { return series.entityID == "sensor.office_temperature" }
+            return false
+        }
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+    }
+
     func test_t_history_selection_switches_immediately_and_cancels_previous_load() async {
         let clock = TestPearchClock()
         let recorder = HistoryProviderRecorder(
@@ -8737,9 +8862,8 @@ final class PearchHAUITests: XCTestCase {
         let store = JSONConfigStore(fileURL: url)
         try store.save(PearchHAConfiguration(selectedEntityIDs: ["cover.office_blinds"],
             menuBarEntityIDs: ["cover.office_blinds"],
-            menuBarItemConfigurations: [MenuBarItemConfiguration(entityID: "cover.office_blinds", style: .battery)],
+            menuBarItemConfigurations: [MenuBarItemConfiguration(entityID: "cover.office_blinds", displayUnit: .number)],
             isEntitySelectionExplicit: true, menuBarRefreshInterval: .thirtySeconds))
-        let renderer = CountingStatusItemGaugeImageRenderer()
         let rooms = [Room(id: "office", name: "Office", entities: [DiscoveredEntity(id: "cover.office_blinds",
             name: "Office blinds", state: "open", unit: nil, areaID: nil, deviceID: nil, currentPosition: 42)])]
         let application = PearchHAApplication(configStore: store,
@@ -8750,13 +8874,13 @@ final class PearchHAUITests: XCTestCase {
                     XCTFail("The test must use its real application delegate")
                     return .failed("application delegate unavailable")
                 }
-                XCTAssertEqual(renderer.renderCount, 1, "The optimistic snapshot must enter passive throttling")
+                XCTAssertEqual(shell.snapshot.statusItemTitle, "open", "The optimistic snapshot must enter passive throttling")
                 XCTAssertEqual(shell.persist(displayPreferences: shell.displayPreferences), .saved)
-                XCTAssertEqual(renderer.renderCount, 2, "The explicit preference save must render the optimistic value")
+                XCTAssertEqual(shell.snapshot.statusItemTitle, "closed", "The explicit preference save must render the optimistic value")
                 // Returning without suspension makes the failure publish its passive rollback
                 // before the canceled refresh task can resume on the main actor.
                 return .failed("Permission denied")
-            }, gaugeImageRenderer: renderer)
+            })
         NSApp.delegate = application
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
@@ -8766,16 +8890,15 @@ final class PearchHAUITests: XCTestCase {
         }
         application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await application.connect()
-        XCTAssertEqual(renderer.renderCount, 1)
+        XCTAssertEqual(application.snapshot.statusItemTitle, "open")
 
-        let changed = await application.setCoverPosition("cover.office_blinds", position: 85)
+        let changed = await application.setCoverControl("cover.office_blinds", command: .close)
 
         XCTAssertFalse(changed)
         for _ in 0..<20 { await Task.yield() }
-        XCTAssertEqual(renderer.renderCount, 2, "A canceled timer must not flush the newer passive rollback before its interval")
+        XCTAssertEqual(application.snapshot.statusItemTitle, "closed", "A canceled timer must not flush the newer passive rollback before its interval")
         XCTAssertEqual(application.persist(displayPreferences: application.displayPreferences), .saved)
-        XCTAssertEqual(renderer.renderCount, 3, "An explicit refresh must still publish the pending rollback")
-        XCTAssertEqual(renderer.renderedItems.last, renderer.renderedItems.first)
+        XCTAssertEqual(application.snapshot.statusItemTitle, "open", "An explicit refresh must still publish the pending rollback")
     }
 
     func testHistoryKnownUnavailableRangesMarksCachedEmptyAndUnavailableRanges() async throws {
