@@ -67,7 +67,9 @@ final class PearchHAColdLaunchTests: XCTestCase {
                            "Querying the target must not activate it before the cold click")
             // No PearchHA query or interaction occurs between these assertions and this Finder-owned click.
             coldClick.click()
-            try await waitUntil("The first cold status click shows and activates the popover") { launched.isActive && root.exists }
+            try await waitUntil("The first cold status click shows and activates the popover", onTimeout: {
+                record("Cold session \(session): first click failed", app: app, activations: activations)
+            }) { launched.isActive && root.exists }
             XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, launched.processIdentifier)
             assertKeyboardWindow(in: launched)
             record("Cold session \(session): first click opened", app: app, activations: activations)
@@ -141,10 +143,11 @@ final class PearchHAColdLaunchTests: XCTestCase {
         XCTAssertNotNil(focusedWindow, "The cold click must establish keyboard window focus without a test activation")
     }
 
-    private func waitUntil(_ description: String, condition: () -> Bool) async throws {
+    private func waitUntil(_ description: String, onTimeout: () -> Void = {}, condition: () -> Bool) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(10))
         while !condition() {
             guard ContinuousClock.now < deadline else {
+                onTimeout()
                 XCTFail(description)
                 throw NSError(domain: "PearchHAE2ETests", code: 2, userInfo: [NSLocalizedDescriptionKey: description])
             }

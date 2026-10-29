@@ -2433,7 +2433,6 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
         item.button?.action = #selector(togglePanel(_:))
-        item.button?.sendAction(on: [.leftMouseDown])
         return item
     }
 

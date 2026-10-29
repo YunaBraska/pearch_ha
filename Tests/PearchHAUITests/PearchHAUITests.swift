@@ -6156,11 +6156,17 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(nativeSegmentedControls(in: panel.contentView).count, 1,
                        "History range control is inside the same panel window")
         try saveControlSnapshot(panel.contentView, name: "history-in-panel")
-        presentation.popover.cancelOperation(nil)
+        let escape = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber, context: nil,
+            characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        panel.sendEvent(escape)
         drainPanelRunLoop()
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
         XCTAssertTrue(presentation.popover.isShown, "Escape returns to rooms first")
-        presentation.popover.cancelOperation(nil)
+        let secondEscape = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber, context: nil,
+            characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        panel.sendEvent(secondEscape)
         XCTAssertFalse(presentation.popover.isShown, "A second Escape closes the panel")
     }
 
@@ -6847,6 +6853,7 @@ final class PearchHAUITests: XCTestCase {
         let previousDelegate = NSApp.delegate
         let previousMenu = NSApp.mainMenu
         let previousPolicy = NSApp.activationPolicy()
+        XCTAssertTrue(NSApp.setActivationPolicy(.accessory), "The harness must use the production accessory activation policy")
         let application = applicationForTest(configStore: nil)
         NSApp.delegate = application
         NSApp.mainMenu = PearchHAApplication.standardMainMenu()
