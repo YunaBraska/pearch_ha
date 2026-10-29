@@ -125,7 +125,7 @@
 				LastSwiftUpdateCheck = 1600;
 				LastUpgradeCheck = 1600;
 				TargetAttributes = {
-                    B00000000000000000000005 = {CreatedOnToolsVersion = 16.0; TestTargetID = A00000000000000000000001; };
+                    B00000000000000000000005 = {CreatedOnToolsVersion = 16.0; };
 					A00000000000000000000001 = {
 						CreatedOnToolsVersion = 16.0;
 					};
@@ -296,7 +296,6 @@
                 PRODUCT_BUNDLE_IDENTIFIER = dev.pearchha.e2e;
                 PRODUCT_NAME = "$(TARGET_NAME)";
                 SWIFT_VERSION = 6.0;
-                TEST_TARGET_NAME = PearchHA;
             };
             name = Debug;
         };
@@ -312,7 +311,6 @@
                 PRODUCT_BUNDLE_IDENTIFIER = dev.pearchha.e2e;
                 PRODUCT_NAME = "$(TARGET_NAME)";
                 SWIFT_VERSION = 6.0;
-                TEST_TARGET_NAME = PearchHA;
             };
             name = Release;
         };
@@ -328,7 +326,6 @@
                 PRODUCT_BUNDLE_IDENTIFIER = dev.pearchha.e2e;
                 PRODUCT_NAME = "$(TARGET_NAME)";
                 SWIFT_VERSION = 6.0;
-                TEST_TARGET_NAME = PearchHA;
             };
             name = AppStore;
         };

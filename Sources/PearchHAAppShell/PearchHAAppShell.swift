@@ -2271,7 +2271,10 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
             return
         }
         popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
-        if popover.isShown { NSApp.activate(ignoringOtherApps: true) }
+        if popover.isShown {
+            popover.contentViewController?.view.window?.makeKey()
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     private func releaseShell() {
