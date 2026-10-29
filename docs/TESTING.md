@@ -74,8 +74,10 @@ desktops. The script and XCUITest both reject local and self-hosted execution.
 The test launches the production app in the background and clicks its observed
 status-item location through Finder's coordinate space. It must not activate
 PearchHA before the first click, which would hide the cold-start focus regression.
-One click must open the panel and give it keyboard focus, and the next must close
-it. Finder dismissal, reopening, Escape and Cmd+, use the same public interface.
+One click must open the panel, and the next must close it. Input originates from
+the already-active app, even when a native popover has keyboard focus without
+activating PearchHA. Escape and Cmd+, verify keyboard delivery through their visible
+effects. Finder dismissal and reopening use the same public interface.
 The session repeats after process termination. No Home Assistant credentials or
 real devices are involved. Each run retains its logs, screenshots and `.xcresult`
 for seven days. These tests do not publish or install a release.

@@ -6868,12 +6868,19 @@ final class PearchHAUITests: XCTestCase {
             .first { $0.target === application })
         await spinUntil("the shell status anchor is visible") { button.window?.isVisible == true && !button.visibleRect.isEmpty }
         drainPanelRunLoop()
+        let windowsBeforeStatusClick = Set(NSApp.windows.map(\.windowNumber))
         button.performClick(nil)
         XCTAssertTrue(application.snapshot.panelIsShown)
-        await spinUntil("the popover application is active") { NSApp.isActive }
+        await spinUntil("the newly opened popover window is key") {
+            guard let window = NSApp.keyWindow else { return false }
+            return window.isVisible && !windowsBeforeStatusClick.contains(window.windowNumber)
+        }
+        let popoverWindow = try XCTUnwrap(NSApp.windows.first {
+            $0 === NSApp.keyWindow && $0.isVisible && !windowsBeforeStatusClick.contains($0.windowNumber)
+        }, "The status click must give keyboard focus to the new popover window")
         let existingWindows = Set(NSApp.windows.map(\.windowNumber))
         let commaEvent = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
-            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: NSApp.keyWindow?.windowNumber ?? 0, context: nil,
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: popoverWindow.windowNumber, context: nil,
             characters: ",", charactersIgnoringModifiers: ",", isARepeat: false, keyCode: 43))
         NSApp.sendEvent(commaEvent)
         await spinUntil("Cmd+, opens the Settings window") {

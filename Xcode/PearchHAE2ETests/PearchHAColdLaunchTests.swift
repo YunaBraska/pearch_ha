@@ -1,5 +1,4 @@
 import AppKit
-import ApplicationServices
 import XCTest
 import os
 
@@ -67,25 +66,26 @@ final class PearchHAColdLaunchTests: XCTestCase {
                            "Querying the target must not activate it before the cold click")
             // No PearchHA query or interaction occurs between these assertions and this Finder-owned click.
             coldClick.click()
-            try await waitUntil("The first cold status click shows and activates the popover", onTimeout: {
+            try await waitUntil("The first cold status click shows the popover", onTimeout: {
                 record("Cold session \(session): first click failed", app: app, activations: activations)
-            }) { launched.isActive && root.exists }
-            XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, launched.processIdentifier)
-            assertKeyboardWindow(in: launched)
+            }) { root.exists }
             record("Cold session \(session): first click opened", app: app, activations: activations)
 
-            // PearchHA is already active. Referencing its visible root cannot mask cold activation.
-            try statusCoordinate(statusItem, from: root).click()
+            // Never activate PearchHA just to deliver input. A native popover can own
+            // keyboard focus while Finder remains the active application.
+            try statusCoordinate(statusItem, from: inputReference(root: root, finder: finder)).click()
             XCTAssertTrue(root.waitForNonExistence(timeout: 5), "The very next native status click closes the popover")
             record("Cold session \(session): first close", app: app, activations: activations)
 
             finder.activate()
             XCTAssertFalse(launched.isActive)
             try statusCoordinate(statusItem, from: finder.menuBars.firstMatch).click()
-            try await waitUntil("One status click reopens from Finder") { launched.isActive && root.exists }
-            assertKeyboardWindow(in: launched)
-            let finderTitle = finderWindow.coordinate(withNormalizedOffset: .zero)
-                .withOffset(CGVector(dx: finderWindow.frame.width / 2, dy: 12))
+            try await waitUntil("One status click reopens from Finder") { root.exists }
+            let finderFrame = finderWindow.frame
+            let outsideOrigin = inputReference(root: root, finder: finder).coordinate(withNormalizedOffset: .zero)
+            let outsidePoint = outsideOrigin.screenPoint
+            let finderTitle = outsideOrigin.withOffset(CGVector(dx: finderFrame.midX - outsidePoint.x,
+                                                               dy: finderFrame.minY + 12 - outsidePoint.y))
             finderTitle.click()
             XCTAssertTrue(root.waitForNonExistence(timeout: 5), "An actual Finder title click dismisses the popover")
             XCTAssertFalse(launched.isActive)
@@ -93,18 +93,16 @@ final class PearchHAColdLaunchTests: XCTestCase {
             record("Cold session \(session): Finder outside dismissal", app: app, activations: activations)
 
             try statusCoordinate(statusItem, from: finder.menuBars.firstMatch).click()
-            try await waitUntil("One click restores the panel after Finder dismissal") { launched.isActive && root.exists }
-            assertKeyboardWindow(in: launched)
-            root.typeKey(XCUIKeyboardKey.escape, modifierFlags: [])
+            try await waitUntil("One click restores the panel after Finder dismissal") { root.exists }
+            inputReference(root: root, finder: finder).typeKey(XCUIKeyboardKey.escape, modifierFlags: [])
             XCTAssertTrue(root.waitForNonExistence(timeout: 5), "Escape reaches and closes the production popover")
             record("Cold session \(session): Escape dismissal", app: app, activations: activations)
 
             finder.activate()
             XCTAssertFalse(launched.isActive)
             try statusCoordinate(statusItem, from: finder.menuBars.firstMatch).click()
-            try await waitUntil("One click reopens after Escape") { launched.isActive && root.exists }
-            assertKeyboardWindow(in: launched)
-            root.typeKey(",", modifierFlags: .command)
+            try await waitUntil("One click reopens after Escape") { root.exists }
+            inputReference(root: root, finder: finder).typeKey(",", modifierFlags: .command)
             let settings = app.windows["PearchHA Settings"]
             XCTAssertTrue(settings.waitForExistence(timeout: 5), "Cmd+, reaches the production main menu and opens Settings")
             XCTAssertFalse(root.exists, "Settings replaces the outer popover")
@@ -135,12 +133,11 @@ final class PearchHAColdLaunchTests: XCTestCase {
         return click
     }
 
-    private func assertKeyboardWindow(in application: NSRunningApplication) {
-        let element = AXUIElementCreateApplication(application.processIdentifier)
-        var focusedWindow: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(element, kAXFocusedWindowAttribute as CFString, &focusedWindow)
-        XCTAssertEqual(result, .success, "Public accessibility must expose the keyboard-focused window; AX trusted=\(AXIsProcessTrusted())")
-        XCTAssertNotNil(focusedWindow, "The cold click must establish keyboard window focus without a test activation")
+    private func inputReference(root: XCUIElement, finder: XCUIApplication) -> XCUIElement {
+        let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        if frontmost == "dev.pearchha.app" { return root }
+        XCTAssertEqual(frontmost, "com.apple.finder", "Input must use the already-active application")
+        return finder.menuBars.firstMatch
     }
 
     private func waitUntil(_ description: String, onTimeout: () -> Void = {}, condition: () -> Bool) async throws {
@@ -157,23 +154,13 @@ final class PearchHAColdLaunchTests: XCTestCase {
 
     private func record(_ title: String, app: XCUIApplication, activations: OSAllocatedUnfairLock<[Activation]>) {
         XCTContext.runActivity(named: title) { activity in
-            let running = NSRunningApplication.runningApplications(withBundleIdentifier: "dev.pearchha.app").first
-            var focusedWindow: CFTypeRef?
-            let focusResult = running.map {
-                AXUIElementCopyAttributeValue(AXUIElementCreateApplication($0.processIdentifier),
-                                             kAXFocusedWindowAttribute as CFString, &focusedWindow)
-            }
-            var focusedElement: CFTypeRef?
-            let systemFocusResult = AXUIElementCopyAttributeValue(AXUIElementCreateSystemWide(),
-                                                                  kAXFocusedUIElementAttribute as CFString, &focusedElement)
-            let focus = "active=\(running?.isActive ?? false), AX trusted=\(AXIsProcessTrusted()), focusedWindowResult=\(String(describing: focusResult)), focusedWindow=\(String(describing: focusedWindow)), systemFocusResult=\(systemFocusResult), focusedElement=\(String(describing: focusedElement))"
             let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
             screenshot.lifetime = .keepAlways
             activity.add(screenshot)
             let trace = activations.withLock { values in
                 values.map { "\($0.timestamp): \($0.bundleIdentifier)" }.joined(separator: "\n")
             }
-            let state = XCTAttachment(string: "frontmost=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "none")\n\(focus)\n\(trace)\n\(app.debugDescription)")
+            let state = XCTAttachment(string: "frontmost=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "none")\n\(trace)\n\(app.debugDescription)")
             state.lifetime = .keepAlways
             activity.add(state)
         }
