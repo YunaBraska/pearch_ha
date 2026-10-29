@@ -33,6 +33,13 @@ jobs:
       - name: Run native UI tests on the isolated runner
         run: sh scripts/test-ui.sh
 
+      - name: Render public UI states for visual review
+        if: matrix.os == 'macos-26'
+        run: |
+          swift build -Xswiftc -warnings-as-errors
+          PEARCHHA_SMOKE_SNAPSHOT_DIR=.build/pearchha-snapshots swift run pearchha-smoke
+          PEARCHHA_CONTROL_SNAPSHOT_DIR=.build/pearchha-snapshots/controls swift test --disable-swift-testing --enable-xctest --filter testLargerText
+
       - name: Upload test results and screenshots
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -43,3 +50,5 @@ jobs:
           path: |
             .build/ui-tests/*.log
             .build/ui-tests/*.xcresult
+            .build/pearchha-snapshots/current/
+            .build/pearchha-snapshots/controls/

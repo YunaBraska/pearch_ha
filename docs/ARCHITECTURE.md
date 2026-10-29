@@ -23,7 +23,7 @@ PearchHAApp -> PearchHAAppShell -> PearchHAUI -> PearchHACore
 - `PearchHAUI`: panel, settings, controls, charts, and local view helpers.
 - `PearchHAApp`: application entrypoint.
 - `PearchHAAppShell`: lifecycle, status items, windows, local macOS readings, popover presentation, and release/update wiring.
-- `PearchHASupport`: clocks, rate limiting, backoff, request coalescing, redaction, and command-line support.
+- `PearchHASupport`: clocks, jitter, backoff, redaction, and command-line support.
 
 ## State and flow
 

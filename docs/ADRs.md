@@ -72,15 +72,21 @@ Consequences: Config is testable and human-readable; secrets are isolated.
 
 Alternatives: UserDefaults for all data was rejected because it is poor secret storage.
 
-## ADR-0008 - Rate limiting and deterministic time
+## ADR-0008 - Request scheduling and deterministic time
 
 Context: Home Assistant often runs on small hardware. Tests must verify timing behavior without flakiness.
 
-Decision: Use token-bucket rate limiting, jitter, capped backoff, request coalescing, debounce, and injected clocks.
+Decision: The panel model owns refresh intervals, capped retry backoff, keyed in-flight
+history requests and control debounce. Use injected clocks for deterministic timing.
+Stop visible-detail and live-update work when their surfaces close. Selected daily
+history previews retain their background refresh contract.
 
-Consequences: Request load is predictable and timing behavior is testable.
+Consequences: Request scheduling stays with its cancellation owner. The generic
+token bucket and request-coalescer helpers had no production callers and were removed,
+along with their self-tests. They did not enforce an application-wide rate limit.
 
-Alternatives: Fixed polling and wall-clock sleeps were rejected.
+Alternatives: Wall-clock sleeps in timing-sensitive tests and a second global
+scheduling layer were rejected.
 
 ## ADR-0009 - Maintain separate direct and Mac App Store channels
 

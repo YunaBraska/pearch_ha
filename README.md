@@ -36,7 +36,8 @@ open PearchHA.xcodeproj
 ```
 
 For command-line builds, signing, and contributions, see [CONTRIBUTING.md](CONTRIBUTING.md).
-Run `sh scripts/check.sh` for the complete local verification contract.
+Run `sh scripts/check.sh` in CI or an isolated desktop session for full verification.
+It opens native windows. Use `swift build -Xswiftc -warnings-as-errors` for compilation only.
 
 ## Documentation
 

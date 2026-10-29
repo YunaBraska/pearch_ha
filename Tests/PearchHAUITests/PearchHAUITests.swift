@@ -4492,6 +4492,95 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertTrue(serviceEntry?.bodyText?.contains(#""duration":15"#) == true)
     }
 
+    func testCustomActionCancellationDuringProtectedReadDoesNotSendOrOverwriteNewerAction() async {
+        for readFails in [false, true] {
+            let store = InMemoryProtectedActionValueStore()
+            let readEntered = ConnectionGate()
+            let readRelease = DispatchSemaphore(value: 0)
+            defer { readRelease.signal() }
+            let newerEntered = ConnectionGate()
+            let newerRelease = ConnectionGate()
+            let runner = ActionRunnerRecorder(results: [.success, .success])
+            let model = PearchHAPanelModel(connector: { _ in .success(rooms: selectionRooms()) },
+                actionRunner: { form, action in
+                    let result = await runner.run(form: form, action: action)
+                    if action.serviceData["marker"] == .string("newer") {
+                        await newerEntered.open()
+                        await newerRelease.wait()
+                    }
+                    return result
+                }, bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+                protectedActionValueStore: store)
+            model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+            await model.connect()
+            let first = EntityCustomAction(id: "protected-first", entityID: "sensor.office_humidity", title: "First",
+                action: ActionSpec(domain: "script", service: "turn_on", targetEntityID: "script.first", serviceData: ["pin": "493817"]))
+            let newer = EntityCustomAction(id: "newer", entityID: first.entityID, title: "Newer",
+                action: ActionSpec(domain: "script", service: "turn_on", targetEntityID: "script.newer", serviceData: ["marker": "newer"]))
+            XCTAssertTrue(model.setCustomAction(first))
+            XCTAssertTrue(model.setCustomAction(newer))
+            store.interceptNextLoad {
+                Task { await readEntered.open() }
+                readRelease.wait()
+                if readFails { throw ProtectedActionValueStoreError.invalidStoredValues }
+            }
+            let firstTask = Task { await model.runCustomAction(first.id) }
+            await spinUntil { await readEntered.isOpen }
+            firstTask.cancel()
+            model.cancelInFlightAction()
+            let newerTask = Task { await model.runCustomAction(newer.id) }
+            await spinUntil { await newerEntered.isOpen }
+            readRelease.signal()
+
+            let firstResult = await firstTask.value
+
+            XCTAssertFalse(firstResult)
+            let calls = await runner.actions()
+            XCTAssertEqual(calls, [newer.action], "A canceled protected read must not send its service request")
+            XCTAssertEqual(model.snapshot.controlActionState, .running(entityID: newer.entityID),
+                           "The canceled read must not overwrite a newer action, including when the read fails")
+            await newerRelease.open()
+            let newerResult = await newerTask.value
+            XCTAssertTrue(newerResult)
+            XCTAssertEqual(model.snapshot.controlActionState, .idle)
+        }
+    }
+
+    func testCustomActionRedactsProtectedValuesEchoedByHomeAssistant() async throws {
+        let pin = "493817"
+        let nestedSecret = "key-493817-protected"
+        let server = try FakeHAWebSocketServer(fixtures: FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[{"entity_id":"sensor.office_humidity","state":"44","attributes":{"friendly_name":"Office humidity","unit_of_measurement":"%"}}]"#,
+            serviceCallFailureMessage: "Denied PIN \(pin) and nested \(nestedSecret); try again."
+        ))
+        server.start()
+        defer { server.stop() }
+        let gateway = PearchHAAuthorizedHomeAssistantGateway()
+        let model = PearchHAPanelModel(connector: gateway.connect(form:), actionRunner: gateway.action(form:action:),
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+            protectedActionValueStore: InMemoryProtectedActionValueStore())
+        model.updateConnectionForm(urlString: server.baseURL.absoluteString, token: "fake-token")
+        await model.connect()
+        let action = EntityCustomAction(id: "protected-failure", entityID: "sensor.office_humidity", title: "Arm home",
+            action: ActionSpec(domain: "alarm_control_panel", service: "alarm_arm_home", targetEntityID: "alarm_control_panel.home",
+                serviceData: ["pin": .string(pin), "steps": .array([.object(["token": .string(nestedSecret)])])]))
+        XCTAssertTrue(model.setCustomAction(action))
+        XCTAssertEqual(model.customAction(id: action.id)?.action.protectedValueReferences.count, 2)
+
+        let succeeded = await model.runCustomAction(action.id)
+
+        XCTAssertFalse(succeeded)
+        let message = try XCTUnwrap(model.snapshot.controlActionState.failureMessage(for: action.entityID))
+        XCTAssertTrue(message.contains("Denied PIN <redacted> and nested <redacted>; try again."))
+        for secret in [pin, nestedSecret] {
+            XCTAssertFalse(message.contains(secret))
+            XCTAssertFalse(model.snapshot.redactedForDiagnostics().controlActionState.failureMessage(for: action.entityID)?.contains(secret) == true)
+        }
+        let requests = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
+        XCTAssertEqual(requests.count, 1, "The protected action must reach the real service transport")
+    }
+
     func testCustomActionRunFailsExplicitlyWhenProtectedValueIsMissing() async {
         let reference: ProtectedActionValueReference = "protected-pin"
         let action = EntityCustomAction(
@@ -8637,6 +8726,56 @@ final class PearchHAUITests: XCTestCase {
             await Task.yield()
         }
         XCTAssertEqual(gaugeRenderer.renderCount, 1)
+    }
+
+    func testCanceledStatusRefreshCannotFlushANewerPassiveRollback() async throws {
+        _ = NSApplication.shared
+        let previousDelegate = NSApp.delegate
+        let previousAppearance = NSApp.appearance
+        let url = temporaryConfigURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let store = JSONConfigStore(fileURL: url)
+        try store.save(PearchHAConfiguration(selectedEntityIDs: ["cover.office_blinds"],
+            menuBarEntityIDs: ["cover.office_blinds"],
+            menuBarItemConfigurations: [MenuBarItemConfiguration(entityID: "cover.office_blinds", style: .battery)],
+            isEntitySelectionExplicit: true, menuBarRefreshInterval: .thirtySeconds))
+        let renderer = CountingStatusItemGaugeImageRenderer()
+        let rooms = [Room(id: "office", name: "Office", entities: [DiscoveredEntity(id: "cover.office_blinds",
+            name: "Office blinds", state: "open", unit: nil, areaID: nil, deviceID: nil, currentPosition: 42)])]
+        let application = PearchHAApplication(configStore: store,
+            connector: { _ in .success(rooms: rooms) },
+            historyProvider: { _, _, _ in .unavailable("history is not used by this refresh regression") },
+            actionRunner: { @MainActor _, _ in
+                guard let shell = NSApp.delegate as? PearchHAApplication else {
+                    XCTFail("The test must use its real application delegate")
+                    return .failed("application delegate unavailable")
+                }
+                XCTAssertEqual(renderer.renderCount, 1, "The optimistic snapshot must enter passive throttling")
+                XCTAssertEqual(shell.persist(displayPreferences: shell.displayPreferences), .saved)
+                XCTAssertEqual(renderer.renderCount, 2, "The explicit preference save must render the optimistic value")
+                // Returning without suspension makes the failure publish its passive rollback
+                // before the canceled refresh task can resume on the main actor.
+                return .failed("Permission denied")
+            }, gaugeImageRenderer: renderer)
+        NSApp.delegate = application
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+            NSApp.delegate = previousDelegate
+            NSApp.appearance = previousAppearance
+        }
+        application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await application.connect()
+        XCTAssertEqual(renderer.renderCount, 1)
+
+        let changed = await application.setCoverPosition("cover.office_blinds", position: 85)
+
+        XCTAssertFalse(changed)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(renderer.renderCount, 2, "A canceled timer must not flush the newer passive rollback before its interval")
+        XCTAssertEqual(application.persist(displayPreferences: application.displayPreferences), .saved)
+        XCTAssertEqual(renderer.renderCount, 3, "An explicit refresh must still publish the pending rollback")
+        XCTAssertEqual(renderer.renderedItems.last, renderer.renderedItems.first)
     }
 
     func testHistoryKnownUnavailableRangesMarksCachedEmptyAndUnavailableRanges() async throws {
@@ -13108,7 +13247,7 @@ private actor ActionRunnerRecorder {
 }
 
 private actor ConnectionGate {
-    private var isOpen = false
+    private(set) var isOpen = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     func wait() async {
@@ -13209,29 +13348,41 @@ private final class CustomActionSinkRecorder {
 }
 
 private final class InMemoryProtectedActionValueStore: ProtectedActionValueStore, @unchecked Sendable {
+    private let lock = NSLock()
     private var values: [ProtectedActionValueReference: String] = [:]
+    private var nextLoad: (@Sendable () throws -> Void)?
+
+    func interceptNextLoad(_ action: @escaping @Sendable () throws -> Void) {
+        lock.withLock { nextLoad = action }
+    }
 
     func save(_ value: String, for reference: ProtectedActionValueReference) throws {
         let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else {
             throw SecretStoreError.emptySecret(.customActionProtectedValues)
         }
-        values[reference] = normalized
+        lock.withLock { values[reference] = normalized }
     }
 
     func load(_ reference: ProtectedActionValueReference) throws -> String {
-        guard let value = values[reference] else {
+        let (value, action) = lock.withLock {
+            let action = nextLoad
+            nextLoad = nil
+            return (values[reference], action)
+        }
+        try action?()
+        guard let value else {
             throw ProtectedActionValueStoreError.missingValue(reference)
         }
         return value
     }
 
     func delete(_ reference: ProtectedActionValueReference) throws {
-        values.removeValue(forKey: reference)
+        _ = lock.withLock { values.removeValue(forKey: reference) }
     }
 
     func snapshot() throws -> [ProtectedActionValueReference: String] {
-        values
+        lock.withLock { values }
     }
 }
 
@@ -13303,10 +13454,6 @@ private final class FailingConfigStore: ConfigStore, @unchecked Sendable {
         self.loadedConfiguration = loadedConfiguration
         self.loadError = loadError
         self.saveError = saveError
-    }
-
-    func describe() -> PearchHAModule {
-        PearchHAPersistence.module
     }
 
     func load() throws -> PearchHAConfiguration {

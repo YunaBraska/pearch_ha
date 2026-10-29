@@ -61,6 +61,7 @@ let package = Package(
         .target(
             name: "PearchHACore",
             dependencies: ["PearchHASupport"],
+            exclude: isAppStoreBuild ? ["Resources/Sparkle-LICENSE.txt"] : [],
             resources: [.process("Resources")]
         ),
         .target(
@@ -174,7 +175,7 @@ let package = Package(
         ),
         .testTarget(
             name: "PearchHAPackagingTests",
-            dependencies: ["PearchHAPackaging"]
+            dependencies: ["PearchHAPackaging", "PearchHACore"]
         ),
         .testTarget(
             name: "PearchHASupportTests",

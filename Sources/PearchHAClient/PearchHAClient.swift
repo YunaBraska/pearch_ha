@@ -186,7 +186,7 @@ public struct URLSessionHARESTTransport: HARESTTransport {
             }
         }
 
-        let (data, response) = try await session.data(for: urlRequest)
+        let (data, response) = try await session.data(for: urlRequest, delegate: HARESTOriginRedirectDelegate())
         guard let httpResponse = response as? HTTPURLResponse else {
             throw HAClientTransportError.nonHTTPResponse
         }
@@ -200,6 +200,23 @@ public struct URLSessionHARESTTransport: HARESTTransport {
         }
 
         return HARESTResponse(statusCode: httpResponse.statusCode, headers: headers, body: data)
+    }
+}
+
+private final class HARESTOriginRedirectDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest
+    ) async -> URLRequest? {
+        guard let source = task.originalRequest?.url, let destination = request.url,
+              let scheme = source.scheme?.lowercased(),
+              scheme == destination.scheme?.lowercased(),
+              source.host?.lowercased() == destination.host?.lowercased(),
+              (source.port ?? (scheme == "https" ? 443 : 80)) == (destination.port ?? (scheme == "https" ? 443 : 80))
+        else { return nil }
+        return request
     }
 }
 
@@ -444,7 +461,6 @@ public enum HAClientFailure: Error, Equatable, Sendable, CustomStringConvertible
 }
 
 public protocol HAClient: Sendable {
-    func describe() -> PearchHAModule
     func checkRESTConnection(_ input: HAConnectionInput) async -> HAClientResult<HARESTCheck>
     func states(_ input: HAConnectionInput) async -> HAClientResult<[EntityState]>
     func checkWebSocketConnection(_ input: HAConnectionInput) async -> HAClientResult<HAWebSocketCheck>
@@ -455,58 +471,6 @@ public protocol HAClient: Sendable {
     func discovery(_ input: HAConnectionInput) async -> HAClientResult<DiscoverySnapshot>
     func history(_ input: HAConnectionInput, entityID: EntityID, range: HistoryRange, end: Date) async -> HAClientResult<HistorySeries>
     func historyBatch(_ input: HAConnectionInput, entityIDs: [EntityID], range: HistoryRange, end: Date) async -> HAClientResult<[EntityID: HistorySeries]>
-}
-
-public struct PlannedHAClient: HAClient {
-    private let client: HomeAssistantClient
-
-    public init(transport: any HARESTTransport = URLSessionHARESTTransport()) {
-        client = HomeAssistantClient(transport: transport)
-    }
-
-    public func describe() -> PearchHAModule {
-        PearchHAClient.module
-    }
-
-    public func checkRESTConnection(_ input: HAConnectionInput) async -> HAClientResult<HARESTCheck> {
-        await client.checkRESTConnection(input)
-    }
-
-    public func states(_ input: HAConnectionInput) async -> HAClientResult<[EntityState]> {
-        await client.states(input)
-    }
-
-    public func checkWebSocketConnection(_ input: HAConnectionInput) async -> HAClientResult<HAWebSocketCheck> {
-        await client.checkWebSocketConnection(input)
-    }
-
-    public func webSocketStates(_ input: HAConnectionInput) async -> HAClientResult<[EntityState]> {
-        await client.webSocketStates(input)
-    }
-
-    public func nextStateChangedEvent(_ input: HAConnectionInput) async -> HAClientResult<EntityState> {
-        await client.nextStateChangedEvent(input)
-    }
-
-    public func services(_ input: HAConnectionInput) async -> HAClientResult<[HAServiceMetadata]> {
-        await client.services(input)
-    }
-
-    public func callService(_ input: HAConnectionInput, call: HAServiceCall) async -> HAClientResult<HAServiceCallResult> {
-        await client.callService(input, call: call)
-    }
-
-    public func discovery(_ input: HAConnectionInput) async -> HAClientResult<DiscoverySnapshot> {
-        await client.discovery(input)
-    }
-
-    public func history(_ input: HAConnectionInput, entityID: EntityID, range: HistoryRange, end: Date = Date()) async -> HAClientResult<HistorySeries> {
-        await client.history(input, entityID: entityID, range: range, end: end)
-    }
-
-    public func historyBatch(_ input: HAConnectionInput, entityIDs: [EntityID], range: HistoryRange, end: Date = Date()) async -> HAClientResult<[EntityID: HistorySeries]> {
-        await client.historyBatch(input, entityIDs: entityIDs, range: range, end: end)
-    }
 }
 
 public struct HomeAssistantClient: HAClient {
@@ -530,10 +494,6 @@ public struct HomeAssistantClient: HAClient {
         self.transport = transport
         self.redactor = redactor
         self.webSocketCommandTimeout = webSocketCommandTimeout
-    }
-
-    public func describe() -> PearchHAModule {
-        PearchHAClient.module
     }
 
     public func authorizationURL(for request: HAOAuthAuthorizationRequest) -> HAClientResult<URL> {
@@ -2202,13 +2162,6 @@ public struct HomeAssistantClient: HAClient {
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         return formatter
     }
-}
-
-public enum PearchHAClient {
-    public static let module = PearchHAModule(
-        name: "PearchHAClient",
-        responsibility: "Home Assistant REST and WebSocket transport."
-    )
 }
 
 private struct HARESTCheckDTO: Decodable {

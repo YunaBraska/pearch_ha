@@ -10,8 +10,8 @@ import PearchHASupport
 ///
 /// The shared fields cover the Home Assistant URL, fallback URL, access token,
 /// the failure/progress banners, the sign-in/connect buttons, and an explicit
-/// self-signed certificate opt-in scoped to the entered HTTPS hosts.
-/// Certificate validation stays strict unless the user opts in.
+/// self-signed certificate preference scoped to the entered HTTPS hosts.
+/// The allowance defaults on; other hosts retain strict certificate validation.
 struct PearchHAConnectionFormFields: View {
     let model: PearchHAPanelModel
     let snapshot: PearchHAPanelSnapshot

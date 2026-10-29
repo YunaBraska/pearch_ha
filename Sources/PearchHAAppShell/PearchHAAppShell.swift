@@ -765,16 +765,16 @@ public enum PearchHAOAuthSignInFailure: Error, Equatable, CustomStringConvertibl
 
 /// Maps a connection form's certificate preference to the client trust policy.
 ///
-/// Certificate validation is strict by default. Only an explicit user opt-in on
-/// the form produces an allowance, and that allowance is scoped to the form's
-/// current HTTPS hosts — the app never trusts all hosts.
+/// The form defaults to allowing self-signed certificates for its current HTTPS
+/// hosts. Disabling that preference restores strict validation. The allowance
+/// never extends to other hosts.
 public enum PearchHAServerTrustPolicyResolver {
     /// Resolves the trust policy for a connection form.
     ///
     /// - Parameter form: The connection form describing the target addresses and
     ///   the user's self-signed certificate preference.
-    /// - Returns: The default strict policy, or a policy allowing self-signed
-    ///   certificates for exactly the form's HTTPS hosts when the user opted in.
+    /// - Returns: Strict validation when the preference is disabled, otherwise
+    ///   self-signed trust for exactly the form's HTTPS hosts.
     public static func policy(for form: PearchHAConnectionForm) -> HAServerTrustPolicy {
         guard form.allowsSelfSignedCertificates else {
             return .default
@@ -2347,7 +2347,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
                 try? await Task.sleep(nanoseconds: duration)
             }
             await MainActor.run {
-                guard let self else {
+                guard !Task.isCancelled, let self else {
                     return
                 }
                 self.statusItemRefreshTask = nil

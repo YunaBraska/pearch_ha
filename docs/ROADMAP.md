@@ -9,14 +9,16 @@ remaining work and release evidence gaps.
   for public browser sign-in. See [HA_API.md](HA_API.md#authentication).
 - The existing direct-release CI has Developer ID signing and notarization
   inputs configured. Those do not establish App Store distribution readiness.
-- Connect App Store distribution signing, provisioning and App Store Connect
-  access to a separate CI lane. The local `AppStore` Xcode configuration and
-  archive/export script are present, but a Store-signed upload is not verified.
-- Publish and verify the privacy-policy URL from `Page/privacy.md`, complete App
-  Store privacy metadata, and provide an isolated, reachable Home Assistant
-  review account. The public privacy URL returned HTTP 404 on 2026-10-27, and
-  review access outside the repository remains unverified. Use an isolated
-  review installation instead of a personal home installation.
+- The separate Store lane produced a signed package in
+  [run 40836734856](https://github.com/YunaBraska/pearch_ha/actions/runs/40836734856)
+  on 2026-10-29 at `5c6f06e`. Reverify the final submission revision. The upload
+  workflow has not run, so App Store Connect acceptance remains unverified.
+- The [public privacy policy](https://yunabraska.github.io/pearch_ha/privacy.html)
+  returned HTTP 200 on 2026-10-29. Complete App Store privacy metadata and verify
+  an isolated, reachable Home Assistant review account. Review access outside
+  the repository remains unverified. Do not use a personal home installation.
+  Publish the reviewed policy with this release, including local-sensor handling
+  and removal instructions, which are not yet present on the live page.
 - Verify Keychain continuity with the actual Store distribution identity and
   configuration migration on each supported macOS release before submission.
 
@@ -26,7 +28,8 @@ remaining work and release evidence gaps.
   fixture and the manually reviewed 1,154-entity installation.
 - Extend closed-menu CPU/memory measurements to open history, Settings, standby,
   reconnects, stale-cache recovery, and long sessions.
-- Verify the credentialed Store archive, export and runtime before submission.
+- Verify the final Store archive's runtime before submission. A successful signed
+  package build does not establish sandbox, migration or Keychain behavior.
 
 ## Planned
 

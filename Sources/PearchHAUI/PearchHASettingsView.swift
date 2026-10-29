@@ -1129,7 +1129,7 @@ public struct PearchHASettingsView: View {
         settingsPage(title: "Privacy", systemImage: Tab.privacy.systemImage) {
             settingsCard {
                 settingsSection(title: "What PearchHA reads", systemImage: "doc.text.magnifyingglass") {
-                    Text("PearchHA connects to the Home Assistant addresses you configure. It reads your Home Assistant address and the access token (or browser sign-in) you provide, plus the entity states needed to show your values.")
+                    Text("PearchHA connects to the Home Assistant addresses you configure. It reads your Home Assistant address and the access token (or browser sign-in) you provide, plus the entity states needed to show your values. Optional This Mac sensors read aggregate CPU, memory, battery and thermal state. These local readings stay in memory on this Mac and are not sent to Home Assistant or the developer.")
                         .pearchHAFont(.callout)
                         .fixedSize(horizontal: false, vertical: true)
                 }

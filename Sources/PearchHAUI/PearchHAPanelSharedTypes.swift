@@ -1017,12 +1017,3 @@ extension HistoryRange {
     /// The history ranges the UI offers.
     static let uiSelectable: [HistoryRange] = [.hour, .day, .week, .month]
 }
-
-public typealias PearchHABootstrapView = PearchHAPanelView
-
-public enum PearchHAUI {
-    public static let module = PearchHAModule(
-        name: "PearchHAUI",
-        responsibility: "SwiftUI and AppKit-facing user interface components."
-    )
-}

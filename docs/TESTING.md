@@ -37,7 +37,7 @@ component instead of maintaining a second list of test names here:
 | Cold app launch, real status-item clicks, focus, dismissal and shortcuts | [XCUITest](../Xcode/PearchHAE2ETests) on [hosted macOS CI](../.github/workflows/ui-tests.yml) |
 | Local OS readings, source isolation, sampling lifecycle, translations | [Local reader](../Tests/PearchHAUITests/PearchHALocalSensorReaderTests.swift), [integration](../Tests/PearchHAUITests/PearchHALocalSensorIntegrationTests.swift) |
 | Universal app, signing, DMG, OAuth site, release evidence | [Packaging](../Tests/PearchHAPackagingTests) |
-| Clocks, rate limits, backoff, coalescing, redaction | [Support](../Tests/PearchHASupportTests) |
+| Clocks, jitter, backoff, redaction | [Support](../Tests/PearchHASupportTests) |
 | Coverage and repository policy | [Coverage](../Tests/PearchHACoverageCheckTests), [Audit](../Tests/PearchHARepoAuditTests) |
 
 ## Protocol fixtures
@@ -81,6 +81,8 @@ effects. Finder dismissal and reopening use the same public interface.
 The session repeats after process termination. No Home Assistant credentials or
 real devices are involved. Each run retains its logs, screenshots and `.xcresult`
 for seven days. These tests do not publish or install a release.
+The macOS 26 job also retains smoke screenshots and the native 100–200% text-size
+checks for visual review. All captures use fixtures, without personal HA data.
 
 Snapshots and a contact sheet are written under `.build/pearchha-snapshots/current`.
 Panel and history captures use the production 384×468 view. Settings captures

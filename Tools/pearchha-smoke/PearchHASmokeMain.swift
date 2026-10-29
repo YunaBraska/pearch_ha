@@ -80,26 +80,18 @@ struct PearchHASmoke {
 
     @MainActor
     private static func runOnce(options: SmokeOptions) async throws {
-        try expect(PearchHASupport.module.name == "PearchHASupport", "support module is named")
-        try expect(PearchHACore.module.name == "PearchHACore", "core module is named")
-        try expect(PlannedHAClient().describe().name == "PearchHAClient", "client module is named")
-        try expect(PlannedConfigStore().describe().name == "PearchHAPersistence", "persistence module is named")
-        try expect(PearchHAUI.module.name == "PearchHAUI", "UI module is named")
-
         let id: EntityID = "sensor.office_temperature"
         try expect(id.rawValue == "sensor.office_temperature", "entity ID preserves raw value")
 
         let location = ConfigLocation()
         try expect(location.applicationSupportDirectoryName == "PearchHA", "config location uses app name")
         fputs("Checking support primitives and toolchain...\n", stderr)
-        try verifyRateLimiter()
         try verifyJitter()
         try verifyBackoff()
         try verifyRedaction()
         try verifyCoverageGate()
         try verifyRepositoryAuditGate()
         try verifyXcodeDoctor()
-        try await verifyCoalescing()
         try await verifyTestClock()
         fputs("Checking Home Assistant protocols and fixture tools...\n", stderr)
         try await verifyMirrorAndFakeHA()
@@ -191,20 +183,6 @@ struct PearchHASmoke {
         } catch let error as SmokeFailure {
             try expect(error.description == "invalid repeat count: many", "smoke options reject non-numeric repeat count")
         }
-    }
-
-    private static func verifyRateLimiter() throws {
-        let start = PearchInstant(nanosecondsSinceStart: 0)
-        var limiter = TokenBucketRateLimiter(capacity: 2, refillPerSecond: 1, now: start)
-
-        try expect(limiter.tryAcquire(at: start), "first token is available")
-        try expect(limiter.tryAcquire(at: start), "second token is available")
-        try expect(!limiter.tryAcquire(at: start), "bucket is empty")
-        try expect(limiter.tryAcquire(at: start.advanced(by: .seconds(1))), "bucket refills over time")
-        try expect(
-            limiter.nextAvailability(for: 3, at: start) == .impossible(capacity: 2, requested: 3),
-            "impossible token requests fail explicitly"
-        )
     }
 
     private static func verifyJitter() throws {
@@ -527,85 +505,6 @@ struct PearchHASmoke {
             let message = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "git failed"
             throw SmokeFailure("git \(arguments.joined(separator: " ")) failed: \(message)")
         }
-    }
-
-    private static func verifyCoalescing() async throws {
-        let coalescer = RequestCoalescer<String, Int>()
-        let counter = Counter()
-        let gate = Gate()
-
-        let first = Task {
-            try await coalescer.value(for: "same") {
-                _ = await counter.increment()
-                await gate.wait()
-                return 42
-            }
-        }
-
-        try await spinUntil("coalescer has first task") {
-            await coalescer.activeRequestCount() == 1
-        }
-
-        let second = Task {
-            try await coalescer.value(for: "same") {
-                _ = await counter.increment()
-                await gate.wait()
-                return 13
-            }
-        }
-        try await spinUntil("coalescer has second caller") {
-            await coalescer.coalescedWaiterCount() == 1
-        }
-
-        _ = await gate.open()
-        let values = try await [first.value, second.value]
-
-        try expect(values == [42, 42], "coalesced callers share the first result")
-        try await expectAsync(await counter.value == 1, "coalesced operation runs once")
-        try await expectAsync(await coalescer.coalescedWaiterCount() == 0, "coalesced waiter count returns to zero")
-
-        let failing = RequestCoalescer<String, Int>()
-        let failures = Counter()
-        let failureGate = Gate()
-        let firstFailure = Task {
-            try await failing.value(for: "same") {
-                _ = await failures.increment()
-                await failureGate.wait()
-                throw SmokeFailure("planned coalescer failure")
-            }
-        }
-        try await spinUntil("coalescer has failing task") {
-            await failing.activeRequestCount() == 1
-        }
-        let secondFailure = Task {
-            try await failing.value(for: "same") {
-                _ = await failures.increment()
-                return 7
-            }
-        }
-        try await spinUntil("coalescer has second failing caller") {
-            await failing.coalescedWaiterCount() == 1
-        }
-        _ = await failureGate.open()
-
-        do {
-            _ = try await firstFailure.value
-            throw SmokeFailure("first coalesced failure unexpectedly succeeded")
-        } catch is SmokeFailure {}
-
-        do {
-            _ = try await secondFailure.value
-            throw SmokeFailure("second coalesced failure unexpectedly succeeded")
-        } catch is SmokeFailure {}
-
-        try await expectAsync(await failing.activeRequestCount() == 0, "failed coalesced request is cleared")
-        try await expectAsync(await failing.coalescedWaiterCount() == 0, "failed coalesced waiter count returns to zero")
-
-        let retry = try await failing.value(for: "same") {
-            _ = await failures.increment()
-            return 99
-        }
-        try expect(retry == 99, "coalescer retries after failure")
     }
 
     private static func verifyTestClock() async throws {
@@ -6264,10 +6163,6 @@ final class SmokeConfigStore: ConfigStore, @unchecked Sendable {
         self.loadedConfiguration = loadedConfiguration
         self.loadError = loadError
         self.saveError = saveError
-    }
-
-    func describe() -> PearchHAModule {
-        PearchHAPersistence.module
     }
 
     func load() throws -> PearchHAConfiguration {

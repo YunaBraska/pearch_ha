@@ -390,7 +390,6 @@ public struct PearchHAConnectionProfile: Equatable, Codable, Sendable {
 }
 
 public protocol ConfigStore: Sendable {
-    func describe() -> PearchHAModule
     func load() throws -> PearchHAConfiguration
     @discardableResult func save(_ configuration: PearchHAConfiguration) throws -> PearchHAConfiguration
 }
@@ -441,10 +440,6 @@ public struct JSONConfigStore: ConfigStore {
 
     public init(location: ConfigLocation = ConfigLocation(), fileManager: FileManager = .default) throws {
         fileURL = try location.fileURL(fileManager: fileManager)
-    }
-
-    public func describe() -> PearchHAModule {
-        PearchHAPersistence.module
     }
 
     public func load() throws -> PearchHAConfiguration {
@@ -527,14 +522,6 @@ public enum ConfigStoreError: Error, Equatable, CustomStringConvertible, Sendabl
         case let .writeFailed(url, message):
             "Config file could not be written at \(url.path): \(message)"
         }
-    }
-}
-
-public struct PlannedConfigStore {
-    public init() {}
-
-    public func describe() -> PearchHAModule {
-        PearchHAPersistence.module
     }
 }
 
@@ -881,11 +868,4 @@ public enum SecretStoreError: Error, Equatable, CustomStringConvertible, Sendabl
             "Keychain \(operation) failed for \(secret.rawValue) with status \(status)"
         }
     }
-}
-
-public enum PearchHAPersistence {
-    public static let module = PearchHAModule(
-        name: "PearchHAPersistence",
-        responsibility: "Config persistence and Keychain-backed secrets."
-    )
 }

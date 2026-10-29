@@ -2442,7 +2442,7 @@ public final class PearchHAPanelModel: ObservableObject {
 
     @discardableResult
     public func runCustomAction(_ id: CustomActionID, confirmed: Bool = false) async -> Bool {
-        guard !snapshot.controlActionState.isRunning else {
+        guard !Task.isCancelled, !snapshot.controlActionState.isRunning else {
             return false
         }
         guard let action = customActionConfiguration.action(id: id),
@@ -2464,24 +2464,32 @@ public final class PearchHAPanelModel: ObservableObject {
             .running(entityID: action.entityID),
             lastUpdateDescription: "Running \(action.title)"
         )
-        let resolvedAction: ActionSpec
+        let resolved: (action: ActionSpec, protectedValues: [String])
         do {
             // Keychain reads are synchronous system calls; resolve off the main
             // actor so the click that triggered the action never stalls the UI.
             let store = protectedActionValueStore
             let spec = action.action
-            resolvedAction = try await Task.detached(priority: .userInitiated) {
-                try spec.resolvedProtectedValues(using: store.load)
+            resolved = try await Task.detached(priority: .userInitiated) {
+                var protectedValues = Set<String>()
+                let action = try spec.resolvedProtectedValues { reference in
+                    let value = try store.load(reference)
+                    if !value.isEmpty { protectedValues.insert(value) }
+                    return value
+                }
+                return (action, protectedValues.sorted { $0.count > $1.count })
             }.value
         } catch {
+            guard !Task.isCancelled else { return false }
             applyControlActionState(
                 .failed(entityID: action.entityID, message: String(describing: error)),
                 lastUpdateDescription: "Action unavailable for \(action.title)"
             )
             return false
         }
+        guard !Task.isCancelled else { return false }
         recordOutboundRequest()
-        let result = await actionRunner(form, resolvedAction)
+        let result = await actionRunner(form, resolved.action)
         guard !Task.isCancelled else {
             return false
         }
@@ -2491,8 +2499,12 @@ public final class PearchHAPanelModel: ObservableObject {
             applyControlActionState(.idle, lastUpdateDescription: "Ran \(action.title)")
             return true
         case let .failed(message):
+            let replacement = Redactor().replacement
+            let safeMessage = resolved.protectedValues.reduce(message) {
+                $0.replacingOccurrences(of: $1, with: replacement)
+            }
             applyControlActionState(
-                .failed(entityID: action.entityID, message: message),
+                .failed(entityID: action.entityID, message: safeMessage),
                 lastUpdateDescription: "Action failed for \(action.title)"
             )
             return false

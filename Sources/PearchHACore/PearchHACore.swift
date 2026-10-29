@@ -1065,10 +1065,3 @@ public struct RoomResolver: Sendable {
         return value
     }
 }
-
-public enum PearchHACore {
-    public static let module = PearchHAModule(
-        name: "PearchHACore",
-        responsibility: "Pure domain state and behavior for PearchHA."
-    )
-}

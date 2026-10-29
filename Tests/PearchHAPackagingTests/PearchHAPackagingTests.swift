@@ -3,6 +3,7 @@ import CryptoKit
 import Foundation
 import XCTest
 import PearchHAPackaging
+import PearchHACore
 
 final class PearchHAPackagingTests: XCTestCase {
     func testInfoPlistDeclaresCallbackURLSchemeAndMenuBarAgent() throws {
@@ -166,6 +167,28 @@ final class PearchHAPackagingTests: XCTestCase {
         _ = try PearchHAAppBundleBuilder().build(.init(executableURL: executable, outputURL: output,
                                                     manifest: PearchHAAppBundleManifest(), resourceBundleURLs: [bundle]))
         XCTAssertEqual(try Data(contentsOf: output.appendingPathComponent("Contents/Resources/PearchHA_PearchHACore.bundle/de.lproj/LocalMac.strings")), strings)
+    }
+
+    func testAppBundleIncludesDependencyNoticesForItsDistributionChannel() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executable = directory.appendingPathComponent("PearchHA-source")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        let output = directory.appendingPathComponent("PearchHA.app")
+        let resources = LocalMacText.resourceBundleURL
+        _ = try PearchHAAppBundleBuilder().build(.init(executableURL: executable, outputURL: output,
+            manifest: PearchHAAppBundleManifest(), resourceBundleURLs: [resources]))
+        let copiedBundle = try XCTUnwrap(Bundle(url: output.appendingPathComponent("Contents/Resources/\(resources.lastPathComponent)")))
+        let notice = copiedBundle.url(forResource: "Sparkle-LICENSE", withExtension: "txt")
+        if ProcessInfo.processInfo.environment["PEARCHHA_APP_STORE"] == "1" {
+            XCTAssertNil(notice, "Store builds do not include Sparkle")
+        } else {
+            let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().appendingPathComponent("Sources/PearchHACore/Resources/Sparkle-LICENSE.txt")
+            XCTAssertEqual(try Data(contentsOf: XCTUnwrap(notice)), try Data(contentsOf: source),
+                           "Distributions must retain the complete dependency and bundled third-party license notices")
+        }
     }
 
     func testAppBundleBuilderRejectsMissingPrivacyManifest() throws {

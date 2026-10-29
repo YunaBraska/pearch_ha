@@ -15,6 +15,9 @@ REST uses `Authorization: Bearer <access-token>`. WebSocket authenticates with
 `{"type":"auth","access_token":"<access-token>"}` and requires `auth_ok`.
 Long-lived tokens and OAuth sessions share this bearer-token contract.
 Username/password credentials are not sent to REST or WebSocket API calls.
+REST redirects stay within the original scheme, host and effective port. A redirect
+to another origin returns its HTTP status without forwarding the request. Configure
+the final Home Assistant address explicitly. Ordered address fallback remains separate.
 
 | OAuth step | Endpoint | Fields |
 | --- | --- | --- |
