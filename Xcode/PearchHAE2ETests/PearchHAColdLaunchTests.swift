@@ -69,6 +69,9 @@ final class PearchHAColdLaunchTests: XCTestCase {
             try await waitUntil("The first cold status click shows the popover", onTimeout: {
                 record("Cold session \(session): first click failed", app: app, activations: activations)
             }) { root.exists }
+            XCTAssertEqual(root.frame.width, 384, accuracy: 1)
+            XCTAssertEqual(root.frame.height, 468, accuracy: 1)
+            XCTAssertFalse(root.frame.intersects(statusItem.frame), "The popover must leave its status button clickable")
             record("Cold session \(session): first click opened", app: app, activations: activations)
 
             // Never activate PearchHA just to deliver input. A native popover can own

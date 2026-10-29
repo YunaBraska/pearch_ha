@@ -6156,16 +6156,38 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(nativeSegmentedControls(in: panel.contentView).count, 1,
                        "History range control is inside the same panel window")
         try saveControlSnapshot(panel.contentView, name: "history-in-panel")
+        var escapeTrace: [String] = []
+        var navigationCount = 0
+        let currentEventType = { NSApp.currentEvent.map { String(describing: $0.type) } ?? "nil" }
+        let originalNavigateBack = try XCTUnwrap(presentation.popover.onNavigateBack)
+        presentation.popover.onNavigateBack = {
+            navigationCount += 1
+            let invocation = navigationCount
+            let before = model.snapshot.historyPresentationEntityID != nil
+            escapeTrace.append("navigate#\(invocation) begin history=\(before) current=\(currentEventType())")
+            let result = originalNavigateBack()
+            escapeTrace.append("navigate#\(invocation) end history=\(model.snapshot.historyPresentationEntityID != nil) result=\(result)")
+            return result
+        }
+        let originalVisibilityChange = try XCTUnwrap(presentation.popover.onVisibilityChange)
+        presentation.popover.onVisibilityChange = { visible in
+            let before = model.snapshot.historyPresentationEntityID != nil
+            escapeTrace.append("visibility=\(visible) begin history=\(before) current=\(currentEventType())")
+            originalVisibilityChange(visible)
+            escapeTrace.append("visibility=\(visible) end history=\(model.snapshot.historyPresentationEntityID != nil)")
+        }
         let escape = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber, context: nil,
             characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        escapeTrace.append("send first type=\(escape.type) current=\(currentEventType())")
         panel.sendEvent(escape)
         drainPanelRunLoop()
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
-        XCTAssertTrue(presentation.popover.isShown, "Escape returns to rooms first")
+        XCTAssertTrue(presentation.popover.isShown, "Escape returns to rooms first: \(escapeTrace.joined(separator: " | "))")
         let secondEscape = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber, context: nil,
             characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        escapeTrace.append("send second type=\(secondEscape.type) current=\(currentEventType())")
         panel.sendEvent(secondEscape)
         XCTAssertFalse(presentation.popover.isShown, "A second Escape closes the panel")
     }
@@ -11319,6 +11341,34 @@ final class PearchHAUITests: XCTestCase {
         await spinUntil { model.snapshot.refreshCount == 1 }
 
         model.setPanelActive(false)
+    }
+
+    func testNativePopoverKeepsPreferredSizeWithinScreenAndClearOfAnchor() async throws {
+        for textSize: PearchHATextSize in [.standard, .maximum] {
+            let model = PearchHAPanelModel(bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+            model.applyDisplayPreferences(.defaults.with(textSize: textSize))
+            let presentation = try PearchHATestPopoverPresentation(model: model)
+            defer { presentation.close() }
+            let content = try XCTUnwrap(presentation.popover.contentViewController?.view)
+            content.layoutSubtreeIfNeeded()
+            drainPanelRunLoop()
+            await Task.yield()
+            content.layoutSubtreeIfNeeded()
+            drainPanelRunLoop()
+
+            let preferred = PearchHAPanelView.preferredContentSize(textSize: textSize)
+            XCTAssertEqual(presentation.popover.contentSize.width, preferred.width, accuracy: 1, textSize.displayName)
+            XCTAssertEqual(presentation.popover.contentSize.height, preferred.height, accuracy: 1, textSize.displayName)
+            XCTAssertEqual(content.bounds.width, preferred.width, accuracy: 1, textSize.displayName)
+            XCTAssertEqual(content.bounds.height, preferred.height, accuracy: 1, textSize.displayName)
+            let visibleFrame = try XCTUnwrap(presentation.anchorWindow.screen?.visibleFrame)
+            XCTAssertTrue(visibleFrame.insetBy(dx: -1, dy: -1).contains(presentation.window.frame),
+                          "\(textSize.rawValue): native popover \(presentation.window.frame) must fit within \(visibleFrame)")
+            let anchorFrame = presentation.anchorWindow.convertToScreen(
+                presentation.anchor.convert(presentation.anchor.bounds, to: nil))
+            XCTAssertFalse(presentation.window.frame.intersects(anchorFrame.insetBy(dx: 1, dy: 1)),
+                           "\(textSize.rawValue): native popover \(presentation.window.frame) must leave its anchor \(anchorFrame) clickable")
+        }
     }
 
     func testStatusPopoverReportsVisibilityChangesOnEveryDismissalPath() throws {

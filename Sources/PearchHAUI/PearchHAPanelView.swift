@@ -231,7 +231,7 @@ private struct PearchHAHistoryDetailView: View {
 }
 
 public struct PearchHAPanelView: View {
-    /// Preferred window size. The shell limits it to the current display.
+    /// Preferred content size. AppKit positions the surrounding native popover.
     public nonisolated static func preferredContentSize(textSize: PearchHATextSize) -> CGSize {
         CGSize(width: 384 + 156 * (textSize.scale - 1), height: 468 + 96 * (textSize.scale - 1))
     }

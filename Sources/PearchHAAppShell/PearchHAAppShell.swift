@@ -2066,7 +2066,11 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
                 onOpenEntitySettings: onOpenEntitySettings
             )
         )
+        // The shell supplies the size. SwiftUI's unbounded content must not
+        // resize the popover over the status item that closes it.
+        hostingController.sizingOptions = []
         if let view = hostingController.view as? PearchHAFirstMouseHostingView<PearchHAPanelView> {
+            view.sizingOptions = []
             view.statusPopover = popover
         }
         popover.contentViewController = hostingController
