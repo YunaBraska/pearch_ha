@@ -9,6 +9,9 @@ sh scripts/check.sh
 The script checks Xcode readiness, builds with warnings as errors, executes XCTest,
 exports coverage across all test bundles, runs native smoke checks, and audits the
 repository for private data, generated output, and telemetry dependencies.
+Native checks open windows and can change focus. Run the full suite in an isolated
+desktop session or CI, not while someone is working on the machine. Compilation
+alone (`swift build -Xswiftc -warnings-as-errors`) does not interact with the desktop.
 
 Command Line Tools-only builds may compile tests without executing them. A run
 ending at `Build complete!` is not test evidence. SwiftPM may export coverage for
@@ -31,6 +34,7 @@ component instead of maintaining a second list of test names here:
 | REST, WebSocket, auth, fallback, history, controls | [Client](../Tests/PearchHAClientTests), [FakeHA](../Tests/FakeHATests) |
 | Config migration, atomic writes, Keychain, protected action values | [Persistence](../Tests/PearchHAPersistenceTests) |
 | Native panel/settings, focus, action cancellation, refresh lifecycle | [UI and AppShell](../Tests/PearchHAUITests) |
+| Cold app launch, real status-item clicks, focus, dismissal and shortcuts | [XCUITest](../Xcode/PearchHAE2ETests) on [hosted macOS CI](../.github/workflows/ui-tests.yml) |
 | Local OS readings, source isolation, sampling lifecycle, translations | [Local reader](../Tests/PearchHAUITests/PearchHALocalSensorReaderTests.swift), [integration](../Tests/PearchHAUITests/PearchHALocalSensorIntegrationTests.swift) |
 | Universal app, signing, DMG, OAuth site, release evidence | [Packaging](../Tests/PearchHAPackagingTests) |
 | Clocks, rate limits, backoff, coalescing, redaction | [Support](../Tests/PearchHASupportTests) |
@@ -59,17 +63,22 @@ PEARCHHA_SMOKE_SNAPSHOT_DIR=.build/pearchha-snapshots swift run pearchha-smoke
 swift run pearchha-smoke --repeat 5
 ```
 
-Smoke exercises native panels and controls, focus, connection and failure states,
+Smoke exercises native popovers and controls, focus, connection and failure states,
 light/dark and accessibility appearances, packaging, and the app-shell lifecycle.
 It also measures cold launch, cached panel opening, idle CPU, memory across repeated
 lifecycles, request volume, history debounce/cache behavior, and status-item redraws.
 Timing tests use injected clocks. Async tests wait for observable progress.
 
-In the installed app, open the panel, click a Finder window, then click its
-menu-bar item once. The panel must return on that first click. Another click
-while PearchHA is active must close it, including with a control popover open.
-Repeat after Escape dismissal. This activation regression requires the running
-app because the XCTest host does not reliably reproduce app deactivation.
+The separate `Native UI` workflow runs `scripts/test-ui.sh` on GitHub-hosted macOS
+desktops. The script and XCUITest both reject local and self-hosted execution.
+The test launches the production app in the background and clicks its observed
+status-item location through Finder's coordinate space. It must not activate
+PearchHA before the first click, which would hide the cold-start focus regression.
+One click must open the panel and give it keyboard focus, and the next must close
+it. Finder dismissal, reopening, Escape and Cmd+, use the same public interface.
+The session repeats after process termination. No Home Assistant credentials or
+real devices are involved. Each run retains its logs, screenshots and `.xcresult`
+for seven days. These tests do not publish or install a release.
 
 Snapshots and a contact sheet are written under `.build/pearchha-snapshots/current`.
 Panel and history captures use the production 384×468 view. Settings captures

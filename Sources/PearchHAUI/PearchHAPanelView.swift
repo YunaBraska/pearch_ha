@@ -337,6 +337,7 @@ public struct PearchHAPanelView: View {
         }
         .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.45 : 0.22), radius: 18, x: 0, y: 8)
         .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("pearchha.menuPopover")
         .accessibilityLabel(accessibility.label)
         .accessibilityValue(accessibility.value)
         .accessibilityHint(accessibility.hint)

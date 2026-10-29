@@ -1,0 +1,45 @@
+name: 🧪 CI · Native UI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pearchha-ui-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-ui:
+    name: XCUITest (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, xcode-27]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout tested revision
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Run native UI tests on the isolated runner
+        run: sh scripts/test-ui.sh
+
+      - name: Upload test results and screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-ui-${{ matrix.os }}-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            .build/ui-tests/*.log
+            .build/ui-tests/*.xcresult
