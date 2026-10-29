@@ -173,6 +173,7 @@ private struct PearchHAInlineHistoryPreview: View {
 }
 
 private struct PearchHAHistoryDetailView: View {
+    let increasedContrast: Bool
     @ObservedObject var model: PearchHAPanelModel
     let entity: DiscoveredEntity
     let onOpenEntitySettings: ((EntityID) -> Void)?
@@ -188,6 +189,7 @@ private struct PearchHAHistoryDetailView: View {
             chartTint: historyChartTint,
             numericColorForValue: historyNumericColor,
             stateColorForTimeline: historyStateColor,
+            increaseContrastOverride: increasedContrast,
             onOpenSettings: {
                 onOpenEntitySettings?(entity.id)
             },
@@ -229,6 +231,11 @@ private struct PearchHAHistoryDetailView: View {
 }
 
 public struct PearchHAPanelView: View {
+    /// Preferred window size. The shell limits it to the current display.
+    public nonisolated static func preferredContentSize(textSize: PearchHATextSize) -> CGSize {
+        CGSize(width: 384 + 156 * (textSize.scale - 1), height: 468 + 96 * (textSize.scale - 1))
+    }
+
     private let model: PearchHAPanelModel
     private let accessibilityPreferencesOverride: PearchHAAccessibilityPreferences?
     private let onOpenSettings: (() -> Void)?
@@ -283,7 +290,6 @@ public struct PearchHAPanelView: View {
             snapshot: snapshot,
             preferences: accessibilityPreferences
         )
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         let shape = RoundedRectangle(cornerRadius: PearchHATheme.Dashboard.panelCornerRadius, style: .continuous)
         return VStack(alignment: .leading, spacing: 0) {
             if showsTopBar {
@@ -305,7 +311,7 @@ public struct PearchHAPanelView: View {
                         .accessibilityLabel("Back to rooms")
                         .padding(.horizontal, 16).padding(.top, 12)
                         ScrollView {
-                            PearchHAHistoryDetailView(model: model, entity: entity, onOpenEntitySettings: onOpenEntitySettings)
+                            PearchHAHistoryDetailView(increasedContrast: accessibilityPreferences.contrastPolicy == .increased, model: model, entity: entity, onOpenEntitySettings: onOpenEntitySettings)
                         }
                     }
                 }
@@ -313,10 +319,12 @@ public struct PearchHAPanelView: View {
             dashboardDivider
             footer
         }
-        .frame(width: 384, height: 468, alignment: .top)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .pearchHAFont(.body)
+        .environment(\.pearchHATextSize, panelDisplayPreferences.textSize)
         .environment(\.dashboardPalette, palette)
         .environment(\.dashboardRowDensity, panelDisplayPreferences.dashboardRowDensity)
-        .tint(PearchHATheme.accent)
+        .tint(palette.accentPrimary)
         .background(palette.surfaceRoot)
         .clipShape(shape)
         .overlay {
@@ -328,7 +336,6 @@ public struct PearchHAPanelView: View {
             )
         }
         .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.45 : 0.22), radius: 18, x: 0, y: 8)
-        .contrast(accessibility.contrastPolicy == .increased ? 1.12 : 1)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibility.label)
         .accessibilityValue(accessibility.value)
@@ -388,6 +395,10 @@ public struct PearchHAPanelView: View {
         )
     }
 
+    private var palette: PearchHATheme.DashboardPalette {
+        PearchHATheme.Dashboard.palette(colorScheme, increasedContrast: accessibilityPreferences.contrastPolicy == .increased)
+    }
+
     private var accessibilityPreferences: PearchHAAccessibilityPreferences {
         if let accessibilityPreferencesOverride {
             return accessibilityPreferencesOverride
@@ -417,7 +428,7 @@ public struct PearchHAPanelView: View {
 
     private var dashboardDivider: some View {
         Rectangle()
-            .fill(PearchHATheme.Dashboard.palette(colorScheme).separator)
+            .fill(palette.separator)
             .frame(height: 1)
     }
 
@@ -439,14 +450,13 @@ public struct PearchHAPanelView: View {
     }
 
     private var statusBar: some View {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         return HStack(spacing: PearchHASpacing.sm - 2) {
             Circle()
                 .fill(connectionStatusColor)
                 .frame(width: 7, height: 7)
                 .accessibilityHidden(true)
             Text("PearchHA")
-                .font(.system(size: 13, weight: .semibold))
+                .pearchHAFont(size: 13, weight: .semibold)
                 .foregroundStyle(palette.textPrimary)
             Spacer(minLength: 0)
         }
@@ -461,7 +471,6 @@ public struct PearchHAPanelView: View {
     }
 
     private var connectionStatusColor: Color {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         return snapshot.isLocalOnly ? palette.accentPrimary : palette.connectionColor(snapshot.connectionState)
     }
 
@@ -478,8 +487,8 @@ public struct PearchHAPanelView: View {
             ZStack {
                 if viewState.isInitialHistoryLoading && !snapshot.hasLocalValues {
                     Text("Loading")
-                        .font(.system(size: 13))
-                        .foregroundStyle(PearchHATheme.Dashboard.palette(colorScheme).textSecondary)
+                        .pearchHAFont(size: 13)
+                        .foregroundStyle(palette.textSecondary)
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 18) {
@@ -647,7 +656,7 @@ public struct PearchHAPanelView: View {
             .overlay(alignment: .top) {
                 if targetedSelectionItem == item, let placement {
                     Rectangle()
-                        .fill(PearchHATheme.accent)
+                        .fill(palette.accentPrimary)
                         .frame(height: 2)
                         .padding(.horizontal, 8)
                         .frame(maxHeight: .infinity, alignment: placement == .before ? .top : .bottom)
@@ -716,7 +725,6 @@ public struct PearchHAPanelView: View {
     /// A quiet "More" / "Less" affordance that expands or collapses a module in
     /// place, keeping overflow rows reachable without a database dump.
     private func moreAffordance(roomID: String, isExpanded: Bool, hiddenCount: Int) -> some View {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         let title = isExpanded ? "Show less" : "\(hiddenCount) more"
         return Button {
             if isExpanded {
@@ -729,7 +737,7 @@ public struct PearchHAPanelView: View {
                 Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                 Text(title)
-                    .font(.system(size: 11, weight: .medium))
+                    .pearchHAFont(size: 11, weight: .medium)
                 Spacer(minLength: 0)
             }
             .foregroundStyle(palette.textSecondary)
@@ -789,7 +797,7 @@ public struct PearchHAPanelView: View {
                                 }
                                 Image(systemName: "slider.horizontal.3")
                                     .font(.system(size: 10, weight: .medium))
-                                    .foregroundStyle(PearchHATheme.Dashboard.palette(colorScheme).textSecondary)
+                                    .foregroundStyle(palette.textSecondary)
                                     .accessibilityHidden(true)
                                 if !hasToggle {
                                     PearchHARequestedControlIndicator(isRequested: model.hasRequestedControls(for: entity.id))
@@ -814,7 +822,6 @@ public struct PearchHAPanelView: View {
     private func rowLabelAccessories(
         contextPresentation: PearchHAPanelEntityContextPresentation
     ) -> [TelemetryRowLabelAccessory] {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         var accessories: [TelemetryRowLabelAccessory] = []
         if contextPresentation.hasAverageLinks {
             accessories.append(
@@ -985,7 +992,6 @@ public struct PearchHAPanelView: View {
     /// message. Returns `nil` when there is nothing to show so the row stays a
     /// single line.
     private func rowSecondLine(for entity: DiscoveredEntity) -> AnyView? {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         let hasCover = snapshot.coverControl(for: entity) != nil
         let failure = snapshot.controlActionState.failureMessage(for: entity.id)
         guard hasCover || failure != nil else {
@@ -996,7 +1002,7 @@ public struct PearchHAPanelView: View {
                 coverControlLine(for: entity)
                 if let failure {
                     Text(failure)
-                        .font(.system(size: 10.5))
+                        .pearchHAFont(size: 10.5)
                         .foregroundStyle(palette.danger)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityLabel("\(entity.name) control failed: \(failure)")
@@ -1146,7 +1152,7 @@ public struct PearchHAPanelView: View {
             entity: entity,
             presentation: presentation,
             value: entityValue(entity),
-            palette: PearchHATheme.Dashboard.palette(colorScheme)
+            palette: palette
         )
     }
 
@@ -1158,7 +1164,6 @@ public struct PearchHAPanelView: View {
         value: FormattedEntityValue,
         presentation: PearchHAEntityRowPresentation
     ) -> some View {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         if case let .statePill(isActive) = presentation, value.iconSymbolName == nil {
             StatusPill(
                 value.text,
@@ -1175,7 +1180,7 @@ public struct PearchHAPanelView: View {
                         .accessibilityHidden(true)
                 }
                 Text(value.text)
-                    .font(.system(size: 14, weight: .semibold).monospacedDigit())
+                    .pearchHAFont(size: 14, weight: .semibold, monospacedDigits: true)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .fixedSize(horizontal: false, vertical: false)
@@ -1186,7 +1191,6 @@ public struct PearchHAPanelView: View {
     }
 
     private func rowValueColor(_ presentation: PearchHAEntityRowPresentation) -> Color {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         switch presentation {
         case let .gauge(gauge):
             return gauge.severity == .normal ? palette.textPrimary : palette.severityColor(gauge.severity)

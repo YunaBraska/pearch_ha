@@ -15,7 +15,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 private enum AppShellLayout {
-    static let panelContentSize = NSSize(width: 384, height: 468)
+    static let panelContentSize = PearchHAPanelView.preferredContentSize(textSize: .standard)
     static let settingsMinContentSize = NSSize(width: 660, height: 560)
     static let unfocusedSurfaceCloseInterval: TimeInterval = 300
 }
@@ -2141,14 +2141,34 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         }
 
         let nextConfiguration = configuration.applying(displayPreferences: preferences)
+        let textSizeChanged = configuration.textSize != preferences.textSize
         let interval = performanceSignposter.beginInterval("PersistDisplayPreferences")
         do {
             configuration = try configStore.save(nextConfiguration)
             configurationPersistenceState = .ready
             applyAppearancePreferences()
+            if textSizeChanged {
+                for index in statusItems.indices {
+                    let presentation = statusItems[index].presentation
+                    apply(presentation, to: &statusItems[index])
+                }
+            }
             if let panelModel {
                 panelModel.applyDisplayPreferences(preferences)
                 scheduleStatusItemRefresh(from: panelModel.snapshot, force: true)
+            }
+            if let panel {
+                let preferred = PearchHAPanelView.preferredContentSize(textSize: preferences.textSize)
+                if let screen = panel.screen?.visibleFrame {
+                    let size = NSSize(width: min(preferred.width, screen.width - 16),
+                                      height: min(preferred.height, screen.height - 16))
+                    panel.setContentSize(size)
+                    panel.setFrameOrigin(NSPoint(
+                        x: min(max(panel.frame.minX, screen.minX + 8), screen.maxX - size.width - 8),
+                        y: min(max(panel.frame.minY, screen.minY + 8), screen.maxY - size.height - 8)))
+                } else {
+                    panel.setContentSize(preferred)
+                }
             }
             performanceSignposter.endInterval("PersistDisplayPreferences", interval)
             return .saved
@@ -2235,9 +2255,9 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
             model.dismissHistoryPopover()
             return true
         }
-        // Size to the fixed SwiftUI content so the borderless window matches the
-        // rounded surface exactly (no chrome inset). The root paints at this size.
-        panel.setContentSize(AppShellLayout.panelContentSize)
+        // Size the borderless window for the selected text size so its bounds
+        // match the rounded content surface without a chrome inset.
+        panel.setContentSize(PearchHAPanelView.preferredContentSize(textSize: model.displayPreferences.textSize))
         return panel
     }
 
@@ -2467,8 +2487,10 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         }
 
         // Reattaching the lazily loaded hosting controller can leave a zero
-        // frame until layout. Anchor the fixed panel size on its first opening.
-        let size = AppShellLayout.panelContentSize
+        // frame until layout. Anchor the preferred panel size on its first opening.
+        let preferred = PearchHAPanelView.preferredContentSize(textSize: configuration.textSize)
+        let size = NSSize(width: min(preferred.width, screenFrame.width - 16),
+                          height: min(preferred.height, screenFrame.height - 16))
         panel.setContentSize(size)
         let buttonFrame = window.convertToScreen(sender.frame)
         let x = min(max(buttonFrame.midX - size.width / 2, screenFrame.minX + 8), screenFrame.maxX - size.width - 8)
@@ -2811,10 +2833,19 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         guard let button else {
             return
         }
+        // The system menu bar cannot grow vertically. Keep both pieces of
+        // information on one readable line when larger app text is selected.
+        if configuration.textSize != .standard {
+            let size = min(18, NSFont.menuBarFont(ofSize: 0).pointSize * configuration.textSize.scale)
+            button.attributedTitle = NSAttributedString(string: "\(label) \(value)", attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: size, weight: .medium)
+            ])
+            return
+        }
         let labelParagraph = NSMutableParagraphStyle()
         labelParagraph.alignment = .center
-        labelParagraph.minimumLineHeight = 8
-        labelParagraph.maximumLineHeight = 8
+        labelParagraph.minimumLineHeight = 11
+        labelParagraph.maximumLineHeight = 11
         let valueParagraph = NSMutableParagraphStyle()
         valueParagraph.alignment = .center
         valueParagraph.minimumLineHeight = 11
@@ -2822,7 +2853,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         let title = NSMutableAttributedString(
             string: label.uppercased() + "\n",
             attributes: [
-                .font: NSFont.systemFont(ofSize: 7.5, weight: .medium),
+                .font: NSFont.systemFont(ofSize: 10, weight: .medium),
                 .kern: 0.4,
                 .paragraphStyle: labelParagraph
             ]
@@ -2847,6 +2878,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         guard let button else {
             return
         }
+        button.font = NSFont.menuBarFont(ofSize: min(18, NSFont.menuBarFont(ofSize: 0).pointSize * configuration.textSize.scale))
         guard stableWidth, !title.isEmpty else {
             button.attributedTitle = NSAttributedString(string: "")
             button.title = title

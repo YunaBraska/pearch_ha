@@ -1,4 +1,102 @@
 import SwiftUI
+import AppKit
+import PearchHACore
+
+private struct PearchHATextSizeKey: EnvironmentKey {
+    static let defaultValue = PearchHATextSize.defaultSize
+}
+
+extension EnvironmentValues {
+    var pearchHATextSize: PearchHATextSize {
+        get { self[PearchHATextSizeKey.self] }
+        set { self[PearchHATextSizeKey.self] = newValue }
+    }
+}
+
+/// macOS does not apply Dynamic Type to SwiftUI text. Resize real fonts so
+/// intrinsic sizes, native controls and accessibility bounds grow together.
+private struct PearchHAScaledFont: ViewModifier {
+    @Environment(\.pearchHATextSize) var textSize
+    let size: CGFloat
+    let weight: Font.Weight
+    let design: Font.Design
+    let monospacedDigits: Bool
+
+    func body(content: Content) -> some View {
+        let font = Font.system(size: max(10, size) * textSize.scale, weight: weight, design: design)
+        content.font(monospacedDigits ? font.monospacedDigit() : font)
+    }
+}
+
+extension View {
+    func pearchHAAdaptiveMenu() -> some View {
+        modifier(PearchHAAdaptiveMenuStyle())
+    }
+
+    func pearchHAAdaptivePicker(_ selectedTitle: String, segmented: Bool = false) -> some View {
+        modifier(PearchHAAdaptivePickerStyle(selectedTitle: selectedTitle, segmented: segmented))
+    }
+
+    func pearchHAFont(size: CGFloat, weight: Font.Weight = .regular,
+                      design: Font.Design = .default, monospacedDigits: Bool = false) -> some View {
+        modifier(PearchHAScaledFont(size: size, weight: weight, design: design, monospacedDigits: monospacedDigits))
+    }
+
+    func pearchHAFont(_ style: Font.TextStyle, weight: Font.Weight? = nil,
+                      monospacedDigits: Bool = false) -> some View {
+        let nativeStyle: NSFont.TextStyle
+        switch style {
+        case .largeTitle: nativeStyle = .largeTitle
+        case .title: nativeStyle = .title1
+        case .title2: nativeStyle = .title2
+        case .title3: nativeStyle = .title3
+        case .headline: nativeStyle = .headline
+        case .subheadline: nativeStyle = .subheadline
+        case .callout: nativeStyle = .callout
+        case .caption: nativeStyle = .caption1
+        case .caption2: nativeStyle = .caption2
+        case .footnote: nativeStyle = .footnote
+        default: nativeStyle = .body
+        }
+        return pearchHAFont(size: NSFont.preferredFont(forTextStyle: nativeStyle).pointSize,
+                            weight: weight ?? (style == .headline ? .bold : .regular),
+                            monospacedDigits: monospacedDigits)
+    }
+}
+
+private struct PearchHAAdaptiveMenuStyle: ViewModifier {
+    @Environment(\.pearchHATextSize) var textSize
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if textSize.scale > 1 {
+            content.menuStyle(.button).controlSize(.large)
+        } else {
+            content.menuStyle(.borderlessButton)
+        }
+    }
+}
+
+private struct PearchHAAdaptivePickerStyle: ViewModifier {
+    @Environment(\.pearchHATextSize) var textSize
+    let selectedTitle: String
+    let segmented: Bool
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if textSize.scale > 1 {
+            Menu {
+                content.pickerStyle(.inline)
+            } label: {
+                Text(selectedTitle).pearchHAFont(.body)
+            }
+            .controlSize(.large)
+            .accessibilityValue(selectedTitle)
+        } else if segmented {
+            content.pickerStyle(.segmented)
+        } else {
+            content
+        }
+    }
+}
 
 /// The PearchHA spacing scale.
 ///

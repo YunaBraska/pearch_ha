@@ -48,6 +48,11 @@ Click an entity’s history preview to see its recent history. Back or Escape re
 
 Settings control the Home Assistant connection, timed refreshes, live updates while the panel is open, labels and per-entity presentation. Each choice remains local to your Mac. In Entities, choose a room and use search, type or capability filters to find a value. Select its row to open details without moving the list. Panel selection and menu-bar visibility remain independent. Clear filters before reordering.
 
+In **Appearance > Text size**, choose 100% to 200%. Larger text also applies to
+history, entity details and control editors. The panel grows and rows wrap while
+keeping the same actions. Menu-bar labels and values share one line at larger
+sizes to fit the macOS menu bar.
+
 ![PearchHA settings]({{ '/assets/help/settings.png' | relative_url }})
 
 To transfer settings from an existing installation, choose **PearchHA > Import Settings…**

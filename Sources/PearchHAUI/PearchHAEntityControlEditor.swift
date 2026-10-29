@@ -31,9 +31,11 @@ struct PearchHAEntityControlsButton<Label: View>: View {
 
 /// One native editor shared by all capability-derived controls.
 public struct PearchHAEntityControlEditor: View {
+    @Environment(\.pearchHATextSize) private var textSize
     @ObservedObject private var model: PearchHAPanelModel
     private let entityID: EntityID
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
     /// Creates an editor that follows live state for the selected entity.
     public init(model: PearchHAPanelModel, entityID: EntityID) {
@@ -42,16 +44,17 @@ public struct PearchHAEntityControlEditor: View {
     }
 
     public var body: some View {
+        let palette = PearchHATheme.Dashboard.palette(colorScheme, increasedContrast: colorSchemeContrast == .increased)
         let entity = model.snapshot.availableRooms.flatMap(\.entities).first { $0.id == entityID }
         let fields = entity.map { PearchHAEntityControlField.controls(for: $0) } ?? []
         VStack(alignment: .leading, spacing: PearchHASpacing.md) {
             HStack(spacing: PearchHASpacing.sm) {
                 if let entity {
                     Image(systemName: model.snapshot.effectiveMenuBarItemConfiguration(for: entity).customIconName ?? pearchHAEntityIconName(for: entity))
-                        .foregroundStyle(PearchHATheme.accent)
+                        .foregroundStyle(palette.accentPrimary)
                         .accessibilityHidden(true)
                 }
-                Text(entity?.name ?? entityID.rawValue).font(PearchHATypography.body().weight(.semibold))
+                Text(entity?.name ?? entityID.rawValue).pearchHAFont(size: 13, weight: .semibold)
                 Spacer(minLength: 0)
                 ZStack {
                     if model.snapshot.controlActionState.isRunning(for: entityID) && !model.hasRequestedControls(for: entityID) {
@@ -64,7 +67,7 @@ public struct PearchHAEntityControlEditor: View {
             }
             if let current = entity?.controlAttributes?["current_temperature"]?.controlNumber {
                 Text("Current temperature: \(current.formatted())\((entity?.unit ?? entity?.controlAttributes?["temperature_unit"]?.controlString).map { " " + $0 } ?? "")")
-                    .font(.subheadline).foregroundStyle(.secondary)
+                    .pearchHAFont(.subheadline).foregroundStyle(.secondary)
             }
             if fields.isEmpty {
                 Text("No controls available").foregroundStyle(.secondary)
@@ -94,15 +97,18 @@ public struct PearchHAEntityControlEditor: View {
             }
         }
         .padding(PearchHASpacing.lg)
-        .frame(width: 340)
+        .frame(width: 340 + 140 * (textSize.scale - 1))
         .fixedSize(horizontal: false, vertical: true)
-        .font(PearchHATypography.body())
-        .tint(PearchHATheme.accent)
-        .background(PearchHATheme.Dashboard.palette(colorScheme).surfaceRoot)
+        .pearchHAFont(size: 13, weight: .regular)
+        .environment(\.dashboardPalette, palette)
+        .tint(palette.accentPrimary)
+        .background(palette.surfaceRoot)
     }
 }
 
 struct PearchHAEntityControlInput: View {
+    @Environment(\.dashboardPalette) private var palette
+    @Environment(\.pearchHATextSize) private var textSize
     let field: PearchHAEntityControlField
     let entityName: String
     let clock: any PearchClock
@@ -133,8 +139,8 @@ struct PearchHAEntityControlInput: View {
             case let .choice(options, current):
                 if isInline {
                     choiceMenu(options: options, current: requestedValue?.controlString ?? current)
-                        .menuStyle(.borderlessButton)
-                        .font(.system(size: 14, weight: .semibold))
+                        .pearchHAAdaptiveMenu()
+                        .pearchHAFont(size: 14, weight: .semibold)
                         .fixedSize()
                 } else {
                     LabeledContent(field.title) {
@@ -147,10 +153,10 @@ struct PearchHAEntityControlInput: View {
                     numberInput(range: range, step: step, unit: unit)
                 } else {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(field.title).font(.subheadline)
+                        Text(field.title).pearchHAFont(.subheadline)
                         numberInput(range: range, step: step, unit: unit)
                         Text("\(range.lowerBound.formatted()) - \(range.upperBound.formatted())\(step.map { ", step " + $0.formatted() } ?? "")")
-                            .font(.caption).foregroundStyle(.secondary)
+                            .pearchHAFont(.caption).foregroundStyle(.secondary)
                     }
                 }
             case let .boolean(current):
@@ -160,10 +166,13 @@ struct PearchHAEntityControlInput: View {
                         .accessibilityLabel("\(field.title) for \(entityName)")
                 } else {
                     LabeledContent(isInline ? "" : field.title) {
-                        Menu(current.map { $0 ? "On" : "Off" } ?? "Choose") {
+                        Menu {
                             Button("On") { _ = submit(.bool(true), false) }
                             Button("Off") { _ = submit(.bool(false), false) }
+                        } label: {
+                            Text(current.map { $0 ? "On" : "Off" } ?? "Choose").pearchHAFont(.body)
                         }
+                        .controlSize(textSize.scale > 1 ? .large : .regular)
                     }
                 }
             case .color:
@@ -179,7 +188,7 @@ struct PearchHAEntityControlInput: View {
                     HStack(spacing: 4) {
                         TextField("Message", text: $text)
                             .textFieldStyle(.roundedBorder)
-                            .frame(width: 120)
+                            .frame(width: 120 * textSize.scale)
                             .onSubmit { sendMessage() }
                             .accessibilityLabel("Message for \(entityName)")
                         Button(action: sendMessage) { Image(systemName: "paperplane") }
@@ -236,7 +245,7 @@ struct PearchHAEntityControlInput: View {
     }
 
     private func choiceMenu(options: [String], current: String?) -> some View {
-        Menu(current ?? "Choose") {
+        Menu {
             ForEach(options, id: \.self) { option in
                 Button {
                     _ = submit(.string(option), false)
@@ -245,7 +254,10 @@ struct PearchHAEntityControlInput: View {
                     else { Text(option) }
                 }
             }
+        } label: {
+            Text(current ?? "Choose").pearchHAFont(.body)
         }
+        .controlSize(textSize.scale > 1 ? .large : .regular)
         .accessibilityLabel("\(field.title) for \(entityName)")
     }
 
@@ -290,7 +302,7 @@ struct PearchHAEntityControlInput: View {
                                 .multilineTextAlignment(.trailing)
                                 .foregroundStyle(isEditingNumber && numberValue.flatMap { field.actionSpec(value: .number($0)) } == nil ? Color.red : Color.primary)
                                 .overlay(alignment: .bottom) {
-                                    Rectangle().fill(PearchHATheme.accent).frame(height: 1).opacity(isEditingNumber ? 1 : 0)
+                                    Rectangle().fill(palette.accentPrimary).frame(height: 1).opacity(isEditingNumber ? 1 : 0)
                                 }
                                 .task {
                                     guard usesSlider else { return }
@@ -302,9 +314,9 @@ struct PearchHAEntityControlInput: View {
                         }
                     }
                 }
-                .font(.system(size: 14).monospacedDigit())
+                .pearchHAFont(size: 14, monospacedDigits: true)
                 .foregroundStyle(.secondary)
-                .frame(width: 62, alignment: .trailing)
+                .frame(width: 62 * textSize.scale, alignment: .trailing)
                 if !usesSlider, let step, range.lowerBound < range.upperBound {
                     Stepper("", onIncrement: { adjust(by: step, range: range) }, onDecrement: { adjust(by: -step, range: range) })
                         .labelsHidden()

@@ -37,6 +37,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
     public let menuBarAppearance: PearchHAMenuBarAppearance
     public let stableMenuBarWidth: Bool
     public let themeMode: PearchHAThemeMode
+    public let textSize: PearchHATextSize
     public let menuBarRefreshInterval: PearchHAMenuBarRefreshInterval
     public let dataSyncInterval: PearchHAMenuBarRefreshInterval
     public let historyDetailRefreshInterval: PearchHAMenuBarRefreshInterval
@@ -62,6 +63,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
         menuBarAppearance: PearchHAMenuBarAppearance = .defaultAppearance,
         stableMenuBarWidth: Bool = false,
         themeMode: PearchHAThemeMode = .defaultMode,
+        textSize: PearchHATextSize = .defaultSize,
         menuBarRefreshInterval: PearchHAMenuBarRefreshInterval = .defaultInterval,
         dataSyncInterval: PearchHAMenuBarRefreshInterval = .fiveSeconds,
         historyDetailRefreshInterval: PearchHAMenuBarRefreshInterval = .thirtySeconds,
@@ -86,6 +88,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
         self.menuBarAppearance = menuBarAppearance
         self.stableMenuBarWidth = stableMenuBarWidth
         self.themeMode = themeMode
+        self.textSize = textSize
         self.menuBarRefreshInterval = menuBarRefreshInterval
         self.dataSyncInterval = dataSyncInterval
         self.historyDetailRefreshInterval = historyDetailRefreshInterval
@@ -138,9 +141,11 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
             menuBarAppearance: menuBarAppearance,
             stableMenuBarWidth: stableMenuBarWidth,
             themeMode: themeMode,
+            textSize: textSize,
             menuBarRefreshInterval: menuBarRefreshInterval,
             dataSyncInterval: dataSyncInterval,
             historyDetailRefreshInterval: historyDetailRefreshInterval,
+            liveUpdatesEnabled: liveUpdatesEnabled,
             accentColor: accentColor,
             dashboardRowDensity: dashboardRowDensity,
             dashboardDefaultHistoryRange: dashboardDefaultHistoryRange,
@@ -184,6 +189,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
         case menuBarAppearance
         case stableMenuBarWidth
         case themeMode
+        case textSize
         case menuBarRefreshInterval
         case dataSyncInterval
         case historyDetailRefreshInterval
@@ -219,6 +225,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
         menuBarAppearance = try container.decodeIfPresent(PearchHAMenuBarAppearance.self, forKey: .menuBarAppearance) ?? .defaultAppearance
         stableMenuBarWidth = try container.decodeIfPresent(Bool.self, forKey: .stableMenuBarWidth) ?? false
         themeMode = try container.decodeIfPresent(PearchHAThemeMode.self, forKey: .themeMode) ?? .defaultMode
+        textSize = try container.decodeIfPresent(PearchHATextSize.self, forKey: .textSize) ?? .defaultSize
         menuBarRefreshInterval = try container.decodeIfPresent(PearchHAMenuBarRefreshInterval.self, forKey: .menuBarRefreshInterval) ?? .defaultInterval
         dataSyncInterval = try container.decodeIfPresent(PearchHAMenuBarRefreshInterval.self, forKey: .dataSyncInterval) ?? .fiveSeconds
         historyDetailRefreshInterval = try container.decodeIfPresent(PearchHAMenuBarRefreshInterval.self, forKey: .historyDetailRefreshInterval) ?? .thirtySeconds
@@ -244,6 +251,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
             menuBarAppearance: menuBarAppearance,
             stableMenuBarWidth: stableMenuBarWidth,
             themeMode: themeMode,
+            textSize: textSize,
             menuBarRefreshInterval: menuBarRefreshInterval,
             dataSyncInterval: dataSyncInterval,
             historyDetailRefreshInterval: historyDetailRefreshInterval,
@@ -275,6 +283,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
             menuBarAppearance: displayPreferences.menuBarAppearance,
             stableMenuBarWidth: displayPreferences.stableMenuBarWidth,
             themeMode: displayPreferences.themeMode,
+            textSize: displayPreferences.textSize,
             menuBarRefreshInterval: displayPreferences.menuBarRefreshInterval,
             dataSyncInterval: displayPreferences.dataSyncInterval,
             historyDetailRefreshInterval: displayPreferences.historyDetailRefreshInterval,

@@ -160,7 +160,6 @@ public struct PearchHASettingsView: View {
             snapshot: snapshot,
             preferences: accessibilityPreferences
         )
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         return HStack(spacing: 0) {
             sidebarRail
             Rectangle()
@@ -172,10 +171,11 @@ public struct PearchHASettingsView: View {
                 .background(palette.surfaceRoot.ignoresSafeArea())
         }
         .environment(\.dashboardPalette, palette)
+        .pearchHAFont(.body)
+        .environment(\.pearchHATextSize, displayPreferences.textSize)
         .frame(minWidth: 660, minHeight: 560)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .tint(PearchHATheme.accent)
-        .contrast(accessibility.contrastPolicy == .increased ? 1.12 : 1)
+        .tint(palette.accentPrimary)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibility.label)
         .transaction { transaction in
@@ -226,7 +226,7 @@ public struct PearchHASettingsView: View {
                         roomFilterButton(localRoom.name, id: localRoom.id.rawValue)
                         Divider().padding(.vertical, 6)
                     }
-                    Text("Rooms").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 8)
+                    Text("Rooms").pearchHAFont(.caption).foregroundStyle(.secondary).padding(.horizontal, 8)
                     roomFilterButton("All rooms", id: "")
                     ForEach(snapshot.availableRooms.filter { $0.id != LocalMacSensor.roomID }, id: \.id) { room in
                         roomFilterButton(room.name, id: room.id.rawValue)
@@ -237,7 +237,7 @@ public struct PearchHASettingsView: View {
             .padding(.vertical, PearchHASpacing.md)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(width: 198)
+        .frame(width: 198 + 42 * (displayPreferences.textSize.scale - 1))
         .frame(maxHeight: .infinity)
         .background(railBackground.ignoresSafeArea())
         .accessibilityLabel("Settings sections")
@@ -269,7 +269,6 @@ public struct PearchHASettingsView: View {
     /// `Button`. The selected row fills with the accent and uses accent text;
     /// unselected rows use secondary text.
     private func sidebarRow(_ tab: Tab) -> some View {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         let isSelected = selectedTab == tab
         return Button {
             selectedTab = tab
@@ -280,7 +279,7 @@ public struct PearchHASettingsView: View {
                     .frame(width: 20, alignment: .center)
                     .foregroundStyle(isSelected ? palette.accentPrimary : palette.textSecondary)
                 Text(tab.title)
-                    .font(PearchHATypography.body().weight(isSelected ? .semibold : .regular))
+                    .pearchHAFont(size: 13, weight: isSelected ? .semibold : .regular)
                     .lineLimit(1)
                     .foregroundStyle(isSelected ? palette.textPrimary : palette.textSecondary)
                 Spacer(minLength: 0)
@@ -308,7 +307,7 @@ public struct PearchHASettingsView: View {
     /// The rail's surface fill, resolved against the current appearance so it
     /// reads as a distinct rail that matches the dashboard panel in light/dark.
     private var railBackground: Color {
-        PearchHATheme.Dashboard.palette(colorScheme).surfaceRoot
+        palette.surfaceRoot
     }
 
     /// Routes a section to its detail content.
@@ -323,6 +322,10 @@ public struct PearchHASettingsView: View {
         case .privacy: privacyTab
         case .about: aboutTab
         }
+    }
+
+    private var palette: PearchHATheme.DashboardPalette {
+        PearchHATheme.Dashboard.palette(colorScheme, increasedContrast: accessibilityPreferences.contrastPolicy == .increased)
     }
 
     private var accessibilityPreferences: PearchHAAccessibilityPreferences {
@@ -347,7 +350,7 @@ public struct PearchHASettingsView: View {
                         .textFieldStyle(.roundedBorder)
                     settingsControlRow("Last update") {
                         Text(snapshot.lastUpdateDescription)
-                            .font(PearchHATypography.bodyValue())
+                            .pearchHAFont(size: 13, weight: .regular, monospacedDigits: true)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -364,11 +367,10 @@ public struct PearchHASettingsView: View {
         systemImage: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: PearchHASpacing.md + 2) {
                 Text(title)
-                    .font(.system(size: 19, weight: .semibold))
+                    .pearchHAFont(size: 19, weight: .semibold)
                     .foregroundStyle(palette.textPrimary)
                     .accessibilityAddTraits(.isHeader)
                 content()
@@ -379,7 +381,7 @@ public struct PearchHASettingsView: View {
             .padding(.horizontal, PearchHASpacing.lg + 2)
         }
         .toggleStyle(PearchHASwitchToggleStyle())
-        .tint(PearchHATheme.accent)
+        .tint(palette.accentPrimary)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
@@ -408,10 +410,10 @@ public struct PearchHASettingsView: View {
                 settingsSection(title: "Startup", systemImage: "power") {
                     VStack(alignment: .leading, spacing: PearchHASpacing.sm - 2) {
                         Toggle("Launch at login", isOn: launchAtLoginBinding)
-                            .fixedSize()
+                            .fixedSize(horizontal: false, vertical: true)
                             .accessibilityLabel("Launch PearchHA at login")
                         Text("Start PearchHA automatically when you sign in to this Mac.")
-                            .font(PearchHATypography.caption().weight(.regular))
+                            .pearchHAFont(size: 11, weight: .regular)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         if launchAtLoginPermissionDenied {
@@ -430,7 +432,7 @@ public struct PearchHASettingsView: View {
                         settingsSectionDivider
                         shortcutRow(label: "Quit PearchHA", keys: "⌘ Q")
                         Text("These shortcuts are built in and cannot be changed.")
-                            .font(.caption)
+                            .pearchHAFont(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -443,13 +445,12 @@ public struct PearchHASettingsView: View {
     /// shown as a calm keycap so it reads as a fact rather than an editable
     /// control (no editable shortcut binding exists today).
     private func shortcutRow(label: String, keys: String) -> some View {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         return HStack(spacing: PearchHASpacing.sm) {
             Text(label)
                 .foregroundStyle(palette.textPrimary)
             Spacer(minLength: 8)
             Text(keys)
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .pearchHAFont(size: 12, weight: .semibold, design: .rounded)
                 .foregroundStyle(palette.textSecondary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
@@ -474,16 +475,21 @@ public struct PearchHASettingsView: View {
     private var appearanceTab: some View {
         settingsPage(title: "Appearance", systemImage: Tab.appearance.systemImage) {
             settingsCard {
-                settingsSection(title: "Preview", systemImage: "eye") {
-                    VStack(alignment: .leading, spacing: PearchHASpacing.md) {
-                        PearchHAAppearancePreview(preferences: displayPreferences)
-                        appearanceDashboardSample
-                    }
-                }
-            }
-            settingsCard {
                 settingsSection(title: "Theme & accent", systemImage: "paintbrush") {
                     VStack(alignment: .leading, spacing: 10) {
+                        settingsControlRow("Text size") {
+                            Picker("Text size", selection: Binding(
+                                get: { displayPreferences.textSize },
+                                set: { updateDisplayPreferences(displayPreferences.with(textSize: $0)) }
+                            )) {
+                                ForEach(PearchHATextSize.allCases, id: \.rawValue) { size in
+                                    Text(size.displayName).tag(size)
+                                }
+                            }
+                            .pearchHAAdaptivePicker(displayPreferences.textSize.displayName)
+                            .labelsHidden()
+                            .accessibilityLabel("Text size")
+                        }
                         settingsControlRow("Theme") {
                             themeModePicker
                         }
@@ -491,6 +497,14 @@ public struct PearchHASettingsView: View {
                             accentMenuPicker
                         }
                         accentSwatchPreview
+                    }
+                }
+            }
+            settingsCard {
+                settingsSection(title: "Preview", systemImage: "eye") {
+                    VStack(alignment: .leading, spacing: PearchHASpacing.md) {
+                        PearchHAAppearancePreview(preferences: displayPreferences)
+                        appearanceDashboardSample
                     }
                 }
             }
@@ -503,20 +517,20 @@ public struct PearchHASettingsView: View {
                                     Text(appearance.displayName).tag(appearance)
                                 }
                             }
-                            .pickerStyle(.segmented)
+                            .pearchHAAdaptivePicker(displayPreferences.menuBarAppearance.displayName, segmented: true)
                             .labelsHidden()
-                            .fixedSize()
+                            .fixedSize(horizontal: false, vertical: true)
                             .accessibilityLabel("Global menu bar style")
                         }
                         Text("The default look for menu-bar values. Individual values can override this in Entities.")
-                            .font(.caption)
+                            .pearchHAFont(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         Toggle("Keep a stable width", isOn: stableMenuBarWidthBinding)
-                            .fixedSize()
+                            .fixedSize(horizontal: false, vertical: true)
                             .accessibilityLabel("Keep a stable menu bar width")
                         Text("Uses monospaced digits so the value does not shift as it changes.")
-                            .font(.caption)
+                            .pearchHAFont(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -531,9 +545,9 @@ public struct PearchHASettingsView: View {
                                     Text(density.displayName).tag(density)
                                 }
                             }
-                            .pickerStyle(.segmented)
+                            .pearchHAAdaptivePicker(displayPreferences.dashboardRowDensity.displayName, segmented: true)
                             .labelsHidden()
-                            .fixedSize()
+                            .fixedSize(horizontal: false, vertical: true)
                             .accessibilityLabel("Dashboard row density")
                         }
                         settingsControlRow("Default history range") {
@@ -542,13 +556,13 @@ public struct PearchHASettingsView: View {
                                     Text(range.displayName).tag(range)
                                 }
                             }
-                            .pickerStyle(.segmented)
+                            .pearchHAAdaptivePicker(displayPreferences.defaultHistoryRange.displayName, segmented: true)
                             .labelsHidden()
-                            .fixedSize()
+                            .fixedSize(horizontal: false, vertical: true)
                             .accessibilityLabel("Default history range")
                         }
                         Text("Used when opening history unless a value has its own range. Inline previews always show the day.")
-                            .font(.caption)
+                            .pearchHAFont(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         settingsControlRow("Rows per room") {
@@ -559,15 +573,15 @@ public struct PearchHASettingsView: View {
                                     updateDisplayPreferences(displayPreferences.with(dashboardRoomRowLimit: limit))
                                 }
                             )
-                            .frame(width: 56)
+                            .frame(width: 56 * displayPreferences.textSize.scale)
                             .accessibilityLabel("Rows shown per room before the more affordance")
                         }
                         Text("Rows shown per room before \u{201C}x more\u{201D}. A negative number shows every row.")
-                            .font(.caption)
+                            .pearchHAFont(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         Toggle("Show updated timestamp in the footer", isOn: footerTimestampBinding)
-                            .fixedSize()
+                            .fixedSize(horizontal: false, vertical: true)
                             .accessibilityLabel("Show the dashboard footer updated timestamp")
                     }
                 }
@@ -576,7 +590,7 @@ public struct PearchHASettingsView: View {
                 settingsSection(title: "Reset", systemImage: "arrow.counterclockwise") {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Restore the display preferences (menu-bar appearance, theme, and accent) to their defaults. Your connection and entities are not changed.")
-                            .font(.caption)
+                            .pearchHAFont(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         Button {
@@ -600,11 +614,10 @@ public struct PearchHASettingsView: View {
     /// both a menu-bar item (from ``PearchHAAppearancePreview``) and a real
     /// dashboard row reflecting the live theme/accent.
     private var appearanceDashboardSample: some View {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         let accent = color(for: displayPreferences.accentColor)
         return VStack(alignment: .leading, spacing: 4) {
             Text("Dashboard row")
-                .font(PearchHATypography.caption())
+                .pearchHAFont(size: 11, weight: .semibold)
                 .foregroundStyle(palette.textTertiary)
             TelemetryRow(
                 icon: "thermometer.medium",
@@ -617,7 +630,7 @@ public struct PearchHASettingsView: View {
                 },
                 value: {
                     Text("21.4°")
-                        .font(PearchHATypography.bodyValue())
+                        .pearchHAFont(size: 13, weight: .regular, monospacedDigits: true)
                         .foregroundStyle(palette.textPrimary)
                 },
                 control: { EmptyView() }
@@ -643,9 +656,9 @@ public struct PearchHASettingsView: View {
                 Text(mode.displayName).tag(mode)
             }
         }
-        .pickerStyle(.segmented)
+        .pearchHAAdaptivePicker(displayPreferences.themeMode.displayName, segmented: true)
         .labelsHidden()
-        .fixedSize()
+        .fixedSize(horizontal: false, vertical: true)
         .accessibilityLabel("Theme")
     }
 
@@ -655,8 +668,9 @@ public struct PearchHASettingsView: View {
                 Text(swatch.name).tag(swatch.id)
             }
         }
+        .pearchHAAdaptivePicker(PearchHAAccentColor.swatches.first { $0.color == displayPreferences.accentColor }?.name ?? "Custom")
         .labelsHidden()
-        .frame(width: 160)
+        .frame(width: 160 * displayPreferences.textSize.scale)
         .pearchHACompactControl()
         .accessibilityLabel("Accent color")
     }
@@ -763,7 +777,7 @@ public struct PearchHASettingsView: View {
                 )
             } else {
                 Text(status.detail)
-                    .font(.caption)
+                    .pearchHAFont(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -781,13 +795,13 @@ public struct PearchHASettingsView: View {
                 StatusPill(
                     "\(rpm) req/min",
                     systemImage: "arrow.up.arrow.down",
-                    color: PearchHATheme.accent,
+                    color: palette.accentPrimary,
                     accessibilityLabel: "\(rpm) requests per minute"
                 )
                 Spacer(minLength: 0)
             }
             Text("Requests sent to Home Assistant in the last minute: connection checks, history fetches, live-update connects, and actions.")
-                .font(.caption)
+                .pearchHAFont(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -815,7 +829,7 @@ public struct PearchHASettingsView: View {
                 Spacer(minLength: 0)
             }
             Text("Background refresh backs off automatically after repeated failures and resumes once the connection recovers.")
-                .font(.caption)
+                .pearchHAFont(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -853,7 +867,7 @@ public struct PearchHASettingsView: View {
                 }
                 if hidden > 0 {
                     Text("and \(hidden) more \(hidden == 1 ? "event" : "events")")
-                        .font(.caption)
+                        .pearchHAFont(.caption)
                         .foregroundStyle(.secondary)
                 }
                 HStack {
@@ -886,21 +900,21 @@ public struct PearchHASettingsView: View {
         let countSuffix = event.count > 1 ? " ×\(event.count)" : ""
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: event.kind.systemImage)
-                .font(.caption)
+                .pearchHAFont(.caption)
                 .foregroundStyle(tint)
                 .frame(width: 18)
                 .accessibilityHidden(true)
             Text(event.message)
-                .font(.callout)
+                .pearchHAFont(.callout)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
             if event.count > 1 {
                 Text("×\(event.count)")
-                    .font(PearchHATypography.caption().weight(.semibold))
+                    .pearchHAFont(size: 11, weight: .semibold)
                     .foregroundStyle(.secondary)
             }
             Text(model.relativeAgeDescription(for: event))
-                .font(.caption)
+                .pearchHAFont(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
@@ -943,15 +957,15 @@ public struct PearchHASettingsView: View {
                     ForEach(Array(health.visibleGroups.enumerated()), id: \.offset) { index, group in
                         HStack(spacing: 8) {
                             Image(systemName: group.systemImage)
-                                .font(.caption)
+                                .pearchHAFont(.caption)
                                 .foregroundStyle(PearchHATheme.warn)
                                 .frame(width: 18)
                                 .accessibilityHidden(true)
                             Text(group.label)
-                                .font(.callout)
+                                .pearchHAFont(.callout)
                             Spacer(minLength: 8)
                             Text("\(group.count)")
-                                .font(PearchHATypography.bodyValue())
+                                .pearchHAFont(size: 13, weight: .regular, monospacedDigits: true)
                                 .foregroundStyle(.secondary)
                         }
                         .padding(.vertical, 5)
@@ -964,7 +978,7 @@ public struct PearchHASettingsView: View {
                 }
                 if health.hiddenCount > 0 {
                     Text("and \(health.hiddenCount) more")
-                        .font(.caption)
+                        .pearchHAFont(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -979,7 +993,7 @@ public struct PearchHASettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             settingsControlRow("Last updated") {
                 Text(snapshot.lastUpdateDescription)
-                    .font(PearchHATypography.bodyValue())
+                    .pearchHAFont(size: 13, weight: .regular, monospacedDigits: true)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -1033,7 +1047,7 @@ public struct PearchHASettingsView: View {
     ) -> some View {
         settingsControlRow(title) {
             Text(value)
-                .font(PearchHATypography.bodyValue())
+                .pearchHAFont(size: 13, weight: .regular, monospacedDigits: true)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
@@ -1047,7 +1061,7 @@ public struct PearchHASettingsView: View {
             Spacer(minLength: 8)
             Text(Self.refreshIntervalOptions.last?.displayName ?? "300s")
         }
-        .font(.caption)
+        .pearchHAFont(.caption)
         .foregroundStyle(.secondary)
     }
 
@@ -1116,24 +1130,24 @@ public struct PearchHASettingsView: View {
             settingsCard {
                 settingsSection(title: "What PearchHA reads", systemImage: "doc.text.magnifyingglass") {
                     Text("PearchHA connects to the Home Assistant addresses you configure. It reads your Home Assistant address and the access token (or browser sign-in) you provide, plus the entity states needed to show your values.")
-                        .font(.callout)
+                        .pearchHAFont(.callout)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 settingsSectionDivider
                 settingsSection(title: "Where credentials live", systemImage: "key") {
                     Text("Your access and refresh tokens are stored in the macOS Keychain on this Mac. They are never written to the configuration file and never shown in this window.")
-                        .font(.callout)
+                        .pearchHAFont(.callout)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 settingsSectionDivider
                 settingsSection(title: "Retention and removal", systemImage: "trash") {
                     Text("Entity history is cached in memory while the app runs. Your connection and display preferences remain on this Mac until you remove them. Signing out removes the saved sign-in session. You can revoke a token in your Home Assistant profile at any time. Protected custom-action values remain in Keychain until the corresponding action is removed.")
-                        .font(.callout).fixedSize(horizontal: false, vertical: true)
+                        .pearchHAFont(.callout).fixedSize(horizontal: false, vertical: true)
                 }
                 settingsSectionDivider
                 settingsSection(title: "Network and updates", systemImage: "hand.raised") {
                     Text("PearchHA includes no analytics or advertising. Home Assistant credentials and entity data are not sent to the developer. Direct-download builds contact GitHub and the update feed to check for app updates, which exposes ordinary connection information such as your IP address and app version. App Store builds use Apple’s update system. Links open in your browser only when you choose them.")
-                        .font(.callout)
+                        .pearchHAFont(.callout)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -1301,9 +1315,9 @@ public struct PearchHASettingsView: View {
                 aboutAppIcon
                 VStack(alignment: .leading, spacing: 3) {
                     Text("PearchHA")
-                        .font(.title2.weight(.semibold))
+                        .pearchHAFont(.title2, weight: .semibold)
                     Text("Version \(Self.applicationVersion.displayText)")
-                        .font(.callout)
+                        .pearchHAFont(.callout)
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
@@ -1311,7 +1325,7 @@ public struct PearchHASettingsView: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("PearchHA, version \(Self.applicationVersion.displayText)")
             Text("A calm Home Assistant menu-bar companion for macOS.")
-                .font(.callout)
+                .pearchHAFont(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1331,7 +1345,7 @@ public struct PearchHASettingsView: View {
         } else {
             Image(systemName: "house.circle.fill")
                 .font(.system(size: 64))
-                .foregroundStyle(PearchHATheme.accent)
+                .foregroundStyle(palette.accentPrimary)
                 .accessibilityHidden(true)
         }
     }
@@ -1366,7 +1380,7 @@ public struct PearchHASettingsView: View {
                         VStack(alignment: .trailing, spacing: 6) {
                             aboutUpdateAction
                             Text(aboutUpdateSummary)
-                                .font(.footnote)
+                                .pearchHAFont(.footnote)
                                 .foregroundStyle(aboutUpdateSummaryColor)
                                 .multilineTextAlignment(.trailing)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -1385,7 +1399,7 @@ public struct PearchHASettingsView: View {
             settingsSection(title: "Support", systemImage: "heart") {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("If it earned a place on your menu bar, a star on the repo helps. If you want to fuel a coffee:")
-                        .font(.callout)
+                        .pearchHAFont(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: 8) {
@@ -1437,7 +1451,7 @@ public struct PearchHASettingsView: View {
                 ProgressView()
                     .controlSize(.small)
                 Text("Checking...")
-                    .font(.callout.weight(.medium))
+                    .pearchHAFont(.callout, weight: .medium)
             }
             .foregroundStyle(.secondary)
             .accessibilityElement(children: .combine)
@@ -1506,12 +1520,12 @@ public struct PearchHASettingsView: View {
 
     private var entitiesTab: some View {
         GeometryReader { geometry in
-            let showsSideInspector = geometry.size.width >= 740
+            let showsSideInspector = geometry.size.width >= 740 * displayPreferences.textSize.scale
             HStack(spacing: 0) {
                 ZStack(alignment: .topLeading) {
                     ScrollViewReader { scrollProxy in
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Entities").font(.title2.weight(.semibold))
+                            Text("Entities").pearchHAFont(.title2, weight: .semibold)
                             entityFilters
                             ScrollView {
                                 settingsContent
@@ -1529,7 +1543,7 @@ public struct PearchHASettingsView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if showsSideInspector {
                     Divider()
-                    entityInspector.frame(width: 360)
+                    entityInspector.frame(width: 360 * displayPreferences.textSize.scale)
                 }
             }
         }
@@ -1542,19 +1556,22 @@ public struct PearchHASettingsView: View {
                 TextField("Search", text: selectionSearchBinding).textFieldStyle(.plain)
                     .accessibilityLabel("Search entities by name, ID or room")
             }
-            HStack {
+            (displayPreferences.textSize.scale >= 1.5 ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                                                     : AnyLayout(HStackLayout())) {
                 Picker("Type", selection: $entityDomain) {
                     Text("All types").tag("")
                     ForEach(Array(Set(snapshot.availableRooms.flatMap(\.entities).map { $0.id.domain })).sorted(), id: \.self) {
                         Text($0).tag($0)
                     }
                 }
+                .pearchHAAdaptivePicker(entityDomain.isEmpty ? "All types" : entityDomain)
                 .labelsHidden().accessibilityLabel("Entity type")
                 Picker("Show", selection: $entityScope) {
                     Text("All entities").tag("all")
                     Text("In panel").tag("selected")
                     Text("Controllable").tag("controllable")
                 }
+                .pearchHAAdaptivePicker(entityScope == "selected" ? "In panel" : entityScope == "controllable" ? "Controllable" : "All entities")
                 .labelsHidden().accessibilityLabel("Entity filter")
                 Spacer(minLength: 0)
             }
@@ -1569,11 +1586,11 @@ public struct PearchHASettingsView: View {
                let entity = room.entities.first(where: { $0.id == id }) {
                 HStack(spacing: PearchHASpacing.sm) {
                     Image(systemName: snapshot.effectiveMenuBarItemConfiguration(for: entity).customIconName ?? pearchHAEntityIconName(for: entity))
-                        .foregroundStyle(PearchHATheme.accent)
+                        .foregroundStyle(palette.accentPrimary)
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: PearchHASpacing.xs) {
-                        Text(entity.name).font(.headline).textSelection(.enabled)
-                        Text(room.name).font(PearchHATypography.caption().weight(.regular)).foregroundStyle(.secondary)
+                        Text(entity.name).pearchHAFont(.headline).textSelection(.enabled)
+                        Text(room.name).pearchHAFont(size: 11, weight: .regular).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 8)
                     Button { inspectedEntityID = nil } label: {
@@ -1588,7 +1605,7 @@ public struct PearchHASettingsView: View {
                 }
             } else {
                 Spacer()
-                Text("Select an entity").font(.headline)
+                Text("Select an entity").pearchHAFont(.headline)
                 Text("Choose a value to edit its display, menu bar, thresholds and actions.")
                     .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Spacer()
@@ -1596,7 +1613,7 @@ public struct PearchHASettingsView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(PearchHATheme.Dashboard.palette(colorScheme).surfaceRoot)
+        .background(palette.surfaceRoot)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Entity details")
     }
@@ -1627,35 +1644,35 @@ public struct PearchHASettingsView: View {
             .disabled(model.snapshot.availableRooms.isEmpty)
             if let selectionPersistenceFailure = model.snapshot.selectionPersistenceFailureDescription {
                 Text(selectionPersistenceFailure)
-                    .font(.callout)
+                    .pearchHAFont(.callout)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("Selection settings error: \(selectionPersistenceFailure)")
             }
             if let displayPersistenceFailure = model.snapshot.displayPersistenceFailureDescription {
                 Text(displayPersistenceFailure)
-                    .font(.callout)
+                    .pearchHAFont(.callout)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("Display settings error: \(displayPersistenceFailure)")
             }
             if let serviceMetadataFailure = model.snapshot.serviceMetadataFailureDescription {
                 Text(serviceMetadataFailure)
-                    .font(.callout)
+                    .pearchHAFont(.callout)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("Service metadata error: \(serviceMetadataFailure)")
             }
             if let customActionPersistenceFailure = viewState.customActionPersistenceFailureDescription {
                 Text(customActionPersistenceFailure)
-                    .font(.callout)
+                    .pearchHAFont(.callout)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("Action settings error: \(customActionPersistenceFailure)")
             }
             if let shellPersistenceFailure = viewState.shellPersistenceFailureDescription {
                 Text(shellPersistenceFailure)
-                    .font(.callout)
+                    .pearchHAFont(.callout)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("Storage error: \(shellPersistenceFailure)")
@@ -1720,12 +1737,12 @@ public struct PearchHASettingsView: View {
     private var orphanedCustomActionControls: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text("Unused buttons")
-                .font(.caption)
+                .pearchHAFont(.caption)
                 .foregroundStyle(.secondary)
             ForEach(model.orphanedCustomActions, id: \.id.rawValue) { action in
                 HStack(spacing: 6) {
                     Text("\(action.title) - \(action.entityID.rawValue)")
-                        .font(.caption)
+                        .pearchHAFont(.caption)
                         .lineLimit(1)
                     Spacer()
                     Button {
@@ -1848,7 +1865,6 @@ public struct PearchHASettingsView: View {
         rowIndex: Int,
         selectable: SelectableEntity
     ) -> some View {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         let isFirst = rowIndex == room.entities.startIndex
         let isLast = rowIndex == room.entities.index(before: room.entities.endIndex)
         return selectionDragDrop(
@@ -1899,7 +1915,6 @@ public struct PearchHASettingsView: View {
         canMoveUp: Bool,
         canMoveDown: Bool
     ) -> some View {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         let count = room.entities.count
         let countLabel = count == 1 ? "1 entity" : "\(count) entities"
         return HStack(spacing: PearchHASpacing.xs + 1) {
@@ -1908,18 +1923,18 @@ public struct PearchHASettingsView: View {
             } label: {
                 HStack(spacing: PearchHASpacing.xs + 1) {
                     Image(systemName: "chevron.right")
-                        .font(PearchHATypography.caption())
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(palette.textSecondary)
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                         .accessibilityHidden(true)
                     Text(room.name)
-                        .font(PearchHATypography.caption())
+                        .pearchHAFont(size: 11, weight: .semibold)
                         .foregroundStyle(.secondary)
                         .textCase(.uppercase)
                         .tracking(0.5)
                         .lineLimit(1)
                     Text("· \(count)")
-                        .font(PearchHATypography.caption())
+                        .pearchHAFont(size: 11, weight: .semibold)
                         .foregroundStyle(palette.textTertiary)
                         .accessibilityHidden(true)
                     Spacer(minLength: 0)
@@ -1959,7 +1974,6 @@ public struct PearchHASettingsView: View {
         canMoveUp: Bool,
         canMoveDown: Bool
     ) -> some View {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         let entity = selectable.entity
         let rowCaption = PearchHAEntityMetadataPresentation.rowCaption(for: entity)
         let hasAverageLinks = viewState.hasAverageLinks(for: entity.id)
@@ -1980,7 +1994,7 @@ public struct PearchHASettingsView: View {
                         .foregroundStyle(palette.textPrimary)
                         .lineLimit(1)
                     Text(rowCaption)
-                        .font(PearchHATypography.caption().weight(.regular))
+                        .pearchHAFont(size: 11, weight: .regular)
                         .foregroundStyle(palette.textTertiary)
                         .lineLimit(1)
                 }
@@ -2023,7 +2037,7 @@ public struct PearchHASettingsView: View {
                 .help(isExpanded ? "Hide settings" : "Show settings")
                 .accessibilityLabel(isExpanded ? "Hide \(entity.name) settings" : "Show \(entity.name) settings")
             }
-            .font(.body)
+            .pearchHAFont(.body)
             .contentShape(Rectangle())
             .onTapGesture {
                 toggleEntityInspector(entity.id)
@@ -2043,7 +2057,7 @@ public struct PearchHASettingsView: View {
     private var menuBarVisiblePill: some View {
         collapsedEntityStatusPill(
             systemImage: "menubar.rectangle",
-            color: PearchHATheme.Dashboard.palette(colorScheme).accentPrimary,
+            color: palette.accentPrimary,
             accessibilityLabel: "Shown in menu bar"
         )
     }
@@ -2052,7 +2066,7 @@ public struct PearchHASettingsView: View {
     private var averageLinkedPill: some View {
         collapsedEntityStatusPill(
             systemImage: "link",
-            color: PearchHATheme.Dashboard.palette(colorScheme).warning,
+            color: palette.warning,
             accessibilityLabel: "Linked values"
         )
     }
@@ -2141,9 +2155,9 @@ public struct PearchHASettingsView: View {
                 }
             }
         }
-        .font(PearchHATypography.body())
+        .pearchHAFont(size: 13, weight: .regular)
         .controlSize(.small)
-        .tint(PearchHATheme.accent)
+        .tint(palette.accentPrimary)
     }
 
     private func entityIdentitySection(
@@ -2166,7 +2180,7 @@ public struct PearchHASettingsView: View {
                                     Image(systemName: "arrow.up.right.square")
                                         .font(.system(size: 10, weight: .semibold))
                                 }
-                                .foregroundStyle(PearchHATheme.accent)
+                                .foregroundStyle(palette.accentPrimary)
                             }
                             .accessibilityLabel(accessibilityLabel(for: field))
                             .fixedSize(horizontal: false, vertical: true)
@@ -2183,11 +2197,8 @@ public struct PearchHASettingsView: View {
     @ViewBuilder
     private func metadataFieldValueText(_ field: PearchHAEntityMetadataPresentation.Field) -> some View {
         Text(field.value)
-            .font(
-                field.usesMonospacedFont
-                    ? .system(size: 12, weight: .regular, design: .monospaced)
-                    : PearchHATypography.body()
-            )
+            .pearchHAFont(size: field.usesMonospacedFont ? 12 : 13,
+                          design: field.usesMonospacedFont ? .monospaced : .default)
             .foregroundStyle(.primary)
             .multilineTextAlignment(.leading)
             .textSelection(.enabled)
@@ -2258,8 +2269,9 @@ public struct PearchHASettingsView: View {
                             Text(style.displayName).tag(style)
                         }
                     }
+                    .pearchHAAdaptivePicker(configuration.style.displayName)
                     .labelsHidden()
-                    .frame(width: 110)
+                    .frame(width: 110 * displayPreferences.textSize.scale)
                     .accessibilityLabel("\(entity.name) display style")
                 }
             }
@@ -2271,8 +2283,9 @@ public struct PearchHASettingsView: View {
                             Text(mode.displayName).tag(mode)
                         }
                     }
+                    .pearchHAAdaptivePicker(configuration.coverControlMode.displayName)
                     .labelsHidden()
-                    .frame(width: 110)
+                    .frame(width: 110 * displayPreferences.textSize.scale)
                     .accessibilityLabel("\(entity.name) cover controls")
                 }
             }
@@ -2291,8 +2304,9 @@ public struct PearchHASettingsView: View {
                             Text(range.displayName).tag(HistoryRange?.some(range))
                         }
                     }
+                    .pearchHAAdaptivePicker(configuration.defaultHistoryRange?.displayName ?? "Auto")
                     .labelsHidden()
-                    .frame(width: 96)
+                    .frame(width: 96 * displayPreferences.textSize.scale)
                     .accessibilityLabel("\(entity.name) chart range")
                 }
             }
@@ -2304,9 +2318,9 @@ public struct PearchHASettingsView: View {
                             Text("\(digits)").tag(digits)
                         }
                     }
-                    .pickerStyle(.segmented)
+                    .pearchHAAdaptivePicker(String(menuBarDecimalsBinding(for: entity.id).wrappedValue), segmented: true)
                     .labelsHidden()
-                    .fixedSize()
+                    .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("\(entity.name) decimals")
                 }
                 if configuration.style != .text && menuBarCanUseGaugeTotal(for: entity) {
@@ -2419,7 +2433,7 @@ public struct PearchHASettingsView: View {
                                     }
                                     Spacer(minLength: 8)
                                     Image(systemName: "plus.circle")
-                                        .foregroundStyle(PearchHATheme.accent)
+                                        .foregroundStyle(palette.accentPrimary)
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.vertical, 6)
@@ -2515,8 +2529,9 @@ public struct PearchHASettingsView: View {
                 configuration.customIconName ?? "Automatic",
                 systemImage: configuration.customIconName ?? pearchHAEntityIconName(for: entity)
             )
+            .pearchHAFont(.body)
         }
-        .fixedSize()
+        .fixedSize(horizontal: false, vertical: true)
         .accessibilityLabel("\(entity.name) icon, currently \(configuration.customIconName ?? "automatic")")
     }
 
@@ -2526,7 +2541,7 @@ public struct PearchHASettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Toggle("Show in menu bar", isOn: menuBarVisibilityBinding(for: entity.id))
-                    .fixedSize()
+                    .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("Show \(entity.name) in menu bar")
                 if isPromoted {
                     menuBarMoveButtons(for: entity)
@@ -2537,13 +2552,13 @@ public struct PearchHASettingsView: View {
             if isPromoted {
                 HStack(spacing: 12) {
                     Toggle("Show icon", isOn: entityIconVisibilityBinding(for: entity.id))
-                        .fixedSize()
+                        .fixedSize(horizontal: false, vertical: true)
                         .accessibilityLabel("Show \(entity.name) icon in the menu bar")
                     Toggle("Show label", isOn: menuBarLabelBinding(for: entity.id))
-                        .fixedSize()
+                        .fixedSize(horizontal: false, vertical: true)
                         .accessibilityLabel("Show \(entity.name) label in menu bar")
                     Toggle("Show unit", isOn: menuBarUnitBinding(for: entity.id))
-                        .fixedSize()
+                        .fixedSize(horizontal: false, vertical: true)
                         .accessibilityLabel("Show \(entity.name) unit in menu bar")
                     Spacer(minLength: 0)
                 }
@@ -2559,10 +2574,11 @@ public struct PearchHASettingsView: View {
         _ label: String,
         @ViewBuilder trailing: () -> Trailing
     ) -> some View {
-        HStack(spacing: 10) {
+        (displayPreferences.textSize.scale >= 1.5 ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10))
+                                                 : AnyLayout(HStackLayout(spacing: 10))) {
             Text(label)
                 .foregroundStyle(.secondary)
-            Spacer(minLength: 8)
+            if displayPreferences.textSize.scale < 1.5 { Spacer(minLength: 8) }
             trailing()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2577,7 +2593,8 @@ public struct PearchHASettingsView: View {
         let detectedLabel = detectedUnitLabel(for: entity, detected: detected)
         let effectiveUnit = configuration.displayUnit ?? detected
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
+            (displayPreferences.textSize.scale >= 1.5 ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                                                     : AnyLayout(HStackLayout(spacing: 8))) {
                 Text("Unit")
                     .foregroundStyle(.secondary)
                 Menu {
@@ -2601,31 +2618,33 @@ public struct PearchHASettingsView: View {
                 } label: {
                     HStack(spacing: 6) {
                         Text(unitSelectionTitle(for: entity, configuration: configuration, detectedLabel: detectedLabel))
+                            .pearchHAFont(.body)
                             .lineLimit(1)
                         Image(systemName: "chevron.up.chevron.down")
                             .font(.system(size: 9, weight: .semibold))
                     }
-                    .frame(width: 160, alignment: .leading)
+                    .frame(width: 160 * displayPreferences.textSize.scale, alignment: .leading)
                 }
-                .menuStyle(.borderlessButton)
+                .pearchHAAdaptiveMenu()
                 .accessibilityLabel("\(entity.name) unit")
-                Spacer(minLength: 0)
+                if displayPreferences.textSize.scale < 1.5 { Spacer(minLength: 0) }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
             if effectiveUnit.usesNormalizedFraction {
-                HStack(spacing: 8) {
+                (displayPreferences.textSize.scale >= 1.5 ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                                                         : AnyLayout(HStackLayout(spacing: 8))) {
                     Text("Min")
                         .foregroundStyle(.secondary)
                     TextField("0", text: displayMinBinding(for: entity.id))
                         .textFieldStyle(.roundedBorder)
-                        .frame(width: 64)
+                        .frame(width: 64 * displayPreferences.textSize.scale)
                         .accessibilityLabel("\(entity.name) minimum value")
                     Text("Max")
                         .foregroundStyle(.secondary)
                     TextField("100", text: displayMaxBinding(for: entity.id))
                         .textFieldStyle(.roundedBorder)
-                        .frame(width: 64)
+                        .frame(width: 64 * displayPreferences.textSize.scale)
                         .accessibilityLabel("\(entity.name) maximum value")
                     Spacer(minLength: 0)
                 }
@@ -2762,7 +2781,8 @@ public struct PearchHASettingsView: View {
         configuration: MenuBarItemConfiguration
     ) -> some View {
         let candidates = menuBarTotalCandidates(for: entity)
-        return HStack(spacing: 8) {
+        return (displayPreferences.textSize.scale >= 1.5 ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                                                        : AnyLayout(HStackLayout(spacing: 8))) {
             Picker("Total", selection: menuBarTotalModeBinding(for: entity.id)) {
                 Text("No total").tag(MenuBarTotalMode.none)
                 Text("Manual").tag(MenuBarTotalMode.absolute)
@@ -2774,7 +2794,10 @@ public struct PearchHASettingsView: View {
                     Text(candidate.name).tag(MenuBarTotalMode.entity(candidate.id))
                 }
             }
-            .frame(width: 132)
+            .pearchHAAdaptivePicker(configuration.totalEntityID.map { id in
+                candidates.first { $0.id == id }?.name ?? id.rawValue
+            } ?? (configuration.absoluteTotal != nil ? "Manual" : "No total"))
+            .frame(width: 132 * displayPreferences.textSize.scale)
             .accessibilityLabel("\(entity.name) gauge total source")
             if configuration.absoluteTotal != nil {
                 Stepper(
@@ -2932,7 +2955,7 @@ public struct PearchHASettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(entity.state.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Current state" : entity.state)
                     Text("Current value")
-                        .font(.caption)
+                        .pearchHAFont(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
@@ -3017,7 +3040,7 @@ public struct PearchHASettingsView: View {
                     }
                 }
             }
-            .frame(width: 120)
+            .frame(width: 120 * displayPreferences.textSize.scale)
             .accessibilityLabel("\(entity.name) state threshold \(index + 1) match")
 
             Spacer(minLength: 0)
@@ -3075,7 +3098,7 @@ public struct PearchHASettingsView: View {
                     }
                 }
             )
-            .frame(width: 72)
+            .frame(width: 72 * displayPreferences.textSize.scale)
             .accessibilityLabel("\(entity.name) threshold \(index + 1) value")
 
             Spacer(minLength: 0)

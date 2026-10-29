@@ -3,7 +3,7 @@
     "name" : "review-contact-sheet.png",
     "pixelsHigh" : 1346,
     "pixelsWide" : 672,
-    "sampledHashHex" : "1ad5ab3b2bdface2",
+    "sampledHashHex" : "83e5f55f03b6bbcd",
     "visiblePixelCount" : 904492
   },
   "renderEnvironment" : "macos-27.0.1-arm64",
@@ -13,56 +13,56 @@
       "name" : "connected-light.png",
       "pixelsHigh" : 936,
       "pixelsWide" : 768,
-      "sampledHashHex" : "f98caa7cb6edc8b1",
+      "sampledHashHex" : "14c4a9b3e32793f5",
       "visiblePixelCount" : 718638
     },
     {
       "name" : "connected-dark.png",
       "pixelsHigh" : 936,
       "pixelsWide" : 768,
-      "sampledHashHex" : "7c25006be34f565d",
+      "sampledHashHex" : "dc9b5ab7656cfb5f",
       "visiblePixelCount" : 718848
     },
     {
       "name" : "connected-dark-increased-contrast.png",
       "pixelsHigh" : 936,
       "pixelsWide" : 768,
-      "sampledHashHex" : "ac310de6e8a2c538",
+      "sampledHashHex" : "b4dd4e90325000a4",
       "visiblePixelCount" : 718848
     },
     {
       "name" : "connected-light-reduced-motion.png",
       "pixelsHigh" : 936,
       "pixelsWide" : 768,
-      "sampledHashHex" : "f98caa7cb6edc8b1",
+      "sampledHashHex" : "14c4a9b3e32793f5",
       "visiblePixelCount" : 718638
     },
     {
       "name" : "history-loaded-light.png",
       "pixelsHigh" : 936,
       "pixelsWide" : 768,
-      "sampledHashHex" : "c49468e63ce2d728",
+      "sampledHashHex" : "155b6a915633c045",
       "visiblePixelCount" : 718638
     },
     {
       "name" : "history-loaded-light-increased-contrast.png",
       "pixelsHigh" : 936,
       "pixelsWide" : 768,
-      "sampledHashHex" : "83b1f0008aa67b43",
+      "sampledHashHex" : "ff1f1efca7d041ce",
       "visiblePixelCount" : 718644
     },
     {
       "name" : "built-in-controls-light.png",
       "pixelsHigh" : 936,
       "pixelsWide" : 768,
-      "sampledHashHex" : "fe3205397ce3e6aa",
+      "sampledHashHex" : "723ad68a256908a3",
       "visiblePixelCount" : 718638
     },
     {
       "name" : "first-run-light.png",
       "pixelsHigh" : 936,
       "pixelsWide" : 768,
-      "sampledHashHex" : "47ea1ce0672543fe",
+      "sampledHashHex" : "343984db9d6ba5f0",
       "visiblePixelCount" : 718638
     },
     {
@@ -83,14 +83,14 @@
       "name" : "settings-selection-light.png",
       "pixelsHigh" : 1440,
       "pixelsWide" : 2240,
-      "sampledHashHex" : "13415646de99cf62",
+      "sampledHashHex" : "ec6f81070d934c76",
       "visiblePixelCount" : 3225600
     },
     {
       "name" : "settings-about-update-light.png",
       "pixelsHigh" : 1440,
       "pixelsWide" : 2240,
-      "sampledHashHex" : "0e1c0dfb5df91f59",
+      "sampledHashHex" : "0a67dda40b0a8890",
       "visiblePixelCount" : 3225600
     },
     {
@@ -104,14 +104,14 @@
       "name" : "empty-light.png",
       "pixelsHigh" : 936,
       "pixelsWide" : 768,
-      "sampledHashHex" : "d601261ba9b227ce",
+      "sampledHashHex" : "91d5634c386552af",
       "visiblePixelCount" : 718638
     },
     {
       "name" : "error-dark.png",
       "pixelsHigh" : 936,
       "pixelsWide" : 768,
-      "sampledHashHex" : "56fdf8faef4255c1",
+      "sampledHashHex" : "fd773c01eebdf9c7",
       "visiblePixelCount" : 718848
     }
   ]

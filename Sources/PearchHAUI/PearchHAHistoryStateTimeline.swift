@@ -93,7 +93,7 @@ struct PearchHAHistoryStateTimelinePopoverBody: View {
                 Text(currentStateLabel)
                     .foregroundStyle(valueColor)
             }
-            .font(.caption)
+            .pearchHAFont(.caption)
             timeline
             legend
         }
@@ -261,14 +261,14 @@ private struct FlowingLegend: View {
                         .fill(colorForState(state))
                         .frame(width: 8, height: 8)
                     Text(PearchHAHistoryStateTimelinePopoverBody.label(for: state))
-                        .font(.caption2)
+                        .pearchHAFont(.caption2)
                         .foregroundStyle(labelColor)
                         .lineLimit(1)
                 }
             }
             if states.count > 4 {
                 Text("+\(states.count - 4) more")
-                    .font(.caption2)
+                    .pearchHAFont(.caption2)
                     .foregroundStyle(labelColor)
                     .lineLimit(1)
                     .accessibilityLabel("\(states.count - 4) more states not shown")

@@ -324,7 +324,7 @@ final class PearchHAUITests: XCTestCase {
             ("media_player", ["supported_features": 4, "volume_level": 0.4], 0.4.formatted(.number.grouping(.never)), 0.62, "volume_level"),
             ("light", ["supported_color_modes": .array(["brightness"])], "-", 62, "brightness_pct")
         ]
-        for inline in [true, false] {
+        for (inline, textSize) in [(true, PearchHATextSize.standard), (false, .standard), (true, .maximum), (false, .maximum)] {
             for (domain, attributes, label, target, parameter) in cases {
                 let clock = TestPearchClock()
                 let runner = ActionRunnerRecorder(results: [.success])
@@ -336,12 +336,14 @@ final class PearchHAUITests: XCTestCase {
                                               selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
                 model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
                 await model.connect()
+                model.applyDisplayPreferences(.defaults.with(textSize: textSize))
                 let window: NSWindow
                 if inline {
                     window = PearchHAApplication.makePanel(model: model)
                 } else {
                     window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 220), styleMask: [.titled], backing: .buffered, defer: false)
-                    window.contentView = NSHostingView(rootView: PearchHAEntityControlEditor(model: model, entityID: entity.id))
+                    window.contentView = NSHostingView(rootView: PearchHAEntityControlEditor(model: model, entityID: entity.id)
+                        .environment(\.pearchHATextSize, textSize))
                 }
                 window.makeKeyAndOrderFront(nil)
                 defer { window.orderOut(nil); window.contentView = nil; window.contentViewController = nil }
@@ -349,7 +351,7 @@ final class PearchHAUITests: XCTestCase {
                 XCTAssertTrue(editableTextFields(in: window.contentView).isEmpty, "\(domain) should show a quiet value until clicked")
                 XCTAssertTrue(nativeSteppers(in: window.contentView).isEmpty, "The slider replaces extra stepper arrows")
                 if label != "-" {
-                    try saveControlSnapshot(window.contentView, name: "\(domain)-\(inline ? "panel" : "popup")")
+                    try saveControlSnapshot(window.contentView, name: "\(domain)-\(inline ? "panel" : "popup")-\(textSize.rawValue)")
                 }
                 let buttons = nativeButtons(in: window.contentView)
                 XCTAssertEqual(buttons.count, 1, "The single control exposes its clickable value")
@@ -6153,6 +6155,75 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertTrue(window.makeFirstResponder(unitPopup), debugSummary)
     }
 
+    func testLargerTextKeepsNativeHistoryAndConnectionControlsReadable() throws {
+        for size: PearchHATextSize in [.standard, .extraLarge, .maximum] {
+            let model = PearchHAPanelModel()
+            let settings = PearchHAApplication.makeSettingsWindow(model: model, initialTab: .connection,
+                displayPreferencesProvider: { .defaults.with(textSize: size) })
+            settings.setContentSize(NSSize(width: 660, height: 560))
+            settings.makeKeyAndOrderFront(nil)
+            defer { settings.orderOut(nil); settings.contentViewController = nil }
+            drainPanelRunLoop()
+            let address = try XCTUnwrap(editableTextFields(in: settings.contentView).first)
+            XCTAssertEqual(try XCTUnwrap(address.font).pointSize, 13 * size.scale, accuracy: 0.1)
+            XCTAssertTrue(settings.makeFirstResponder(address))
+            let frame = address.convert(address.bounds, to: settings.contentView)
+            XCTAssertLessThanOrEqual(frame.maxX, try XCTUnwrap(settings.contentView).bounds.maxX)
+            try saveControlSnapshot(settings.contentView, name: "text-connection-\(size.rawValue)")
+
+            for (scheme, increasedContrast) in [(ColorScheme.light, false), (.dark, false), (.light, true), (.dark, true)] {
+                let history = NSHostingView(rootView: PearchHAHistoryPopoverContent(
+                    entityID: "sensor.temperature", entityName: "Außentemperatur im Schlafzimmer",
+                    valueText: "24.5 °C", state: .loaded(HistorySeries(entityID: "sensor.temperature", range: .day, samples: [])),
+                    increaseContrastOverride: increasedContrast,
+                    selectedRange: .constant(.day))
+                    .environment(\.pearchHATextSize, size).environment(\.colorScheme, scheme))
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 280 + 140 * (size.scale - 1), height: 350),
+                                      styleMask: [.titled], backing: .buffered, defer: true)
+                window.contentView = history
+                window.makeKeyAndOrderFront(nil)
+                defer { window.orderOut(nil); window.contentView = nil }
+                drainPanelRunLoop()
+                let ranges = try XCTUnwrap(nativeSegmentedControls(in: history).first)
+                XCTAssertEqual(try XCTUnwrap(ranges.font).pointSize, 11 * size.scale, accuracy: 0.1)
+                XCTAssertEqual(ranges.segmentCount, 4)
+                let bezel = try XCTUnwrap(ranges.selectedSegmentBezelColor?.usingColorSpace(.sRGB))
+                let luminance = zip([bezel.redComponent, bezel.greenComponent, bezel.blueComponent], [0.2126, 0.7152, 0.0722])
+                    .reduce(0.0) { result, channel in
+                        let value = channel.0 <= 0.04045 ? channel.0 / 12.92 : pow((channel.0 + 0.055) / 1.055, 2.4)
+                        return result + value * channel.1
+                    }
+                XCTAssertGreaterThanOrEqual(1.05 / (luminance + 0.05), increasedContrast ? 7 : 4.5,
+                                            "The native selected segment has a white label")
+                XCTAssertTrue(window.makeFirstResponder(ranges))
+                XCTAssertLessThanOrEqual(ranges.convert(ranges.bounds, to: history).maxX, history.bounds.maxX)
+                try saveControlSnapshot(history, name: "text-history-\(size.rawValue)-\(scheme == .dark ? "dark" : "light")-\(increasedContrast ? "contrast" : "normal")")
+            }
+        }
+    }
+
+    func testLargerTextKeepsInspectorBoundsEditableAtMinimumWindowWidth() async throws {
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: selectionRooms()) })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let window = PearchHAApplication.makeSettingsWindow(model: model, initialTab: .entities,
+            initiallyExpandedEntityIDs: ["sensor.office_humidity"],
+            displayPreferencesProvider: { .defaults.with(textSize: .maximum) })
+        window.setContentSize(NSSize(width: 660, height: 560))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil); window.contentViewController = nil }
+        drainPanelRunLoop()
+        let content = try XCTUnwrap(window.contentView)
+        for placeholder in ["0", "100"] {
+            let field = try XCTUnwrap(editableTextFields(in: content).first { $0.placeholderString == placeholder })
+            XCTAssertTrue(window.makeFirstResponder(field))
+            XCTAssertGreaterThanOrEqual(field.bounds.width, 120)
+            XCTAssertLessThanOrEqual(field.convert(field.bounds, to: content).maxX, content.bounds.maxX)
+            XCTAssertGreaterThanOrEqual(try XCTUnwrap(field.font).pointSize, 20)
+        }
+        try saveControlSnapshot(content, name: "text-inspector-200")
+    }
+
     func testHistoryPopoverExposesNativeRangeControlAndFocus() {
         let hostingView = NSHostingView(
             rootView: PearchHAHistoryPopoverContent(
@@ -6876,6 +6947,11 @@ final class PearchHAUITests: XCTestCase {
 
         // The stacked style renders the caps label on its own line above the
         // value, so the status-item title carries exactly one line break.
+        XCTAssertEqual(application.snapshot.menuBarItems[0].title, "OFFICE HUMIDITY\n44%")
+        XCTAssertEqual(application.persist(displayPreferences: application.displayPreferences.with(textSize: .maximum)), .saved)
+        XCTAssertEqual(application.snapshot.menuBarItems[0].title, "Office humidity 44%",
+                       "Larger text must apply immediately even when sensor values are unchanged")
+        XCTAssertEqual(application.persist(displayPreferences: application.displayPreferences.with(textSize: .standard)), .saved)
         XCTAssertEqual(application.snapshot.menuBarItems[0].title, "OFFICE HUMIDITY\n44%")
     }
 

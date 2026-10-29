@@ -29,9 +29,9 @@ struct PearchHAConnectionFormFields: View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Connect to Home Assistant")
-                    .font(.headline)
+                    .pearchHAFont(.headline)
                 Text("Enter your Home Assistant address, then sign in or paste an access token.")
-                    .font(.callout)
+                    .pearchHAFont(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -49,11 +49,12 @@ struct PearchHAConnectionFormFields: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(PearchHATheme.Dashboard.palette(.light, increasedContrast: true).accentPrimary)
                 .controlSize(.large)
                 .disabled(isConnectionBusy)
                 .help("Open Home Assistant in your browser to sign in. Recommended.")
                 Text("Opens Home Assistant in your browser to approve access. No password is stored.")
-                    .font(.caption)
+                    .pearchHAFont(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -84,7 +85,7 @@ struct PearchHAConnectionFormFields: View {
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Primary address")
-                    .font(.caption)
+                    .pearchHAFont(.caption)
                     .foregroundStyle(.secondary)
                 PearchHANativeTextField(
                     placeholder: "Home Assistant URL",
@@ -107,13 +108,14 @@ struct PearchHAConnectionFormFields: View {
                 model.addConnectionAddress()
             } label: {
                 Label("Add address", systemImage: "plus.circle")
+                    .pearchHAFont(.body)
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
             .accessibilityHint("Adds another Home Assistant address to try")
 
             Text("Add internal, external, or VPN addresses. They are tried in order when an earlier one cannot be reached.")
-                .font(.caption)
+                .pearchHAFont(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -135,7 +137,7 @@ struct PearchHAConnectionFormFields: View {
             .toggleStyle(.switch)
             .controlSize(.small)
             Text("Applies only to the HTTPS addresses listed above — never to other hosts. Turn off for strict certificate validation.")
-                .font(.caption)
+                .pearchHAFont(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -192,7 +194,7 @@ struct PearchHAConnectionFormFields: View {
             }
             if invalid {
                 Text("Enter a valid http or https address.")
-                    .font(.caption)
+                    .pearchHAFont(.caption)
                     .foregroundStyle(.red)
                     .accessibilityLabel("Invalid alternative address")
             }
@@ -233,13 +235,13 @@ struct PearchHAConnectionFormFields: View {
                     Image(systemName: isConnected ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath")
                         .foregroundStyle(isConnected ? PearchHATheme.ok : PearchHATheme.warn)
                     Text(snapshot.connectionSummary)
-                        .font(.headline)
+                        .pearchHAFont(.headline)
                 }
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(connectedAccessibilityLabel)
                 if let connectedHost {
                     Text(isConnected ? "Connected to \(connectedHost)" : "Server: \(connectedHost)")
-                        .font(.callout)
+                        .pearchHAFont(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityHidden(true)
@@ -257,6 +259,7 @@ struct PearchHAConnectionFormFields: View {
                     model.applyConnectionEdits()
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(PearchHATheme.Dashboard.palette(.light, increasedContrast: true).accentPrimary)
                 .controlSize(.large)
                 .disabled(isConnectionBusy || !model.canApplyConnectionEdits)
                 .help(tokenAccessPresentation.connectedActionHelp)
@@ -284,7 +287,7 @@ struct PearchHAConnectionFormFields: View {
         Group {
             line
             Text("or use an access token")
-                .font(.caption)
+                .pearchHAFont(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize()
             line
@@ -300,12 +303,12 @@ struct PearchHAConnectionFormFields: View {
             )
             if let savedTokenGuidance = tokenAccessPresentation.savedTokenGuidance {
                 Text(savedTokenGuidance)
-                    .font(.caption)
+                    .pearchHAFont(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Text(tokenAccessPresentation.tokenCreationGuidance)
-                .font(.caption)
+                .pearchHAFont(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityLabel("Where to find a token: Home Assistant profile, Security, Long-lived access tokens.")
@@ -334,7 +337,7 @@ struct PearchHAConnectionFormFields: View {
                     .accessibilityHidden(true)
                 Text(connectionProgressMessage)
             }
-            .font(.callout)
+            .pearchHAFont(.callout)
             .foregroundStyle(.secondary)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(connectionProgressMessage)
