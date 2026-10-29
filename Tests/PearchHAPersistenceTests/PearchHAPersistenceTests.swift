@@ -100,6 +100,89 @@ final class PearchHAPersistenceTests: XCTestCase {
         XCTAssertEqual(try store.load(), configuration)
     }
 
+    func testConfigStoreImportsValidatedConfigurationWithoutChangingSource() throws {
+        let sourceURL = temporaryConfigURL()
+        let destinationURL = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: destinationURL.deletingLastPathComponent())
+        }
+        let configuration = PearchHAConfiguration(
+            selectedEntityIDs: ["sensor.office_temperature"],
+            menuBarEntityIDs: ["sensor.office_temperature"],
+            connectionProfile: PearchHAConnectionProfile(urlString: "https://homeassistant.local:8123"),
+            roomOrder: ["office"],
+            entityOrder: ["sensor.office_temperature"],
+            isEntitySelectionExplicit: true,
+            themeMode: .dark,
+            liveUpdatesEnabled: true
+        )
+        let sourceStore = JSONConfigStore(fileURL: sourceURL)
+        let destinationStore = JSONConfigStore(fileURL: destinationURL)
+        try sourceStore.save(configuration)
+        let sourceBytes = try Data(contentsOf: sourceURL)
+
+        XCTAssertEqual(try destinationStore.save(try destinationStore.readImport(from: sourceURL)), configuration)
+        XCTAssertEqual(try destinationStore.load(), configuration)
+        XCTAssertEqual(try Data(contentsOf: sourceURL), sourceBytes)
+
+        XCTAssertEqual(try destinationStore.save(try destinationStore.readImport(from: sourceURL)), configuration)
+        XCTAssertEqual(try Data(contentsOf: sourceURL), sourceBytes)
+    }
+
+    func testConfigStoreImportsConfirmedSnapshotWithoutRereadingChangedSource() throws {
+        let sourceURL = temporaryConfigURL()
+        let destinationURL = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: destinationURL.deletingLastPathComponent())
+        }
+        let sourceStore = JSONConfigStore(fileURL: sourceURL)
+        let destinationStore = JSONConfigStore(fileURL: destinationURL)
+        let confirmed = PearchHAConfiguration(selectedEntityIDs: ["sensor.confirmed"])
+        let changed = PearchHAConfiguration(selectedEntityIDs: ["sensor.changed"])
+        try sourceStore.save(confirmed)
+
+        let snapshot = try destinationStore.readImport(from: sourceURL)
+        try sourceStore.save(changed)
+        XCTAssertEqual(try destinationStore.save(snapshot), confirmed)
+        XCTAssertEqual(try destinationStore.load(), confirmed)
+    }
+
+    func testConfigStoreImportRejectsMissingMalformedUnsupportedAndInvalidSourcesWithoutOverwrite() throws {
+        let sourceURL = temporaryConfigURL()
+        let destinationURL = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: destinationURL.deletingLastPathComponent())
+        }
+        let destinationStore = JSONConfigStore(fileURL: destinationURL)
+        let existing = PearchHAConfiguration(selectedEntityIDs: ["sensor.keep"])
+        try destinationStore.save(existing)
+
+        XCTAssertThrowsError(try destinationStore.readImport(from: sourceURL)) { error in
+            guard case let .readFailed(url, _) = error as? ConfigStoreError else {
+                return XCTFail("expected source read failure, got \(error)")
+            }
+            XCTAssertEqual(url, sourceURL)
+        }
+
+        try FileManager.default.createDirectory(at: sourceURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("not json".utf8).write(to: sourceURL)
+        XCTAssertThrowsError(try destinationStore.readImport(from: sourceURL))
+        XCTAssertEqual(try destinationStore.load(), existing)
+
+        try Data("{\"schemaVersion\": 99}".utf8).write(to: sourceURL)
+        XCTAssertThrowsError(try destinationStore.readImport(from: sourceURL)) { error in
+            XCTAssertEqual(error as? ConfigStoreError, .unsupportedSchemaVersion(99))
+        }
+        XCTAssertEqual(try destinationStore.load(), existing)
+
+        try Data(#"{"schemaVersion":1,"customActions":[{"id":"bad","entityID":"sensor.a","title":" ","action":{"domain":"script","service":"turn_on","targetEntityID":"script.a","serviceData":{}},"requiresConfirmation":false}]}"#.utf8).write(to: sourceURL)
+        XCTAssertThrowsError(try destinationStore.readImport(from: sourceURL))
+        XCTAssertEqual(try destinationStore.load(), existing)
+    }
+
     func testJSONConfigStoreDefaultsMissingHistoryRangeToInheritGlobal() throws {
         let url = temporaryConfigURL()
         defer {
@@ -136,12 +219,55 @@ final class PearchHAPersistenceTests: XCTestCase {
         XCTAssertEqual(configuration.customActionConfiguration, CustomActionConfiguration())
     }
 
+    func testLargerTextSurvivesUnrelatedConfigurationChanges() throws {
+        let json = Data(#"{"schemaVersion":1,"textSize":200,"liveUpdatesEnabled":true}"#.utf8)
+        let configuration = try JSONDecoder().decode(PearchHAConfiguration.self, from: json)
+        let replaced = configuration.replacing(selectedEntityIDs: ["sensor.temperature"])
+        XCTAssertEqual(replaced.textSize, .maximum)
+        XCTAssertTrue(replaced.liveUpdatesEnabled)
+        let updated = replaced.applying(displayPreferences: replaced.displayPreferences.with(themeMode: .dark))
+        let encoded = try JSONEncoder().encode(updated)
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertEqual(fields["textSize"] as? Int, 200)
+        XCTAssertEqual(updated.selectedEntityIDs, ["sensor.temperature"])
+        XCTAssertTrue(updated.liveUpdatesEnabled)
+    }
+
+    func testJSONConfigStoreRoundTripsEveryTextSize() throws {
+        let url = temporaryConfigURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let store = JSONConfigStore(fileURL: url)
+
+        for textSize in PearchHATextSize.allCases {
+            let configuration = PearchHAConfiguration(textSize: textSize)
+            try store.save(configuration)
+
+            let restored = try store.load()
+            XCTAssertEqual(restored, configuration)
+            XCTAssertEqual(restored.displayPreferences.textSize, textSize)
+        }
+    }
+
+    func testJSONConfigStoreRejectsUnsupportedTextSize() throws {
+        let url = temporaryConfigURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(#"{"schemaVersion":1,"textSize":110}"#.utf8).write(to: url)
+
+        XCTAssertThrowsError(try JSONConfigStore(fileURL: url).load()) { error in
+            guard let error = error as? ConfigStoreError, case .malformedConfig = error else {
+                return XCTFail("Expected malformed configuration for an unsupported text size, got \(error)")
+            }
+        }
+    }
+
     func testConfigurationDefaultsDisplayPreferences() {
         let configuration = PearchHAConfiguration.empty
 
         XCTAssertEqual(configuration.menuBarAppearance, .iconAndText)
         XCTAssertFalse(configuration.stableMenuBarWidth)
         XCTAssertEqual(configuration.themeMode, .system)
+        XCTAssertEqual(configuration.textSize, .standard)
         XCTAssertEqual(configuration.menuBarRefreshInterval, .thirtySeconds)
         XCTAssertEqual(configuration.dataSyncInterval, .fiveSeconds)
         XCTAssertEqual(configuration.historyDetailRefreshInterval, .thirtySeconds)
@@ -163,6 +289,7 @@ final class PearchHAPersistenceTests: XCTestCase {
             menuBarAppearance: .iconOnly,
             stableMenuBarWidth: true,
             themeMode: .dark,
+            textSize: .extraLarge,
             menuBarRefreshInterval: .sixtySeconds,
             dataSyncInterval: .fifteenSeconds,
             historyDetailRefreshInterval: .oneHundredTwentySeconds,
@@ -181,6 +308,7 @@ final class PearchHAPersistenceTests: XCTestCase {
 
     func testConfigurationDisplayPreferencesBridgesDashboardFields() {
         let configuration = PearchHAConfiguration(
+            textSize: .veryLarge,
             menuBarRefreshInterval: .fiveSeconds,
             dataSyncInterval: .sixtySeconds,
             historyDetailRefreshInterval: .oneHundredTwentySeconds,
@@ -193,6 +321,7 @@ final class PearchHAPersistenceTests: XCTestCase {
 
         let preferences = configuration.displayPreferences
 
+        XCTAssertEqual(preferences.textSize, .veryLarge)
         XCTAssertEqual(preferences.menuBarRefreshInterval, .fiveSeconds)
         XCTAssertEqual(preferences.dataSyncInterval, .sixtySeconds)
         XCTAssertEqual(preferences.historyDetailRefreshInterval, .oneHundredTwentySeconds)
@@ -209,6 +338,7 @@ final class PearchHAPersistenceTests: XCTestCase {
             menuBarEntityIDs: ["sensor.office_temperature"]
         )
         let preferences = PearchHADisplayPreferences.defaults
+            .with(textSize: .maximum)
             .with(menuBarRefreshInterval: .oneHundredTwentySeconds)
             .with(dataSyncInterval: .fifteenSeconds)
             .with(historyDetailRefreshInterval: .sixtySeconds)
@@ -221,6 +351,7 @@ final class PearchHAPersistenceTests: XCTestCase {
         let applied = base.applying(displayPreferences: preferences)
 
         // Display fields take the new values.
+        XCTAssertEqual(applied.textSize, .maximum)
         XCTAssertEqual(applied.menuBarRefreshInterval, .oneHundredTwentySeconds)
         XCTAssertEqual(applied.dataSyncInterval, .fifteenSeconds)
         XCTAssertEqual(applied.historyDetailRefreshInterval, .sixtySeconds)
@@ -256,6 +387,8 @@ final class PearchHAPersistenceTests: XCTestCase {
         XCTAssertEqual(configuration.menuBarAppearance, .iconAndText)
         XCTAssertFalse(configuration.stableMenuBarWidth)
         XCTAssertEqual(configuration.themeMode, .system)
+        XCTAssertEqual(configuration.textSize, .standard)
+        XCTAssertEqual(configuration.displayPreferences.textSize, .standard)
         XCTAssertEqual(configuration.menuBarRefreshInterval, .thirtySeconds)
         XCTAssertEqual(configuration.dataSyncInterval, .fiveSeconds)
         XCTAssertEqual(configuration.historyDetailRefreshInterval, .thirtySeconds)
@@ -358,6 +491,7 @@ final class PearchHAPersistenceTests: XCTestCase {
         XCTAssertEqual(base.with(menuBarAppearance: .textOnly).menuBarAppearance, .textOnly)
         XCTAssertTrue(base.with(stableMenuBarWidth: true).stableMenuBarWidth)
         XCTAssertEqual(base.with(themeMode: .light).themeMode, .light)
+        XCTAssertEqual(base.with(textSize: .large).textSize, .large)
         XCTAssertEqual(base.with(menuBarRefreshInterval: .fiveSeconds).menuBarRefreshInterval, .fiveSeconds)
         XCTAssertEqual(base.with(dataSyncInterval: .sixtySeconds).dataSyncInterval, .sixtySeconds)
         XCTAssertEqual(

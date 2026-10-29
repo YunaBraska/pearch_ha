@@ -14,6 +14,45 @@ import PearchHATestSupport
 @testable import PearchHAUI
 
 @MainActor
+private final class PearchHATestPopoverPresentation {
+    let popover: PearchHAStatusPopover
+    let anchor: NSView
+    let anchorWindow: NSWindow
+    let window: NSWindow
+
+    init(model: PearchHAPanelModel) throws {
+        _ = NSApplication.shared
+        guard let visibleFrame = NSScreen.main?.visibleFrame else {
+            throw NSError(domain: "PearchHAUITests", code: 2, userInfo: [NSLocalizedDescriptionKey: "A visible screen is required for native popover tests"])
+        }
+        let anchorWindow = NSWindow(contentRect: NSRect(x: visibleFrame.midX, y: visibleFrame.maxY - 80, width: 40, height: 40),
+                                    styleMask: [.titled], backing: .buffered, defer: false)
+        anchorWindow.isReleasedWhenClosed = false
+        let anchor = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+        anchorWindow.contentView = anchor
+        anchorWindow.orderFront(nil)
+        let popover = PearchHAApplication.makePopover(model: model)
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        guard let window = popover.contentViewController?.view.window, popover.isShown else {
+            popover.close()
+            anchorWindow.close()
+            throw NSError(domain: "PearchHAUITests", code: 1, userInfo: [NSLocalizedDescriptionKey: "Popover did not present from its visible test anchor"])
+        }
+        self.popover = popover
+        self.anchor = anchor
+        self.anchorWindow = anchorWindow
+        self.window = window
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func close() {
+        popover.close()
+        popover.contentViewController = nil
+        anchorWindow.close()
+    }
+}
+
+@MainActor
 final class PearchHAUITests: XCTestCase {
     private func entity(_ domain: String, state: String = "on", attributes: [String: ActionValue] = [:]) -> DiscoveredEntity {
         DiscoveredEntity(id: EntityID("\(domain).office"), name: "Office \(domain)", state: state,
@@ -303,9 +342,10 @@ final class PearchHAUITests: XCTestCase {
                                       selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [light.id, number.id], isExplicit: true))
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        let panel = PearchHAApplication.makePanel(model: model)
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
         panel.makeKeyAndOrderFront(nil)
-        defer { panel.orderOut(nil); panel.contentViewController = nil }
         drainPanelRunLoop()
         let previousField = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
         XCTAssertTrue(panel.makeFirstResponder(previousField))
@@ -324,7 +364,7 @@ final class PearchHAUITests: XCTestCase {
             ("media_player", ["supported_features": 4, "volume_level": 0.4], 0.4.formatted(.number.grouping(.never)), 0.62, "volume_level"),
             ("light", ["supported_color_modes": .array(["brightness"])], "-", 62, "brightness_pct")
         ]
-        for inline in [true, false] {
+        for (inline, textSize) in [(true, PearchHATextSize.standard), (false, .standard), (true, .maximum), (false, .maximum)] {
             for (domain, attributes, label, target, parameter) in cases {
                 let clock = TestPearchClock()
                 let runner = ActionRunnerRecorder(results: [.success])
@@ -336,37 +376,51 @@ final class PearchHAUITests: XCTestCase {
                                               selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
                 model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
                 await model.connect()
+                model.applyDisplayPreferences(.defaults.with(textSize: textSize))
+                let presentation: PearchHATestPopoverPresentation?
                 let window: NSWindow
                 if inline {
-                    window = PearchHAApplication.makePanel(model: model)
+                    presentation = try PearchHATestPopoverPresentation(model: model)
+                    window = try XCTUnwrap(presentation).window
                 } else {
+                    presentation = nil
                     window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 220), styleMask: [.titled], backing: .buffered, defer: false)
-                    window.contentView = NSHostingView(rootView: PearchHAEntityControlEditor(model: model, entityID: entity.id))
+                    window.contentView = NSHostingView(rootView: PearchHAEntityControlEditor(model: model, entityID: entity.id)
+                        .environment(\.pearchHATextSize, textSize))
                 }
                 window.makeKeyAndOrderFront(nil)
-                defer { window.orderOut(nil); window.contentView = nil; window.contentViewController = nil }
+                defer {
+                    if let presentation { presentation.close() }
+                    else { window.orderOut(nil); window.contentView = nil; window.contentViewController = nil }
+                }
                 drainPanelRunLoop()
                 XCTAssertTrue(editableTextFields(in: window.contentView).isEmpty, "\(domain) should show a quiet value until clicked")
                 XCTAssertTrue(nativeSteppers(in: window.contentView).isEmpty, "The slider replaces extra stepper arrows")
                 if label != "-" {
-                    try saveControlSnapshot(window.contentView, name: "\(domain)-\(inline ? "panel" : "popup")")
+                    try saveControlSnapshot(window.contentView, name: "\(domain)-\(inline ? "panel" : "popup")-\(textSize.rawValue)")
                 }
                 let buttons = nativeButtons(in: window.contentView)
                 XCTAssertEqual(buttons.count, 1, "The single control exposes its clickable value")
+                if inline, domain == "light" {
+                    let valueButton = try XCTUnwrap(buttons.first)
+                    let toggle = try XCTUnwrap(nativeSwitches(in: window.contentView).first)
+                    let gap = toggle.convert(toggle.bounds, to: nil).minX - valueButton.convert(valueButton.bounds, to: nil).maxX
+                    XCTAssertGreaterThanOrEqual(gap, 17, "The requested indicator must fit between the value and its switch")
+                }
                 try XCTUnwrap(buttons.first).performClick(nil)
                 drainPanelRunLoop()
                 let field = try XCTUnwrap(editableTextFields(in: window.contentView).first)
                 XCTAssertEqual(field.stringValue, label == "-" ? "" : label.replacingOccurrences(of: " %", with: ""))
-                await spinUntil { field.currentEditor() != nil }
+                await spinUntil("\(domain) inline=\(inline) initial=\(label): focus") { field.currentEditor() != nil }
                 XCTAssertNotNil(field.currentEditor(), "Clicking the value must focus precise entry without a second click")
                 try setNativeTextFieldDraft(target.formatted(.number.grouping(.never)), for: field, in: window)
-                await spinUntil { await clock.sleepingTaskCount() == 1 }
+                await spinUntil("\(domain) inline=\(inline) initial=\(label): debounce") { await clock.sleepingTaskCount() == 1 }
                 _ = await clock.advance(by: .milliseconds(599))
                 let beforeDelay = await runner.callCount()
                 XCTAssertEqual(beforeDelay, 0)
                 _ = await clock.advance(by: .milliseconds(1))
-                await spinUntil { await runner.callCount() == 1 }
-                await spinUntil { model.snapshot.controlActionState == .idle }
+                await spinUntil("\(domain) inline=\(inline) initial=\(label): dispatch") { await runner.callCount() == 1 }
+                await spinUntil("\(domain) inline=\(inline) initial=\(label): completion") { model.snapshot.controlActionState == .idle }
                 drainPanelRunLoop()
                 XCTAssertTrue(editableTextFields(in: window.contentView).isEmpty, "Successful entry returns to a quiet value")
                 let actions = await runner.actions()
@@ -378,8 +432,11 @@ final class PearchHAUITests: XCTestCase {
                 try XCTUnwrap(nativeButtons(in: window.contentView).first).performClick(nil)
                 drainPanelRunLoop()
                 let canceledField = try XCTUnwrap(editableTextFields(in: window.contentView).first)
-                try setNativeTextFieldDraft(target.formatted(.number.grouping(.never)), for: canceledField, in: window)
-                await spinUntil { await clock.sleepingTaskCount() == 1 }
+                if label == "-" {
+                    XCTAssertEqual(canceledField.stringValue, target.formatted(.number.grouping(.never)), "Missing telemetry must retain the requested value")
+                }
+                try setNativeTextFieldDraft((target / 2).formatted(.number.grouping(.never)), for: canceledField, in: window)
+                await spinUntil("\(domain) inline=\(inline) initial=\(label): cancellation debounce") { await clock.sleepingTaskCount() == 1 }
                 try XCTUnwrap(canceledField.currentEditor() as? NSTextView).doCommand(by: #selector(NSResponder.cancelOperation(_:)))
                 drainPanelRunLoop()
                 await spinUntil { await clock.sleepingTaskCount() == 0 }
@@ -402,9 +459,10 @@ final class PearchHAUITests: XCTestCase {
                                       selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        let panel = PearchHAApplication.makePanel(model: model)
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
         panel.makeKeyAndOrderFront(nil)
-        defer { panel.orderOut(nil); panel.contentViewController = nil }
         drainPanelRunLoop()
         XCTAssertTrue(editableTextFields(in: panel.contentView).isEmpty)
         XCTAssertTrue(nativeSteppers(in: panel.contentView).isEmpty)
@@ -445,10 +503,266 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(actions.first?.serviceData, ["position": 52])
     }
 
+    func testRequestedNumberSurvivesSubmissionAndPanelRecreationUntilNextReport() async throws {
+        let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+        let refreshEntered = ConnectionGate()
+        let refreshRelease = ConnectionGate()
+        let calls = CallCounter()
+        let entity = DiscoveredEntity(id: "number.office", name: "Target temperature", state: "27", unit: "°C",
+                                      areaID: "office", deviceID: nil, controlAttributes: ["min": 16, "max": 30, "step": 1])
+        let model = PearchHAPanelModel(connector: { _ in
+            if await calls.next() > 1 {
+                await refreshEntered.open()
+                await refreshRelease.wait()
+            }
+            return .success(rooms: [Room(id: "office", name: "Office", entities: [entity])])
+        }, actionRunner: { form, action in await runner.run(form: form, action: action) }, clock: TestPearchClock(),
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+                                      selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        var presentation = try PearchHATestPopoverPresentation(model: model)
+        var panel = presentation.window
+        defer { presentation.close() }
+        panel.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        let field = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
+        let idleFrame = field.convert(field.bounds, to: nil)
+        try setNativeTextFieldValue("30", for: field, in: panel)
+        await spinUntil { await runner.callCount() == 1 }
+        drainPanelRunLoop()
+        XCTAssertEqual(field.stringValue, "30", "Submitting must retain the requested value while HA has not reported again")
+        XCTAssertEqual(field.convert(field.bounds, to: nil), idleFrame, "Waiting for HA must not move or resize the control")
+        XCTAssertEqual(model.snapshot.availableRooms.first?.entities.first?.state, "27", "Requested values are not reported telemetry")
+
+        await runner.releaseNext()
+        await refreshEntered.wait()
+        presentation.close()
+        presentation = try PearchHATestPopoverPresentation(model: model)
+        panel = presentation.window
+        panel.makeKeyAndOrderFront(nil)
+        try await Task.sleep(for: .milliseconds(100))
+        drainPanelRunLoop()
+        let reopenedField = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
+        XCTAssertEqual(model.requestedControlValue(for: entity.id, controlID: "set_value.value"), 30)
+        XCTAssertEqual(reopenedField.stringValue, "30", "A recreated panel must retain the request until the next report")
+        XCTAssertEqual(reopenedField.convert(reopenedField.bounds, to: nil), idleFrame)
+        try saveControlSnapshot(panel.contentView, name: "requested-number-panel")
+
+        await refreshRelease.open()
+        await spinUntil { model.snapshot.controlActionState == .idle }
+        drainPanelRunLoop()
+        XCTAssertNil(model.requestedControlValue(for: entity.id, controlID: "set_value.value"))
+        let reportedField = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
+        XCTAssertEqual(reportedField.stringValue, "27", "The next report wins, even when unchanged or different from the request")
+        XCTAssertEqual(reportedField.convert(reportedField.bounds, to: nil), idleFrame, "Clearing the request must not move or resize the control")
+        try saveControlSnapshot(panel.contentView, name: "reported-number-panel")
+    }
+
+    func testRequestedValuesEndOnTheNextReportWithoutRequiringAMatch() async {
+        let cases: [(DiscoveredEntity, String, ActionValue)] = [
+            (entity("climate", state: "heat", attributes: ["hvac_modes": .array(["heat", "dry"])]), "set_hvac_mode.hvac_mode", "dry"),
+            (entity("select", state: "Celsius", attributes: ["options": .array(["Celsius", "Fahrenheit"])]), "select_option.option", "Fahrenheit"),
+            (entity("number", state: "27", attributes: ["min": 16, "max": 30, "step": 1]), "set_value.value", 30),
+            (entity("fan", attributes: ["supported_features": 2, "oscillating": false]), "oscillate.oscillating", true),
+            (entity("light", attributes: ["supported_color_modes": .array(["rgb"]), "rgb_color": .array([1, 2, 3])]), "turn_on.rgb_color", .array([4, 5, 6]))
+        ]
+        for (entity, controlID, value) in cases {
+            let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+            let model = PearchHAPanelModel(connector: { _ in .success(rooms: [Room(id: "office", name: "Office", entities: [entity])]) },
+                                          actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                          bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+            model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+            await model.connect()
+            model.setPanelActive(true)
+            let task = Task { await model.setEntityControlValue(entity.id, controlID: controlID, value: value) }
+            await spinUntil { await runner.callCount() == 1 }
+            XCTAssertEqual(model.requestedControlValue(for: entity.id, controlID: controlID), value)
+            XCTAssertFalse(model.applyLiveState(EntityState(id: "sensor.other", name: "Other", state: "0", unit: nil)))
+            XCTAssertTrue(model.hasRequestedControls(for: entity.id))
+            XCTAssertTrue(model.applyLiveState(EntityState(id: entity.id, name: entity.name, state: entity.state, unit: entity.unit,
+                                                           controlAttributes: entity.controlAttributes)))
+            XCTAssertFalse(model.hasRequestedControls(for: entity.id), "An unchanged report also ends the request for \(controlID)")
+            await runner.releaseNext()
+            let sent = await task.value
+            XCTAssertTrue(sent)
+            XCTAssertFalse(model.hasRequestedControls(for: entity.id), "Service acceptance must not resurrect an already reported request")
+        }
+    }
+
+    func testLightBrightnessRequestEndsOnRefreshedValueWithoutLiveUpdates() async throws {
+        let initial = entity("light", state: "off", attributes: ["supported_color_modes": .array(["brightness"]), "brightness": .null])
+        let reported = entity("light", attributes: ["supported_color_modes": .array(["brightness"]), "brightness": 158])
+        let connector = ConnectionResultRecorder(results: [
+            .success(rooms: [Room(id: "office", name: "Office", entities: [initial])]),
+            .success(rooms: [Room(id: "office", name: "Office", entities: [reported])])
+        ])
+        let runner = ActionRunnerRecorder(results: [.success, .success], waitForRelease: true)
+        let model = PearchHAPanelModel(connector: { _ in await connector.next() },
+                                      actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let task = Task { await model.setEntityControlValue(initial.id, controlID: "turn_on.brightness_pct", value: 62) }
+        await spinUntil { await runner.callCount() == 1 }
+        XCTAssertEqual(model.requestedControlValue(for: initial.id, controlID: "turn_on.brightness_pct"), 62)
+        await runner.releaseNext()
+        let sent = await task.value
+        XCTAssertTrue(sent)
+        XCTAssertEqual(model.snapshot.availableRooms.first?.entities.first?.controlAttributes?["brightness"], 158)
+        XCTAssertFalse(model.hasRequestedControls(for: initial.id), "The new REST brightness must retire the request even with unchanged entity IDs")
+        XCTAssertTrue(model.startEntityControlToggle(initial.id, isOn: false), "Control validation must use the refreshed on state")
+        await spinUntil { await runner.callCount() == 2 }
+        await runner.releaseNext()
+        await spinUntil { model.snapshot.controlActionState == .idle }
+        let actions = await runner.actions()
+        XCTAssertEqual(actions.last?.service, "turn_off", "The newly reported light must be switchable off")
+    }
+
+    func testLightBrightnessRequestEndsWhenHomeAssistantReportsOff() async throws {
+        let initial = entity("light", attributes: ["supported_color_modes": .array(["brightness"]), "brightness": 128])
+        for brightness: ActionValue? in [nil, .null, 0, 128] {
+            for useLiveReport in [false, true] {
+                var attributes: [String: ActionValue] = ["supported_color_modes": .array(["brightness"])]
+                attributes["brightness"] = brightness
+                let reported = entity("light", state: "off", attributes: attributes)
+                let connector = ConnectionResultRecorder(results: [
+                    .success(rooms: [Room(id: "office", name: "Office", entities: [initial])]),
+                    .success(rooms: [Room(id: "office", name: "Office", entities: [reported])])
+                ])
+                let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+                let model = PearchHAPanelModel(connector: { _ in await connector.next() },
+                                              actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                              bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+                model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+                await model.connect()
+                model.setPanelActive(true)
+                let task = Task { await model.setEntityControlValue(initial.id, controlID: "turn_on.brightness_pct", value: 0) }
+                await spinUntil { await runner.callCount() == 1 }
+                XCTAssertEqual(model.requestedControlValue(for: initial.id, controlID: "turn_on.brightness_pct"), 0)
+                if useLiveReport {
+                    XCTAssertTrue(model.applyLiveState(EntityState(id: reported.id, name: reported.name, state: reported.state,
+                                                                   unit: nil, controlAttributes: attributes)))
+                    XCTAssertFalse(model.hasRequestedControls(for: initial.id), "An off report must end brightness waiting")
+                }
+                await runner.releaseNext()
+                let sent = await task.value
+                XCTAssertTrue(sent)
+                XCTAssertFalse(model.hasRequestedControls(for: initial.id), "The refreshed off state must end brightness waiting")
+                let current = try XCTUnwrap(model.snapshot.availableRooms.flatMap(\.entities).first)
+                let field = try XCTUnwrap(PearchHAEntityControlField.controls(for: current).first { $0.id == "turn_on.brightness_pct" })
+                XCTAssertEqual(field.input.reportedValue, 0, "An off light has zero brightness, including when HA retains its previous setting")
+                let actions = await runner.actions()
+                XCTAssertEqual(actions, [ActionSpec(domain: "light", service: "turn_on", targetEntityID: initial.id,
+                                                    serviceData: ["brightness_pct": 0])])
+            }
+        }
+    }
+
+    func testRequestedModeIsVisibleInPanelUntilReported() async throws {
+        let entity = entity("climate", state: "heat", attributes: ["hvac_modes": .array(["heat", "dry"])])
+        let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: [Room(id: "office", name: "Office", entities: [entity])]) },
+                                      actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+                                      selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.setPanelActive(true)
+        let task = Task { await model.setEntityControlValue(entity.id, controlID: "set_hvac_mode.hvac_mode", value: "dry") }
+        await spinUntil { await runner.callCount() == 1 }
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let window = presentation.window
+        defer { presentation.close() }
+        window.makeKeyAndOrderFront(nil)
+        try await Task.sleep(for: .milliseconds(100))
+        window.contentView?.layoutSubtreeIfNeeded()
+        drainPanelRunLoop()
+        let requestedElements = accessibilityElements(in: try XCTUnwrap(window.contentView))
+        XCTAssertTrue(requestedElements.contains { $0.accessibilityLabel() == "dry" || $0.accessibilityValue() as? String == "dry" }, requestedElements.map { $0.accessibilityLabel() ?? "" }.description)
+        XCTAssertTrue(model.hasRequestedControls(for: entity.id))
+        try saveControlSnapshot(window.contentView, name: "requested-mode-panel")
+        XCTAssertTrue(model.applyLiveState(EntityState(id: entity.id, name: entity.name, state: "heat", unit: nil, controlAttributes: entity.controlAttributes)))
+        drainPanelRunLoop()
+        let reportedElements = accessibilityElements(in: try XCTUnwrap(window.contentView))
+        XCTAssertTrue(reportedElements.contains { $0.accessibilityLabel() == "heat" || $0.accessibilityValue() as? String == "heat" }, reportedElements.map { $0.accessibilityLabel() ?? "" }.description)
+        XCTAssertFalse(model.hasRequestedControls(for: entity.id))
+        await runner.releaseNext()
+        _ = await task.value
+    }
+
+    func testOlderRefreshCannotRetireANewerControlRequest() async {
+        let clock = TestPearchClock()
+        let entered = ConnectionGate()
+        let release = ConnectionGate()
+        let calls = CallCounter()
+        let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+        let entity = entity("number", state: "27", attributes: ["min": 16, "max": 30])
+        let model = PearchHAPanelModel(connector: { _ in
+            if await calls.next() == 2 {
+                await entered.open()
+                await release.wait()
+            }
+            return .success(rooms: [Room(id: "office", name: "Office", entities: [entity])])
+        }, actionRunner: { form, action in await runner.run(form: form, action: action) }, clock: clock,
+                                      bulkSyncConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.setPanelActive(true)
+        defer { model.setPanelActive(false) }
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .seconds(45))
+        await entered.wait()
+        let task = Task { await model.setEntityControlValue(entity.id, controlID: "set_value.value", value: 30) }
+        await spinUntil { await runner.callCount() == 1 }
+        await release.open()
+        await spinUntil { model.snapshot.refreshCount == 1 }
+        XCTAssertEqual(model.requestedControlValue(for: entity.id, controlID: "set_value.value"), 30)
+        XCTAssertTrue(model.applyLiveState(EntityState(id: entity.id, name: entity.name, state: "28", unit: nil, controlAttributes: entity.controlAttributes)))
+        XCTAssertFalse(model.hasRequestedControls(for: entity.id))
+        await runner.releaseNext()
+        _ = await task.value
+    }
+
+    func testRequestedValueSurvivesRefreshFailureButEndsOnCancellationOrServiceFailure() async {
+        let entity = entity("number", state: "27", attributes: ["min": 16, "max": 30])
+        let rooms = [Room(id: "office", name: "Office", entities: [entity])]
+        let connection = ConnectionResultRecorder(results: [.success(rooms: rooms), .failure(.unreachable(host: "localhost")), .success(rooms: rooms)])
+        let runner = ActionRunnerRecorder(results: [.success, .failed("Rejected"), .success], waitForRelease: true)
+        let model = PearchHAPanelModel(connector: { _ in await connection.next() },
+                                      actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let first = Task { await model.setEntityControlValue(entity.id, controlID: "set_value.value", value: 30) }
+        await spinUntil { await runner.callCount() == 1 }
+        await runner.releaseNext()
+        _ = await first.value
+        XCTAssertEqual(model.requestedControlValue(for: entity.id, controlID: "set_value.value"), 30)
+        XCTAssertNotNil(model.snapshot.controlActionState.failureMessage(for: entity.id))
+        await model.refresh()
+        XCTAssertFalse(model.hasRequestedControls(for: entity.id))
+
+        let second = Task { await model.setEntityControlValue(entity.id, controlID: "set_value.value", value: 29) }
+        await spinUntil { await runner.callCount() == 2 }
+        await runner.releaseNext()
+        _ = await second.value
+        XCTAssertFalse(model.hasRequestedControls(for: entity.id))
+        XCTAssertEqual(model.snapshot.controlActionState.failureMessage(for: entity.id), "Rejected")
+
+        let third = Task { await model.setEntityControlValue(entity.id, controlID: "set_value.value", value: 28) }
+        await spinUntil { await runner.callCount() == 3 }
+        third.cancel()
+        await runner.releaseNext()
+        _ = await third.value
+        XCTAssertFalse(model.hasRequestedControls(for: entity.id))
+        XCTAssertEqual(model.snapshot.controlActionState, .idle)
+    }
+
     func testNumericInputsDebounceTypingInPanelAndPopup() async throws {
         for inline in [true, false] {
             let clock = TestPearchClock()
-            let runner = ActionRunnerRecorder(results: [.success])
+            let runner = ActionRunnerRecorder(results: [.success, .success], waitForRelease: true)
             let entity = DiscoveredEntity(id: "number.office", name: "Target temperature", state: "22", unit: "°C",
                                           areaID: "office", deviceID: nil, controlAttributes: ["min": 16, "max": 30, "step": 0.5])
             let model = PearchHAPanelModel(connector: { _ in .success(rooms: [Room(id: "office", name: "Office", entities: [entity])]) },
@@ -457,17 +771,26 @@ final class PearchHAUITests: XCTestCase {
                                           selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
             model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
             await model.connect()
+            model.setPanelActive(true)
+            let presentation: PearchHATestPopoverPresentation?
             let window: NSWindow
             if inline {
-                window = PearchHAApplication.makePanel(model: model)
+                presentation = try PearchHATestPopoverPresentation(model: model)
+                window = try XCTUnwrap(presentation).window
             } else {
+                presentation = nil
                 window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 220), styleMask: [.titled], backing: .buffered, defer: false)
                 window.contentView = NSHostingView(rootView: PearchHAEntityControlEditor(model: model, entityID: entity.id))
             }
             window.makeKeyAndOrderFront(nil)
-            defer { window.orderOut(nil); window.contentView = nil; window.contentViewController = nil }
+            defer {
+                if let presentation { presentation.close() }
+                else { window.orderOut(nil); window.contentView = nil; window.contentViewController = nil }
+            }
             drainPanelRunLoop()
             let field = try XCTUnwrap(editableTextFields(in: window.contentView).first)
+            let idleFrame = field.convert(field.bounds, to: nil)
+            let idleSize = window.contentView?.fittingSize
             try saveControlSnapshot(window.contentView, name: inline ? "numeric-panel" : "numeric-popup")
             XCTAssertFalse(nativeButtons(in: window.contentView).contains { $0.title == "Set" })
             try setNativeTextFieldDraft("23", for: field, in: window)
@@ -489,6 +812,16 @@ final class PearchHAUITests: XCTestCase {
             let afterDelay = await runner.callCount()
             XCTAssertEqual(afterDelay, 1, "Only the final edit is sent")
 
+            drainPanelRunLoop()
+            XCTAssertEqual(field.convert(field.bounds, to: nil), idleFrame, "The pending indicator must not shift the input")
+            XCTAssertEqual(window.contentView?.fittingSize, idleSize, "Waiting must not resize the panel or editor")
+            XCTAssertTrue(model.applyLiveState(EntityState(id: entity.id, name: entity.name, state: entity.state, unit: entity.unit,
+                                                           controlAttributes: entity.controlAttributes)))
+            drainPanelRunLoop()
+            XCTAssertEqual(field.convert(field.bounds, to: nil), idleFrame)
+            XCTAssertEqual(window.contentView?.fittingSize, idleSize, "A report arriving before service completion must not add a status row")
+            await runner.releaseNext()
+
             await spinUntil { model.snapshot.controlActionState == .idle }
             drainPanelRunLoop()
             let stepper = try XCTUnwrap(nativeSteppers(in: window.contentView).first)
@@ -506,6 +839,8 @@ final class PearchHAUITests: XCTestCase {
             await spinUntil { await runner.callCount() == 2 }
             let steppedActions = await runner.actions()
             XCTAssertEqual(steppedActions.last?.serviceData, ["value": 23.5])
+            await runner.releaseNext()
+            await spinUntil { model.snapshot.controlActionState == .idle }
         }
     }
 
@@ -520,9 +855,10 @@ final class PearchHAUITests: XCTestCase {
                                       selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        let panel = PearchHAApplication.makePanel(model: model)
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
         panel.makeKeyAndOrderFront(nil)
-        defer { panel.orderOut(nil); panel.contentViewController = nil }
         drainPanelRunLoop()
         let field = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
         for invalid in ["23junk", "40", 22.25.formatted(.number.grouping(.never)), "22"] {
@@ -565,9 +901,10 @@ final class PearchHAUITests: XCTestCase {
         }, selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        let panel = PearchHAApplication.makePanel(model: model)
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
         panel.makeKeyAndOrderFront(nil)
-        defer { panel.orderOut(nil); panel.contentViewController = nil }
         drainPanelRunLoop()
         let view = try XCTUnwrap(panel.contentView)
         view.layoutSubtreeIfNeeded()
@@ -596,10 +933,12 @@ final class PearchHAUITests: XCTestCase {
                                       selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        let panel = PearchHAApplication.makePanel(model: model)
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
         panel.makeKeyAndOrderFront(nil)
         model.setPanelActive(true)
-        defer { model.setPanelActive(false); panel.orderOut(nil); panel.contentViewController = nil }
+        defer { model.setPanelActive(false) }
         drainPanelRunLoop()
         let view = try XCTUnwrap(panel.contentView)
         view.layoutSubtreeIfNeeded()
@@ -2174,6 +2513,131 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
     }
 
+    func testHistoryDismissalBeforeDebounceTaskStartsRemainsDismissed() async {
+        let recorder = HistoryProviderRecorder(results: [])
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { form, entityID, range in
+                await recorder.provide(form: form, entityID: entityID, range: range)
+            },
+            historyDebounce: .milliseconds(0),
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
+        model.dismissHistoryPopover()
+        for _ in 0..<20 { await Task.yield() }
+
+        XCTAssertNil(model.snapshot.historyPresentationEntityID, "Canceled detail work must not restore the dismissed history surface")
+        XCTAssertEqual(model.snapshot.historyState, .idle)
+        let callCount = await recorder.callCount()
+        XCTAssertEqual(callCount, 0)
+    }
+
+    func testHistoryReplacementBeforeDebounceTaskStartsNeverRestoresOldSelection() async {
+        var presentedEntities: [EntityID] = []
+        let recorder = HistoryProviderRecorder(results: [
+            .success(historySeries(entityID: "sensor.office_humidity", range: .hour, value: 46.0))
+        ])
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { form, entityID, range in
+                await recorder.provide(form: form, entityID: entityID, range: range)
+            },
+            historyDebounce: .milliseconds(0),
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+            snapshotSink: { snapshot, _ in
+                if let entityID = snapshot.historyPresentationEntityID { presentedEntities.append(entityID) }
+            }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
+        model.presentHistoryDetail("sensor.office_humidity", range: .hour)
+        presentedEntities.removeAll()
+        await spinUntil {
+            if case let .loaded(series) = model.snapshot.historyState { return series.entityID == "sensor.office_humidity" }
+            return false
+        }
+        for _ in 0..<20 { await Task.yield() }
+
+        XCTAssertFalse(presentedEntities.contains("sensor.office_temperature"), "Canceled detail work must not republish the replaced selection")
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
+        let callCount = await recorder.callCount()
+        XCTAssertEqual(callCount, 1)
+    }
+
+    func testRefreshRemovingPresentedHistoryEntityDismissesAndCancelsDetail() async {
+        let clock = TestPearchClock()
+        let roomsWithoutTemperature = selectionRooms().map { room in
+            Room(id: room.id, name: room.name, entities: room.entities.filter { $0.id != "sensor.office_temperature" })
+        }
+        let connections = ConnectionResultRecorder(results: [
+            .success(rooms: selectionRooms()), .success(rooms: roomsWithoutTemperature)
+        ])
+        let history = HistoryProviderRecorder(results: [])
+        let model = PearchHAPanelModel(
+            connector: { _ in await connections.next() },
+            historyProvider: { form, entityID, range in
+                await history.provide(form: form, entityID: entityID, range: range)
+            },
+            clock: clock, historyDebounce: .seconds(1),
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+
+        await model.refresh()
+
+        XCTAssertFalse(model.snapshot.availableRooms.flatMap(\.entities).contains { $0.id == "sensor.office_temperature" })
+        XCTAssertTrue(model.snapshot.rooms.flatMap(\.entities).contains { $0.id == "sensor.office_humidity" })
+        XCTAssertNil(model.snapshot.historyPresentationEntityID, "Missing detail content must reveal the rooms view")
+        XCTAssertEqual(model.snapshot.historyState, .idle)
+        await spinUntil("removed history detail cancels its debounce") { await clock.sleepingTaskCount() == 0 }
+        _ = await clock.advance(by: .seconds(2))
+        for _ in 0..<20 { await Task.yield() }
+        let historyCalls = await history.callCount()
+        XCTAssertEqual(historyCalls, 0)
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+    }
+
+    func testRefreshKeepsAvailableHistoryEntityAfterUnselectionAndUnpinning() async {
+        let clock = TestPearchClock()
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, entityID, range in
+                .success(historySeries(entityID: entityID, range: range, value: 21.4))
+            },
+            clock: clock, historyDebounce: .seconds(1),
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        XCTAssertTrue(model.setMenuBarEntity("sensor.office_temperature", isVisible: true))
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        model.setEntity("sensor.office_temperature", isSelected: false)
+        XCTAssertTrue(model.setMenuBarEntity("sensor.office_temperature", isVisible: false))
+
+        await model.refresh()
+
+        XCTAssertFalse(model.snapshot.rooms.flatMap(\.entities).contains { $0.id == "sensor.office_temperature" })
+        XCTAssertFalse(model.snapshot.menuBarDisplayConfiguration.isPromoted("sensor.office_temperature"))
+        XCTAssertTrue(model.snapshot.availableRooms.flatMap(\.entities).contains { $0.id == "sensor.office_temperature" })
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+        _ = await clock.advance(by: .seconds(1))
+        await spinUntil {
+            if case let .loaded(series) = model.snapshot.historyState { return series.entityID == "sensor.office_temperature" }
+            return false
+        }
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+    }
+
     func test_t_history_selection_switches_immediately_and_cancels_previous_load() async {
         let clock = TestPearchClock()
         let recorder = HistoryProviderRecorder(
@@ -2246,7 +2710,7 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
     }
 
-    func test_t_scroll_activity_closes_history_and_allows_explicit_reopen() async {
+    func test_t_history_dismissal_allows_explicit_reopen() async {
         let clock = TestPearchClock()
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
@@ -2268,7 +2732,7 @@ final class PearchHAUITests: XCTestCase {
         }
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
 
-        model.notePanelScrollActivity()
+        model.dismissHistoryPopover()
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
 
         model.presentHistoryDetail("sensor.office_humidity", range: .hour)
@@ -3011,7 +3475,7 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.entityState("switch.office_lamp"), "off")
     }
 
-    func testBuiltInControlSuccessReassertsTargetStateAfterStaleRefreshDuringInFlightAction() async {
+    func testBuiltInControlKeepsTheNextReportedStateAfterServiceAcceptance() async {
         let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
         let connector = ConnectionResultRecorder(results: [
             .success(rooms: controlRooms()),
@@ -3041,9 +3505,28 @@ final class PearchHAUITests: XCTestCase {
             model.snapshot.controlActionState == .idle
         }
 
-        XCTAssertEqual(model.entityState("switch.office_lamp"), "on")
+        XCTAssertEqual(model.entityState("switch.office_lamp"), "off")
+        XCTAssertFalse(model.hasRequestedControls(for: "switch.office_lamp"))
         let _hoisted23 = await connector.callCount()
         XCTAssertEqual(_hoisted23, 2)
+    }
+
+    func testCancelingControlPreservesItsNextReportedState() async {
+        let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: controlRooms()) },
+                                      actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.setPanelActive(true)
+        XCTAssertTrue(model.startEntityControlToggle("switch.office_lamp", isOn: true))
+        await spinUntil { await runner.callCount() == 1 }
+        XCTAssertTrue(model.applyLiveState(EntityState(id: "switch.office_lamp", name: "Office lamp", state: "on", unit: nil)))
+        XCTAssertFalse(model.hasRequestedControls(for: "switch.office_lamp"))
+        model.cancelInFlightAction()
+        await runner.releaseNext()
+        XCTAssertEqual(model.entityState("switch.office_lamp"), "on", "Cancellation must not roll back an already reported value")
+        XCTAssertEqual(model.snapshot.controlActionState, .idle)
     }
 
     func testBuiltInControlSuccessIgnoresStaleLiveUpdateWhileActionIsInFlight() async {
@@ -3235,7 +3718,7 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.entityPosition("cover.office_blinds"), 42)
     }
 
-    func testBuiltInCoverPositionSuccessReassertsTargetAfterStaleRefreshDuringInFlightAction() async {
+    func testBuiltInCoverPositionKeepsTheNextReportAfterServiceAcceptance() async {
         let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
         let connector = ConnectionResultRecorder(results: [
             .success(rooms: controlRooms()),
@@ -3266,7 +3749,8 @@ final class PearchHAUITests: XCTestCase {
         }
 
         XCTAssertEqual(model.entityState("cover.office_blinds"), "open")
-        XCTAssertEqual(model.entityPosition("cover.office_blinds"), 75)
+        XCTAssertEqual(model.entityPosition("cover.office_blinds"), 42)
+        XCTAssertFalse(model.hasRequestedControls(for: "cover.office_blinds"))
         let _hoisted30 = await connector.callCount()
         XCTAssertEqual(_hoisted30, 2)
     }
@@ -4133,6 +4617,95 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertTrue(serviceEntry?.bodyText?.contains(#""duration":15"#) == true)
     }
 
+    func testCustomActionCancellationDuringProtectedReadDoesNotSendOrOverwriteNewerAction() async {
+        for readFails in [false, true] {
+            let store = InMemoryProtectedActionValueStore()
+            let readEntered = ConnectionGate()
+            let readRelease = DispatchSemaphore(value: 0)
+            defer { readRelease.signal() }
+            let newerEntered = ConnectionGate()
+            let newerRelease = ConnectionGate()
+            let runner = ActionRunnerRecorder(results: [.success, .success])
+            let model = PearchHAPanelModel(connector: { _ in .success(rooms: selectionRooms()) },
+                actionRunner: { form, action in
+                    let result = await runner.run(form: form, action: action)
+                    if action.serviceData["marker"] == .string("newer") {
+                        await newerEntered.open()
+                        await newerRelease.wait()
+                    }
+                    return result
+                }, bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+                protectedActionValueStore: store)
+            model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+            await model.connect()
+            let first = EntityCustomAction(id: "protected-first", entityID: "sensor.office_humidity", title: "First",
+                action: ActionSpec(domain: "script", service: "turn_on", targetEntityID: "script.first", serviceData: ["pin": "493817"]))
+            let newer = EntityCustomAction(id: "newer", entityID: first.entityID, title: "Newer",
+                action: ActionSpec(domain: "script", service: "turn_on", targetEntityID: "script.newer", serviceData: ["marker": "newer"]))
+            XCTAssertTrue(model.setCustomAction(first))
+            XCTAssertTrue(model.setCustomAction(newer))
+            store.interceptNextLoad {
+                Task { await readEntered.open() }
+                readRelease.wait()
+                if readFails { throw ProtectedActionValueStoreError.invalidStoredValues }
+            }
+            let firstTask = Task { await model.runCustomAction(first.id) }
+            await spinUntil { await readEntered.isOpen }
+            firstTask.cancel()
+            model.cancelInFlightAction()
+            let newerTask = Task { await model.runCustomAction(newer.id) }
+            await spinUntil { await newerEntered.isOpen }
+            readRelease.signal()
+
+            let firstResult = await firstTask.value
+
+            XCTAssertFalse(firstResult)
+            let calls = await runner.actions()
+            XCTAssertEqual(calls, [newer.action], "A canceled protected read must not send its service request")
+            XCTAssertEqual(model.snapshot.controlActionState, .running(entityID: newer.entityID),
+                           "The canceled read must not overwrite a newer action, including when the read fails")
+            await newerRelease.open()
+            let newerResult = await newerTask.value
+            XCTAssertTrue(newerResult)
+            XCTAssertEqual(model.snapshot.controlActionState, .idle)
+        }
+    }
+
+    func testCustomActionRedactsProtectedValuesEchoedByHomeAssistant() async throws {
+        let pin = "493817"
+        let nestedSecret = "key-493817-protected"
+        let server = try FakeHAWebSocketServer(fixtures: FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[{"entity_id":"sensor.office_humidity","state":"44","attributes":{"friendly_name":"Office humidity","unit_of_measurement":"%"}}]"#,
+            serviceCallFailureMessage: "Denied PIN \(pin) and nested \(nestedSecret); try again."
+        ))
+        server.start()
+        defer { server.stop() }
+        let gateway = PearchHAAuthorizedHomeAssistantGateway()
+        let model = PearchHAPanelModel(connector: gateway.connect(form:), actionRunner: gateway.action(form:action:),
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+            protectedActionValueStore: InMemoryProtectedActionValueStore())
+        model.updateConnectionForm(urlString: server.baseURL.absoluteString, token: "fake-token")
+        await model.connect()
+        let action = EntityCustomAction(id: "protected-failure", entityID: "sensor.office_humidity", title: "Arm home",
+            action: ActionSpec(domain: "alarm_control_panel", service: "alarm_arm_home", targetEntityID: "alarm_control_panel.home",
+                serviceData: ["pin": .string(pin), "steps": .array([.object(["token": .string(nestedSecret)])])]))
+        XCTAssertTrue(model.setCustomAction(action))
+        XCTAssertEqual(model.customAction(id: action.id)?.action.protectedValueReferences.count, 2)
+
+        let succeeded = await model.runCustomAction(action.id)
+
+        XCTAssertFalse(succeeded)
+        let message = try XCTUnwrap(model.snapshot.controlActionState.failureMessage(for: action.entityID))
+        XCTAssertTrue(message.contains("Denied PIN <redacted> and nested <redacted>; try again."))
+        for secret in [pin, nestedSecret] {
+            XCTAssertFalse(message.contains(secret))
+            XCTAssertFalse(model.snapshot.redactedForDiagnostics().controlActionState.failureMessage(for: action.entityID)?.contains(secret) == true)
+        }
+        let requests = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
+        XCTAssertEqual(requests.count, 1, "The protected action must reach the real service transport")
+    }
+
     func testCustomActionRunFailsExplicitlyWhenProtectedValueIsMissing() async {
         let reference: ProtectedActionValueReference = "protected-pin"
         let action = EntityCustomAction(
@@ -4722,6 +5295,14 @@ final class PearchHAUITests: XCTestCase {
                 target: .entity("sensor.office_temperature"),
                 tree: tree
             ),
+            .unsupported
+        )
+        XCTAssertEqual(
+            translator.translate(source: .entity("sensor.office_temperature"), target: .entity("sensor.office_temperature"), tree: tree),
+            .unsupported
+        )
+        XCTAssertEqual(
+            translator.translate(source: .room("office"), target: .entity("sensor.office_temperature"), tree: tree),
             .unsupported
         )
     }
@@ -5429,29 +6010,16 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertFalse(snapshot.redactedForDiagnostics().accessibilitySummary.contains("secret-token"))
     }
 
-    func testAppShellPanelCanBecomeKeyForFirstRunTextEntry() {
-        let panel = PearchHAApplication.makePanel(model: PearchHAPanelModel())
-        defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
-        }
-        let frameSize = panel.frame.size
-
-        XCTAssertTrue(panel.canBecomeKey)
-        XCTAssertTrue(panel.canBecomeMain)
-        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
-        // The panel is borderless so the SwiftUI root paints the rounded
-        // dashboard surface itself: no titlebar, no window frame/background.
-        XCTAssertTrue(panel.styleMask.contains(.borderless))
-        XCTAssertFalse(panel.styleMask.contains(.titled))
-        XCTAssertFalse(panel.isOpaque)
-        XCTAssertEqual(panel.backgroundColor, .clear)
-        XCTAssertFalse(panel.hasShadow)
-        XCTAssertTrue(panel.isFloatingPanel)
-        XCTAssertTrue(panel.hidesOnDeactivate)
-        XCTAssertNotNil(panel.contentViewController)
-        XCTAssertEqual(Int(frameSize.width.rounded()), 384)
-        XCTAssertGreaterThanOrEqual(Int(frameSize.height.rounded()), 468)
+    func testAppShellPopoverHostsKeyCapableContent() throws {
+        let presentation = try PearchHATestPopoverPresentation(model: PearchHAPanelModel())
+        defer { presentation.close() }
+        XCTAssertEqual(presentation.popover.behavior, .transient)
+        XCTAssertFalse(presentation.popover.animates)
+        XCTAssertTrue(presentation.popover.isShown)
+        XCTAssertTrue(presentation.window.canBecomeKey)
+        XCTAssertNotNil(presentation.popover.contentViewController)
+        XCTAssertEqual(Int(presentation.popover.contentSize.width.rounded()), 384)
+        XCTAssertEqual(Int(presentation.popover.contentSize.height.rounded()), 468)
     }
 
     func testAppShellConnectionFormNormalizesFrontendURLsThroughNativeTextFields() throws {
@@ -5590,8 +6158,10 @@ final class PearchHAUITests: XCTestCase {
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        let panel = PearchHAApplication.makePanel(model: model)
-        defer { panel.orderOut(nil); panel.contentViewController = nil }
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
+
         panel.makeKeyAndOrderFront(nil)
         drainPanelRunLoop()
         panel.contentView?.layoutSubtreeIfNeeded()
@@ -5633,24 +6203,32 @@ final class PearchHAUITests: XCTestCase {
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        let panel = PearchHAApplication.makePanel(model: model)
-        defer { panel.orderOut(nil); panel.contentViewController = nil }
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
+
         panel.makeKeyAndOrderFront(nil)
         drainPanelRunLoop()
         let switches = nativeSwitches(in: panel.contentView)
         XCTAssertEqual(switches.count, 3)
+        let idleFrames = switches.map { $0.convert($0.bounds, to: nil) }
         let control = try XCTUnwrap(switches.first)
         control.performClick(nil)
         await spinUntil { await runner.callCount() == 1 }
         await spinUntil("every switch reflects the shared command lock") { switches.allSatisfy { !$0.isEnabled } }
+        drainPanelRunLoop()
+        XCTAssertEqual(switches.map { $0.convert($0.bounds, to: nil) }, idleFrames, "Waiting must not shift toggle controls")
+        try saveControlSnapshot(panel.contentView, name: "requested-switch-panel")
         await runner.releaseNext()
         await spinUntil { !model.snapshot.controlActionState.isRunning }
         await spinUntil("switches recover after the failed command") { switches.allSatisfy(\.isEnabled) }
+        drainPanelRunLoop()
+        XCTAssertEqual(switches.map { $0.convert($0.bounds, to: nil).minX }, idleFrames.map(\.minX), "The failure message must not shift the control column")
         XCTAssertEqual(control.state, .off)
     }
 
     func testAppShellLightSwitchSendsOnAndOffAfterReopeningPanel() async throws {
-        func click(_ control: NSSwitch, in panel: NSPanel) -> [String] {
+        func click(_ control: NSSwitch, in panel: NSWindow) -> [String] {
             XCTAssertTrue(control.window === panel, "Native switch must belong to the current panel")
             control.performClick(nil)
             NSApp.updateWindows()
@@ -5666,8 +6244,10 @@ final class PearchHAUITests: XCTestCase {
         ])
         let model = await connectedModel([lamp], server: server)
         for (index, service) in ["turn_on", "turn_off"].enumerated() {
-            let panel = PearchHAApplication.makePanel(model: model)
-            defer { panel.orderOut(nil); panel.contentViewController = nil }
+            let presentation = try PearchHATestPopoverPresentation(model: model)
+            let panel = presentation.window
+            defer { presentation.close() }
+
             panel.makeKeyAndOrderFront(nil)
             drainPanelRunLoop()
             panel.contentView?.layoutSubtreeIfNeeded()
@@ -5698,6 +6278,150 @@ final class PearchHAUITests: XCTestCase {
             XCTAssertEqual(payload["service_data"], .object([:]))
             XCTAssertEqual(model.snapshot.rooms.first?.entities.first?.state, service == "turn_on" ? "on" : "off")
         }
+    }
+
+    func testSettingsInspectorKeepsSearchAndEntityRowsInPlace() async throws {
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: selectionRooms()) })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        var searchFrame: NSRect?
+        for id: EntityID in ["sensor.office_humidity", "sensor.office_temperature"] {
+            let window = PearchHAApplication.makeSettingsWindow(model: model, initialTab: .entities,
+                initiallyExpandedEntityIDs: [id])
+            window.setContentSize(NSSize(width: 1120, height: 700))
+            window.makeKeyAndOrderFront(nil)
+            defer { window.orderOut(nil); window.contentView = nil }
+            try await Task.sleep(for: .milliseconds(100))
+            drainPanelRunLoop()
+            let search = try XCTUnwrap(editableTextFields(in: window.contentView).first { $0.placeholderString == "Search" })
+            let unit = try XCTUnwrap(nativePopUpButtons(in: window.contentView).first { $0.title.hasPrefix("Detected") })
+            let frame = search.convert(search.bounds, to: nil)
+            XCTAssertGreaterThan(unit.convert(unit.bounds, to: nil).minX, frame.maxX,
+                                 "Entity settings must be beside the list, never inserted between its rows")
+            if let searchFrame { XCTAssertEqual(frame, searchFrame, "Changing the inspected entity preserves list geometry") }
+            searchFrame = frame
+            try saveControlSnapshot(window.contentView, name: "entity-inspector-\(id.rawValue)")
+            window.setContentSize(NSSize(width: 660, height: 560))
+            drainPanelRunLoop()
+            XCTAssertNotNil(nativePopUpButtons(in: window.contentView).first { $0.title.hasPrefix("Detected") },
+                            "The inspector stays reachable at minimum window size")
+            try saveControlSnapshot(window.contentView, name: "entity-inspector-narrow")
+        }
+    }
+
+    func testSettingsSearchHandlesMixedFiveHundredEntityInstallation() async throws {
+        let domains = ["sensor", "light", "cover", "climate", "select"]
+        let rooms = (0..<20).map { room in
+            Room(id: RoomID("room_\(room)"), name: "Room \(room)", entities: (0..<25).map { item in
+                DiscoveredEntity(id: EntityID("\(domains[item % domains.count]).room_\(room)_item_\(item)"),
+                    name: "\(item == 24 ? "Long balcony temperature · Temperatur Außenbereich" : "Device \(item)")",
+                    state: item % 17 == 0 ? "unavailable" : "21", unit: item % 5 == 0 ? "°C" : nil,
+                    areaID: AreaID("room_\(room)"), deviceID: DeviceID("device_\(room)_\(item / 3)"),
+                    controlAttributes: ["supported_features": 15, "options": .array(["Celsius", "Fahrenheit"])] )
+            })
+        }
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: rooms) },
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let start = DispatchTime.now().uptimeNanoseconds
+        let window = PearchHAApplication.makeSettingsWindow(model: model, initialTab: .entities,
+            initiallyExpandedEntityIDs: ["sensor.room_0_item_0"])
+        window.makeKeyAndOrderFront(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        let openMilliseconds = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+        defer { window.orderOut(nil); window.contentView = nil }
+        drainPanelRunLoop()
+        let search = try XCTUnwrap(editableTextFields(in: window.contentView).first { $0.placeholderString == "Search" })
+        try setNativeTextFieldValue("room_19_item_24", for: search, in: window)
+        await spinUntil { model.snapshot.selectionQuery == "room_19_item_24" }
+        XCTAssertEqual(model.settingsSelectionTree.flatMap(\.entities).map { $0.entity.id }, ["select.room_19_item_24"])
+        XCTAssertEqual(model.snapshot.availableRooms.flatMap(\.entities).count, 500, "Filtering must not discard discovery data")
+        try setNativeTextFieldValue("", for: search, in: window)
+        await spinUntil { model.snapshot.selectionQuery.isEmpty }
+        XCTAssertEqual(model.settingsSelectionTree.flatMap(\.entities).count, 500)
+        print("Settings open with 500 mixed entities: \(String(format: "%.1f", openMilliseconds)) ms")
+    }
+
+    func testStandardMenusExposeSettingsHelpAndQuit() {
+        let menu = PearchHAApplication.standardMainMenu()
+        XCTAssertEqual(menu.items.compactMap { $0.submenu?.title }, ["PearchHA", "Edit", "Window", "Help"])
+        let appMenu = menu.items.first?.submenu
+        XCTAssertEqual(appMenu?.items.first { $0.title == "Settings…" }?.keyEquivalent, ",")
+        XCTAssertEqual(appMenu?.items.first { $0.title == "Quit PearchHA" }?.keyEquivalent, "q")
+    }
+
+    func testHistoryOpensInsidePanelAndReturnsWithoutClosingPanel() async throws {
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, id, range in .success(historySeries(entityID: id, range: range, value: 44)) },
+            historyDebounce: .milliseconds(0), bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
+        panel.makeKeyAndOrderFront(nil)
+
+        model.presentHistoryDetail("sensor.office_humidity")
+        await spinUntil { if case .loaded = model.snapshot.historyState { return true }; return false }
+        try await Task.sleep(for: .milliseconds(100))
+        drainPanelRunLoop()
+        XCTAssertEqual(nativeSegmentedControls(in: panel.contentView).count, 1,
+                       "History range control is inside the same panel window")
+        try saveControlSnapshot(panel.contentView, name: "history-in-panel")
+        let sendQueuedEvent = { (event: NSEvent, mask: NSEvent.EventTypeMask) throws in
+            NSApp.postEvent(event, atStart: true)
+            let queued = try XCTUnwrap(NSApp.nextEvent(matching: mask, until: .distantPast, inMode: .default, dequeue: true))
+            XCTAssertEqual(queued.type, event.type)
+            XCTAssertEqual(queued.windowNumber, event.windowNumber)
+            NSApp.sendEvent(queued)
+        }
+        let escape = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber, context: nil,
+            characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        try sendQueuedEvent(escape, .keyDown)
+        drainPanelRunLoop()
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+        XCTAssertTrue(presentation.popover.isShown, "Escape returns to rooms first")
+        let secondEscape = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber, context: nil,
+            characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        try sendQueuedEvent(secondEscape, .keyDown)
+        XCTAssertFalse(presentation.popover.isShown, "A second Escape closes the panel")
+
+        let screen = try XCTUnwrap(presentation.anchorWindow.screen?.visibleFrame)
+        let outsideWindow = NSWindow(contentRect: NSRect(x: screen.minX + 12, y: screen.minY + 12, width: 80, height: 60),
+                                     styleMask: [.titled], backing: .buffered, defer: false)
+        outsideWindow.isReleasedWhenClosed = false
+        outsideWindow.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 80, height: 60))
+        defer { outsideWindow.close(); outsideWindow.contentView = nil }
+        outsideWindow.orderFront(nil)
+        drainPanelRunLoop()
+        presentation.popover.show(relativeTo: presentation.anchor.bounds, of: presentation.anchor, preferredEdge: .minY)
+        let reopenedWindow = try XCTUnwrap(presentation.popover.contentViewController?.view.window)
+        reopenedWindow.makeKeyAndOrderFront(nil)
+        model.presentHistoryDetail("sensor.office_humidity")
+        await spinUntil { if case .loaded = model.snapshot.historyState { return true }; return false }
+        XCTAssertNotNil(model.snapshot.historyPresentationEntityID)
+        XCTAssertFalse(reopenedWindow.frame.intersects(outsideWindow.frame), "The outside target must be separate from the popover")
+        XCTAssertTrue(presentation.popover.isShown, "Preparing the outside target must not dismiss history")
+        // Queue the release before dispatching the press so native tracking can consume it.
+        for type: NSEvent.EventType in [.leftMouseUp, .leftMouseDown] {
+            let outsideClick = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: NSPoint(x: 20, y: 20),
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: outsideWindow.windowNumber, context: nil, eventNumber: 1,
+                clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0))
+            NSApp.postEvent(outsideClick, atStart: true)
+        }
+        let outsideDown = try XCTUnwrap(NSApp.nextEvent(matching: .leftMouseDown, until: .distantPast, inMode: .default, dequeue: true))
+        NSApp.sendEvent(outsideDown)
+        if let outsideUp = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: true) {
+            NSApp.sendEvent(outsideUp)
+        }
+        drainPanelRunLoop()
+        XCTAssertFalse(presentation.popover.isShown, "An outside click closes the popover while history is open")
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
     }
 
     func testSettingsEntitiesTabExposesNativeSearchUnitMenuAndKeyViewLoop() async throws {
@@ -5742,6 +6466,75 @@ final class PearchHAUITests: XCTestCase {
         }
         XCTAssertTrue(unitPopup.acceptsFirstResponder, debugSummary)
         XCTAssertTrue(window.makeFirstResponder(unitPopup), debugSummary)
+    }
+
+    func testLargerTextKeepsNativeHistoryAndConnectionControlsReadable() throws {
+        for size: PearchHATextSize in [.standard, .extraLarge, .maximum] {
+            let model = PearchHAPanelModel()
+            let settings = PearchHAApplication.makeSettingsWindow(model: model, initialTab: .connection,
+                displayPreferencesProvider: { .defaults.with(textSize: size) })
+            settings.setContentSize(NSSize(width: 660, height: 560))
+            settings.makeKeyAndOrderFront(nil)
+            defer { settings.orderOut(nil); settings.contentViewController = nil }
+            drainPanelRunLoop()
+            let address = try XCTUnwrap(editableTextFields(in: settings.contentView).first)
+            XCTAssertEqual(try XCTUnwrap(address.font).pointSize, 13 * size.scale, accuracy: 0.1)
+            XCTAssertTrue(settings.makeFirstResponder(address))
+            let frame = address.convert(address.bounds, to: settings.contentView)
+            XCTAssertLessThanOrEqual(frame.maxX, try XCTUnwrap(settings.contentView).bounds.maxX)
+            try saveControlSnapshot(settings.contentView, name: "text-connection-\(size.rawValue)")
+
+            for (scheme, increasedContrast) in [(ColorScheme.light, false), (.dark, false), (.light, true), (.dark, true)] {
+                let history = NSHostingView(rootView: PearchHAHistoryPopoverContent(
+                    entityID: "sensor.temperature", entityName: "Außentemperatur im Schlafzimmer",
+                    valueText: "24.5 °C", state: .loaded(HistorySeries(entityID: "sensor.temperature", range: .day, samples: [])),
+                    increaseContrastOverride: increasedContrast,
+                    selectedRange: .constant(.day))
+                    .environment(\.pearchHATextSize, size).environment(\.colorScheme, scheme))
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 280 + 140 * (size.scale - 1), height: 350),
+                                      styleMask: [.titled], backing: .buffered, defer: true)
+                window.contentView = history
+                window.makeKeyAndOrderFront(nil)
+                defer { window.orderOut(nil); window.contentView = nil }
+                drainPanelRunLoop()
+                let ranges = try XCTUnwrap(nativeSegmentedControls(in: history).first)
+                XCTAssertEqual(try XCTUnwrap(ranges.font).pointSize, 11 * size.scale, accuracy: 0.1)
+                XCTAssertEqual(ranges.segmentCount, 4)
+                let bezel = try XCTUnwrap(ranges.selectedSegmentBezelColor?.usingColorSpace(.sRGB))
+                let luminance = zip([bezel.redComponent, bezel.greenComponent, bezel.blueComponent], [0.2126, 0.7152, 0.0722])
+                    .reduce(0.0) { result, channel in
+                        let value = channel.0 <= 0.04045 ? channel.0 / 12.92 : pow((channel.0 + 0.055) / 1.055, 2.4)
+                        return result + value * channel.1
+                    }
+                XCTAssertGreaterThanOrEqual(1.05 / (luminance + 0.05), increasedContrast ? 7 : 4.5,
+                                            "The native selected segment has a white label")
+                XCTAssertTrue(window.makeFirstResponder(ranges))
+                XCTAssertLessThanOrEqual(ranges.convert(ranges.bounds, to: history).maxX, history.bounds.maxX)
+                try saveControlSnapshot(history, name: "text-history-\(size.rawValue)-\(scheme == .dark ? "dark" : "light")-\(increasedContrast ? "contrast" : "normal")")
+            }
+        }
+    }
+
+    func testLargerTextKeepsInspectorBoundsEditableAtMinimumWindowWidth() async throws {
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: selectionRooms()) })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let window = PearchHAApplication.makeSettingsWindow(model: model, initialTab: .entities,
+            initiallyExpandedEntityIDs: ["sensor.office_humidity"],
+            displayPreferencesProvider: { .defaults.with(textSize: .maximum) })
+        window.setContentSize(NSSize(width: 660, height: 560))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil); window.contentViewController = nil }
+        drainPanelRunLoop()
+        let content = try XCTUnwrap(window.contentView)
+        for placeholder in ["0", "100"] {
+            let field = try XCTUnwrap(editableTextFields(in: content).first { $0.placeholderString == placeholder })
+            XCTAssertTrue(window.makeFirstResponder(field))
+            XCTAssertGreaterThanOrEqual(field.bounds.width, 120)
+            XCTAssertLessThanOrEqual(field.convert(field.bounds, to: content).maxX, content.bounds.maxX)
+            XCTAssertGreaterThanOrEqual(try XCTUnwrap(field.font).pointSize, 20)
+        }
+        try saveControlSnapshot(content, name: "text-inspector-200")
     }
 
     func testHistoryPopoverExposesNativeRangeControlAndFocus() {
@@ -5869,11 +6662,9 @@ final class PearchHAUITests: XCTestCase {
         await model.connect()
         XCTAssertTrue(model.setCustomAction(sensorCustomAction(requiresConfirmation: true)))
 
-        let panel = PearchHAApplication.makePanel(model: model)
-        defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
-        }
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
 
         panel.makeKeyAndOrderFront(nil)
         drainPanelRunLoop()
@@ -5908,10 +6699,8 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertTrue(snapshot.statusItemHasAction)
         XCTAssertTrue(snapshot.hasPanel)
         XCTAssertTrue(snapshot.hasPanelModel)
-        XCTAssertTrue(snapshot.panelCanBecomeKey)
-        XCTAssertTrue(snapshot.panelCanBecomeMain)
-        XCTAssertTrue(snapshot.panelIsFloating)
-        XCTAssertTrue(snapshot.panelHidesOnDeactivate)
+        XCTAssertTrue(snapshot.panelIsTransient)
+        XCTAssertFalse(snapshot.panelIsShown)
         XCTAssertEqual(snapshot.panelContentWidth, 384)
         XCTAssertEqual(snapshot.panelContentHeight, 468)
         XCTAssertEqual(snapshot.selectedEntityIDs, [])
@@ -5926,6 +6715,56 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertFalse(application.snapshot.statusItemHasImage)
         XCTAssertFalse(application.snapshot.hasPanel)
         XCTAssertFalse(application.snapshot.hasPanelModel)
+    }
+
+    func testSettingsImportSurvivesPendingSavesAndRelaunch() throws {
+        let destination = temporaryConfigURL()
+        let source = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: source.deletingLastPathComponent())
+        }
+        let store = JSONConfigStore(fileURL: destination)
+        try store.save(.empty)
+        let imported = PearchHAConfiguration(
+            selectedEntityIDs: ["sensor.office_humidity"],
+            menuBarEntityIDs: ["sensor.office_humidity"],
+            isEntitySelectionExplicit: true,
+            themeMode: .dark
+        )
+        try JSONConfigStore(fileURL: source).save(imported)
+        let sourceBytes = try Data(contentsOf: source)
+        let application = applicationForTest(configStore: store)
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        let importedSnapshot = try store.readImport(from: source)
+        XCTAssertEqual(application.importSettings(importedSnapshot), .saved)
+        // A disappearing Settings view or a late model callback must not write
+        // its pre-import snapshot while the application is quitting.
+        XCTAssertNotEqual(application.persist(displayPreferences: .defaults), .saved)
+        XCTAssertNotEqual(application.persist(selection: PearchHAConfiguration.empty.selectionConfiguration), .saved)
+        XCTAssertNotEqual(application.persist(menuBarDisplayConfiguration: PearchHAConfiguration.empty.menuBarDisplayConfiguration), .saved)
+        XCTAssertNotEqual(application.persist(customActionConfiguration: PearchHAConfiguration.empty.customActionConfiguration), .saved)
+        application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        XCTAssertEqual(try store.load(), imported)
+        XCTAssertEqual(try Data(contentsOf: source), sourceBytes)
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer { application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification)) }
+        XCTAssertEqual(application.snapshot.selectedEntityIDs, imported.selectedEntityIDs)
+        XCTAssertEqual(application.displayPreferences.themeMode, .dark)
+        XCTAssertEqual(application.persist(displayPreferences: .defaults), .saved)
+    }
+
+    func testSettingsImportFailureKeepsCurrentConfigurationEditable() throws {
+        let destination = temporaryConfigURL()
+        defer { try? FileManager.default.removeItem(at: destination.deletingLastPathComponent()) }
+        let store = JSONConfigStore(fileURL: destination)
+        try store.save(.empty)
+        let application = applicationForTest(configStore: store)
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer { application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification)) }
+        XCTAssertNotEqual(application.importSettings(PearchHAConfiguration(schemaVersion: 99)), .saved)
+        XCTAssertEqual(try store.load(), .empty)
+        XCTAssertEqual(application.persist(displayPreferences: .defaults), .saved)
     }
 
     func test_t_app_shell_launch_loads_selection_config() throws {
@@ -6109,6 +6948,7 @@ final class PearchHAUITests: XCTestCase {
     }
 
     func test_t_app_shell_persists_and_reloads_display_preferences() async throws {
+        _ = NSApplication.shared
         let url = temporaryConfigURL()
         defer {
             try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
@@ -6118,7 +6958,22 @@ final class PearchHAUITests: XCTestCase {
             configStore: store,
             connector: { _ in .success(rooms: selectionRooms()) }
         )
+        let previousAppearance = NSApp.appearance
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+            NSApp.appearance = previousAppearance
+        }
+        XCTAssertEqual(application.persist(displayPreferences: application.displayPreferences.with(themeMode: .light)), .saved)
+        let button = try XCTUnwrap(NSApp.windows.flatMap { nativeViews(in: $0.contentView, of: NSStatusBarButton.self) }
+            .first { $0.target === application })
+        await spinUntil("the shell status anchor is visible") { button.window?.isVisible == true && !button.visibleRect.isEmpty }
+        drainPanelRunLoop()
+        let existingWindows = Set(NSApp.windows.map(\.windowNumber))
+        button.performClick(nil)
+        XCTAssertTrue(application.snapshot.panelIsShown)
+        let contentWindow = try XCTUnwrap(NSApp.windows.first { !existingWindows.contains($0.windowNumber) && $0.isVisible })
+        XCTAssertEqual(contentWindow.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .aqua)
 
         let preferences = PearchHADisplayPreferences(
             menuBarAppearance: .iconOnly,
@@ -6135,6 +6990,15 @@ final class PearchHAUITests: XCTestCase {
         )
         XCTAssertEqual(application.persist(displayPreferences: preferences), .saved)
         XCTAssertEqual(application.displayPreferences, preferences)
+        drainPanelRunLoop()
+        XCTAssertEqual(contentWindow.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .darkAqua,
+                       "Changing the theme updates the retained native popover")
+        button.performClick(nil)
+        XCTAssertFalse(application.snapshot.panelIsShown)
+        button.performClick(nil)
+        XCTAssertTrue(application.snapshot.panelIsShown)
+        XCTAssertEqual(contentWindow.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .darkAqua,
+                       "Reopening retains the current native appearance")
         application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
 
         let reloaded = try store.load()
@@ -6213,35 +7077,70 @@ final class PearchHAUITests: XCTestCase {
         )
     }
 
-    func test_t_status_panel_escape_closes_and_command_comma_opens_settings() {
-        var openedSettings = 0
-        let panel = PearchHAStatusPanel()
-        panel.onOpenSettings = {
-            openedSettings += 1
+    func testAppShellStatusButtonOpensClosesAndReopensPopover() async throws {
+        _ = NSApplication.shared
+        let application = applicationForTest(configStore: nil)
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer { application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification)) }
+        let button = try XCTUnwrap(NSApp.windows.flatMap { nativeViews(in: $0.contentView, of: NSStatusBarButton.self) }
+            .first { $0.target === application })
+        await spinUntil("the shell status anchor is visible") { button.window?.isVisible == true && !button.visibleRect.isEmpty }
+        drainPanelRunLoop()
+        for _ in 0..<3 {
+            button.performClick(nil)
+            XCTAssertTrue(application.snapshot.panelIsShown, "One status action opens the popover; anchorVisible=\(button.window?.isVisible == true) rect=\(button.visibleRect)")
+            button.performClick(nil)
+            XCTAssertFalse(application.snapshot.panelIsShown, "One status action closes the popover")
         }
-        panel.makeKeyAndOrderFront(nil)
-        XCTAssertTrue(panel.isVisible)
+    }
 
-        panel.cancelOperation(nil)
-        XCTAssertFalse(panel.isVisible, "Escape (cancelOperation) closes the panel")
+    func testStatusPopoverEscapeCloses() throws {
+        let presentation = try PearchHATestPopoverPresentation(model: PearchHAPanelModel())
+        defer { presentation.close() }
+        XCTAssertTrue(presentation.popover.isShown)
+        presentation.popover.cancelOperation(nil)
+        XCTAssertFalse(presentation.popover.isShown, "Escape closes the native popover")
+    }
 
-        let commaEvent = NSEvent.keyEvent(
-            with: .keyDown,
-            location: .zero,
-            modifierFlags: .command,
-            timestamp: 0,
-            windowNumber: 0,
-            context: nil,
-            characters: ",",
-            charactersIgnoringModifiers: ",",
-            isARepeat: false,
-            keyCode: 43
-        )
-        XCTAssertNotNil(commaEvent)
-        if let commaEvent {
-            XCTAssertTrue(panel.performKeyEquivalent(with: commaEvent), "Cmd+, is handled by the panel")
+    func testAppShellCommandCommaOpensSettingsFromPopover() async throws {
+        _ = NSApplication.shared
+        let previousDelegate = NSApp.delegate
+        let previousMenu = NSApp.mainMenu
+        let previousPolicy = NSApp.activationPolicy()
+        XCTAssertTrue(NSApp.setActivationPolicy(.accessory), "The harness must use the production accessory activation policy")
+        let application = applicationForTest(configStore: nil)
+        NSApp.delegate = application
+        NSApp.mainMenu = PearchHAApplication.standardMainMenu()
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+            NSApp.delegate = previousDelegate
+            NSApp.mainMenu = previousMenu
+            NSApp.setActivationPolicy(previousPolicy)
         }
-        XCTAssertEqual(openedSettings, 1, "Cmd+, routes to the open-settings path")
+        let button = try XCTUnwrap(NSApp.windows.flatMap { nativeViews(in: $0.contentView, of: NSStatusBarButton.self) }
+            .first { $0.target === application })
+        await spinUntil("the shell status anchor is visible") { button.window?.isVisible == true && !button.visibleRect.isEmpty }
+        drainPanelRunLoop()
+        let windowsBeforeStatusClick = Set(NSApp.windows.map(\.windowNumber))
+        button.performClick(nil)
+        XCTAssertTrue(application.snapshot.panelIsShown)
+        await spinUntil("the newly opened popover window is key") {
+            guard let window = NSApp.keyWindow else { return false }
+            return window.isVisible && !windowsBeforeStatusClick.contains(window.windowNumber)
+        }
+        let popoverWindow = try XCTUnwrap(NSApp.windows.first {
+            $0 === NSApp.keyWindow && $0.isVisible && !windowsBeforeStatusClick.contains($0.windowNumber)
+        }, "The status click must give keyboard focus to the new popover window")
+        let existingWindows = Set(NSApp.windows.map(\.windowNumber))
+        let commaEvent = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: popoverWindow.windowNumber, context: nil,
+            characters: ",", charactersIgnoringModifiers: ",", isARepeat: false, keyCode: 43))
+        NSApp.sendEvent(commaEvent)
+        await spinUntil("Cmd+, opens the Settings window") {
+            NSApp.windows.contains { !existingWindows.contains($0.windowNumber) && $0.isVisible && $0.title == "PearchHA Settings" }
+        }
+        XCTAssertFalse(application.snapshot.panelIsShown, "Opening Settings dismisses the popover")
     }
 
     func test_t_menu_bar_presenter_reads_promotions_from_live_snapshot() {
@@ -6417,6 +7316,11 @@ final class PearchHAUITests: XCTestCase {
 
         // The stacked style renders the caps label on its own line above the
         // value, so the status-item title carries exactly one line break.
+        XCTAssertEqual(application.snapshot.menuBarItems[0].title, "OFFICE HUMIDITY\n44%")
+        XCTAssertEqual(application.persist(displayPreferences: application.displayPreferences.with(textSize: .maximum)), .saved)
+        XCTAssertEqual(application.snapshot.menuBarItems[0].title, "Office humidity 44%",
+                       "Larger text must apply immediately even when sensor values are unchanged")
+        XCTAssertEqual(application.persist(displayPreferences: application.displayPreferences.with(textSize: .standard)), .saved)
         XCTAssertEqual(application.snapshot.menuBarItems[0].title, "OFFICE HUMIDITY\n44%")
     }
 
@@ -7017,6 +7921,67 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(try sessionStore.load().accessToken, "fresh-access")
         XCTAssertEqual(try sessionStore.load().refreshToken, "refresh-token")
         XCTAssertEqual(try sessionStore.load().clientID, "https://pearchha.dev/app")
+    }
+
+    func testPackagedOAuthConfigurationLoadsWithoutShellEnvironment() throws {
+        let bundle = try oauthTestBundle([
+            "PEARCHHA_OAUTH_CLIENT_ID": "https://example.invalid/pearchha/",
+            "PEARCHHA_OAUTH_REDIRECT_URI": "pearchha://auth"
+        ])
+        defer { try? FileManager.default.removeItem(at: bundle.bundleURL.deletingLastPathComponent()) }
+        let configuration = try XCTUnwrap(PearchHAOAuthApplicationConfiguration.fromEnvironment([:], bundle: bundle))
+        XCTAssertEqual(configuration.clientID, "https://example.invalid/pearchha/")
+        XCTAssertEqual(configuration.redirectURI, "pearchha://auth")
+        XCTAssertTrue(configuration.acceptsCallbackURL(try XCTUnwrap(URL(string: "pearchha://auth?code=test&state=test"))))
+    }
+
+    func testPackagedOAuthConfigurationCanBeOverriddenExplicitlyForDevelopment() throws {
+        let bundle = try oauthTestBundle([
+            "PEARCHHA_OAUTH_CLIENT_ID": "https://example.invalid/packaged/",
+            "PEARCHHA_OAUTH_REDIRECT_URI": "pearchha://auth"
+        ])
+        defer { try? FileManager.default.removeItem(at: bundle.bundleURL.deletingLastPathComponent()) }
+        let configuration = try XCTUnwrap(PearchHAOAuthApplicationConfiguration.fromEnvironment([
+            "PEARCHHA_OAUTH_CLIENT_ID": "https://example.invalid/development/",
+            "PEARCHHA_OAUTH_REDIRECT_URI": "pearchha-development://auth"
+        ], bundle: bundle))
+        XCTAssertEqual(configuration.clientID, "https://example.invalid/development/")
+        XCTAssertEqual(configuration.redirectURI, "pearchha-development://auth")
+    }
+
+    func testPackagedOAuthConfigurationWithoutMetadataIsUnavailable() throws {
+        let bundle = try oauthTestBundle([:])
+        defer { try? FileManager.default.removeItem(at: bundle.bundleURL.deletingLastPathComponent()) }
+        XCTAssertNil(try PearchHAOAuthApplicationConfiguration.fromEnvironment([:], bundle: bundle))
+    }
+
+    func testPackagedOAuthConfigurationRejectsInvalidMetadata() throws {
+        let cases: [([String: String], String)] = [
+            (["PEARCHHA_OAUTH_CLIENT_ID": "https://example.invalid/app/"], "OAuth redirect URI is invalid"),
+            (["PEARCHHA_OAUTH_CLIENT_ID": "$(PEARCHHA_OAUTH_CLIENT_ID)", "PEARCHHA_OAUTH_REDIRECT_URI": "pearchha://auth"], "OAuth client ID must be an application website URL"),
+            (["PEARCHHA_OAUTH_CLIENT_ID": "https://example.invalid/app/", "PEARCHHA_OAUTH_REDIRECT_URI": "other-app://auth"], "OAuth callback scheme is not declared by this app")
+        ]
+        for (metadata, message) in cases {
+            let bundle = try oauthTestBundle(metadata)
+            defer { try? FileManager.default.removeItem(at: bundle.bundleURL.deletingLastPathComponent()) }
+            XCTAssertThrowsError(try PearchHAOAuthApplicationConfiguration.fromEnvironment([:], bundle: bundle)) { error in
+                XCTAssertEqual(error as? PearchHAOAuthSignInFailure, .configuration(message))
+            }
+        }
+    }
+
+    private func oauthTestBundle(_ configuration: [String: String]) throws -> Bundle {
+        let directory = try temporaryEnvironmentFileURL().deletingLastPathComponent()
+        let bundleURL = directory.appendingPathComponent("PearchHA.app")
+        let contents = bundleURL.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        var metadata: [String: Any] = configuration
+        metadata["CFBundleIdentifier"] = "dev.pearchha.tests.oauth.\(UUID().uuidString)"
+        metadata["CFBundlePackageType"] = "APPL"
+        metadata["CFBundleURLTypes"] = [["CFBundleURLSchemes": ["pearchha"]]]
+        try PropertyListSerialization.data(fromPropertyList: metadata, format: .xml, options: 0)
+            .write(to: contents.appendingPathComponent("Info.plist"))
+        return try XCTUnwrap(Bundle(url: bundleURL))
     }
 
     func testOAuthApplicationConfigurationLoadsFromExplicitEnvironmentFile() throws {
@@ -7886,6 +8851,54 @@ final class PearchHAUITests: XCTestCase {
             await Task.yield()
         }
         XCTAssertEqual(gaugeRenderer.renderCount, 1)
+    }
+
+    func testCanceledStatusRefreshCannotFlushANewerPassiveRollback() async throws {
+        _ = NSApplication.shared
+        let previousDelegate = NSApp.delegate
+        let previousAppearance = NSApp.appearance
+        let url = temporaryConfigURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let store = JSONConfigStore(fileURL: url)
+        try store.save(PearchHAConfiguration(selectedEntityIDs: ["cover.office_blinds"],
+            menuBarEntityIDs: ["cover.office_blinds"],
+            menuBarItemConfigurations: [MenuBarItemConfiguration(entityID: "cover.office_blinds", displayUnit: .number)],
+            isEntitySelectionExplicit: true, menuBarRefreshInterval: .thirtySeconds))
+        let rooms = [Room(id: "office", name: "Office", entities: [DiscoveredEntity(id: "cover.office_blinds",
+            name: "Office blinds", state: "open", unit: nil, areaID: nil, deviceID: nil, currentPosition: 42)])]
+        let application = PearchHAApplication(configStore: store,
+            connector: { _ in .success(rooms: rooms) },
+            historyProvider: { _, _, _ in .unavailable("history is not used by this refresh regression") },
+            actionRunner: { @MainActor _, _ in
+                guard let shell = NSApp.delegate as? PearchHAApplication else {
+                    XCTFail("The test must use its real application delegate")
+                    return .failed("application delegate unavailable")
+                }
+                XCTAssertEqual(shell.snapshot.statusItemTitle, "open", "The optimistic snapshot must enter passive throttling")
+                XCTAssertEqual(shell.persist(displayPreferences: shell.displayPreferences), .saved)
+                XCTAssertEqual(shell.snapshot.statusItemTitle, "closed", "The explicit preference save must render the optimistic value")
+                // Returning without suspension makes the failure publish its passive rollback
+                // before the canceled refresh task can resume on the main actor.
+                return .failed("Permission denied")
+            })
+        NSApp.delegate = application
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+            NSApp.delegate = previousDelegate
+            NSApp.appearance = previousAppearance
+        }
+        application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await application.connect()
+        XCTAssertEqual(application.snapshot.statusItemTitle, "open")
+
+        let changed = await application.setCoverControl("cover.office_blinds", command: .close)
+
+        XCTAssertFalse(changed)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(application.snapshot.statusItemTitle, "closed", "A canceled timer must not flush the newer passive rollback before its interval")
+        XCTAssertEqual(application.persist(displayPreferences: application.displayPreferences), .saved)
+        XCTAssertEqual(application.snapshot.statusItemTitle, "open", "An explicit refresh must still publish the pending rollback")
     }
 
     func testHistoryKnownUnavailableRangesMarksCachedEmptyAndUnavailableRanges() async throws {
@@ -10136,12 +11149,10 @@ final class PearchHAUITests: XCTestCase {
             bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: .milliseconds(250)), panelActive: true
         )
         model.setAllEntities(isSelected: true)
-        let panel = PearchHAApplication.makePanel(model: model)
-        defer {
-            model.setPanelActive(false)
-            panel.orderOut(nil)
-            panel.contentViewController = nil
-        }
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
+        defer { model.setPanelActive(false) }
         panel.makeKeyAndOrderFront(nil)
         drainPanelRunLoop()
         await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .milliseconds(250), untilBatches: 1)
@@ -10612,40 +11623,72 @@ final class PearchHAUITests: XCTestCase {
         model.setPanelActive(false)
     }
 
-    func test_t_status_panel_reports_visibility_changes_on_every_dismissal_path() {
-        let panel = PearchHAStatusPanel()
-        var reported: [Bool] = []
-        panel.onVisibilityChange = { reported.append($0) }
+    func testNativePopoverKeepsPreferredSizeWithinScreenAndClearOfAnchor() async throws {
+        for textSize: PearchHATextSize in [.standard, .maximum] {
+            let model = PearchHAPanelModel(bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+            model.applyDisplayPreferences(.defaults.with(textSize: textSize))
+            let presentation = try PearchHATestPopoverPresentation(model: model)
+            defer { presentation.close() }
+            let content = try XCTUnwrap(presentation.popover.contentViewController?.view)
+            content.layoutSubtreeIfNeeded()
+            drainPanelRunLoop()
+            await Task.yield()
+            content.layoutSubtreeIfNeeded()
+            drainPanelRunLoop()
 
-        panel.makeKeyAndOrderFront(nil)
-        XCTAssertEqual(reported, [true])
-
-        // Escape routes through cancelOperation -> orderOut.
-        panel.cancelOperation(nil)
-        XCTAssertEqual(reported, [true, false])
-
-        // Repeated hides do not re-report; only genuine changes fire.
-        panel.orderOut(nil)
-        XCTAssertEqual(reported, [true, false])
+            let preferred = PearchHAPanelView.preferredContentSize(textSize: textSize)
+            XCTAssertEqual(presentation.popover.contentSize.width, preferred.width, accuracy: 1, textSize.displayName)
+            XCTAssertEqual(presentation.popover.contentSize.height, preferred.height, accuracy: 1, textSize.displayName)
+            XCTAssertEqual(content.bounds.width, preferred.width, accuracy: 1, textSize.displayName)
+            XCTAssertEqual(content.bounds.height, preferred.height, accuracy: 1, textSize.displayName)
+            let visibleFrame = try XCTUnwrap(presentation.anchorWindow.screen?.visibleFrame)
+            XCTAssertTrue(visibleFrame.insetBy(dx: -1, dy: -1).contains(presentation.window.frame),
+                          "\(textSize.rawValue): native popover \(presentation.window.frame) must fit within \(visibleFrame)")
+            let anchorFrame = presentation.anchorWindow.convertToScreen(
+                presentation.anchor.convert(presentation.anchor.bounds, to: nil))
+            XCTAssertFalse(presentation.window.frame.intersects(anchorFrame.insetBy(dx: 1, dy: 1)),
+                           "\(textSize.rawValue): native popover \(presentation.window.frame) must leave its anchor \(anchorFrame) clickable")
+        }
     }
 
-    func test_t_panel_dismissal_stops_background_work_without_status_item_toggle() async {
-        let model = PearchHAPanelModel(
-            connector: { _ in .success(rooms: prefetchRooms(count: 1)) }
-        )
-        let panel = PearchHAApplication.makePanel(model: model)
-        defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
+    func testStatusPopoverReportsVisibilityChangesOnEveryDismissalPath() throws {
+        let presentation = try PearchHATestPopoverPresentation(model: PearchHAPanelModel())
+        defer { presentation.close() }
+        var reported: [Bool] = []
+        presentation.popover.onVisibilityChange = { reported.append($0) }
+        presentation.popover.cancelOperation(nil)
+        XCTAssertEqual(reported, [false])
+        presentation.popover.show(relativeTo: presentation.anchor.bounds, of: presentation.anchor, preferredEdge: .minY)
+        XCTAssertEqual(reported, [false, true])
+        presentation.popover.close()
+        presentation.popover.close()
+        XCTAssertEqual(reported, [false, true, false])
+    }
+
+    func testPopoverDismissalStopsBackgroundWorkWithoutStatusItemToggle() throws {
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: prefetchRooms(count: 1)) })
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        defer { presentation.close() }
+        XCTAssertTrue(model.isPanelActive)
+        presentation.popover.cancelOperation(nil)
+        XCTAssertFalse(model.isPanelActive, "Native dismissal stops panel-only background work")
+    }
+
+    func testAppDeactivationDismissesPanelAndAllowsImmediateReopening() async throws {
+        _ = NSApplication.shared
+        let application = applicationForTest(configStore: nil)
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer { application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification)) }
+        let button = try XCTUnwrap(NSApp.windows.flatMap { nativeViews(in: $0.contentView, of: NSStatusBarButton.self) }
+            .first { $0.target === application })
+        await spinUntil("the shell status anchor is visible") { button.window?.isVisible == true && !button.visibleRect.isEmpty }
+        drainPanelRunLoop()
+        for _ in 0..<2 {
+            button.performClick(nil)
+            XCTAssertTrue(application.snapshot.panelIsShown, "anchorVisible=\(button.window?.isVisible == true) rect=\(button.visibleRect)")
+            application.applicationDidResignActive(Notification(name: NSApplication.didResignActiveNotification, object: NSApp))
+            XCTAssertFalse(application.snapshot.panelIsShown, "App deactivation closes the native popover")
         }
-
-        panel.makeKeyAndOrderFront(nil)
-        XCTAssertTrue(model.isPanelActive, "showing the panel activates background sync")
-
-        // Escape (or click-away auto-hide) must deactivate the model even though
-        // the status-item toggle never ran — this leaked background loops before.
-        panel.cancelOperation(nil)
-        XCTAssertFalse(model.isPanelActive, "hiding the panel deactivates detail refresh and live updates")
     }
 
     func test_t_periodic_refresh_backs_off_after_failure() async {
@@ -10775,6 +11818,13 @@ final class PearchHAUITests: XCTestCase {
 
     private func editableTextFields(in root: NSView?) -> [NSTextField] {
         nativeViews(in: root, of: NSTextField.self).filter { !$0.isHiddenOrHasHiddenAncestor && $0.isEditable }
+    }
+
+    private func accessibilityElements(in root: Any) -> [any NSAccessibilityProtocol] {
+        guard let element = root as? any NSAccessibilityProtocol else { return [] }
+        let children = element.accessibilityChildren() ?? []
+        let descendants: [Any] = children.isEmpty ? ((root as? NSView)?.subviews ?? []) : children
+        return [element] + descendants.flatMap { accessibilityElements(in: $0) }
     }
 
     private func nativeSteppers(in root: NSView?) -> [NSStepper] {
@@ -12320,7 +13370,7 @@ private actor ActionRunnerRecorder {
 }
 
 private actor ConnectionGate {
-    private var isOpen = false
+    private(set) var isOpen = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     func wait() async {
@@ -12421,29 +13471,41 @@ private final class CustomActionSinkRecorder {
 }
 
 private final class InMemoryProtectedActionValueStore: ProtectedActionValueStore, @unchecked Sendable {
+    private let lock = NSLock()
     private var values: [ProtectedActionValueReference: String] = [:]
+    private var nextLoad: (@Sendable () throws -> Void)?
+
+    func interceptNextLoad(_ action: @escaping @Sendable () throws -> Void) {
+        lock.withLock { nextLoad = action }
+    }
 
     func save(_ value: String, for reference: ProtectedActionValueReference) throws {
         let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else {
             throw SecretStoreError.emptySecret(.customActionProtectedValues)
         }
-        values[reference] = normalized
+        lock.withLock { values[reference] = normalized }
     }
 
     func load(_ reference: ProtectedActionValueReference) throws -> String {
-        guard let value = values[reference] else {
+        let (value, action) = lock.withLock {
+            let action = nextLoad
+            nextLoad = nil
+            return (values[reference], action)
+        }
+        try action?()
+        guard let value else {
             throw ProtectedActionValueStoreError.missingValue(reference)
         }
         return value
     }
 
     func delete(_ reference: ProtectedActionValueReference) throws {
-        values.removeValue(forKey: reference)
+        _ = lock.withLock { values.removeValue(forKey: reference) }
     }
 
     func snapshot() throws -> [ProtectedActionValueReference: String] {
-        values
+        lock.withLock { values }
     }
 }
 
@@ -12515,10 +13577,6 @@ private final class FailingConfigStore: ConfigStore, @unchecked Sendable {
         self.loadedConfiguration = loadedConfiguration
         self.loadError = loadError
         self.saveError = saveError
-    }
-
-    func describe() -> PearchHAModule {
-        PearchHAPersistence.module
     }
 
     func load() throws -> PearchHAConfiguration {

@@ -22,7 +22,12 @@ public struct EntityID: Hashable, Codable, Sendable, ExpressibleByStringLiteral 
     }
 
     public var domain: String {
-        rawValue.split(separator: ".", maxSplits: 1).first.map(String.init) ?? rawValue
+        if source == .thisMac { return "sensor" }
+        return rawValue.split(separator: ".", maxSplits: 1).first.map(String.init) ?? rawValue
+    }
+
+    public var source: EntitySource {
+        rawValue.hasPrefix("local-mac:") ? .thisMac : .homeAssistant
     }
 }
 
@@ -1059,11 +1064,4 @@ public struct RoomResolver: Sendable {
         }
         return value
     }
-}
-
-public enum PearchHACore {
-    public static let module = PearchHAModule(
-        name: "PearchHACore",
-        responsibility: "Pure domain state and behavior for PearchHA."
-    )
 }

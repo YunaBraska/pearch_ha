@@ -3,6 +3,7 @@ import CryptoKit
 import Foundation
 import XCTest
 import PearchHAPackaging
+import PearchHACore
 
 final class PearchHAPackagingTests: XCTestCase {
     func testInfoPlistDeclaresCallbackURLSchemeAndMenuBarAgent() throws {
@@ -21,14 +22,59 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertEqual(plist["CFBundlePackageType"] as? String, "APPL")
         XCTAssertEqual(plist["CFBundleIconFile"] as? String, "PearchHA")
         XCTAssertEqual(plist["LSMinimumSystemVersion"] as? String, "13.0")
+        XCTAssertEqual(plist["LSApplicationCategoryType"] as? String, "public.app-category.utilities")
+        let exportedTypes = try XCTUnwrap(plist["UTExportedTypeDeclarations"] as? [[String: Any]])
+        XCTAssertEqual(exportedTypes.count, 1)
+        XCTAssertEqual(exportedTypes.first?["UTTypeIdentifier"] as? String, "dev.pearchha.panel-selection")
+        XCTAssertEqual(exportedTypes.first?["UTTypeConformsTo"] as? [String], ["public.data"])
+        XCTAssertEqual(
+            plist["NSLocalNetworkUsageDescription"] as? String,
+            "PearchHA connects to your Home Assistant instance on your network."
+        )
         XCTAssertEqual(plist["LSUIElement"] as? Bool, true)
         XCTAssertEqual(plist["SUFeedURL"] as? String, "https://example.invalid/appcast.xml")
         XCTAssertEqual(plist["SUPublicEDKey"] as? String, "public-key")
+        XCTAssertNil(plist["PEARCHHA_OAUTH_CLIENT_ID"])
+        XCTAssertNil(plist["PEARCHHA_OAUTH_REDIRECT_URI"])
         let urlTypes = try XCTUnwrap(plist["CFBundleURLTypes"] as? [[String: Any]])
         XCTAssertEqual(urlTypes.count, 1)
         XCTAssertEqual(urlTypes.first?["CFBundleTypeRole"] as? String, "Viewer")
         XCTAssertEqual(urlTypes.first?["CFBundleURLName"] as? String, "dev.pearchha.app.oauth")
         XCTAssertEqual(urlTypes.first?["CFBundleURLSchemes"] as? [String], ["pearchha-test"])
+    }
+
+    func testInfoPlistEmbedsOnlyValidatedPublicOAuthMetadata() throws {
+        let oauthClient = try PearchHAOAuthClientWebsiteManifest(
+            clientID: "https://pearchha.dev/app",
+            redirectURI: "pearchha://auth"
+        )
+        let manifest = try PearchHAAppBundleManifest(
+            callbackURLScheme: "pearchha",
+            oauthClient: oauthClient
+        )
+
+        let plist = try propertyList(from: manifest.propertyListData())
+
+        XCTAssertEqual(plist["PEARCHHA_OAUTH_CLIENT_ID"] as? String, "https://pearchha.dev/app")
+        XCTAssertEqual(plist["PEARCHHA_OAUTH_REDIRECT_URI"] as? String, "pearchha://auth")
+        XCTAssertNil(plist["PEARCHHA_ACCESS_TOKEN"])
+        XCTAssertNil(plist["PEARCHHA_REFRESH_TOKEN"])
+    }
+
+    func testManifestRejectsOAuthRedirectSchemeMismatch() throws {
+        let oauthClient = try PearchHAOAuthClientWebsiteManifest(
+            clientID: "https://pearchha.dev/app",
+            redirectURI: "other-app://auth"
+        )
+
+        XCTAssertThrowsError(
+            try PearchHAAppBundleManifest(callbackURLScheme: "pearchha", oauthClient: oauthClient)
+        ) { error in
+            XCTAssertEqual(
+                error as? PearchHAAppBundleManifestError,
+                .oauthRedirectSchemeMismatch(expected: "pearchha", actual: "other-app")
+            )
+        }
     }
 
     func testManifestRejectsIncompleteUpdateConfiguration() {
@@ -78,6 +124,95 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertEqual(plist["CFBundleIconFile"] as? String, "PearchHA")
         let urlTypes = try XCTUnwrap(plist["CFBundleURLTypes"] as? [[String: Any]])
         XCTAssertEqual(urlTypes.first?["CFBundleURLSchemes"] as? [String], ["pearchha"])
+    }
+
+    func testAppBundleBuilderCopiesPrivacyManifestIntoResources() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executableURL = directory.appendingPathComponent("PearchHA-source", isDirectory: false)
+        let privacyManifestURL = directory.appendingPathComponent("PrivacyInfo.xcprivacy", isDirectory: false)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executableURL)
+        try Data("privacy-manifest".utf8).write(to: privacyManifestURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executableURL.path)
+        let outputURL = directory.appendingPathComponent("PearchHA.app", isDirectory: true)
+
+        let result = try PearchHAAppBundleBuilder().build(
+            PearchHAAppBundleBuildConfiguration(
+                executableURL: executableURL,
+                outputURL: outputURL,
+                manifest: try PearchHAAppBundleManifest(),
+                privacyManifestURL: privacyManifestURL
+            )
+        )
+
+        let bundledPrivacyURL = result.appURL.appendingPathComponent(
+            "Contents/Resources/PrivacyInfo.xcprivacy",
+            isDirectory: false
+        )
+        XCTAssertEqual(try Data(contentsOf: bundledPrivacyURL), Data("privacy-manifest".utf8))
+    }
+
+    func testAppBundleBuilderPreservesLocalizedResources() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let bundle = directory.appendingPathComponent("PearchHA_PearchHACore.bundle")
+        let localized = bundle.appendingPathComponent("de.lproj")
+        try FileManager.default.createDirectory(at: localized, withIntermediateDirectories: true)
+        let strings = Data("\"thisMac\" = \"Dieser Mac\";".utf8)
+        try strings.write(to: localized.appendingPathComponent("LocalMac.strings"))
+        let executable = directory.appendingPathComponent("PearchHA-source")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        let output = directory.appendingPathComponent("PearchHA.app")
+        _ = try PearchHAAppBundleBuilder().build(.init(executableURL: executable, outputURL: output,
+                                                    manifest: PearchHAAppBundleManifest(), resourceBundleURLs: [bundle]))
+        XCTAssertEqual(try Data(contentsOf: output.appendingPathComponent("Contents/Resources/PearchHA_PearchHACore.bundle/de.lproj/LocalMac.strings")), strings)
+    }
+
+    func testAppBundleIncludesDependencyNoticesForItsDistributionChannel() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executable = directory.appendingPathComponent("PearchHA-source")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        let output = directory.appendingPathComponent("PearchHA.app")
+        let resources = LocalMacText.resourceBundleURL
+        _ = try PearchHAAppBundleBuilder().build(.init(executableURL: executable, outputURL: output,
+            manifest: PearchHAAppBundleManifest(), resourceBundleURLs: [resources]))
+        let copiedBundle = try XCTUnwrap(Bundle(url: output.appendingPathComponent("Contents/Resources/\(resources.lastPathComponent)")))
+        let notice = copiedBundle.url(forResource: "Sparkle-LICENSE", withExtension: "txt")
+        if ProcessInfo.processInfo.environment["PEARCHHA_APP_STORE"] == "1" {
+            XCTAssertNil(notice, "Store builds do not include Sparkle")
+        } else {
+            let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().appendingPathComponent("Sources/PearchHACore/Resources/Sparkle-LICENSE.txt")
+            XCTAssertEqual(try Data(contentsOf: XCTUnwrap(notice)), try Data(contentsOf: source),
+                           "Distributions must retain the complete dependency and bundled third-party license notices")
+        }
+    }
+
+    func testAppBundleBuilderRejectsMissingPrivacyManifest() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executableURL = directory.appendingPathComponent("PearchHA-source", isDirectory: false)
+        let missingPrivacyManifestURL = directory.appendingPathComponent("MissingPrivacyInfo.xcprivacy", isDirectory: false)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executableURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executableURL.path)
+        let outputURL = directory.appendingPathComponent("PearchHA.app", isDirectory: true)
+
+        XCTAssertThrowsError(
+            try PearchHAAppBundleBuilder().build(
+                PearchHAAppBundleBuildConfiguration(
+                    executableURL: executableURL,
+                    outputURL: outputURL,
+                    manifest: try PearchHAAppBundleManifest(),
+                    privacyManifestURL: missingPrivacyManifestURL
+                )
+            )
+        ) { error in
+            XCTAssertEqual(error as? PearchHAAppBundleBuildError, .privacyManifestMissing(missingPrivacyManifestURL.path))
+        }
     }
 
     func testAppBundleBuilderRejectsMissingConfiguredIcon() throws {
@@ -253,7 +388,15 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertEqual(plist["CFBundlePackageType"] as? String, "APPL")
         XCTAssertEqual(plist["LSMinimumSystemVersion"] as? String, "13.0")
         XCTAssertEqual(plist["LSUIElement"] as? Bool, true)
+        let exportedTypes = try XCTUnwrap(plist["UTExportedTypeDeclarations"] as? [[String: Any]])
+        XCTAssertEqual(exportedTypes.count, 1)
+        XCTAssertEqual(exportedTypes.first?["UTTypeIdentifier"] as? String, "dev.pearchha.panel-selection")
+        XCTAssertEqual(exportedTypes.first?["UTTypeConformsTo"] as? [String], ["public.data"])
         XCTAssertEqual(plist["NSPrincipalClass"] as? String, "NSApplication")
+        XCTAssertEqual(
+            plist["NSLocalNetworkUsageDescription"] as? String,
+            "PearchHA connects to your Home Assistant instance on your network."
+        )
         let urlTypes = try XCTUnwrap(plist["CFBundleURLTypes"] as? [[String: Any]])
         XCTAssertEqual(urlTypes.first?["CFBundleTypeRole"] as? String, "Viewer")
         XCTAssertEqual(urlTypes.first?["CFBundleURLSchemes"] as? [String], ["pearchha"])
@@ -274,6 +417,36 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertTrue(entrypoint.contains("import PearchHAAppShell"))
         XCTAssertTrue(entrypoint.contains("PearchHAApplication.main()"))
         XCTAssertEqual(entrypoint, try String(contentsOf: swiftPMEntrypointURL, encoding: .utf8))
+    }
+
+
+    func testAppStoreLaneUsesSandboxNetworkAccessAndSeparatePackageGraph() throws {
+        let rootURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let entitlementsURL = rootURL.appendingPathComponent(
+            "Xcode/PearchHA/PearchHA-AppStore.entitlements",
+            isDirectory: false
+        )
+        let exportURL = rootURL.appendingPathComponent(
+            "Xcode/PearchHA/AppStoreExportOptions.plist",
+            isDirectory: false
+        )
+        let scriptURL = rootURL.appendingPathComponent("scripts/package-app-store.sh", isDirectory: false)
+        let packageURL = rootURL.appendingPathComponent("Package.swift", isDirectory: false)
+        let projectURL = rootURL.appendingPathComponent("PearchHA.xcodeproj/project.pbxproj", isDirectory: false)
+
+        let entitlements = try propertyList(from: Data(contentsOf: entitlementsURL))
+        XCTAssertEqual(entitlements["com.apple.security.app-sandbox"] as? Bool, true)
+        XCTAssertEqual(entitlements["com.apple.security.network.client"] as? Bool, true)
+        let export = try propertyList(from: Data(contentsOf: exportURL))
+        XCTAssertEqual(export["method"] as? String, "app-store")
+        XCTAssertTrue(try String(contentsOf: scriptURL, encoding: .utf8).contains("PEARCHHA_APP_STORE=1"))
+        let package = try String(contentsOf: packageURL, encoding: .utf8)
+        XCTAssertTrue(package.contains("isAppStoreBuild"))
+        XCTAssertTrue(package.contains("packageDependencies"))
+        let project = try String(contentsOf: projectURL, encoding: .utf8)
+        XCTAssertTrue(project.contains("name = AppStore;"))
+        XCTAssertTrue(project.contains("PearchHA-AppStore.entitlements"))
+        XCTAssertTrue(project.contains("SWIFT_ACTIVE_COMPILATION_CONDITIONS = PEARCHHA_APP_STORE;"))
     }
 
     func testCIWorkflowUsesTheSharedBuildContract() throws {

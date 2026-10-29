@@ -11,6 +11,7 @@ import PearchHACore
 /// label so the pill can be hidden from assistive tech when its text is already
 /// announced by a parent element.
 public struct StatusPill: View {
+    @Environment(\.colorScheme) private var colorScheme
     private let text: String
     private let systemImage: String?
     private let color: Color
@@ -24,7 +25,7 @@ public struct StatusPill: View {
     ///   - systemImage: An optional leading SF Symbol.
     ///   - color: The semantic tint for the glyph, text, and well.
     ///   - filled: When `true`, the pill fills with the tint and the text turns
-    ///     white (active states); otherwise the tint is used as text over a faint
+    ///     a contrasting neutral (active states); otherwise the tint is used as text over a faint
     ///     well.
     ///   - accessibilityLabel: An explicit accessibility label; when `nil` the
     ///     visible `text` is used.
@@ -50,13 +51,13 @@ public struct StatusPill: View {
                     .accessibilityHidden(true)
             }
             Text(text)
-                .font(.system(size: 10.5, weight: .semibold))
+                .pearchHAFont(size: 10.5, weight: .semibold)
                 .textCase(.uppercase)
                 .tracking(0.4)
                 .lineLimit(1)
                 .fixedSize()
         }
-        .foregroundStyle(filled ? Color.white : color)
+        .foregroundStyle(filled ? (colorScheme == .dark ? Color.black : Color.white) : color)
         .padding(.horizontal, 7)
         .padding(.vertical, 2.5)
         .background(
@@ -77,6 +78,7 @@ public struct StatusPill: View {
 /// behavior) while reading as a small cockpit control rather than a full-size
 /// toggle. While `isRunning` it disables hits and dims slightly.
 public struct CompactSwitch: View {
+    @Environment(\.dashboardPalette) private var palette
     private let isOn: Bool
     private let isRunning: Bool
     private let onChange: (Bool) -> Void
@@ -98,7 +100,7 @@ public struct CompactSwitch: View {
             .labelsHidden()
             .toggleStyle(.switch)
             .controlSize(.mini)
-            .tint(PearchHATheme.accent)
+            .tint(palette.accentPrimary)
             .disabled(isRunning)
             .opacity(isRunning ? 0.55 : 1)
     }
@@ -136,11 +138,11 @@ public struct SummaryMetric: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(value)
-                .font(.system(size: 16, weight: .semibold).monospacedDigit())
+                .pearchHAFont(size: 16, weight: .semibold, monospacedDigits: true)
                 .foregroundStyle(tint ?? palette.textPrimary)
                 .lineLimit(1)
             Text(caption)
-                .font(.system(size: 9, weight: .semibold))
+                .pearchHAFont(size: 10, weight: .semibold)
                 .textCase(.uppercase)
                 .tracking(0.5)
                 .foregroundStyle(palette.textTertiary)
@@ -225,17 +227,17 @@ public struct ModuleHeader: View {
 
     public var body: some View {
         HStack(spacing: 6) {
-            // Accent-colored caps, the iStat Menus section-header signature.
+            // Section names use readable ink; controls and selection carry the accent.
             Text(title)
-                .font(.system(size: 10.5, weight: .semibold))
+                .pearchHAFont(size: 10.5, weight: .semibold)
                 .textCase(.uppercase)
                 .tracking(0.8)
-                .foregroundStyle(palette.accentPrimary)
+                .foregroundStyle(palette.textSecondary)
                 .lineLimit(1)
             Spacer(minLength: 0)
             if let trailingText {
                 Text(trailingText)
-                    .font(.system(size: 10, weight: .medium))
+                    .pearchHAFont(size: 10, weight: .medium)
                     .foregroundStyle(palette.textTertiary)
                     .lineLimit(1)
             }
@@ -252,9 +254,11 @@ public struct ModuleHeader: View {
 /// and no rounded box — it is nearly integrated into the single popover surface.
 /// The only internal decoration is an almost-invisible hairline between rows.
 public struct ModuleBlock<Rows: View>: View {
-    @Environment(\.dashboardPalette) private var palette
     private let title: String
     private let trailingText: String?
+    private let headerDrag: PearchHAPanelDrag?
+    private let moveEarlier: (() -> Void)?
+    private let moveLater: (() -> Void)?
     private let rows: Rows
 
     /// Creates the module block.
@@ -266,22 +270,43 @@ public struct ModuleBlock<Rows: View>: View {
     public init(
         title: String,
         trailingText: String? = nil,
+        headerDrag: PearchHAPanelDrag? = nil,
+        moveEarlier: (() -> Void)? = nil,
+        moveLater: (() -> Void)? = nil,
         @ViewBuilder rows: () -> Rows
     ) {
         self.title = title
         self.trailingText = trailingText
+        self.headerDrag = headerDrag
+        self.moveEarlier = moveEarlier
+        self.moveLater = moveLater
         self.rows = rows()
     }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             ModuleHeader(title, trailingText: trailingText)
+                .frame(minHeight: 20)
+                .contentShape(Rectangle())
+                .overlay {
+                    if let headerDrag { PearchHAPanelDragSource(configuration: headerDrag) }
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(title)
+                .accessibilityActions { reorderActions }
+                .contextMenu { reorderActions }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 2)
             VStack(spacing: 0) {
                 rows
             }
         }
+    }
+
+    @ViewBuilder
+    private var reorderActions: some View {
+        if let moveEarlier { Button("Move room earlier", action: moveEarlier) }
+        if let moveLater { Button("Move room later", action: moveLater) }
     }
 }
 
@@ -311,11 +336,11 @@ public enum TelemetryRowMetrics {
     /// The fixed leading icon column width.
     public static let iconWidth: CGFloat = 16
     /// The reserved history-preview column width (micro chart or placeholder).
-    public static let previewWidth: CGFloat = 92
+    public static let previewWidth: CGFloat = 72
     /// The reserved history-preview column height.
     public static let previewHeight: CGFloat = 24
     /// The reserved value/status column minimum width, right-aligned.
-    public static let valueMinWidth: CGFloat = 66
+    public static let valueMinWidth: CGFloat = 60
     /// The reserved trailing control column width so toggles align across rows.
     public static let controlWidth: CGFloat = 38
 }
@@ -341,7 +366,7 @@ public struct TelemetryRowLabelAccessory {
 ///
 /// Layout is a fixed-column reserved grid so every row lines up like a table and
 /// nothing reflows when cached data arrives:
-/// `[icon 16] [label (+ subtitle), flexible] [preview 92×24] [value ≥66] [control 38]`.
+/// `[icon 16] [label (+ subtitle), flexible] [preview 72×24] [value ≥60] [control 38]`.
 /// Each non-flexible column is a reserved fixed (or fixed-min) width that is
 /// always present, so a row that has no cached history shows a muted placeholder
 /// in the same footprint a chart would occupy. The `preview`, `value`, and
@@ -351,12 +376,14 @@ public struct TelemetryRowLabelAccessory {
 public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
     @Environment(\.dashboardPalette) private var palette
     @Environment(\.dashboardRowDensity) private var rowDensity
+    @Environment(\.pearchHATextSize) private var textSize
     private let icon: String?
     private let iconActive: Bool
     private let label: String
     private let labelAccessories: [TelemetryRowLabelAccessory]
     private let labelAccessorySystemImage: String?
     private let labelAccessoryAccessibilityLabel: String?
+    private let labelDrag: PearchHAPanelDrag?
     private let subtitle: String?
     private let secondLine: AnyView?
     private let preview: Preview
@@ -388,6 +415,7 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
         labelAccessories: [TelemetryRowLabelAccessory] = [],
         labelAccessorySystemImage: String? = nil,
         labelAccessoryAccessibilityLabel: String? = nil,
+        labelDrag: PearchHAPanelDrag? = nil,
         subtitle: String? = nil,
         secondLine: AnyView? = nil,
         @ViewBuilder preview: () -> Preview,
@@ -400,6 +428,7 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
         self.labelAccessories = labelAccessories
         self.labelAccessorySystemImage = labelAccessorySystemImage
         self.labelAccessoryAccessibilityLabel = labelAccessoryAccessibilityLabel
+        self.labelDrag = labelDrag
         self.subtitle = subtitle
         self.secondLine = secondLine
         self.preview = preview()
@@ -409,7 +438,38 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 10) {
+            if textSize.scale >= 1.5 {
+                leadingColumn
+            }
+            HStack(spacing: PearchHASpacing.sm) {
+                if textSize.scale < 1.5 {
+                    leadingColumn
+                }
+                preview
+                    .frame(
+                        width: TelemetryRowMetrics.previewWidth,
+                        height: TelemetryRowMetrics.previewHeight,
+                        alignment: .center
+                    )
+                if textSize.scale >= 1.5 {
+                    Spacer(minLength: 0)
+                }
+                value
+                    .frame(minWidth: TelemetryRowMetrics.valueMinWidth, alignment: .trailing)
+                control
+                    .frame(width: TelemetryRowMetrics.controlWidth, alignment: .trailing)
+            }
+            secondLine
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, rowDensity == .compact ? 4 : 7)
+        .frame(minHeight: rowDensity == .compact ? 30 : 38)
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private var leadingColumn: some View {
+        let content = HStack(spacing: PearchHASpacing.sm) {
                 Group {
                     if let icon {
                         Image(systemName: icon)
@@ -419,15 +479,15 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
                         Color.clear
                     }
                 }
-                .frame(width: TelemetryRowMetrics.iconWidth, height: 16, alignment: .center)
+                .frame(width: TelemetryRowMetrics.iconWidth * textSize.scale, height: 16 * textSize.scale, alignment: .center)
                 .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 0) {
                     HStack(spacing: 5) {
                         Text(label)
-                            .font(.system(size: 12.5, weight: .medium))
+                            .pearchHAFont(size: 13, weight: .medium)
                             .foregroundStyle(palette.textPrimary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.85)
+                            .lineLimit(textSize.scale >= 1.5 ? nil : 1)
+                            .help(label)
                         ForEach(Array(labelAccessories.enumerated()), id: \.offset) { _, accessory in
                             Image(systemName: accessory.systemImage)
                                 .font(.system(size: 10.5, weight: .medium))
@@ -445,30 +505,22 @@ public struct TelemetryRow<Preview: View, Value: View, Control: View>: View {
                     }
                     if let subtitle {
                         Text(subtitle)
-                            .font(.system(size: 10))
+                            .pearchHAFont(size: 10)
                             .foregroundStyle(palette.textTertiary)
                             .lineLimit(1)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .layoutPriority(1)
-                preview
-                    .frame(
-                        width: TelemetryRowMetrics.previewWidth,
-                        height: TelemetryRowMetrics.previewHeight,
-                        alignment: .center
-                    )
-                value
-                    .frame(minWidth: TelemetryRowMetrics.valueMinWidth, alignment: .trailing)
-                control
-                    .frame(width: TelemetryRowMetrics.controlWidth, alignment: .trailing)
-            }
-            secondLine
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, rowDensity == .compact ? 4 : 7)
-        .frame(minHeight: rowDensity == .compact ? 30 : 38)
-        .contentShape(Rectangle())
+        if let labelDrag {
+            content
+                .frame(minHeight: 20)
+                .contentShape(Rectangle())
+                .overlay { PearchHAPanelDragSource(configuration: labelDrag) }
+        } else {
+            content
+        }
     }
 }
 
@@ -520,7 +572,7 @@ public struct DashboardFooter: View {
                     .frame(width: 6, height: 6)
                     .accessibilityHidden(true)
                 Text(updatedText)
-                    .font(.system(size: 11))
+                    .pearchHAFont(size: 11)
                     .foregroundStyle(palette.textSecondary)
                     .lineLimit(1)
                     .accessibilityLabel("Updated \(updatedText)")
@@ -551,6 +603,8 @@ public struct DashboardFooter: View {
 /// instrument design language. The label stays a real `Toggle` label, keeping
 /// the switch keyboard-focusable and accessible.
 public struct PearchHASwitchToggleStyle: ToggleStyle {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dashboardPalette) private var palette
     public init() {}
 
     public func makeBody(configuration: Configuration) -> some View {
@@ -559,18 +613,18 @@ public struct PearchHASwitchToggleStyle: ToggleStyle {
         } label: {
             HStack(spacing: 7) {
                 Capsule(style: .continuous)
-                    .fill(configuration.isOn ? PearchHATheme.accent : Color.primary.opacity(0.18))
+                    .fill(configuration.isOn ? palette.accentPrimary : Color.primary.opacity(0.18))
                     .frame(width: 26, height: 15)
                     .overlay(alignment: configuration.isOn ? .trailing : .leading) {
                         Circle()
-                            .fill(Color.white)
+                            .fill(configuration.isOn && colorScheme == .dark ? Color.black : Color.white)
                             .frame(width: 11, height: 11)
                             .padding(2)
                             .shadow(color: Color.black.opacity(0.25), radius: 0.6, y: 0.4)
                     }
                     .animation(.easeInOut(duration: PearchHAMotion.standardDuration), value: configuration.isOn)
                 configuration.label
-                    .font(.caption)
+                    .pearchHAFont(.caption)
             }
             .contentShape(Rectangle())
         }

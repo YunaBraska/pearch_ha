@@ -12,15 +12,15 @@ Consequences: Best native fidelity and lowest expected overhead. macOS only.
 
 Alternatives: Electron and Tauri were rejected because the app is a small ambient utility, not a cross-platform web shell.
 
-## ADR-0002 - `NSStatusItem` plus custom `NSPanel`
+## ADR-0002 - `NSStatusItem` plus native `NSPopover`
 
-Context: PearchHA needs multiple menu bar items, gauges, hover behavior, sliders, charts, and rich keyboard support.
+Context: PearchHA needs multiple menu bar items, gauges, sliders, charts, and keyboard support. The former nonactivating `NSPanel` could be hidden by app deactivation before the status-item action arrived. Its visibility flag then caused a close click to reopen the panel.
 
-Decision: Use `NSStatusItem` for menu bar items and a custom borderless `NSPanel` hosting SwiftUI for the drop-down.
+Decision: Use `NSStatusItem` for menu bar items and a transient `NSPopover` hosting the same SwiftUI content. AppKit owns anchoring and presentation. Explicit toggles and app deactivation close the popover, including nested control popovers. Delegate callbacks own the model's visible state. Escape returns from history before closing the root, and Cmd+, opens Settings.
 
-Consequences: More AppKit glue, but full control over layout and interaction.
+Consequences: The native frame includes an anchor arrow. Content stays attached across ordinary closes to preserve scroll and expansion state. Settings and shutdown release it. Manual positioning, occlusion inference and the inactivity timer are removed.
 
-Alternatives: `MenuBarExtra` is simpler but too constrained for the full panel and independent bar widgets.
+Alternatives: `MenuBarExtra` is too constrained for independent bar widgets. Timing thresholds and extra mouse monitors would make the former panel's event ordering more fragile.
 
 ## ADR-0003 - Token-normalized Home Assistant auth
 
@@ -72,15 +72,21 @@ Consequences: Config is testable and human-readable; secrets are isolated.
 
 Alternatives: UserDefaults for all data was rejected because it is poor secret storage.
 
-## ADR-0008 - Rate limiting and deterministic time
+## ADR-0008 - Request scheduling and deterministic time
 
 Context: Home Assistant often runs on small hardware. Tests must verify timing behavior without flakiness.
 
-Decision: Use token-bucket rate limiting, jitter, capped backoff, request coalescing, debounce, and injected clocks.
+Decision: The panel model owns refresh intervals, capped retry backoff, keyed in-flight
+history requests and control debounce. Use injected clocks for deterministic timing.
+Stop visible-detail and live-update work when their surfaces close. Selected daily
+history previews retain their background refresh contract.
 
-Consequences: Request load is predictable and timing behavior is testable.
+Consequences: Request scheduling stays with its cancellation owner. The generic
+token bucket and request-coalescer helpers had no production callers and were removed,
+along with their self-tests. They did not enforce an application-wide rate limit.
 
-Alternatives: Fixed polling and wall-clock sleeps were rejected.
+Alternatives: Wall-clock sleeps in timing-sensitive tests and a second global
+scheduling layer were rejected.
 
 ## ADR-0009 - Maintain separate direct and Mac App Store channels
 
@@ -88,9 +94,11 @@ Context: Direct downloads need Developer ID signing, notarization, and Sparkle. 
 
 Decision: Keep the direct ZIP and DMG release unchanged. A manual Store-package workflow builds a separate sandboxed package with bundle identifier `berlin.yuna.pearchha`, without Sparkle or a GitHub update control. It is packaged and signed for validation only. Store upload follows successful sandbox testing and App Review preparation.
 
-Consequences: One source tree supports both channels without presenting an external updater in the Store build. The Store channel needs a matching provisioning profile and real-device validation before submission.
+Both channels embed only the public OAuth client website and redirect URI in the signed bundle. Finder launches must not depend on a working-directory env file. Explicit environment overrides remain available for development. The public redirect declaration is deployed and verified separately from the app.
 
-Alternatives: Reusing the direct app bundle for the Store was rejected because it would retain Sparkle and two competing update channels.
+Consequences: One source tree supports both channels without presenting an external updater in the Store build. The Store channel needs a matching provisioning profile and real-device validation before submission. Configuration transfer is explicit through Import Settings. The original file is never moved or modified. A validated import replaces the destination atomically and quits the app, blocking pending saves until the next launch. Keychain secrets are not exported or copied. Automatic container migration was rejected because the macOS 27.0.1 runtime probe removed the source file.
+
+Alternatives: Reusing the direct app bundle for the Store was rejected because it would retain Sparkle and two competing update channels. Replacing direct distribution with Mac App Store only was rejected because sandbox and review constraints would remove existing direct-install capabilities.
 
 ## ADR-0010 - Host-scoped self-signed trust, on by default, never trust-all
 
@@ -122,12 +130,44 @@ independently of the Live Updates preference.
 Alternatives: An always-on subscription and eager loading of every history range
 were replaced after resource measurements. Refresh lifecycle stays in the panel model.
 
-## ADR-0012 - Home Assistant palette on an iStat-style layout
+## ADR-0012 - Shared Cyan surfaces and compact telemetry layout
 
-Context: The dashboard used a bespoke graphite/navy palette and a flat "Name Value" menu-bar title. User direction: look and behave like iStat Menus, with theme colors that read as Home Assistant.
+Context: The compact telemetry layout works, but separate gray treatments made the panel, Settings and entity details feel unrelated. The current design direction is consistent Cyan with all controls and customization retained.
 
-Decision: The dashboard palettes adopt the Home Assistant theme tokens (dark `#111111`/`#1C1C1C`/`#282828`, light `#FAFAFA`/white, HA text grays, semantic trio `#4CAF50`/`#FF9800`/`#F44336`, 12pt card radius) while layout idioms come from iStat Menus/Stats: accent-colored caps section headers, min/max peak labels pinned on the history chart, a per-entity gear shortcut in the history popover, and the "Show label" menu-bar option rendering as a stacked tiny-caps-label-above-value status item instead of widening the bar with a flat title.
+Decision: One adaptive palette owns the panel, Settings, inspector and control/history details. Pale Cyan and cool graphite surfaces use opaque fills, readable secondary text and the saved user accent. Semantic threshold and connection colors remain distinct. Fixed preview, value and control slots preserve alignment while history or requested-value feedback changes. Settings keeps its icon-and-label sidebar and a single connection summary. Screenshots render the production views at their real sizes. Chart min/max labels, the entity settings shortcut and the stacked menu-bar label/value option remain available.
 
-Consequences: One glance reads as "Home Assistant in an iStat shell". The stacked title changes the persisted-visible rendering of "Show label" (title now carries a line break); the review baseline was regenerated. Severity colors are shared between the panel, thresholds, and menu-bar gauges.
+Entity management uses a room rail, a lazy entity list with search/type/scope filters, and an independent detail pane. Narrow windows show the same inspector in place of the list. History opens inside the panel, retains the room view beneath it, and offers recorded samples to keyboard and assistive-technology users. No data, control capabilities, or refresh ownership change.
+
+The inspector and control editor reuse the existing card surface, spacing and typography instead of maintaining separate detail styling. Panel ordering uses the same persisted room/entity order as Settings. Entity names/icons and room headings are drag handles, with menu and accessibility alternatives. Drops only reorder within the existing hierarchy and never send device commands. Invalid or cancelled drops leave the order unchanged. A native drag source owns session completion on macOS 13 and clears transient state for every outcome. Both app manifests declare the private drag data type. Room reorder actions belong to the header rather than being inherited by each entity.
+
+Accent foregrounds resolve against the actual light/dark content and selection surfaces, targeting at least 4.5:1 contrast and 7:1 with Increase Contrast. Saved accents and custom threshold colors remain unchanged. The shared resolver replaces the blanket contrast filter. Cyan stays the default hue; an extreme custom fill can limit the maximum achievable contrast.
+
+Reading text has a 10-point minimum. One persisted text-size preference scales real fonts from 100% to 200%, because macOS does not apply SwiftUI Dynamic Type sizing. Larger text reflows telemetry and inspector controls. The panel grows within its screen and retains scrolling. Native fields and history selectors use the same preference. The fixed-height system menu bar caps text at 18 points and combines label and value on one line at larger sizes.
+
+Consequences: Shared surface tokens prevent visual drift between navigation and details. Opaque content removes the redundant material overlay and respects reduced transparency without a second rendering path. Severity colors remain shared between the panel, thresholds and menu-bar gauges. The stacked menu-bar title uses a line break at 100% when "Show label" is enabled. Existing configurations retain 100% text size, and partial configuration updates preserve this preference.
 
 Alternatives: Cloning iStat 7's ring-heavy dropdown was rejected — its density cost is the most criticized part of iStat 7. A full theme-pack system was rejected as disproportionate; the accent stays user-configurable.
+
+## ADR-0013 - Read-only local Mac source
+
+Context: Menu-bar values should also describe the current Mac without requiring
+a Home Assistant connection or private hardware APIs.
+
+Decision: Reuse selection, formatting, gauges, thresholds and menu-bar presentation.
+Stable `local-mac:` entity IDs identify their source and cannot collide with HA's
+`domain.object_id` identifiers. Labels and raw state codes remain separate, with
+English and German resources. The app shell reads documented Mach, IOPowerSources
+and ProcessInfo APIs. The panel model owns the cancellable sampling loop and
+rejects results from superseded requests. Native notification subscriptions belong
+to the shell and are released with it.
+
+Consequences: Local values work offline and survive HA reconnects and sign-out.
+They are opt-in, read-only, excluded from HA requests, and never recorded to disk.
+CPU requires two samples. Memory is active, wired and compressed pages as a share
+of physical RAM, not memory pressure. Battery readings require an internal battery.
+Thermal load is a state, not a temperature. Both packaging channels embed the same
+localization bundle. App Store signing and review remain separate release gates.
+
+Alternatives: Fake HA entities, a separate selection store, persistent local history,
+private SMC access, fan control and a general plugin framework are unnecessary for
+this scope.

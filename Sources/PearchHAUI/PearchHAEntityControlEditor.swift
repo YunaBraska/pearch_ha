@@ -31,8 +31,11 @@ struct PearchHAEntityControlsButton<Label: View>: View {
 
 /// One native editor shared by all capability-derived controls.
 public struct PearchHAEntityControlEditor: View {
+    @Environment(\.pearchHATextSize) private var textSize
     @ObservedObject private var model: PearchHAPanelModel
     private let entityID: EntityID
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
     /// Creates an editor that follows live state for the selected entity.
     public init(model: PearchHAPanelModel, entityID: EntityID) {
@@ -41,50 +44,78 @@ public struct PearchHAEntityControlEditor: View {
     }
 
     public var body: some View {
+        let palette = PearchHATheme.Dashboard.palette(colorScheme, increasedContrast: colorSchemeContrast == .increased)
         let entity = model.snapshot.availableRooms.flatMap(\.entities).first { $0.id == entityID }
         let fields = entity.map { PearchHAEntityControlField.controls(for: $0) } ?? []
-        VStack(alignment: .leading, spacing: 12) {
-            Text(entity?.name ?? entityID.rawValue).font(.headline)
+        VStack(alignment: .leading, spacing: PearchHASpacing.md) {
+            HStack(spacing: PearchHASpacing.sm) {
+                if let entity {
+                    Image(systemName: model.snapshot.effectiveMenuBarItemConfiguration(for: entity).customIconName ?? pearchHAEntityIconName(for: entity))
+                        .foregroundStyle(palette.accentPrimary)
+                        .accessibilityHidden(true)
+                }
+                Text(entity?.name ?? entityID.rawValue).pearchHAFont(size: 13, weight: .semibold)
+                Spacer(minLength: 0)
+                ZStack {
+                    if model.snapshot.controlActionState.isRunning(for: entityID) && !model.hasRequestedControls(for: entityID) {
+                        ProgressView().controlSize(.small)
+                            .help("Waiting for Home Assistant")
+                            .accessibilityLabel("Waiting for Home Assistant")
+                    }
+                }
+                .frame(width: 16, height: 16)
+            }
             if let current = entity?.controlAttributes?["current_temperature"]?.controlNumber {
                 Text("Current temperature: \(current.formatted())\((entity?.unit ?? entity?.controlAttributes?["temperature_unit"]?.controlString).map { " " + $0 } ?? "")")
-                    .font(.subheadline).foregroundStyle(.secondary)
+                    .pearchHAFont(.subheadline).foregroundStyle(.secondary)
             }
             if fields.isEmpty {
                 Text("No controls available").foregroundStyle(.secondary)
             } else {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        ForEach(fields) { field in
-                            PearchHAEntityControlInput(field: field, entityName: entity?.name ?? entityID.rawValue, clock: model.clock,
-                                                      isRunning: model.snapshot.controlActionState.isRunning(for: entityID)) { value, confirmed in
-                                model.startEntityControlValue(entityID, controlID: field.id, value: value, confirmed: confirmed)
+                    PearchHACard(cornerRadius: PearchHACornerRadius.card) {
+                        VStack(alignment: .leading, spacing: PearchHASpacing.md) {
+                            ForEach(Array(fields.enumerated()), id: \.element.id) { index, field in
+                                if index > 0 { Divider().accessibilityHidden(true) }
+                                PearchHAEntityControlInput(field: field, entityName: entity?.name ?? entityID.rawValue, clock: model.clock,
+                                                          isRunning: model.snapshot.controlActionState.isRunning(for: entityID),
+                                                          requestedValue: model.requestedControlValue(for: entityID, controlID: field.id)) { value, confirmed in
+                                    model.startEntityControlValue(entityID, controlID: field.id, value: value, confirmed: confirmed)
+                                }
+                                .disabled(model.snapshot.connectionState != .connected || model.snapshot.controlActionState.isRunning)
                             }
-                            .disabled(model.snapshot.connectionState != .connected || model.snapshot.controlActionState.isRunning)
                         }
+                        .padding(PearchHASpacing.md)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .padding(2)
                 }
                 .frame(maxHeight: 400)
             }
-            if model.snapshot.controlActionState.isRunning(for: entityID) {
-                HStack { ProgressView().controlSize(.small); Text("Updating...") }
-            }
             if let failure = model.snapshot.controlActionState.failureMessage(for: entityID) {
                 Text(failure).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(16)
-        .frame(width: 320)
+        .padding(PearchHASpacing.lg)
+        .frame(width: 340 + 140 * (textSize.scale - 1))
         .fixedSize(horizontal: false, vertical: true)
+        .pearchHAFont(size: 13, weight: .regular)
+        .environment(\.dashboardPalette, palette)
+        .tint(palette.accentPrimary)
+        .background(palette.surfaceRoot)
     }
 }
 
 struct PearchHAEntityControlInput: View {
+    @Environment(\.dashboardPalette) private var palette
+    @Environment(\.pearchHATextSize) private var textSize
     let field: PearchHAEntityControlField
     let entityName: String
     let clock: any PearchClock
     var isInline = false
     var isRunning = false
+    var requestedValue: ActionValue? = nil
+    var showsRequestedIndicator = true
     var coverMode: CoverControlMode? = nil
     var runCoverCommand: ((PearchHACoverCommand) -> Bool)? = nil
     let submit: (ActionValue?, Bool) -> Bool
@@ -98,7 +129,7 @@ struct PearchHAEntityControlInput: View {
     @FocusState private var isEditingNumber: Bool
 
     var body: some View {
-        Group {
+        HStack(spacing: 5) {
             switch field.input {
             case .action:
                 Button(field.title) {
@@ -107,13 +138,13 @@ struct PearchHAEntityControlInput: View {
                 }
             case let .choice(options, current):
                 if isInline {
-                    choiceMenu(options: options, current: current)
-                        .menuStyle(.borderlessButton)
-                        .font(.system(size: 14, weight: .semibold))
+                    choiceMenu(options: options, current: requestedValue?.controlString ?? current)
+                        .pearchHAAdaptiveMenu()
+                        .pearchHAFont(size: 14, weight: .semibold)
                         .fixedSize()
                 } else {
                     LabeledContent(field.title) {
-                        choiceMenu(options: options, current: current)
+                        choiceMenu(options: options, current: requestedValue?.controlString ?? current)
                             .frame(maxWidth: 180)
                     }
                 }
@@ -122,22 +153,26 @@ struct PearchHAEntityControlInput: View {
                     numberInput(range: range, step: step, unit: unit)
                 } else {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(field.title).font(.subheadline)
+                        Text(field.title).pearchHAFont(.subheadline)
                         numberInput(range: range, step: step, unit: unit)
                         Text("\(range.lowerBound.formatted()) - \(range.upperBound.formatted())\(step.map { ", step " + $0.formatted() } ?? "")")
-                            .font(.caption).foregroundStyle(.secondary)
+                            .pearchHAFont(.caption).foregroundStyle(.secondary)
                     }
                 }
             case let .boolean(current):
+                let current = requestedValue?.controlBool ?? current
                 if isInline, let current {
                     CompactSwitch(isOn: current, isRunning: isRunning) { _ = submit(.bool($0), false) }
                         .accessibilityLabel("\(field.title) for \(entityName)")
                 } else {
                     LabeledContent(isInline ? "" : field.title) {
-                        Menu(current.map { $0 ? "On" : "Off" } ?? "Choose") {
+                        Menu {
                             Button("On") { _ = submit(.bool(true), false) }
                             Button("Off") { _ = submit(.bool(false), false) }
+                        } label: {
+                            Text(current.map { $0 ? "On" : "Off" } ?? "Choose").pearchHAFont(.body)
                         }
+                        .controlSize(textSize.scale > 1 ? .large : .regular)
                     }
                 }
             case .color:
@@ -153,7 +188,7 @@ struct PearchHAEntityControlInput: View {
                     HStack(spacing: 4) {
                         TextField("Message", text: $text)
                             .textFieldStyle(.roundedBorder)
-                            .frame(width: 120)
+                            .frame(width: 120 * textSize.scale)
                             .onSubmit { sendMessage() }
                             .accessibilityLabel("Message for \(entityName)")
                         Button(action: sendMessage) { Image(systemName: "paperplane") }
@@ -168,6 +203,9 @@ struct PearchHAEntityControlInput: View {
                             .disabled(field.actionSpec(value: .string(text)) == nil)
                     }
                 }
+            }
+            if field.input.reportsValue && showsRequestedIndicator {
+                PearchHARequestedControlIndicator(isRequested: requestedValue != nil)
             }
         }
         .accessibilityElement(children: .contain)
@@ -191,6 +229,11 @@ struct PearchHAEntityControlInput: View {
         .onChange(of: isRunning) { running in
             if !running && !isEditingNumber && !isSliding && pendingNumberTask == nil { synchronize() }
         }
+        .onChange(of: requestedValue) { [requestedValue] newValue in
+            if !isSliding && pendingNumberTask == nil && (!isEditingNumber || numberValue == requestedValue?.controlNumber) {
+                synchronize(using: newValue)
+            }
+        }
         .onChange(of: isEnabled) { enabled in
             if !enabled { cancelPendingNumber() }
         }
@@ -202,7 +245,7 @@ struct PearchHAEntityControlInput: View {
     }
 
     private func choiceMenu(options: [String], current: String?) -> some View {
-        Menu(current ?? "Choose") {
+        Menu {
             ForEach(options, id: \.self) { option in
                 Button {
                     _ = submit(.string(option), false)
@@ -211,7 +254,10 @@ struct PearchHAEntityControlInput: View {
                     else { Text(option) }
                 }
             }
+        } label: {
+            Text(current ?? "Choose").pearchHAFont(.body)
         }
+        .controlSize(textSize.scale > 1 ? .large : .regular)
         .accessibilityLabel("\(field.title) for \(entityName)")
     }
 
@@ -256,7 +302,7 @@ struct PearchHAEntityControlInput: View {
                                 .multilineTextAlignment(.trailing)
                                 .foregroundStyle(isEditingNumber && numberValue.flatMap { field.actionSpec(value: .number($0)) } == nil ? Color.red : Color.primary)
                                 .overlay(alignment: .bottom) {
-                                    Rectangle().fill(Color.accentColor).frame(height: 1).opacity(isEditingNumber ? 1 : 0)
+                                    Rectangle().fill(palette.accentPrimary).frame(height: 1).opacity(isEditingNumber ? 1 : 0)
                                 }
                                 .task {
                                     guard usesSlider else { return }
@@ -268,9 +314,9 @@ struct PearchHAEntityControlInput: View {
                         }
                     }
                 }
-                .font(.system(size: 14).monospacedDigit())
+                .pearchHAFont(size: 14, monospacedDigits: true)
                 .foregroundStyle(.secondary)
-                .frame(width: 62, alignment: .trailing)
+                .frame(width: 62 * textSize.scale, alignment: .trailing)
                 if !usesSlider, let step, range.lowerBound < range.upperBound {
                     Stepper("", onIncrement: { adjust(by: step, range: range) }, onDecrement: { adjust(by: -step, range: range) })
                         .labelsHidden()
@@ -345,7 +391,7 @@ struct PearchHAEntityControlInput: View {
 
     private var changedNumberValue: Double? {
         guard let numberValue, case let .number(current, _, _, _) = field.input,
-              numberValue != current, field.actionSpec(value: .number(numberValue)) != nil else { return nil }
+              numberValue != (requestedValue?.controlNumber ?? current), field.actionSpec(value: .number(numberValue)) != nil else { return nil }
         return numberValue
     }
 
@@ -375,15 +421,41 @@ struct PearchHAEntityControlInput: View {
     }
 
     private func synchronize() {
+        synchronize(using: requestedValue)
+    }
+
+    private func synchronize(using requestedValue: ActionValue?) {
         switch field.input {
         case let .number(current, _, _, _):
-            text = current.map { $0.formatted(.number.grouping(.never).precision(.fractionLength(0...8))) } ?? ""
+            text = (requestedValue?.controlNumber ?? current).map { $0.formatted(.number.grouping(.never).precision(.fractionLength(0...8))) } ?? ""
         case let .color(current):
-            if let current {
+            let requestedComponents: [Double]?
+            if case let .array(values) = requestedValue { requestedComponents = values.compactMap(\.controlNumber) }
+            else { requestedComponents = nil }
+            if let current = requestedComponents ?? current {
                 color = Color(.sRGB, red: current[0] / 255, green: current[1] / 255, blue: current[2] / 255)
             }
         case .action, .choice, .boolean, .text:
             break
         }
+    }
+}
+
+/// A quiet, non-animated status shared by inline controls and their editor.
+struct PearchHARequestedControlIndicator: View {
+    let isRequested: Bool
+
+    var body: some View {
+        ZStack {
+            if isRequested {
+                Image(systemName: "clock")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .help("Requested. Waiting for the next value from Home Assistant.")
+                    .accessibilityLabel("Requested")
+                    .accessibilityHint("Waiting for the next value from Home Assistant")
+            }
+        }
+        .frame(width: 12, height: 12)
     }
 }

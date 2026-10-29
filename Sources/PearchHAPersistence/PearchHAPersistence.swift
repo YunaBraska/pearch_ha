@@ -37,6 +37,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
     public let menuBarAppearance: PearchHAMenuBarAppearance
     public let stableMenuBarWidth: Bool
     public let themeMode: PearchHAThemeMode
+    public let textSize: PearchHATextSize
     public let menuBarRefreshInterval: PearchHAMenuBarRefreshInterval
     public let dataSyncInterval: PearchHAMenuBarRefreshInterval
     public let historyDetailRefreshInterval: PearchHAMenuBarRefreshInterval
@@ -62,6 +63,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
         menuBarAppearance: PearchHAMenuBarAppearance = .defaultAppearance,
         stableMenuBarWidth: Bool = false,
         themeMode: PearchHAThemeMode = .defaultMode,
+        textSize: PearchHATextSize = .defaultSize,
         menuBarRefreshInterval: PearchHAMenuBarRefreshInterval = .defaultInterval,
         dataSyncInterval: PearchHAMenuBarRefreshInterval = .fiveSeconds,
         historyDetailRefreshInterval: PearchHAMenuBarRefreshInterval = .thirtySeconds,
@@ -86,6 +88,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
         self.menuBarAppearance = menuBarAppearance
         self.stableMenuBarWidth = stableMenuBarWidth
         self.themeMode = themeMode
+        self.textSize = textSize
         self.menuBarRefreshInterval = menuBarRefreshInterval
         self.dataSyncInterval = dataSyncInterval
         self.historyDetailRefreshInterval = historyDetailRefreshInterval
@@ -138,9 +141,11 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
             menuBarAppearance: menuBarAppearance,
             stableMenuBarWidth: stableMenuBarWidth,
             themeMode: themeMode,
+            textSize: textSize,
             menuBarRefreshInterval: menuBarRefreshInterval,
             dataSyncInterval: dataSyncInterval,
             historyDetailRefreshInterval: historyDetailRefreshInterval,
+            liveUpdatesEnabled: liveUpdatesEnabled,
             accentColor: accentColor,
             dashboardRowDensity: dashboardRowDensity,
             dashboardDefaultHistoryRange: dashboardDefaultHistoryRange,
@@ -184,6 +189,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
         case menuBarAppearance
         case stableMenuBarWidth
         case themeMode
+        case textSize
         case menuBarRefreshInterval
         case dataSyncInterval
         case historyDetailRefreshInterval
@@ -219,6 +225,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
         menuBarAppearance = try container.decodeIfPresent(PearchHAMenuBarAppearance.self, forKey: .menuBarAppearance) ?? .defaultAppearance
         stableMenuBarWidth = try container.decodeIfPresent(Bool.self, forKey: .stableMenuBarWidth) ?? false
         themeMode = try container.decodeIfPresent(PearchHAThemeMode.self, forKey: .themeMode) ?? .defaultMode
+        textSize = try container.decodeIfPresent(PearchHATextSize.self, forKey: .textSize) ?? .defaultSize
         menuBarRefreshInterval = try container.decodeIfPresent(PearchHAMenuBarRefreshInterval.self, forKey: .menuBarRefreshInterval) ?? .defaultInterval
         dataSyncInterval = try container.decodeIfPresent(PearchHAMenuBarRefreshInterval.self, forKey: .dataSyncInterval) ?? .fiveSeconds
         historyDetailRefreshInterval = try container.decodeIfPresent(PearchHAMenuBarRefreshInterval.self, forKey: .historyDetailRefreshInterval) ?? .thirtySeconds
@@ -244,6 +251,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
             menuBarAppearance: menuBarAppearance,
             stableMenuBarWidth: stableMenuBarWidth,
             themeMode: themeMode,
+            textSize: textSize,
             menuBarRefreshInterval: menuBarRefreshInterval,
             dataSyncInterval: dataSyncInterval,
             historyDetailRefreshInterval: historyDetailRefreshInterval,
@@ -275,6 +283,7 @@ public struct PearchHAConfiguration: Equatable, Codable, Sendable {
             menuBarAppearance: displayPreferences.menuBarAppearance,
             stableMenuBarWidth: displayPreferences.stableMenuBarWidth,
             themeMode: displayPreferences.themeMode,
+            textSize: displayPreferences.textSize,
             menuBarRefreshInterval: displayPreferences.menuBarRefreshInterval,
             dataSyncInterval: displayPreferences.dataSyncInterval,
             historyDetailRefreshInterval: displayPreferences.historyDetailRefreshInterval,
@@ -381,9 +390,45 @@ public struct PearchHAConnectionProfile: Equatable, Codable, Sendable {
 }
 
 public protocol ConfigStore: Sendable {
-    func describe() -> PearchHAModule
     func load() throws -> PearchHAConfiguration
     @discardableResult func save(_ configuration: PearchHAConfiguration) throws -> PearchHAConfiguration
+}
+
+public extension ConfigStore {
+    /// Reads and validates a complete configuration from a user-selected JSON file.
+    ///
+    /// The source file is never modified. The returned value is an immutable
+    /// snapshot suitable for confirmation before saving it to the destination store.
+    func readImport(from sourceURL: URL) throws -> PearchHAConfiguration {
+        let fileManager = FileManager.default
+        guard let attributes = try? fileManager.attributesOfItem(atPath: sourceURL.path),
+              attributes[.type] as? FileAttributeType == .typeRegular
+        else {
+            throw ConfigStoreError.readFailed(sourceURL, message: "source is not a regular file")
+        }
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: sourceURL)
+        } catch {
+            throw ConfigStoreError.readFailed(sourceURL, message: String(describing: error))
+        }
+
+        let configuration: PearchHAConfiguration
+        do {
+            configuration = try JSONDecoder().decode(PearchHAConfiguration.self, from: data)
+        } catch {
+            throw ConfigStoreError.malformedConfig(sourceURL, message: String(describing: error))
+        }
+        guard configuration.schemaVersion == PearchHAConfiguration.currentSchemaVersion else {
+            throw ConfigStoreError.unsupportedSchemaVersion(configuration.schemaVersion)
+        }
+        if let failure = configuration.customActionConfiguration.validationFailure() {
+            throw ConfigStoreError.invalidConfiguration(message: failure.description)
+        }
+        return configuration
+    }
+
 }
 
 public struct JSONConfigStore: ConfigStore {
@@ -395,10 +440,6 @@ public struct JSONConfigStore: ConfigStore {
 
     public init(location: ConfigLocation = ConfigLocation(), fileManager: FileManager = .default) throws {
         fileURL = try location.fileURL(fileManager: fileManager)
-    }
-
-    public func describe() -> PearchHAModule {
-        PearchHAPersistence.module
     }
 
     public func load() throws -> PearchHAConfiguration {
@@ -481,14 +522,6 @@ public enum ConfigStoreError: Error, Equatable, CustomStringConvertible, Sendabl
         case let .writeFailed(url, message):
             "Config file could not be written at \(url.path): \(message)"
         }
-    }
-}
-
-public struct PlannedConfigStore {
-    public init() {}
-
-    public func describe() -> PearchHAModule {
-        PearchHAPersistence.module
     }
 }
 
@@ -835,11 +868,4 @@ public enum SecretStoreError: Error, Equatable, CustomStringConvertible, Sendabl
             "Keychain \(operation) failed for \(secret.rawValue) with status \(status)"
         }
     }
-}
-
-public enum PearchHAPersistence {
-    public static let module = PearchHAModule(
-        name: "PearchHAPersistence",
-        responsibility: "Config persistence and Keychain-backed secrets."
-    )
 }

@@ -1164,6 +1164,12 @@ public struct PearchHAPanelSnapshot: Equatable, Sendable {
         rooms.reduce(0) { $0 + $1.entities.count }
     }
 
+    public var hasLocalValues: Bool { rooms.contains { $0.id == LocalMacSensor.roomID } }
+
+    public var isLocalOnly: Bool {
+        hasLocalValues && connectionState == .disconnected && connectionForm.primaryURL() == nil
+    }
+
     public func control(for entity: DiscoveredEntity) -> PearchHAEntityControl? {
         PearchHAEntityControl(entity: entity, actionState: controlActionState)
     }
@@ -1214,7 +1220,8 @@ public struct PearchHAPanelSnapshot: Equatable, Sendable {
     }
 
     public var accessibilitySummary: String {
-        "PearchHA \(connectionSummary.lowercased()), \(visibleEntityCount) visible values"
+        if isLocalOnly { return "PearchHA · \(LocalMacText.thisMac.localized())" }
+        return "PearchHA \(connectionSummary.lowercased()), \(visibleEntityCount) visible values"
     }
 
     public var failureDescription: String? {
@@ -1403,7 +1410,7 @@ public struct PearchHAPanelSnapshot: Equatable, Sendable {
             showsUnit: configuration.showsUnit,
             minValue: configuration.minValue,
             maxValue: configuration.maxValue
-        ).format(displayedEntity(for: entity), isStale: valuesAreStale)
+        ).format(displayedEntity(for: entity), isStale: valuesAreStale && entity.id.source == .homeAssistant)
     }
 
     private func displayedEntity(for entity: DiscoveredEntity) -> DiscoveredEntity {
@@ -1530,7 +1537,8 @@ public struct PearchHAPanelSnapshot: Equatable, Sendable {
     }
 
     private var accessibilityContentLabel: String {
-        switch phase {
+        if hasLocalValues { return "\(visibleEntityCount) visible values" }
+        return switch phase {
         case .firstRun:
             "Connection form"
         case .connecting:
@@ -1549,6 +1557,7 @@ public struct PearchHAPanelSnapshot: Equatable, Sendable {
     }
 
     private var accessibilityKeyboardHint: String {
+        if isLocalOnly { return LocalMacText.readOnly.localized() }
         if isSettingsPresented {
             return "Use Tab to move through settings. Space toggles checkboxes. Reorder buttons move values without dragging."
         }

@@ -1,12 +1,9 @@
 import SwiftUI
 import PearchHACore
 
-/// The PearchHA design system: an adaptive, iStat-Menus-inspired palette and the
-/// reusable card surface used to group rooms.
-///
-/// Colors are resolved per `ColorScheme` so the panel reads cleanly in both
-/// light and dark appearances. The accent is a Home Assistant blue; the semantic
-/// trio (`ok`/`warn`/`critical`) drives gauges, pills, and the timeline.
+/// Shared adaptive surfaces and accents for the panel, Settings and details.
+/// Cyan provides continuity across appearances; semantic colors still identify
+/// health and thresholds, and the saved accent remains user-configurable.
 public enum PearchHATheme {
     /// The user-selected accent color, defaulting to the Home Assistant blue
     /// (≈ `#03A9F4`).
@@ -17,7 +14,8 @@ public enum PearchHATheme {
     /// from main-thread SwiftUI/AppKit render passes, so no cross-thread
     /// coordination is required.
     public static var accent: Color {
-        Color(
+        let accentColor = accentSnapshot.raw
+        return Color(
             .sRGB,
             red: accentColor.red,
             green: accentColor.green,
@@ -26,14 +24,117 @@ public enum PearchHATheme {
         )
     }
 
-    nonisolated(unsafe) private static var accentColor: PearchHAAccentColor = .homeAssistantBlue
+    /// Raw color and its four foreground variants are replaced together by the
+    /// appearance owner. Render passes only read this immutable snapshot.
+    private struct AccentSnapshot {
+        let raw: PearchHAAccentColor
+        let light: Color
+        let dark: Color
+        let increasedLight: Color
+        let increasedDark: Color
+
+        init(_ accent: PearchHAAccentColor) {
+            raw = accent
+            light = readableAccent(accent, for: .light)
+            dark = readableAccent(accent, for: .dark)
+            increasedLight = readableAccent(accent, for: .light, increasedContrast: true)
+            increasedDark = readableAccent(accent, for: .dark, increasedContrast: true)
+        }
+    }
+
+    nonisolated(unsafe) private static var accentSnapshot = AccentSnapshot(.homeAssistantBlue)
 
     /// Applies the persisted accent color so the panel and settings reflect it.
     ///
     /// - Parameter accentColor: The accent color to use process-wide.
     @MainActor
     public static func apply(accentColor: PearchHAAccentColor) {
-        Self.accentColor = accentColor
+        guard accentSnapshot.raw != accentColor else { return }
+        accentSnapshot = AccentSnapshot(accentColor)
+    }
+
+    /// Resolves readable foreground ink without changing the saved accent.
+    ///
+    /// The original hue is blended only as far toward black (light appearance)
+    /// or white (dark appearance) as needed. Translucent foregrounds gain opacity
+    /// when required. Content surfaces and raw accent selection/hover fills are
+    /// included in the calculation. Increased Contrast targets 7:1; if a custom
+    /// fill makes that impossible, the strongest achievable contrast is used.
+    ///
+    /// - Parameters:
+    ///   - accent: The unchanged user-selected RGBA color.
+    ///   - scheme: The appearance of the content surface.
+    ///   - increasedContrast: Whether Increase Contrast is enabled.
+    /// - Returns: Foreground ink targeting 4.5:1, or 7:1 with Increase Contrast.
+    public static func readableAccent(
+        _ accent: PearchHAAccentColor,
+        for scheme: ColorScheme,
+        increasedContrast: Bool = false
+    ) -> Color {
+        let surfaces = scheme == .dark ? Dashboard.darkSurfaces : Dashboard.lightSurfaces
+        let backgroundColors = [surfaces.root, surfaces.panel, surfaces.elevated]
+        let opacities = scheme == .dark ? [0, 0.16, 0.22] : [0, 0.16]
+        let backgrounds = backgroundColors.flatMap { background in
+            opacities.map { opacity in
+                let alpha = accent.alpha * opacity
+                return [accent.red * alpha + background.red * (1 - alpha),
+                        accent.green * alpha + background.green * (1 - alpha),
+                        accent.blue * alpha + background.blue * (1 - alpha)]
+            }
+        }
+        let target = scheme == .dark ? 1.0 : 0.0
+        // A small margin keeps conversion to native colors above the threshold.
+        let requiredRatio = increasedContrast ? 7.01 : 4.51
+
+        func luminance(_ channels: [Double]) -> Double {
+            zip(channels, [0.2126, 0.7152, 0.0722]).reduce(0) { result, channel in
+                let linear = channel.0 <= 0.04045 ? channel.0 / 12.92 : pow((channel.0 + 0.055) / 1.055, 2.4)
+                return result + linear * channel.1
+            }
+        }
+
+        func candidate(_ amount: Double) -> PearchHAAccentColor {
+            PearchHAAccentColor(red: accent.red + (target - accent.red) * amount,
+                               green: accent.green + (target - accent.green) * amount,
+                               blue: accent.blue + (target - accent.blue) * amount,
+                               alpha: accent.alpha + (1 - accent.alpha) * amount)
+        }
+
+        let backgroundLuminances = backgrounds.map(luminance)
+
+        func minimumRatio(_ ink: PearchHAAccentColor) -> Double {
+            let inkLuminance = ink.alpha == 1 ? luminance([ink.red, ink.green, ink.blue]) : nil
+            // Status capsules use their readable foreground as a 16% chip fill.
+            // Unlike raw selection fills, these backgrounds change with the ink.
+            let derivedChips = backgroundColors.map { background in
+                let alpha = ink.alpha * 0.16
+                return [ink.red * alpha + background.red * (1 - alpha),
+                        ink.green * alpha + background.green * (1 - alpha),
+                        ink.blue * alpha + background.blue * (1 - alpha)]
+            }
+            return (Array(zip(backgrounds, backgroundLuminances)) + derivedChips.map { ($0, luminance($0)) })
+                .reduce(Double.infinity) { minimum, entry in
+                let (background, surface) = entry
+                let foreground = inkLuminance ?? luminance([ink.red * ink.alpha + background[0] * (1 - ink.alpha),
+                                            ink.green * ink.alpha + background[1] * (1 - ink.alpha),
+                                            ink.blue * ink.alpha + background[2] * (1 - ink.alpha)])
+                return min(minimum, (max(foreground, surface) + 0.05) / (min(foreground, surface) + 0.05))
+            }
+        }
+
+        guard minimumRatio(accent) < requiredRatio else { return color(for: accent) }
+        guard minimumRatio(candidate(1)) >= requiredRatio else { return color(for: candidate(1)) }
+        var lower = 0.0
+        var upper = 1.0
+        for _ in 0..<24 {
+            let amount = (lower + upper) / 2
+            if minimumRatio(candidate(amount)) >= requiredRatio {
+                upper = amount
+            } else {
+                lower = amount
+            }
+        }
+        return color(for: candidate(upper))
     }
 
     /// A healthy/normal severity color (the Home Assistant success green,
@@ -103,12 +204,9 @@ public enum PearchHATheme {
         }
     }
 
-    /// The elevated card fill for the current appearance (the Home Assistant
-    /// card surface, `#1C1C1C` in dark).
+    /// The grouped content fill shared by cards in the current appearance.
     public static func cardFill(_ scheme: ColorScheme) -> Color {
-        scheme == .dark
-            ? Color(red: 0x1C / 255, green: 0x1C / 255, blue: 0x1C / 255)
-            : Color.white
+        Dashboard.palette(scheme).surfacePanel
     }
 
     /// The hairline card border for the current appearance.
@@ -123,21 +221,9 @@ public enum PearchHATheme {
         scheme == .dark ? Color.clear : Color.black.opacity(0.06)
     }
 
-    /// The appearance-aware palette for the menu-bar dashboard popover.
-    ///
-    /// The dashboard is designed to look intentional in **both** appearances: a
-    /// graphite/dark-blue instrument panel in dark mode, and a clean light
-    /// *translucent graphite* surface (not pure white) with dark, readable text in
-    /// light mode. The same visual hierarchy, accents, and semantic trio carry
-    /// across both; the light tokens are designed rather than mechanically
-    /// inverted. Tokens are resolved against the supplied ``ColorScheme`` so the
-    /// popover follows the resolved theme (system/light/dark). The Settings window
-    /// keeps the separate adaptive palette above and never uses these.
-    ///
-    /// A ``DashboardPalette`` value-type carries the resolved colors; the
-    /// ``palette(_:)`` factory builds it for an appearance. Views read tokens from
-    /// the palette so a single `@Environment(\.colorScheme)` read fans out to all
-    /// dashboard surfaces.
+    /// The shared appearance-aware palette for the panel, Settings and details.
+    /// Root, grouped content and elevated controls have distinct surfaces in both
+    /// appearances. Opaque fills remain legible with Reduce Transparency enabled.
     public struct DashboardPalette: Equatable, Sendable {
         /// The deepest surface — the popover root behind everything.
         public let surfaceRoot: Color
@@ -168,8 +254,8 @@ public enum PearchHATheme {
         /// The soft drop-shadow color for the outer surface.
         public let shadowSoft: Color
 
-        /// The calm blue/violet primary accent (the resolved Home Assistant blue).
-        public var accentPrimary: Color { PearchHATheme.accent }
+        /// The user-selected primary accent (Cyan by default).
+        public let accentPrimary: Color
         /// The secondary accent (violet/pink), shared by both appearances.
         public var accentSecondary: Color { chartSecondaryColor }
         /// The success color (green), aligned with ``PearchHATheme/ok``.
@@ -179,7 +265,7 @@ public enum PearchHATheme {
         /// The danger color (red), aligned with ``PearchHATheme/critical``.
         public var danger: Color { PearchHATheme.critical }
         /// The primary chart stroke (the accent blue).
-        public var chartPrimary: Color { PearchHATheme.accent }
+        public var chartPrimary: Color { accentPrimary }
         /// The secondary chart stroke (the violet/pink secondary accent).
         public var chartSecondary: Color { chartSecondaryColor }
 
@@ -244,6 +330,16 @@ public enum PearchHATheme {
     }
 
     public enum Dashboard {
+        static let darkSurfaces = (
+            root: PearchHAAccentColor(red: 0x13 / 255, green: 0x21 / 255, blue: 0x29 / 255),
+            panel: PearchHAAccentColor(red: 0x1B / 255, green: 0x2B / 255, blue: 0x34 / 255),
+            elevated: PearchHAAccentColor(red: 0x26 / 255, green: 0x38 / 255, blue: 0x40 / 255)
+        )
+        static let lightSurfaces = (
+            root: PearchHAAccentColor(red: 0xEB / 255, green: 0xF5 / 255, blue: 0xF8 / 255),
+            panel: PearchHAAccentColor(red: 0xF7 / 255, green: 0xFB / 255, blue: 0xFC / 255),
+            elevated: PearchHAAccentColor(red: 1, green: 1, blue: 1)
+        )
         /// A violet/pink secondary-series accent, shared by both appearances.
         public static let accentSecondary = Color(red: 0.71, green: 0.55, blue: 0.93)
 
@@ -267,49 +363,55 @@ public enum PearchHATheme {
         ///
         /// - Parameter scheme: The resolved color scheme.
         /// - Returns: A ``DashboardPalette`` with designed light or dark tokens.
-        public static func palette(_ scheme: ColorScheme) -> DashboardPalette {
-            scheme == .dark ? darkPalette : lightPalette
+        public static func palette(_ scheme: ColorScheme, increasedContrast: Bool = false) -> DashboardPalette {
+            let surfaces = scheme == .dark ? darkSurfaces : lightSurfaces
+            let snapshot = PearchHATheme.accentSnapshot
+            let foreground = scheme == .dark
+                ? (increasedContrast ? snapshot.increasedDark : snapshot.dark)
+                : (increasedContrast ? snapshot.increasedLight : snapshot.light)
+            if scheme == .dark {
+                return DashboardPalette(
+                    surfaceRoot: PearchHATheme.color(for: surfaces.root),
+                    surfacePanel: PearchHATheme.color(for: surfaces.panel),
+                    surfacePanelElevated: PearchHATheme.color(for: surfaces.elevated),
+                    surfaceControl: Color.white.opacity(0.07),
+                    surfaceControlActive: PearchHATheme.accent.opacity(0.22),
+                    borderSubtle: Color.white.opacity(0.07),
+                    separatorSubtle: Color.white.opacity(0.08),
+                    textPrimary: Color(red: 0xED / 255, green: 0xF5 / 255, blue: 0xF7 / 255),
+                    textSecondary: Color(red: 0xAB / 255, green: 0xBD / 255, blue: 0xC4 / 255),
+                    textTertiary: Color(red: 0x97 / 255, green: 0xAC / 255, blue: 0xB5 / 255),
+                    chartSecondaryColor: accentSecondary,
+                    chartMuted: Color.white.opacity(0.22),
+                    meterTrack: Color.white.opacity(0.10),
+                    shadowSoft: Color.black.opacity(0.55),
+                    accentPrimary: foreground
+                )
+            }
+            return DashboardPalette(
+                surfaceRoot: PearchHATheme.color(for: surfaces.root),
+                surfacePanel: PearchHATheme.color(for: surfaces.panel),
+                surfacePanelElevated: PearchHATheme.color(for: surfaces.elevated),
+                surfaceControl: Color.black.opacity(0.05),
+                surfaceControlActive: PearchHATheme.accent.opacity(0.16),
+                borderSubtle: Color.black.opacity(0.07),
+                separatorSubtle: Color.black.opacity(0.07),
+                textPrimary: Color(red: 0x1B / 255, green: 0x30 / 255, blue: 0x3A / 255),
+                textSecondary: Color(red: 0x50 / 255, green: 0x66 / 255, blue: 0x70 / 255),
+                textTertiary: Color(red: 0x5E / 255, green: 0x73 / 255, blue: 0x7C / 255),
+                chartSecondaryColor: accentSecondary,
+                chartMuted: Color.black.opacity(0.22),
+                meterTrack: Color.black.opacity(0.08),
+                shadowSoft: Color.black.opacity(0.18),
+                accentPrimary: foreground
+            )
         }
 
-        /// The dark palette, matched to the Home Assistant dark theme: a
-        /// `#111111` root, `#1C1C1C` card surfaces, `#282828` elevated surfaces,
-        /// and the neutral HA text grays (`#E1E1E1` / `#9B9B9B` / `#6F6F6F`).
-        public static let darkPalette = DashboardPalette(
-            surfaceRoot: Color(red: 0x11 / 255, green: 0x11 / 255, blue: 0x11 / 255),
-            surfacePanel: Color(red: 0x1C / 255, green: 0x1C / 255, blue: 0x1C / 255),
-            surfacePanelElevated: Color(red: 0x28 / 255, green: 0x28 / 255, blue: 0x28 / 255),
-            surfaceControl: Color.white.opacity(0.07),
-            surfaceControlActive: PearchHATheme.accent.opacity(0.22),
-            borderSubtle: Color.white.opacity(0.07),
-            separatorSubtle: Color.white.opacity(0.05),
-            textPrimary: Color(red: 0xE1 / 255, green: 0xE1 / 255, blue: 0xE1 / 255),
-            textSecondary: Color(red: 0x9B / 255, green: 0x9B / 255, blue: 0x9B / 255),
-            textTertiary: Color(red: 0x6F / 255, green: 0x6F / 255, blue: 0x6F / 255),
-            chartSecondaryColor: accentSecondary,
-            chartMuted: Color.white.opacity(0.22),
-            meterTrack: Color.white.opacity(0.10),
-            shadowSoft: Color.black.opacity(0.55)
-        )
+        /// Cool graphite surfaces with readable blue-gray secondary text.
+        public static var darkPalette: DashboardPalette { palette(.dark) }
 
-        /// The light palette, matched to the Home Assistant light theme: a
-        /// `#FAFAFA` root behind white card surfaces and the HA text grays
-        /// (`#212121` / `#727272` / `#9B9B9B`).
-        public static let lightPalette = DashboardPalette(
-            surfaceRoot: Color(red: 0xFA / 255, green: 0xFA / 255, blue: 0xFA / 255),
-            surfacePanel: Color.white,
-            surfacePanelElevated: Color.white,
-            surfaceControl: Color.black.opacity(0.05),
-            surfaceControlActive: PearchHATheme.accent.opacity(0.16),
-            borderSubtle: Color.black.opacity(0.07),
-            separatorSubtle: Color.black.opacity(0.06),
-            textPrimary: Color(red: 0x21 / 255, green: 0x21 / 255, blue: 0x21 / 255),
-            textSecondary: Color(red: 0x72 / 255, green: 0x72 / 255, blue: 0x72 / 255),
-            textTertiary: Color(red: 0x9B / 255, green: 0x9B / 255, blue: 0x9B / 255),
-            chartSecondaryColor: accentSecondary,
-            chartMuted: Color.black.opacity(0.22),
-            meterTrack: Color.black.opacity(0.08),
-            shadowSoft: Color.black.opacity(0.18)
-        )
+        /// Pale Cyan surfaces with dark ink and subtly elevated content.
+        public static var lightPalette: DashboardPalette { palette(.light) }
     }
 
     /// The subtle fill of an inset capsule control (search field, footer bar).
@@ -372,6 +474,7 @@ public extension EnvironmentValues {
 /// rest, and a dimmed look while disabled. It adds no animation timer.
 public struct PearchHAIconButtonStyle: ButtonStyle {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dashboardPalette) private var palette
     @Environment(\.isEnabled) private var isEnabled
     @State private var isHovering = false
     private let prominentOnHover: Bool
@@ -392,7 +495,7 @@ public struct PearchHAIconButtonStyle: ButtonStyle {
                 return Color.secondary.opacity(0.5)
             }
             if active {
-                return prominentOnHover ? Color.white : PearchHATheme.accent
+                return prominentOnHover ? (colorScheme == .dark ? Color.black : Color.white) : palette.accentPrimary
             }
             return Color.secondary
         }()
@@ -401,11 +504,11 @@ public struct PearchHAIconButtonStyle: ButtonStyle {
                 return .clear
             }
             return prominentOnHover
-                ? PearchHATheme.accent
+                ? palette.accentPrimary
                 : PearchHATheme.accent.opacity(0.16)
         }()
         return configuration.label
-            .font(.system(size: 12, weight: .semibold))
+            .pearchHAFont(size: 12, weight: .semibold)
             .foregroundStyle(foreground)
             .padding(.horizontal, 7)
             .padding(.vertical, 4)
@@ -413,7 +516,6 @@ public struct PearchHAIconButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: 7, style: .continuous).fill(chip)
             )
             .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .opacity(configuration.isPressed && isEnabled ? 0.85 : 1)
             .onHover { hovering in
                 isHovering = hovering
             }
@@ -427,6 +529,7 @@ public struct PearchHAIconButtonStyle: ButtonStyle {
 /// well tints to the accent and the glyph turns accent. The caller keeps its
 /// action, `help`, and accessibility labels. No animation timer is used.
 public struct PearchHACircularIconButtonStyle: ButtonStyle {
+    @Environment(\.dashboardPalette) private var palette
     @Environment(\.isEnabled) private var isEnabled
     @State private var isHovering = false
     private let diameter: CGFloat
@@ -441,17 +544,16 @@ public struct PearchHACircularIconButtonStyle: ButtonStyle {
             if !isEnabled {
                 return Color.secondary.opacity(0.5)
             }
-            return active ? PearchHATheme.accent : Color.secondary
+            return active ? palette.accentPrimary : Color.secondary
         }()
         return configuration.label
-            .font(.system(size: 11, weight: .semibold))
+            .pearchHAFont(size: 11, weight: .semibold)
             .foregroundStyle(foreground)
             .frame(width: diameter, height: diameter)
             .background(
                 Circle().fill(active ? PearchHATheme.accent.opacity(0.16) : Color.primary.opacity(0.05))
             )
             .contentShape(Circle())
-            .opacity(configuration.isPressed && isEnabled ? 0.85 : 1)
             .onHover { hovering in
                 isHovering = hovering
             }
@@ -464,6 +566,7 @@ public struct PearchHACircularIconButtonStyle: ButtonStyle {
 /// while still presenting the bespoke circular look. Used for the panel's cover
 /// open/stop/close controls.
 public struct PearchHACircularIconLabel: View {
+    @Environment(\.dashboardPalette) private var palette
     @State private var isHovering = false
     private let icon: String
     private let disabled: Bool
@@ -479,7 +582,7 @@ public struct PearchHACircularIconLabel: View {
         let active = isHovering && !disabled
         let foreground: Color = disabled
             ? Color.secondary.opacity(0.5)
-            : (active ? PearchHATheme.accent : Color.secondary)
+            : (active ? palette.accentPrimary : Color.secondary)
         return Image(systemName: icon)
             .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(foreground)
@@ -538,7 +641,6 @@ public extension View {
     func pearchHACompactControl() -> some View {
         self
             .controlSize(.small)
-            .tint(PearchHATheme.accent)
     }
 }
 

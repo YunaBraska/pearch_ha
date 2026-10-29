@@ -82,6 +82,7 @@ public struct FakeHAFixtures: Equatable, Sendable {
     public let recorderStatisticsBody: String
     public let servicesBody: String
     public let bearerToken: String
+    public let serviceCallFailureMessage: String?
 
     public init(
         apiBody: String,
@@ -95,7 +96,8 @@ public struct FakeHAFixtures: Equatable, Sendable {
         entityRegistryBody: String = "[]",
         recorderStatisticsBody: String = "{}",
         servicesBody: String = "{}",
-        bearerToken: String = "fake-token"
+        bearerToken: String = "fake-token",
+        serviceCallFailureMessage: String? = nil
     ) {
         self.apiBody = apiBody
         self.statesBody = statesBody
@@ -109,6 +111,7 @@ public struct FakeHAFixtures: Equatable, Sendable {
         self.recorderStatisticsBody = recorderStatisticsBody
         self.servicesBody = servicesBody
         self.bearerToken = bearerToken
+        self.serviceCallFailureMessage = serviceCallFailureMessage
     }
 
     public static let minimal = FakeHAFixtures(
@@ -247,6 +250,18 @@ public actor FakeHAJournal {
     }
 }
 
+public struct FakeHAHTTPResponse: Equatable, Sendable {
+    public let statusCode: Int
+    public let headers: [String: String]
+    public let body: String
+
+    public init(statusCode: Int, headers: [String: String] = [:], body: String = "") {
+        self.statusCode = statusCode
+        self.headers = headers
+        self.body = body
+    }
+}
+
 public final class FakeHARESTServer: @unchecked Sendable {
     /// The loopback address assigned when start() makes the listener ready.
     public var baseURL: URL {
@@ -263,12 +278,14 @@ public final class FakeHARESTServer: @unchecked Sendable {
     private let fixtures: FakeHAFixtures
     private let redactor: Redactor
     private let pathPrefix: String
+    private let responseOverrides: [String: FakeHAHTTPResponse]
 
     public init(
         fixtures: FakeHAFixtures = .minimal,
         pathPrefix: String = "",
         redactor: Redactor = Redactor(),
-        tlsIdentity: SecIdentity? = nil
+        tlsIdentity: SecIdentity? = nil,
+        responseOverrides: [String: FakeHAHTTPResponse] = [:]
     ) throws {
         let listener = try makeLoopbackListener(tlsIdentity: tlsIdentity)
         let normalizedPathPrefix = Self.normalizedPathPrefix(pathPrefix)
@@ -279,6 +296,7 @@ public final class FakeHARESTServer: @unchecked Sendable {
         self.fixtures = fixtures
         self.redactor = redactor
         self.pathPrefix = normalizedPathPrefix
+        self.responseOverrides = responseOverrides
         self.journal = FakeHAJournal()
         self.queue = DispatchQueue(label: "dev.pearchha.fakeha.rest")
     }
@@ -319,17 +337,21 @@ public final class FakeHARESTServer: @unchecked Sendable {
                         headers: redactor.redact(headers: request.headers)
                     )
                 )
+                let response = self.response(for: request)
+                connection.send(content: response, completion: .contentProcessed { _ in
+                    connection.cancel()
+                })
             }
-            let response = self.response(for: request)
-            connection.send(content: response, completion: .contentProcessed { _ in
-                connection.cancel()
-            })
         }
     }
 
     private func response(for request: HTTPRequest) -> Data {
         guard let effectivePath = effectivePath(for: request.path) else {
             return httpResponse(status: 404, reason: "Not Found", body: #"{"message":"Not found"}"#)
+        }
+
+        if let response = responseOverrides[effectivePath] {
+            return httpResponse(status: response.statusCode, reason: "Fixture Response", body: response.body, headers: response.headers)
         }
 
         guard request.headers["authorization"] == "Bearer \(fixtures.bearerToken)" else {
@@ -385,14 +407,15 @@ public final class FakeHARESTServer: @unchecked Sendable {
         return suffix.isEmpty ? "/" : suffix
     }
 
-    private func httpResponse(status: Int, reason: String, body: String) -> Data {
+    private func httpResponse(status: Int, reason: String, body: String, headers: [String: String] = [:]) -> Data {
         let bytes = body.data(using: .utf8) ?? Data()
+        let additionalHeaders = headers.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)\r\n" }.joined()
         let header = """
         HTTP/1.1 \(status) \(reason)\r
         Content-Type: application/json\r
         Content-Length: \(bytes.count)\r
         Connection: close\r
-        \r
+        \(additionalHeaders)\r
 
         """
         var data = Data(header.utf8)
@@ -1065,7 +1088,14 @@ public final class FakeHAWebSocketServer: @unchecked Sendable {
                     bodyText: redactor.redact(message: rawMessage)
                 )
             )
-            sendText(#"{"id":\#(id),"type":"result","success":true,"result":{"context":{"id":"fake-context"},"response":null}}"#, to: connection)
+            if let message = fixtures.serviceCallFailureMessage,
+               let data = try? JSONSerialization.data(withJSONObject: ["id": id, "type": "result", "success": false,
+                                                                     "error": ["code": "failed", "message": message]]),
+               let text = String(data: data, encoding: .utf8) {
+                sendText(text, to: connection)
+            } else {
+                sendText(#"{"id":\#(id),"type":"result","success":true,"result":{"context":{"id":"fake-context"},"response":null}}"#, to: connection)
+            }
             receiveCommand(on: connection, buffer: nextBuffer)
         }
     }

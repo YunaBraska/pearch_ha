@@ -9,6 +9,7 @@ import PearchHACore
 /// own accessibility framing by passing the same `title`; this view exposes the
 /// title as its accessibility label and ignores the decorative glyph.
 public struct PearchHASectionHeader<Trailing: View>: View {
+    @Environment(\.dashboardPalette) private var palette
     private let title: String
     private let systemImage: String?
     private let trailing: Trailing
@@ -33,12 +34,12 @@ public struct PearchHASectionHeader<Trailing: View>: View {
         HStack(spacing: PearchHASpacing.xs + 1) {
             if let systemImage {
                 Image(systemName: systemImage)
-                    .font(PearchHATypography.caption())
-                    .foregroundStyle(PearchHATheme.accent)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(palette.accentPrimary)
                     .accessibilityHidden(true)
             }
             Text(title)
-                .font(PearchHATypography.caption())
+                .pearchHAFont(size: 11, weight: .semibold)
                 .foregroundStyle(.secondary)
                 .textCase(.uppercase)
                 .tracking(0.5)
@@ -140,10 +141,10 @@ public struct PearchHAStateView: View {
             symbol(size: 34)
             VStack(spacing: PearchHASpacing.xs) {
                 Text(title)
-                    .font(.headline)
+                    .pearchHAFont(.headline)
                 if let message {
                     Text(message)
-                        .font(.callout)
+                        .pearchHAFont(.callout)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
@@ -164,12 +165,12 @@ public struct PearchHAStateView: View {
                 .padding(.top, 1)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.callout)
+                    .pearchHAFont(.callout)
                     .foregroundStyle(symbolTint)
                     .fixedSize(horizontal: false, vertical: true)
                 if let message {
                     Text(message)
-                        .font(.caption)
+                        .pearchHAFont(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -207,6 +208,7 @@ public struct PearchHAStateView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
+            .tint(PearchHATheme.Dashboard.palette(.light, increasedContrast: true).accentPrimary)
             .disabled(actionDisabled)
         }
     }
@@ -444,16 +446,12 @@ public struct PearchHAAppearancePreview: View {
             HStack(spacing: PearchHASpacing.xs + 1) {
                 if preferences.menuBarAppearance.showsImage {
                     Image(systemName: "thermometer.medium")
-                        .font(PearchHATypography.caption())
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(accent)
                 }
                 if preferences.menuBarAppearance.showsTitle {
                     Text("21°")
-                        .font(
-                            preferences.stableMenuBarWidth
-                                ? PearchHATypography.bodyValue()
-                                : PearchHATypography.body()
-                        )
+                        .pearchHAFont(.body, monospacedDigits: preferences.stableMenuBarWidth)
                         .foregroundStyle(.primary)
                 }
             }
@@ -471,15 +469,15 @@ public struct PearchHAAppearancePreview: View {
         let shape = RoundedRectangle(cornerRadius: PearchHACornerRadius.card, style: .continuous)
         return HStack(spacing: PearchHASpacing.sm) {
             Image(systemName: "thermometer.medium")
-                .font(PearchHATypography.body())
+                .font(.system(size: 13, weight: .regular))
                 .foregroundStyle(accent)
                 .frame(width: 22)
             Text("Living Room")
-                .font(PearchHATypography.body())
+                .pearchHAFont(size: 13, weight: .regular)
                 .foregroundStyle(.primary)
             Spacer(minLength: 0)
             Text("21°")
-                .font(PearchHATypography.bodyValue())
+                .pearchHAFont(size: 13, weight: .regular, monospacedDigits: true)
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, PearchHASpacing.md)

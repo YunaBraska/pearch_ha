@@ -2,6 +2,9 @@
 
 Keep changes scoped to observable behavior. Prefer extending or simplifying the
 existing implementation. Update its tests and owning document when behavior changes.
+When updating Sparkle, copy its complete distribution `LICENSE` to
+`Sources/PearchHACore/Resources/Sparkle-LICENSE.txt`. The shared resource bundle
+ships it in direct builds. Store builds exclude both Sparkle and its notice.
 
 ## Development
 
@@ -11,8 +14,11 @@ Use Swift 6 and full Xcode for native verification:
 git clone https://github.com/YunaBraska/pearch_ha.git
 cd pearch_ha
 open PearchHA.xcodeproj
-sh scripts/check.sh
+swift build -Xswiftc -warnings-as-errors
 ```
+
+Run `sh scripts/check.sh` for full verification in CI or an isolated desktop session.
+Its native tests open windows and change focus.
 
 [TESTING.md](docs/TESTING.md) defines the gates, focused checks, and evidence limits.
 Use a branch from `main`, run the relevant checks, and include their results and any

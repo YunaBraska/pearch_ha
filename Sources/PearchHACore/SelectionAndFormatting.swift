@@ -127,7 +127,7 @@ public struct EntitySelectionProjector: Sendable {
                         || entity.deviceDomain?.lowercased().contains(normalizedQuery) == true
                 }
                 .map { entity in
-                    SelectableEntity(entity: entity, isSelected: !configuration.isExplicit || selected.contains(entity.id))
+                    SelectableEntity(entity: entity, isSelected: configuration.isExplicit ? selected.contains(entity.id) : entity.id.source == .homeAssistant)
                 }
             guard !entities.isEmpty else {
                 return nil
@@ -141,22 +141,9 @@ public struct EntitySelectionProjector: Sendable {
         configuration: EntitySelectionConfiguration
     ) -> [Room] {
         let selected = Set(configuration.selectedEntityIDs)
-        if !configuration.isExplicit {
-            return orderedRooms(rooms, roomOrder: configuration.roomOrder).map { room in
-                Room(
-                    id: room.id,
-                    name: room.name,
-                    entities: orderedEntities(room.entities, entityOrder: configuration.entityOrder)
-                )
-            }
-        }
-        guard !selected.isEmpty else {
-            return []
-        }
-
         return orderedRooms(rooms, roomOrder: configuration.roomOrder).compactMap { room in
             let entities = orderedEntities(room.entities, entityOrder: configuration.entityOrder)
-                .filter { selected.contains($0.id) }
+                .filter { configuration.isExplicit ? selected.contains($0.id) : $0.id.source == .homeAssistant }
             guard !entities.isEmpty else {
                 return nil
             }
@@ -212,8 +199,10 @@ public struct EntitySelectionReorderer: Sendable {
         let orderedRooms = EntitySelectionProjector().selectedRooms(
             rooms: rooms,
             configuration: EntitySelectionConfiguration(
+                selectedEntityIDs: rooms.flatMap(\.entities).map(\.id),
                 roomOrder: configuration.roomOrder,
-                entityOrder: configuration.entityOrder
+                entityOrder: configuration.entityOrder,
+                isExplicit: true
             )
         )
         let orderedRoomIDs = orderedRooms.map(\.id)
@@ -241,8 +230,10 @@ public struct EntitySelectionReorderer: Sendable {
         let orderedRooms = EntitySelectionProjector().selectedRooms(
             rooms: rooms,
             configuration: EntitySelectionConfiguration(
+                selectedEntityIDs: rooms.flatMap(\.entities).map(\.id),
                 roomOrder: configuration.roomOrder,
-                entityOrder: configuration.entityOrder
+                entityOrder: configuration.entityOrder,
+                isExplicit: true
             )
         )
         let orderedRoomIDs = orderedRooms.map(\.id)
@@ -269,8 +260,10 @@ public struct EntitySelectionReorderer: Sendable {
         let projectedRooms = EntitySelectionProjector().selectedRooms(
             rooms: rooms,
             configuration: EntitySelectionConfiguration(
+                selectedEntityIDs: rooms.flatMap(\.entities).map(\.id),
                 roomOrder: configuration.roomOrder,
-                entityOrder: configuration.entityOrder
+                entityOrder: configuration.entityOrder,
+                isExplicit: true
             )
         )
         let orderedEntityIDs = projectedRooms.flatMap(\.entities).map(\.id)
@@ -307,8 +300,10 @@ public struct EntitySelectionReorderer: Sendable {
         let projectedRooms = EntitySelectionProjector().selectedRooms(
             rooms: rooms,
             configuration: EntitySelectionConfiguration(
+                selectedEntityIDs: rooms.flatMap(\.entities).map(\.id),
                 roomOrder: configuration.roomOrder,
-                entityOrder: configuration.entityOrder
+                entityOrder: configuration.entityOrder,
+                isExplicit: true
             )
         )
         let sourceRoomID = projectedRooms.first { room in
@@ -360,8 +355,10 @@ public struct EntitySelectionReorderer: Sendable {
         EntitySelectionProjector().selectedRooms(
             rooms: rooms,
             configuration: EntitySelectionConfiguration(
+                selectedEntityIDs: rooms.flatMap(\.entities).map(\.id),
                 roomOrder: roomOrder,
-                entityOrder: entityOrder
+                entityOrder: entityOrder,
+                isExplicit: true
             )
         )
         .flatMap(\.entities)
@@ -1449,10 +1446,10 @@ public struct EntityValueFormatter: Sendable {
     public func format(_ entity: DiscoveredEntity, isStale: Bool = false) -> FormattedEntityValue {
         let normalizedState = entity.state.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if normalizedState == "unavailable" {
-            return FormattedEntityValue(text: "Unavailable", status: .unavailable)
+            return FormattedEntityValue(text: entity.id.source == .thisMac ? LocalMacText.unavailable.localized(locale: Locale(identifier: localeIdentifier)) : "Unavailable", status: .unavailable)
         }
         if normalizedState == "unknown" {
-            return FormattedEntityValue(text: "Unknown", status: .unknown)
+            return FormattedEntityValue(text: entity.id.source == .thisMac ? LocalMacText.unknown.localized(locale: Locale(identifier: localeIdentifier)) : "Unknown", status: .unknown)
         }
 
         let trimmedState = entity.state.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1467,7 +1464,7 @@ public struct EntityValueFormatter: Sendable {
             trimmedState: trimmedState,
             haUnit: entity.unit
         )
-        let text = icon?.accessibleText ?? value
+        let text = LocalMacSensor(entityID: entity.id)?.formattedState(normalizedState, locale: Locale(identifier: localeIdentifier)) ?? icon?.accessibleText ?? value
         if isStale {
             return FormattedEntityValue(text: "Stale: \(text)", status: .stale, iconSymbolName: icon?.symbolName)
         }

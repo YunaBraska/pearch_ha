@@ -15,6 +15,9 @@ REST uses `Authorization: Bearer <access-token>`. WebSocket authenticates with
 `{"type":"auth","access_token":"<access-token>"}` and requires `auth_ok`.
 Long-lived tokens and OAuth sessions share this bearer-token contract.
 Username/password credentials are not sent to REST or WebSocket API calls.
+REST redirects stay within the original scheme, host and effective port. A redirect
+to another origin returns its HTTP status without forwarding the request. Configure
+the final Home Assistant address explicitly. Ordered address fallback remains separate.
 
 | OAuth step | Endpoint | Fields |
 | --- | --- | --- |
@@ -27,7 +30,26 @@ Code exchange also requires `refresh_token`. Keychain stores the session and cli
 ID. Authentication failure triggers one refresh and one retry. Failed refresh
 clears the stored session and requires reconnecting.
 
-Native sign-in reads the application client website and callback URI from `PEARCHHA_OAUTH_CLIENT_ID` and `PEARCHHA_OAUTH_REDIRECT_URI`. Exported process values win; otherwise the app reads those keys from a local ignored env file, or from the exported `PEARCHHA_ENV_FILE` path. The packaged `.app` must declare the callback scheme in `CFBundleURLTypes` with `CFBundleTypeRole=Viewer`; `pearchha-package-app --verify-launch-services` writes that metadata, registers the generated bundle, and verifies macOS records the callback scheme claim for that bundle. The app shell accepts delivered callback URLs only when their scheme and redirect base match the configured redirect URI, and records only a redacted ingress event. The client website must publish the redirect URI according to the Home Assistant native-app registration rules before this can pass real-HA sign-in verification.
+Installed apps read the public application client website and callback URI from
+`PEARCHHA_OAUTH_CLIENT_ID` and `PEARCHHA_OAUTH_REDIRECT_URI` in `Info.plist`, so
+Finder launches do not require a shell environment. Explicit process values or
+`PEARCHHA_ENV_FILE` retain the development override. Only unbundled development
+runs fall back to a relative `.env.local` file.
+
+For direct bundles, export both public values during packaging or pass
+`pearchha-package-app --oauth-env <local-env-file>`. Only those two fields are
+embedded. Tokens and other env-file contents are never bundled. The Store
+packaging script uses the same package tool and embeds both values when exported.
+Unconfigured local builds can continue to use token sign-in.
+
+The packaged `.app` must declare the callback scheme in `CFBundleURLTypes` with
+`CFBundleTypeRole=Viewer`. Packaging and runtime reject a bundled redirect whose
+scheme is not declared. `pearchha-package-app --verify-launch-services` registers
+the generated bundle and verifies macOS records the scheme claim. The app shell
+accepts delivered callback URLs only when their scheme and redirect base match
+the configured redirect URI, and records only a redacted ingress event. The
+client website must publish the redirect URI according to the Home Assistant
+native-app registration rules before real-HA sign-in verification.
 
 For native callback schemes such as `pearchha://auth`, the application website must include a redirect declaration in the first 10kB of HTML:
 
@@ -101,7 +123,13 @@ edited directly in its row: choices use a dropdown, numbers use a borderless edi
 value and an optional stepper, booleans use a switch, and actions use a named button.
 Position, brightness, fan speed and volume use a slider with a quiet value. Clicking
 that value reveals precise numeric entry. Sliders have no additional stepper and
-commit on release. Multiple settings open an editor from the value marked with a slider icon. Existing on/off
+commit on release. Requested values, including choices and switches, remain visible
+with a small clock and tooltip until Home Assistant next reports that value, even
+if it differs from the request. Service acceptance alone does not clear this status.
+An off light displays zero brightness, including when HA clears its brightness attribute.
+The status space stays reserved so pending feedback does not move the controls.
+Failures clear rejected requests. No extra polling is started.
+Multiple settings open an editor from the value marked with a slider icon. Existing on/off
 switches and cover controls remain inline. Tooltips list the domain and available
 settings, options and numeric bounds. All controls use Home Assistant's current
 feature flags, options and numeric bounds:

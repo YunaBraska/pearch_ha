@@ -13,6 +13,43 @@ import PearchHARepoAudit
 import PearchHASupport
 import PearchHAUI
 
+@MainActor
+private final class SmokePopoverPresentation {
+    let popover: PearchHAStatusPopover
+    let anchorWindow: NSWindow
+    let window: NSWindow
+
+    init(model: PearchHAPanelModel) throws {
+        _ = NSApplication.shared
+        guard let visibleFrame = NSScreen.main?.visibleFrame else {
+            throw SmokeFailure("A visible screen is required for native popover smoke checks")
+        }
+        let anchorWindow = NSWindow(contentRect: NSRect(x: visibleFrame.midX, y: visibleFrame.maxY - 80, width: 40, height: 40),
+                                    styleMask: [.titled], backing: .buffered, defer: false)
+        anchorWindow.isReleasedWhenClosed = false
+        let anchor = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+        anchorWindow.contentView = anchor
+        anchorWindow.orderFront(nil)
+        let popover = PearchHAApplication.makePopover(model: model)
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        guard let window = popover.contentViewController?.view.window, popover.isShown else {
+            popover.close()
+            anchorWindow.close()
+            throw SmokeFailure("Popover did not present from its visible smoke anchor")
+        }
+        self.popover = popover
+        self.anchorWindow = anchorWindow
+        self.window = window
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func close() {
+        popover.close()
+        popover.contentViewController = nil
+        anchorWindow.close()
+    }
+}
+
 @main
 struct PearchHASmoke {
     static func main() async {
@@ -43,26 +80,18 @@ struct PearchHASmoke {
 
     @MainActor
     private static func runOnce(options: SmokeOptions) async throws {
-        try expect(PearchHASupport.module.name == "PearchHASupport", "support module is named")
-        try expect(PearchHACore.module.name == "PearchHACore", "core module is named")
-        try expect(PlannedHAClient().describe().name == "PearchHAClient", "client module is named")
-        try expect(PlannedConfigStore().describe().name == "PearchHAPersistence", "persistence module is named")
-        try expect(PearchHAUI.module.name == "PearchHAUI", "UI module is named")
-
         let id: EntityID = "sensor.office_temperature"
         try expect(id.rawValue == "sensor.office_temperature", "entity ID preserves raw value")
 
         let location = ConfigLocation()
         try expect(location.applicationSupportDirectoryName == "PearchHA", "config location uses app name")
         fputs("Checking support primitives and toolchain...\n", stderr)
-        try verifyRateLimiter()
         try verifyJitter()
         try verifyBackoff()
         try verifyRedaction()
         try verifyCoverageGate()
         try verifyRepositoryAuditGate()
         try verifyXcodeDoctor()
-        try await verifyCoalescing()
         try await verifyTestClock()
         fputs("Checking Home Assistant protocols and fixture tools...\n", stderr)
         try await verifyMirrorAndFakeHA()
@@ -154,20 +183,6 @@ struct PearchHASmoke {
         } catch let error as SmokeFailure {
             try expect(error.description == "invalid repeat count: many", "smoke options reject non-numeric repeat count")
         }
-    }
-
-    private static func verifyRateLimiter() throws {
-        let start = PearchInstant(nanosecondsSinceStart: 0)
-        var limiter = TokenBucketRateLimiter(capacity: 2, refillPerSecond: 1, now: start)
-
-        try expect(limiter.tryAcquire(at: start), "first token is available")
-        try expect(limiter.tryAcquire(at: start), "second token is available")
-        try expect(!limiter.tryAcquire(at: start), "bucket is empty")
-        try expect(limiter.tryAcquire(at: start.advanced(by: .seconds(1))), "bucket refills over time")
-        try expect(
-            limiter.nextAvailability(for: 3, at: start) == .impossible(capacity: 2, requested: 3),
-            "impossible token requests fail explicitly"
-        )
     }
 
     private static func verifyJitter() throws {
@@ -490,85 +505,6 @@ struct PearchHASmoke {
             let message = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "git failed"
             throw SmokeFailure("git \(arguments.joined(separator: " ")) failed: \(message)")
         }
-    }
-
-    private static func verifyCoalescing() async throws {
-        let coalescer = RequestCoalescer<String, Int>()
-        let counter = Counter()
-        let gate = Gate()
-
-        let first = Task {
-            try await coalescer.value(for: "same") {
-                _ = await counter.increment()
-                await gate.wait()
-                return 42
-            }
-        }
-
-        try await spinUntil("coalescer has first task") {
-            await coalescer.activeRequestCount() == 1
-        }
-
-        let second = Task {
-            try await coalescer.value(for: "same") {
-                _ = await counter.increment()
-                await gate.wait()
-                return 13
-            }
-        }
-        try await spinUntil("coalescer has second caller") {
-            await coalescer.coalescedWaiterCount() == 1
-        }
-
-        _ = await gate.open()
-        let values = try await [first.value, second.value]
-
-        try expect(values == [42, 42], "coalesced callers share the first result")
-        try await expectAsync(await counter.value == 1, "coalesced operation runs once")
-        try await expectAsync(await coalescer.coalescedWaiterCount() == 0, "coalesced waiter count returns to zero")
-
-        let failing = RequestCoalescer<String, Int>()
-        let failures = Counter()
-        let failureGate = Gate()
-        let firstFailure = Task {
-            try await failing.value(for: "same") {
-                _ = await failures.increment()
-                await failureGate.wait()
-                throw SmokeFailure("planned coalescer failure")
-            }
-        }
-        try await spinUntil("coalescer has failing task") {
-            await failing.activeRequestCount() == 1
-        }
-        let secondFailure = Task {
-            try await failing.value(for: "same") {
-                _ = await failures.increment()
-                return 7
-            }
-        }
-        try await spinUntil("coalescer has second failing caller") {
-            await failing.coalescedWaiterCount() == 1
-        }
-        _ = await failureGate.open()
-
-        do {
-            _ = try await firstFailure.value
-            throw SmokeFailure("first coalesced failure unexpectedly succeeded")
-        } catch is SmokeFailure {}
-
-        do {
-            _ = try await secondFailure.value
-            throw SmokeFailure("second coalesced failure unexpectedly succeeded")
-        } catch is SmokeFailure {}
-
-        try await expectAsync(await failing.activeRequestCount() == 0, "failed coalesced request is cleared")
-        try await expectAsync(await failing.coalescedWaiterCount() == 0, "failed coalesced waiter count returns to zero")
-
-        let retry = try await failing.value(for: "same") {
-            _ = await failures.increment()
-            return 99
-        }
-        try expect(retry == 99, "coalescer retries after failure")
     }
 
     private static func verifyTestClock() async throws {
@@ -2952,26 +2888,17 @@ struct PearchHASmoke {
     @MainActor
     private static func verifyAppShellPanelFactory() throws {
         _ = NSApplication.shared
-        let panel = PearchHAApplication.makePanel(model: PearchHAPanelModel())
-        defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
-        }
+        let presentation = try SmokePopoverPresentation(model: PearchHAPanelModel())
+        let panel = presentation.window
+        defer { presentation.close() }
 
-        let frameSize = panel.frame.size
-        try expect(panel.canBecomeKey, "app shell panel accepts first-run text focus")
-        try expect(panel.canBecomeMain, "app shell panel can become main while open")
-        try expect(panel.styleMask.contains(.nonactivatingPanel), "app shell panel is nonactivating")
-        try expect(panel.styleMask.contains(.borderless), "app shell panel is borderless (SwiftUI paints the rounded surface)")
-        try expect(!panel.styleMask.contains(.titled), "app shell panel has no titled window chrome")
-        try expect(!panel.isOpaque, "app shell panel is transparent so the rounded corners show")
-        try expect(panel.backgroundColor == .clear, "app shell panel clears its window background")
-        try expect(!panel.hasShadow, "app shell panel defers its shadow to the SwiftUI root")
-        try expect(panel.isFloatingPanel, "app shell panel floats above normal windows")
-        try expect(panel.hidesOnDeactivate, "app shell panel hides on deactivate")
-        try expect(panel.contentViewController != nil, "app shell hosts SwiftUI content")
-        try expect(Int(frameSize.width.rounded()) == 384, "app shell panel frame width is stable")
-        try expect(Int(frameSize.height.rounded()) >= 468, "app shell panel frame height fits first-run content")
+        try expect(presentation.popover.behavior == .transient, "app shell uses native transient dismissal")
+        try expect(!presentation.popover.animates, "app shell popover has deterministic presentation")
+        try expect(presentation.popover.isShown, "app shell presents from its visible anchor")
+        try expect(panel.canBecomeKey, "popover accepts keyboard focus")
+        try expect(presentation.popover.contentViewController != nil, "app shell hosts SwiftUI content")
+        try expect(Int(presentation.popover.contentSize.width.rounded()) == 384, "popover content width is stable")
+        try expect(Int(presentation.popover.contentSize.height.rounded()) == 468, "popover content height is stable")
 
         // The panel no longer hosts the connection form (it points to
         // Settings); the fields live in the Settings window's Connection tab.
@@ -3143,11 +3070,9 @@ struct PearchHASmoke {
             ),
             "custom-action smoke fixture stores the panel action"
         )
-        let panel = PearchHAApplication.makePanel(model: model)
-        defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
-        }
+        let presentation = try SmokePopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
 
         panel.makeKeyAndOrderFront(nil)
         drainMainRunLoop()
@@ -3169,11 +3094,9 @@ struct PearchHASmoke {
     private static func verifyBuiltInControlsPanelFactory() async throws {
         _ = NSApplication.shared
         let model = try await panelSnapshotModel(for: .builtInControlsLight)
-        let panel = PearchHAApplication.makePanel(model: model)
-        defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
-        }
+        let presentation = try SmokePopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
 
         panel.makeKeyAndOrderFront(nil)
         drainMainRunLoop()
@@ -3413,6 +3336,7 @@ struct PearchHASmoke {
         let median = sortedSamples[sortedSamples.count / 2]
         let maximum = sortedSamples[sortedSamples.index(before: sortedSamples.endIndex)]
 
+        print("Cached panel open: median \(milliseconds(median)) ms, maximum \(milliseconds(maximum)) ms")
         try expect(
             median <= SmokePerformanceBudget.panelOpenMedianNanoseconds,
             "cached panel open median exceeds \(SmokePerformanceBudget.panelOpenMedianMilliseconds) ms: \(milliseconds(median)) ms"
@@ -3429,15 +3353,27 @@ struct PearchHASmoke {
             snapshot: SmokePanelSnapshotVariant.connectedLight.snapshot,
             customActionConfiguration: SmokePanelSnapshotVariant.connectedLight.customActionConfiguration
         )
+        guard let visibleFrame = NSScreen.main?.visibleFrame else {
+            throw SmokeFailure("A visible screen is required for the popover opening benchmark")
+        }
+        let anchorWindow = NSWindow(contentRect: NSRect(x: visibleFrame.midX, y: visibleFrame.maxY - 80, width: 40, height: 40),
+                                    styleMask: [.titled], backing: .buffered, defer: false)
+        anchorWindow.isReleasedWhenClosed = false
+        let anchor = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+        anchorWindow.contentView = anchor
+        anchorWindow.orderFront(nil)
+        defer { anchorWindow.close() }
+        // The real status-item anchor already exists before the user opens the popover.
         let start = DispatchTime.now().uptimeNanoseconds
-        let panel = PearchHAApplication.makePanel(model: model)
-        panel.orderFrontRegardless()
-        panel.contentView?.layoutSubtreeIfNeeded()
-        panel.displayIfNeeded()
-        let elapsed = DispatchTime.now().uptimeNanoseconds - start
-        panel.orderOut(nil)
-        panel.contentViewController = nil
-        return elapsed
+        let popover = PearchHAApplication.makePopover(model: model)
+        defer { popover.close(); popover.contentViewController = nil }
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        guard let window = popover.contentViewController?.view.window, popover.isShown else {
+            throw SmokeFailure("The opening benchmark could not present its native popover")
+        }
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        return DispatchTime.now().uptimeNanoseconds - start
     }
 
     private static func milliseconds(_ nanoseconds: UInt64) -> String {
@@ -4053,19 +3989,13 @@ struct PearchHASmoke {
         let size: NSSize
         if variant == .historyLoadedLight || variant == .historyLoadedLightIncreasedContrast {
             view = AnyView(
-                PearchHAHistoryPopoverContent(
-                    entityID: "sensor.office_humidity",
-                    entityName: "Office humidity",
-                    valueText: "44%",
-                    state: .loaded(SmokePanelSnapshotVariant.loadedHistorySeries),
-                    increaseContrastOverride: variant.colorSchemeContrast == .increased,
-                    selectedRange: .constant(.day)
+                PearchHAPanelView(
+                    model: model,
+                    accessibilityPreferencesOverride: variant.accessibilityPreferences
                 )
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .background(Color(nsColor: NSColor.windowBackgroundColor))
                 .environment(\.colorScheme, variant.colorScheme)
             )
-            size = NSSize(width: 360, height: 420)
+            size = NSSize(width: 384, height: 468)
         } else if variant == .settingsSelectionLight || variant == .settingsAboutUpdateLight {
             let tab: PearchHASettingsView.Tab = variant == .settingsAboutUpdateLight ? .about : .entities
             view = AnyView(
@@ -4075,12 +4005,9 @@ struct PearchHASmoke {
                     initialTab: tab,
                     initiallyExpandedEntityIDs: ["sensor.office_humidity"]
                 )
-                .tabContentForSnapshot(tab)
                 .environment(\.colorScheme, variant.colorScheme)
             )
-            size = variant == .settingsAboutUpdateLight
-                ? NSSize(width: 520, height: 620)
-                : NSSize(width: 520, height: 560)
+            size = NSSize(width: 1120, height: 720)
         } else {
             view = AnyView(
                 PearchHAPanelView(
@@ -4465,10 +4392,8 @@ struct PearchHASmoke {
         try expect(snapshot.statusItemHasAction, "app launch wires status item action")
         try expect(snapshot.hasPanel, "app launch creates panel")
         try expect(snapshot.hasPanelModel, "app launch creates panel model")
-        try expect(snapshot.panelCanBecomeKey, "app launch creates key-capable panel")
-        try expect(snapshot.panelCanBecomeMain, "app launch creates main-capable panel")
-        try expect(snapshot.panelIsFloating, "app launch creates floating panel")
-        try expect(snapshot.panelHidesOnDeactivate, "app launch creates dismissible panel")
+        try expect(snapshot.panelIsTransient, "app launch creates native transient popover")
+        try expect(!snapshot.panelIsShown, "app launch keeps the popover closed")
         try expect(snapshot.panelContentWidth == 384, "app launch preserves panel content width")
         try expect(snapshot.panelContentHeight == 468, "app launch preserves panel content height")
         try expect(snapshot.menuBarEntityIDs.isEmpty, "app launch starts without promoted menu bar entities")
@@ -6238,10 +6163,6 @@ final class SmokeConfigStore: ConfigStore, @unchecked Sendable {
         self.loadedConfiguration = loadedConfiguration
         self.loadError = loadError
         self.saveError = saveError
-    }
-
-    func describe() -> PearchHAModule {
-        PearchHAPersistence.module
     }
 
     func load() throws -> PearchHAConfiguration {

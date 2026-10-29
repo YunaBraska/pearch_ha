@@ -11,6 +11,23 @@ public struct PearchHAEntityControlField: Equatable, Sendable, Identifiable {
         case boolean(current: Bool?)
         case color(current: [Double]?)
         case text
+
+        var reportsValue: Bool {
+            switch self {
+            case .action, .text: false
+            case .choice, .number, .boolean, .color: true
+            }
+        }
+
+        var reportedValue: ActionValue? {
+            switch self {
+            case let .choice(_, current): current.map(ActionValue.string)
+            case let .number(current, _, _, _): current.map(ActionValue.number)
+            case let .boolean(current): current.map(ActionValue.bool)
+            case let .color(current): current.map { .array($0.map(ActionValue.number)) }
+            case .action, .text: nil
+            }
+        }
     }
 
     public let id: String
@@ -167,7 +184,9 @@ public struct PearchHAEntityControlField: Equatable, Sendable, Identifiable {
         case "light":
             let modes = strings("supported_color_modes")
             if modes.contains(where: { ["brightness", "color_temp", "hs", "xy", "rgb", "rgbw", "rgbww", "white"].contains($0) }) {
-                numeric("Brightness", "turn_on", "brightness_pct", current: number("brightness").map { ($0 / 255 * 100).rounded() }, min: 0, max: 100, step: 1, unit: "%")
+                // Home Assistant clears brightness when a light turns off.
+                let brightness = entity.state == "off" ? 0 : number("brightness").map { ($0 / 255 * 100).rounded() }
+                numeric("Brightness", "turn_on", "brightness_pct", current: brightness, min: 0, max: 100, step: 1, unit: "%")
             }
             if modes.contains("color_temp") {
                 numeric("Color temperature", "turn_on", "color_temp_kelvin", current: number("color_temp_kelvin"), min: number("min_color_temp_kelvin"), max: number("max_color_temp_kelvin"), step: 1, unit: "K")

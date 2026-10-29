@@ -19,6 +19,7 @@ let appStoreSettings: [SwiftSetting] = isAppStoreBuild
 
 let package = Package(
     name: "PearchHA",
+    defaultLocalization: "en",
     platforms: [
         .macOS(.v13)
     ],
@@ -59,7 +60,9 @@ let package = Package(
         ),
         .target(
             name: "PearchHACore",
-            dependencies: ["PearchHASupport"]
+            dependencies: ["PearchHASupport"],
+            exclude: isAppStoreBuild ? ["Resources/Sparkle-LICENSE.txt"] : [],
+            resources: [.process("Resources")]
         ),
         .target(
             name: "PearchHAClient",
@@ -142,6 +145,7 @@ let package = Package(
             name: "pearchha-package-app",
             dependencies: [
                 "PearchHAClient",
+                "PearchHACore",
                 "PearchHAPackaging",
                 "PearchHASupport"
             ],
@@ -171,7 +175,7 @@ let package = Package(
         ),
         .testTarget(
             name: "PearchHAPackagingTests",
-            dependencies: ["PearchHAPackaging"]
+            dependencies: ["PearchHAPackaging", "PearchHACore"]
         ),
         .testTarget(
             name: "PearchHASupportTests",

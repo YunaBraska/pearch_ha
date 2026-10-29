@@ -3,21 +3,36 @@
 Implemented features are described in the [README](../README.md). This file owns
 remaining work and release evidence gaps.
 
-## Blocked: public release credentials
+## Open: App Store submission and public sign-in
 
 - Supply and verify the production OAuth client website and redirect declaration
   for public browser sign-in. See [HA_API.md](HA_API.md#authentication).
-- Supply Developer ID signing and notarization credentials. Local test-signed
-  universal packaging and evidence verification pass, but do not prove public trust.
+- The existing direct-release CI has Developer ID signing and notarization
+  inputs configured. Those do not establish App Store distribution readiness.
+- The separate Store lane produced a signed package in
+  [run 40836734856](https://github.com/YunaBraska/pearch_ha/actions/runs/40836734856)
+  on 2026-10-29 at `5c6f06e`. Reverify the final submission revision. The upload
+  workflow has not run, so App Store Connect acceptance remains unverified.
+- The [public privacy policy](https://yunabraska.github.io/pearch_ha/privacy.html)
+  returned HTTP 200 on 2026-10-29. Complete App Store privacy metadata and verify
+  an isolated, reachable Home Assistant review account. Review access outside
+  the repository remains unverified. Do not use a personal home installation.
+  Publish the reviewed policy with this release, including local-sensor handling
+  and removal instructions, which are not yet present on the live page.
+- Verify Keychain continuity with the actual Store distribution identity and
+  configuration migration on each supported macOS release before submission.
 
 ## In progress: runtime verification
 
-- Verify the Settings entity list stays responsive with a large real installation.
+- Extend the Settings responsiveness checks beyond the verified 500-entity
+  fixture and the manually reviewed 1,154-entity installation.
 - Extend closed-menu CPU/memory measurements to open history, Settings, standby,
   reconnects, stale-cache recovery, and long sessions.
-- Verify the credentialed release path before public release.
+- Verify the final Store archive's runtime before submission. A successful signed
+  package build does not establish sandbox, migration or Keychain behavior.
 
 ## Planned
 
 - Raise client coverage toward 95% without weakening the existing gates.
-- Decide localization scope before claiming broader language support.
+- Extend localization beyond the German/English **This Mac** source before claiming
+  whole-app language support.

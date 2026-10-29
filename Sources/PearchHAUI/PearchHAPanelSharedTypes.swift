@@ -171,10 +171,12 @@ public struct SelectionDropTranslator: Sendable {
 }
 
 public struct PearchHAHistoryPopoverContent: View {
+    @Environment(\.pearchHATextSize) private var textSize
     private let entityID: EntityID
     private let entityName: String
     private let valueText: String
     private let unit: String?
+    private let fillsPanel: Bool
     private let state: PearchHAHistoryPanelState
     private let chartTint: Color?
     private let numericColorForValue: (Double) -> Color?
@@ -194,6 +196,7 @@ public struct PearchHAHistoryPopoverContent: View {
         entityName: String,
         valueText: String,
         unit: String? = nil,
+        fillsPanel: Bool = false,
         state: PearchHAHistoryPanelState,
         chartTint: Color? = nil,
         numericColorForValue: ((Double) -> Color?)? = nil,
@@ -207,6 +210,7 @@ public struct PearchHAHistoryPopoverContent: View {
         self.entityName = entityName
         self.valueText = valueText
         self.unit = unit
+        self.fillsPanel = fillsPanel
         self.state = state
         self.chartTint = chartTint
         self.numericColorForValue = numericColorForValue ?? { _ in nil }
@@ -220,20 +224,21 @@ public struct PearchHAHistoryPopoverContent: View {
     }
 
     private var palette: PearchHATheme.DashboardPalette {
-        PearchHATheme.Dashboard.palette(colorScheme)
+        PearchHATheme.Dashboard.palette(colorScheme, increasedContrast: isIncreasedContrast)
     }
 
     public var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+        let shape = RoundedRectangle(cornerRadius: PearchHACornerRadius.card, style: .continuous)
+        return VStack(alignment: .leading, spacing: PearchHASpacing.md) {
+            (textSize.scale >= 1.5 ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                                  : AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: 8))) {
                 Text(entityName)
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .pearchHAFont(size: 13, weight: .semibold)
                     .foregroundStyle(palette.textPrimary)
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
                 Text(valueText)
-                    .font(.system(size: 16, weight: .semibold).monospacedDigit())
+                    .pearchHAFont(size: 18, weight: .semibold, monospacedDigits: true)
                     .foregroundStyle(palette.textPrimary)
                 if let onOpenSettings {
                     Button(action: onOpenSettings) {
@@ -245,6 +250,7 @@ public struct PearchHAHistoryPopoverContent: View {
                 }
             }
             PearchHAHistoryRangeSegmentedControl(
+                increasedContrast: isIncreasedContrast,
                 options: rangeOptions,
                 selection: $selectedRange,
                 disabledRanges: disabledRanges,
@@ -254,17 +260,18 @@ public struct PearchHAHistoryPopoverContent: View {
             historyBody
                 .frame(minHeight: Self.bodyMinHeight, alignment: .topLeading)
         }
-        .padding(14)
-        .frame(width: 280)
+        .padding(PearchHASpacing.lg)
+        .frame(width: fillsPanel ? nil : 280 + 140 * (textSize.scale - 1))
+        .frame(maxWidth: fillsPanel ? .infinity : nil)
         .environment(\.dashboardPalette, palette)
         .background {
             shape
-                .fill(palette.surfacePanelElevated)
-                .overlay(shape.fill(.ultraThinMaterial).opacity(0.35))
+                .fill(fillsPanel ? palette.surfaceRoot : palette.surfacePanelElevated)
+
         }
-        .overlay(shape.strokeBorder(palette.borderSubtle, lineWidth: 1))
+        .overlay(shape.strokeBorder(fillsPanel ? .clear : palette.borderSubtle, lineWidth: 1))
         .clipShape(shape)
-        .shadow(color: palette.shadowSoft, radius: 14, x: 0, y: 6)
+        .shadow(color: fillsPanel ? .clear : palette.shadowSoft, radius: 14, x: 0, y: 6)
     }
 
     /// The ranges offered in the segmented selector.
@@ -281,14 +288,14 @@ public struct PearchHAHistoryPopoverContent: View {
         HStack(spacing: 4) {
             if state.entityID == entityID, let symbol = state.statusSymbolName, let help = state.statusHelp {
                 Image(systemName: symbol)
-                    .font(.caption2)
+                    .pearchHAFont(.caption2)
                     .foregroundStyle(historyLabelForegroundStyle)
                     .help(help)
                     .accessibilityLabel(help)
             }
             Spacer(minLength: 0)
             Text(hoverReadout ?? " ")
-                .font(.caption2.monospacedDigit())
+                .pearchHAFont(.caption2, monospacedDigits: true)
                 .foregroundStyle(hoverReadout == nil ? historyLabelForegroundStyle.opacity(0) : historyLabelForegroundStyle)
                 .accessibilityHidden(true)
         }
@@ -306,13 +313,13 @@ public struct PearchHAHistoryPopoverContent: View {
                 .accessibilityLabel("\(entityName) history loading")
         case .empty:
             Text("No history for this range")
-                .font(.callout)
+                .pearchHAFont(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityLabel("\(entityName) has no history for this range")
         case .noNumericData:
             Text("No history data")
-                .font(.callout)
+                .pearchHAFont(.callout)
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("\(entityName) history has no numeric data")
         case let .stateTimeline(series, segments):
@@ -327,6 +334,7 @@ public struct PearchHAHistoryPopoverContent: View {
                 colorForState: stateColorForTimeline,
                 onHoverReadoutChange: { hoverReadout = $0 }
             )
+            recordedValues(series)
         case let .statistics(series, statistics):
             // Keep a constant height: always show the chart and stats, and float
             // the cursor readout as an overlay on the chart. Swapping the area
@@ -335,18 +343,19 @@ public struct PearchHAHistoryPopoverContent: View {
             VStack(alignment: .leading, spacing: 8) {
                 interactiveChart(series: series)
                 historyStats(statistics)
+                recordedValues(series)
             }
         case let .unavailable(message):
             VStack(alignment: .leading, spacing: 4) {
                 Label("History unavailable", systemImage: "exclamationmark.triangle")
-                    .font(.callout)
+                    .pearchHAFont(.callout)
                     .foregroundStyle(.secondary)
                 Text(message)
-                    .font(.caption)
+                    .pearchHAFont(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Text("Close and reopen history to retry.")
-                    .font(.caption)
+                    .pearchHAFont(.caption)
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -356,7 +365,7 @@ public struct PearchHAHistoryPopoverContent: View {
     }
 
     private func interactiveChart(series: HistorySeries) -> some View {
-        let chartHeight: CGFloat = 80
+        let chartHeight: CGFloat = fillsPanel ? 150 : 80
         let peaks = Self.chartPeaks(series: series)
         let geometry = PearchHAHistorySparklineGeometry(series: series)
         return GeometryReader { proxy in
@@ -369,7 +378,7 @@ public struct PearchHAHistoryPopoverContent: View {
                         Spacer(minLength: 0)
                         Text(peaks.minimum)
                     }
-                    .font(.system(size: 9).monospacedDigit())
+                    .pearchHAFont(size: 10, monospacedDigits: true)
                     .foregroundStyle(historyLabelForegroundStyle)
                     .frame(maxWidth: .infinity, alignment: .trailing)
                     .padding(2)
@@ -463,10 +472,44 @@ public struct PearchHAHistoryPopoverContent: View {
         return "\(formattedValue) · \(formattedTimestamp)"
     }
 
+    /// The same samples as the graph, reachable with keyboard and VoiceOver.
+    /// The lazy list does not create an accessibility element for every sample until opened.
+    private func recordedValues(_ series: HistorySeries) -> some View {
+        let samples = series.samples.sorted { $0.timestamp < $1.timestamp }
+        return VStack(alignment: .leading, spacing: 8) {
+            if let first = samples.first, let last = samples.last {
+                HStack {
+                    Text(first.timestamp, format: .dateTime.month(.abbreviated).day().hour().minute())
+                    Spacer()
+                    Text(last.timestamp, format: .dateTime.month(.abbreviated).day().hour().minute())
+                }
+                .pearchHAFont(.caption2).foregroundStyle(.secondary)
+            }
+            DisclosureGroup("Recorded values") {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(samples.enumerated()), id: \.offset) { _, sample in
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(sample.timestamp, format: .dateTime.year().month().day().hour().minute().second())
+                                Spacer()
+                                Text(sample.numericValue.map { menuBarNumberLabel($0) + (unit.map { " " + $0 } ?? "") } ?? sample.state)
+                                    .monospacedDigit()
+                            }
+                            .pearchHAFont(.caption)
+                            .accessibilityElement(children: .combine)
+                        }
+                    }.padding(.vertical, 6)
+                }.frame(maxHeight: 160)
+            }
+            .pearchHAFont(.caption)
+            .accessibilityLabel("Recorded values for \(entityName)")
+        }
+    }
+
     private func historyStats(_ statistics: PearchHAHistoryStatistics) -> some View {
         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
             GridRow {
-                statisticLabel("Current")
+                statisticLabel("Last recorded")
                 statisticValue(menuBarNumberLabel(statistics.current))
             }
             GridRow {
@@ -478,7 +521,7 @@ public struct PearchHAHistoryPopoverContent: View {
                 statisticValue(menuBarNumberLabel(statistics.maximum))
             }
         }
-        .font(.caption)
+        .pearchHAFont(.caption)
     }
 
     @ViewBuilder
@@ -511,6 +554,8 @@ public struct PearchHAHistoryPopoverContent: View {
 }
 
 private struct PearchHAHistoryRangeSegmentedControl: NSViewRepresentable {
+    let increasedContrast: Bool
+    @Environment(\.pearchHATextSize) private var textSize
     let options: [HistoryRange]
     @Binding var selection: HistoryRange
     let disabledRanges: Set<HistoryRange>
@@ -545,6 +590,10 @@ private struct PearchHAHistoryRangeSegmentedControl: NSViewRepresentable {
     }
 
     private func sync(_ control: NSSegmentedControl) {
+        control.font = .systemFont(ofSize: 11 * textSize.scale)
+        control.invalidateIntrinsicContentSize()
+        // AppKit keeps the selected label white in both appearances.
+        control.selectedSegmentBezelColor = NSColor(PearchHATheme.Dashboard.palette(.light, increasedContrast: increasedContrast).accentPrimary)
         for (index, range) in options.enumerated() {
             control.setSelected(range == selection, forSegment: index)
             control.setEnabled(!disabledRanges.contains(range), forSegment: index)
@@ -595,6 +644,7 @@ enum PearchHASliderValueFormatting {
 }
 
 public func pearchHAEntityIconName(for entity: DiscoveredEntity) -> String {
+    if let local = LocalMacSensor(entityID: entity.id) { return local.symbol }
     let domain = entity.id.domain
     let name = entity.name.lowercased()
     let unit = (entity.unit ?? "").lowercased()
@@ -666,6 +716,7 @@ extension PearchHAPanelSnapshot {
 
 @MainActor
 struct PearchHANativeTextField: NSViewRepresentable {
+    @Environment(\.pearchHATextSize) private var textSize
     let placeholder: String
     @Binding var text: String
     let contentType: NSTextContentType?
@@ -695,6 +746,7 @@ struct PearchHANativeTextField: NSViewRepresentable {
     }
 
     private func configure(_ field: NSTextField) {
+        field.font = .systemFont(ofSize: 13 * textSize.scale)
         field.placeholderString = placeholder
         field.isEditable = true
         field.isSelectable = true
@@ -751,6 +803,7 @@ struct PearchHANativeTextField: NSViewRepresentable {
 
 @MainActor
 struct PearchHANativeSecureField: NSViewRepresentable {
+    @Environment(\.pearchHATextSize) private var textSize
     let placeholder: String
     @Binding var text: String
     let contentType: NSTextContentType?
@@ -775,6 +828,7 @@ struct PearchHANativeSecureField: NSViewRepresentable {
     }
 
     private func configure(_ field: NSSecureTextField) {
+        field.font = .systemFont(ofSize: 13 * textSize.scale)
         field.placeholderString = placeholder
         field.isEditable = true
         field.isSelectable = true
@@ -962,13 +1016,4 @@ extension HistoryRange {
 
     /// The history ranges the UI offers.
     static let uiSelectable: [HistoryRange] = [.hour, .day, .week, .month]
-}
-
-public typealias PearchHABootstrapView = PearchHAPanelView
-
-public enum PearchHAUI {
-    public static let module = PearchHAModule(
-        name: "PearchHAUI",
-        responsibility: "SwiftUI and AppKit-facing user interface components."
-    )
 }
