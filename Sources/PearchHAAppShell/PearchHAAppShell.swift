@@ -19,12 +19,21 @@ private enum AppShellLayout {
 }
 
 private final class PearchHAFirstMouseHostingView<Content: View>: NSHostingView<Content> {
-    var cancelHandler: (() -> Void)?
+    weak var statusPopover: PearchHAStatusPopover?
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.type == .keyDown, event.keyCode == 53,
+           event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
+           statusPopover?.onNavigateBack?() == true {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func cancelOperation(_ sender: Any?) {
-        if let cancelHandler { cancelHandler() } else { super.cancelOperation(sender) }
+        if let statusPopover { statusPopover.cancelOperation(sender) } else { super.cancelOperation(sender) }
     }
 }
 
@@ -2058,7 +2067,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
             )
         )
         if let view = hostingController.view as? PearchHAFirstMouseHostingView<PearchHAPanelView> {
-            view.cancelHandler = { [weak popover] in popover?.cancelOperation(nil) }
+            view.statusPopover = popover
         }
         popover.contentViewController = hostingController
         popover.appearance = NSApp.appearance
@@ -2418,6 +2427,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
         item.button?.action = #selector(togglePanel(_:))
+        item.button?.sendAction(on: [.leftMouseDown])
         return item
     }
 
