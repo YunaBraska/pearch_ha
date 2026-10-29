@@ -1373,7 +1373,7 @@ public struct PearchHASettingsView: View {
                     settingsControlRow("Updates") {
 #if PEARCHHA_APP_STORE
                         Text("Updates are managed by the Mac App Store.")
-                            .font(.footnote)
+                            .pearchHAFont(.footnote)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.trailing)
 #else

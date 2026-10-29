@@ -2465,7 +2465,7 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
             return
         }
         panelModel?.dismissHistoryPopover()
-        if panel.isVisible {
+        if panel.isVisible && NSApp.isActive {
             cancelPanelInactivityClose()
             panel.orderOut(sender)
             panelModel?.setPanelActive(false)
@@ -2543,7 +2543,9 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
             if duration > 0 {
                 try? await Task.sleep(nanoseconds: duration)
             }
-            guard let self,
+            // Cancellation wakes the sleeper but is not an expired timeout.
+            guard !Task.isCancelled,
+                  let self,
                   let panel,
                   panel.isVisible,
                   !panel.isKeyWindow

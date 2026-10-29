@@ -65,6 +65,12 @@ It also measures cold launch, cached panel opening, idle CPU, memory across repe
 lifecycles, request volume, history debounce/cache behavior, and status-item redraws.
 Timing tests use injected clocks. Async tests wait for observable progress.
 
+In the installed app, open the panel, click a Finder window, then click its
+menu-bar item once. The panel must return on that first click. Another click
+while PearchHA is active must close it, including with a control popover open.
+Repeat after Escape dismissal. This activation regression requires the running
+app because the XCTest host does not reliably reproduce app deactivation.
+
 Snapshots and a contact sheet are written under `.build/pearchha-snapshots/current`.
 Panel and history captures use the production 384×468 view. Settings captures
 include the sidebar and inspector at the production 1120×720 window size.
@@ -93,12 +99,13 @@ workflow requires production credentials for those checks. CLI `--help` is the
 canonical option reference.
 
 For the Mac App Store channel, run
-`scripts/package-app-store.sh VERSION`. This uses the `AppStore` Xcode
-configuration, applies sandbox, network-client and user-selected read-only file
-entitlements, and exports an
-App Store archive. It requires an installed Apple distribution certificate and
-provisioning profile, plus exported `PEARCHHA_OAUTH_CLIENT_ID` and
-`PEARCHHA_OAUTH_REDIRECT_URI` public configuration. Verify the deployed client
+`scripts/package-app-store.sh VERSION BUILD_NUMBER`. The existing App Store
+workflow supplies `APP_STORE_BUNDLE_ID`, `APP_STORE_TEAM_ID`,
+`MACOS_APP_STORE_APPLICATION_IDENTITY` and `MACOS_APP_STORE_PROFILE_PATH`.
+The script builds both architectures without Sparkle and signs the sandboxed
+bundle under `dist/app-store`. Export `PEARCHHA_OAUTH_CLIENT_ID` and
+`PEARCHHA_OAUTH_REDIRECT_URI` to embed the public sign-in configuration through
+the package tool. Verify the deployed client
 website with `pearchha-package-app --verify-published-oauth-site` first. The
 packaged app must retain both public values and its matching callback scheme
 without a shell environment. Do not use this lane for the direct ZIP/DMG release.

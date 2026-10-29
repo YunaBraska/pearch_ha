@@ -7,14 +7,19 @@ final class PearchHALocalSensorReaderTests: XCTestCase {
         let firstChange = expectation(description: "thermal change")
         var changeCount = 0
         let observation = PearchHALocalSensorObservation {
+            XCTAssertTrue(Thread.isMainThread)
             changeCount += 1
             firstChange.fulfill()
         }
-        NotificationCenter.default.post(name: ProcessInfo.thermalStateDidChangeNotification, object: nil)
+        await Task.detached {
+            NotificationCenter.default.post(name: ProcessInfo.thermalStateDidChangeNotification, object: nil)
+        }.value
         await fulfillment(of: [firstChange], timeout: 1)
 
         observation.invalidate()
-        NotificationCenter.default.post(name: ProcessInfo.thermalStateDidChangeNotification, object: nil)
+        await Task.detached {
+            NotificationCenter.default.post(name: ProcessInfo.thermalStateDidChangeNotification, object: nil)
+        }.value
         await Task.yield()
         XCTAssertEqual(changeCount, 1)
         observation.invalidate()

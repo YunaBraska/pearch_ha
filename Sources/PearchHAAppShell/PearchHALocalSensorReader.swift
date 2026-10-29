@@ -196,7 +196,7 @@ public final class PearchHALocalSensorObservation {
     public init(onChange: @escaping @MainActor @Sendable () -> Void) {
         powerSource = LocalPowerSourceObservation(onChange: onChange)
         thermalObserver = NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
-            .sink { _ in Task { @MainActor in onChange() } }
+            .sink { @Sendable _ in Task { @MainActor in onChange() } }
     }
 
     public func invalidate() {

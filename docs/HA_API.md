@@ -36,8 +36,8 @@ runs fall back to a relative `.env.local` file.
 For direct bundles, export both public values during packaging or pass
 `pearchha-package-app --oauth-env <local-env-file>`. Only those two fields are
 embedded. Tokens and other env-file contents are never bundled. The Store
-packaging script requires both exported values and passes them as Xcode build
-settings. Unconfigured local builds can continue to use token sign-in.
+packaging script uses the same package tool and embeds both values when exported.
+Unconfigured local builds can continue to use token sign-in.
 
 The packaged `.app` must declare the callback scheme in `CFBundleURLTypes` with
 `CFBundleTypeRole=Viewer`. Packaging and runtime reject a bundled redirect whose

@@ -6743,6 +6743,48 @@ final class PearchHAUITests: XCTestCase {
         )
     }
 
+    func testAppShellCancelledInactivityDoesNotCloseReopenedPanel() async throws {
+        _ = NSApplication.shared
+        let activationPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        let existingWindows = Set(NSApp.windows.map(\.windowNumber))
+        let application = applicationForTest(configStore: nil)
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        let otherWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                                   styleMask: [.titled], backing: .buffered, defer: false)
+        defer {
+            otherWindow.orderOut(nil)
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+            NSApp.setActivationPolicy(activationPolicy)
+        }
+        let panel = try XCTUnwrap(NSApp.windows.compactMap { $0 as? PearchHAStatusPanel }
+            .first { !existingWindows.contains($0.windowNumber) })
+        let button = try XCTUnwrap(NSApp.windows.flatMap { nativeViews(in: $0.contentView, of: NSStatusBarButton.self) }
+            .first { $0.target === application })
+
+        button.performClick(nil)
+        await spinUntil("the status click activates the application") { NSApp.isActive }
+        XCTAssertTrue(panel.isVisible, "One status-item click opens the panel")
+        otherWindow.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(otherWindow.isKeyWindow)
+        XCTAssertFalse(panel.isKeyWindow)
+        await Task.yield()
+
+        panel.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(panel.isKeyWindow)
+        otherWindow.makeKeyAndOrderFront(nil)
+        XCTAssertFalse(panel.isKeyWindow)
+        // Let cancelled work resume after a replacement timeout has been armed.
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertTrue(panel.isVisible, "Cancelled inactivity must not dismiss the panel before the new timeout")
+
+        button.performClick(nil)
+        XCTAssertFalse(panel.isVisible)
+        button.performClick(nil)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertTrue(panel.isVisible, "One click reopens the panel after dismissal")
+    }
+
     func test_t_status_panel_escape_closes_and_command_comma_opens_settings() {
         var openedSettings = 0
         let panel = PearchHAStatusPanel()
