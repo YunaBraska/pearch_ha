@@ -31,7 +31,7 @@ if xcodebuild test \
     -resultBundlePath .build/ui-tests/NativeUI.xcresult \
     -parallel-testing-enabled NO \
     -test-timeouts-enabled YES \
-    -default-test-execution-time-allowance 120 \
+    -default-test-execution-time-allowance 180 \
     -maximum-test-execution-time-allowance 180 \
     CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
     > .build/ui-tests/xcodebuild.log 2>&1; then

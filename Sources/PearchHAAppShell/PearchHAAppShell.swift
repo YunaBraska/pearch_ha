@@ -19,22 +19,7 @@ private enum AppShellLayout {
 }
 
 private final class PearchHAFirstMouseHostingView<Content: View>: NSHostingView<Content> {
-    weak var statusPopover: PearchHAStatusPopover?
-
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.type == .keyDown, event.keyCode == 53,
-           event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
-           statusPopover?.onNavigateBack?() == true {
-            return true
-        }
-        return super.performKeyEquivalent(with: event)
-    }
-
-    override func cancelOperation(_ sender: Any?) {
-        if let statusPopover { statusPopover.cancelOperation(sender) } else { super.cancelOperation(sender) }
-    }
 }
 
 private final class PearchHAFirstMouseHostingController<Content: View>: NSHostingController<Content> {
@@ -43,11 +28,25 @@ private final class PearchHAFirstMouseHostingController<Content: View>: NSHostin
     }
 }
 
+private final class PearchHAHistoryEscapeMonitor {
+    private let monitor: Any?
+
+    @MainActor
+    init(handler: @escaping (NSEvent) -> NSEvent?) {
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: handler)
+    }
+
+    deinit {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+    }
+}
+
 /// The native menu-bar popover owns presentation and dismissal. Its content
 /// remains attached across ordinary closes so expansion and scroll state survive.
 public final class PearchHAStatusPopover: NSPopover, NSPopoverDelegate {
     public var onNavigateBack: (() -> Bool)?
     public var onVisibilityChange: ((Bool) -> Void)?
+    private var historyEscapeMonitor: PearchHAHistoryEscapeMonitor?
 
     public override init() {
         super.init()
@@ -62,10 +61,20 @@ public final class PearchHAStatusPopover: NSPopover, NSPopoverDelegate {
     }
 
     public func popoverDidShow(_ notification: Notification) {
+        historyEscapeMonitor = PearchHAHistoryEscapeMonitor { [weak self] event in
+            guard let self, self.isShown,
+                  let window = self.contentViewController?.view.window,
+                  event.window === window,
+                  event.keyCode == 53,
+                  event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
+                  self.onNavigateBack?() == true else { return event }
+            return nil
+        }
         onVisibilityChange?(true)
     }
 
     public func popoverDidClose(_ notification: Notification) {
+        historyEscapeMonitor = nil
         onVisibilityChange?(false)
     }
 
@@ -2071,7 +2080,6 @@ public final class PearchHAApplication: NSObject, NSApplicationDelegate {
         hostingController.sizingOptions = []
         if let view = hostingController.view as? PearchHAFirstMouseHostingView<PearchHAPanelView> {
             view.sizingOptions = []
-            view.statusPopover = popover
         }
         popover.contentViewController = hostingController
         popover.appearance = NSApp.appearance

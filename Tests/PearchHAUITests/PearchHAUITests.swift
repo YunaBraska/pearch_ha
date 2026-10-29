@@ -6156,40 +6156,59 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(nativeSegmentedControls(in: panel.contentView).count, 1,
                        "History range control is inside the same panel window")
         try saveControlSnapshot(panel.contentView, name: "history-in-panel")
-        var escapeTrace: [String] = []
-        var navigationCount = 0
-        let currentEventType = { NSApp.currentEvent.map { String(describing: $0.type) } ?? "nil" }
-        let originalNavigateBack = try XCTUnwrap(presentation.popover.onNavigateBack)
-        presentation.popover.onNavigateBack = {
-            navigationCount += 1
-            let invocation = navigationCount
-            let before = model.snapshot.historyPresentationEntityID != nil
-            escapeTrace.append("navigate#\(invocation) begin history=\(before) current=\(currentEventType())")
-            let result = originalNavigateBack()
-            escapeTrace.append("navigate#\(invocation) end history=\(model.snapshot.historyPresentationEntityID != nil) result=\(result)")
-            return result
-        }
-        let originalVisibilityChange = try XCTUnwrap(presentation.popover.onVisibilityChange)
-        presentation.popover.onVisibilityChange = { visible in
-            let before = model.snapshot.historyPresentationEntityID != nil
-            escapeTrace.append("visibility=\(visible) begin history=\(before) current=\(currentEventType())")
-            originalVisibilityChange(visible)
-            escapeTrace.append("visibility=\(visible) end history=\(model.snapshot.historyPresentationEntityID != nil)")
+        let sendQueuedEvent = { (event: NSEvent, mask: NSEvent.EventTypeMask) throws in
+            NSApp.postEvent(event, atStart: true)
+            let queued = try XCTUnwrap(NSApp.nextEvent(matching: mask, until: .distantPast, inMode: .default, dequeue: true))
+            XCTAssertEqual(queued.type, event.type)
+            XCTAssertEqual(queued.windowNumber, event.windowNumber)
+            NSApp.sendEvent(queued)
         }
         let escape = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber, context: nil,
             characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
-        escapeTrace.append("send first type=\(escape.type) current=\(currentEventType())")
-        panel.sendEvent(escape)
+        try sendQueuedEvent(escape, .keyDown)
         drainPanelRunLoop()
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
-        XCTAssertTrue(presentation.popover.isShown, "Escape returns to rooms first: \(escapeTrace.joined(separator: " | "))")
+        XCTAssertTrue(presentation.popover.isShown, "Escape returns to rooms first")
         let secondEscape = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber, context: nil,
             characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
-        escapeTrace.append("send second type=\(secondEscape.type) current=\(currentEventType())")
-        panel.sendEvent(secondEscape)
+        try sendQueuedEvent(secondEscape, .keyDown)
         XCTAssertFalse(presentation.popover.isShown, "A second Escape closes the panel")
+
+        let screen = try XCTUnwrap(presentation.anchorWindow.screen?.visibleFrame)
+        let outsideWindow = NSWindow(contentRect: NSRect(x: screen.minX + 12, y: screen.minY + 12, width: 80, height: 60),
+                                     styleMask: [.titled], backing: .buffered, defer: false)
+        outsideWindow.isReleasedWhenClosed = false
+        outsideWindow.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 80, height: 60))
+        defer { outsideWindow.close(); outsideWindow.contentView = nil }
+        outsideWindow.orderFront(nil)
+        drainPanelRunLoop()
+        presentation.popover.show(relativeTo: presentation.anchor.bounds, of: presentation.anchor, preferredEdge: .minY)
+        let reopenedWindow = try XCTUnwrap(presentation.popover.contentViewController?.view.window)
+        reopenedWindow.makeKeyAndOrderFront(nil)
+        model.presentHistoryDetail("sensor.office_humidity")
+        await spinUntil { if case .loaded = model.snapshot.historyState { return true }; return false }
+        XCTAssertNotNil(model.snapshot.historyPresentationEntityID)
+        XCTAssertFalse(reopenedWindow.frame.intersects(outsideWindow.frame), "The outside target must be separate from the popover")
+        XCTAssertTrue(presentation.popover.isShown, "Preparing the outside target must not dismiss history")
+        XCTAssertTrue(NSApp.keyWindow === reopenedWindow, "The popover must own keyboard focus before the outside click")
+        // Queue the release before dispatching the press so native tracking can consume it.
+        for type: NSEvent.EventType in [.leftMouseUp, .leftMouseDown] {
+            let outsideClick = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: NSPoint(x: 20, y: 20),
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: outsideWindow.windowNumber, context: nil, eventNumber: 1,
+                clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0))
+            NSApp.postEvent(outsideClick, atStart: true)
+        }
+        let outsideDown = try XCTUnwrap(NSApp.nextEvent(matching: .leftMouseDown, until: .distantPast, inMode: .default, dequeue: true))
+        NSApp.sendEvent(outsideDown)
+        if let outsideUp = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: true) {
+            NSApp.sendEvent(outsideUp)
+        }
+        drainPanelRunLoop()
+        XCTAssertFalse(presentation.popover.isShown, "An outside click closes the popover while history is open")
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
     }
 
     func testSettingsEntitiesTabExposesNativeSearchUnitMenuAndKeyViewLoop() async throws {

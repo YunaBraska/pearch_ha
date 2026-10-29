@@ -33,8 +33,8 @@ final class PearchHAColdLaunchTests: XCTestCase {
         finder.activate()
         let finderWindow = finder.windows[directory.lastPathComponent]
         XCTAssertTrue(finderWindow.waitForExistence(timeout: 10), "Finder must show the owned empty test folder")
-        var runningApp: NSRunningApplication?
-        defer { runningApp?.terminate() }
+        var ownedApplication: XCUIApplication?
+        defer { ownedApplication?.terminate() }
 
         for session in 1...2 {
             finder.activate()
@@ -51,9 +51,9 @@ final class PearchHAColdLaunchTests: XCTestCase {
             configuration.activates = false
             configuration.allowsRunningApplicationSubstitution = false
             let launched = try await NSWorkspace.shared.openApplication(at: appURL, configuration: configuration)
-            runningApp = launched
             XCTAssertEqual(launched.bundleURL?.standardizedFileURL, appURL)
             let app = XCUIApplication(url: appURL)
+            ownedApplication = app
             let root = app.descendants(matching: .any).matching(identifier: "pearchha.menuPopover").firstMatch
             let statusItem = app.statusItems.matching(NSPredicate(format: "label == %@", "PearchHA")).firstMatch
             XCTAssertTrue(statusItem.waitForExistence(timeout: 15), "A clean production launch must expose its fallback status item")
@@ -113,9 +113,11 @@ final class PearchHAColdLaunchTests: XCTestCase {
             settings.typeKey("w", modifierFlags: .command)
             XCTAssertTrue(settings.waitForNonExistence(timeout: 5))
 
-            XCTAssertTrue(launched.terminate())
+            XCTAssertFalse(launched.isTerminated, "Closing Settings must leave the menu-bar app running")
+            XCTAssertNotEqual(app.state, .notRunning)
+            app.terminate()
             try await waitUntil("The process terminates before the next independent launch") { launched.isTerminated }
-            runningApp = nil
+            ownedApplication = nil
             XCTAssertTrue(NSRunningApplication.runningApplications(withBundleIdentifier: "dev.pearchha.app").isEmpty)
         }
         finder.activate()
