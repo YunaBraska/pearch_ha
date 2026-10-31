@@ -2,6 +2,8 @@
 
 A native macOS menu bar app for Home Assistant.
 
+**[Product site and user documentation](https://yunabraska.github.io/pearch_ha/)**
+
 [![CI](https://github.com/YunaBraska/pearch_ha/actions/workflows/build-pr.yml/badge.svg)](https://github.com/YunaBraska/pearch_ha/actions/workflows/build-pr.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![macOS 13+](https://img.shields.io/badge/macOS-13%2B-blue)](https://developer.apple.com/macos/)
@@ -39,9 +41,9 @@ For command-line builds, signing, and contributions, see [CONTRIBUTING.md](CONTR
 Run `sh scripts/check.sh` in CI or an isolated desktop session for full verification.
 It opens native windows. Use `swift build -Xswiftc -warnings-as-errors` for compilation only.
 
-## Documentation
+## Developer documentation
 
-The [documentation index](docs/README.md) links architecture, API behavior, decisions,
+The [developer documentation index](docs/README.md) links architecture, API behavior, decisions,
 verification, and the remaining release work.
 
 ## Repo layout
