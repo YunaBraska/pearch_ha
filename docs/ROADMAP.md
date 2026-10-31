@@ -14,11 +14,10 @@ remaining work and release evidence gaps.
   on 2026-10-29 at `5c6f06e`. Reverify the final submission revision. The upload
   workflow has not run, so App Store Connect acceptance remains unverified.
 - The [public privacy policy](https://yunabraska.github.io/pearch_ha/privacy.html)
-  returned HTTP 200 on 2026-10-29. Complete App Store privacy metadata and verify
-  an isolated, reachable Home Assistant review account. Review access outside
-  the repository remains unverified. Do not use a personal home installation.
-  Publish the reviewed policy with this release, including local-sensor handling
-  and removal instructions, which are not yet present on the live page.
+  returned HTTP 200 on 2026-10-29 and is linked from Settings About. Complete
+  App Store privacy metadata and verify an isolated, reachable Home Assistant
+  review account. Review access outside the repository remains unverified. Do
+  not use a personal home installation.
 - Verify Keychain continuity with the actual Store distribution identity and
   configuration migration on each supported macOS release before submission.
 
