@@ -66,8 +66,11 @@ public final class PearchHAStatusPopover: NSPopover, NSPopoverDelegate {
                   let window = self.contentViewController?.view.window,
                   event.window === window,
                   event.keyCode == 53,
-                  event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
-                  self.onNavigateBack?() == true else { return event }
+                  event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty
+            else { return event }
+            if self.onNavigateBack?() != true {
+                self.close()
+            }
             return nil
         }
         onVisibilityChange?(true)

@@ -454,13 +454,17 @@ final class PearchHAPackagingTests: XCTestCase {
 
     func testCIWorkflowUsesTheSharedBuildContract() throws {
         let rootURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-        let workflowURL = rootURL.appendingPathComponent(".github/workflows/build-pr.yml", isDirectory: false)
-        let workflow = try String(contentsOf: workflowURL, encoding: .utf8)
+        let pullRequestURL = rootURL.appendingPathComponent(".github/workflows/build-pr.yml", isDirectory: false)
+        let snapshotURL = rootURL.appendingPathComponent(".github/workflows/build-merge.yml", isDirectory: false)
+        let pullRequest = try String(contentsOf: pullRequestURL, encoding: .utf8)
+        let snapshot = try String(contentsOf: snapshotURL, encoding: .utf8)
 
-        XCTAssertTrue(workflow.contains("pull_request:"))
-        XCTAssertTrue(workflow.contains("wc_swift_build_common.yml@"))
-        XCTAssertTrue(workflow.contains("ref: ${{ github.event.pull_request.head.sha }}"))
-        XCTAssertTrue(workflow.contains("secrets: inherit"))
+        XCTAssertTrue(pullRequest.contains("pull_request:"))
+        XCTAssertTrue(pullRequest.contains("wc_swift_build_common.yml@"))
+        XCTAssertTrue(pullRequest.contains("ref: ${{ github.event.pull_request.head.sha || github.sha }}"))
+        XCTAssertFalse(pullRequest.contains("secrets: inherit"))
+        XCTAssertTrue(snapshot.contains("wc_swift_snapshot.yml@"))
+        XCTAssertTrue(snapshot.contains("contents: write"))
     }
 
     func testCheckScriptEnforcesTestsCoverageSmokeAndAudit() throws {

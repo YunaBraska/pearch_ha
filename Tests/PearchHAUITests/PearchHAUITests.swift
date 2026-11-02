@@ -6388,6 +6388,7 @@ final class PearchHAUITests: XCTestCase {
             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber, context: nil,
             characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
         try sendQueuedEvent(secondEscape, .keyDown)
+        await spinUntil("second Escape closes the panel") { !presentation.popover.isShown }
         XCTAssertFalse(presentation.popover.isShown, "A second Escape closes the panel")
 
         let screen = try XCTUnwrap(presentation.anchorWindow.screen?.visibleFrame)
