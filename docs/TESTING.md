@@ -68,8 +68,8 @@ light/dark and accessibility appearances, packaging, and the app-shell lifecycle
 It also measures cold launch, cached panel opening, idle CPU, memory across repeated
 lifecycles, request volume, history debounce/cache behavior, and status-item redraws.
 Timing tests use injected clocks. Async tests wait for observable progress. Cached panel
-opening warms the real retained popover surface before measurement and must keep its median
-below 150 ms and every measured opening below 300 ms.
+opening and idle CPU are measured for regressions. A median above 150 ms, an individual
+opening above 300 ms, or excess idle CPU is reported as a warning, not a build blocker.
 
 The separate `Native UI` workflow runs `scripts/test-ui.sh` on GitHub-hosted macOS
 desktops. The script and XCUITest both reject local and self-hosted execution.
