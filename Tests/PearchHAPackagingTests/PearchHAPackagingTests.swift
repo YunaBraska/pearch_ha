@@ -1124,6 +1124,8 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertTrue(workflow.contains("workflow_dispatch:"))
         XCTAssertTrue(workflow.contains("wc_swift_release.yml@"))
         XCTAssertTrue(workflow.contains("force: ${{ inputs.force }}"))
+        XCTAssertTrue(workflow.contains("app_store_app_name: PearchHA"))
+        XCTAssertTrue(workflow.contains("app_store_bundle_id: berlin.yuna.pearchha"))
         XCTAssertFalse(workflow.contains("homebrew-tap"))
         XCTAssertFalse(workflow.contains("RELEASE_TOKEN"))
 
