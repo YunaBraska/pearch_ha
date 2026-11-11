@@ -161,12 +161,23 @@ final class PearchHAPackagingTests: XCTestCase {
         try FileManager.default.createDirectory(at: localized, withIntermediateDirectories: true)
         let strings = Data("\"thisMac\" = \"Dieser Mac\";".utf8)
         try strings.write(to: localized.appendingPathComponent("LocalMac.strings"))
+        try PropertyListSerialization.data(
+            fromPropertyList: ["CFBundleDevelopmentRegion": "en"],
+            format: .xml,
+            options: 0
+        ).write(to: bundle.appendingPathComponent("Info.plist"))
         let executable = directory.appendingPathComponent("PearchHA-source")
         try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
         let output = directory.appendingPathComponent("PearchHA.app")
         _ = try PearchHAAppBundleBuilder().build(.init(executableURL: executable, outputURL: output,
                                                     manifest: PearchHAAppBundleManifest(), resourceBundleURLs: [bundle]))
-        XCTAssertEqual(try Data(contentsOf: output.appendingPathComponent("Contents/Resources/PearchHA_PearchHACore.bundle/de.lproj/LocalMac.strings")), strings)
+        let copiedBundle = output.appendingPathComponent("Contents/Resources/PearchHA_PearchHACore.bundle")
+        XCTAssertEqual(
+            try Data(contentsOf: copiedBundle.appendingPathComponent("Contents/Resources/de.lproj/LocalMac.strings")),
+            strings
+        )
+        let info = try propertyList(from: Data(contentsOf: copiedBundle.appendingPathComponent("Contents/Info.plist")))
+        XCTAssertEqual(info["CFBundleIdentifier"] as? String, "dev.pearchha.app.resources.pearchha-pearchhacore")
     }
 
     func testAppBundleIncludesDependencyNoticesForItsDistributionChannel() throws {
