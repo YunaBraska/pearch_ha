@@ -3,7 +3,7 @@
     "name" : "review-contact-sheet.png",
     "pixelsHigh" : 1346,
     "pixelsWide" : 672,
-    "sampledHashHex" : "83e5f55f03b6bbcd",
+    "sampledHashHex" : "e9f9b8a5db77cc53",
     "visiblePixelCount" : 904492
   },
   "renderEnvironment" : "macos-27.0.1-arm64",
@@ -90,7 +90,7 @@
       "name" : "settings-about-update-light.png",
       "pixelsHigh" : 1440,
       "pixelsWide" : 2240,
-      "sampledHashHex" : "0a67dda40b0a8890",
+      "sampledHashHex" : "bcea241b960c486a",
       "visiblePixelCount" : 3225600
     },
     {

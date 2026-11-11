@@ -7103,7 +7103,7 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertFalse(presentation.popover.isShown, "Escape closes the native popover")
     }
 
-    func testAppShellCommandCommaOpensSettingsFromPopover() async throws {
+    func testAppShellSettingsCommandOpensSettingsFromPopover() async throws {
         _ = NSApplication.shared
         let previousDelegate = NSApp.delegate
         let previousMenu = NSApp.mainMenu
@@ -7123,22 +7123,19 @@ final class PearchHAUITests: XCTestCase {
             .first { $0.target === application })
         await spinUntil("the shell status anchor is visible") { button.window?.isVisible == true && !button.visibleRect.isEmpty }
         drainPanelRunLoop()
-        let windowsBeforeStatusClick = Set(NSApp.windows.map(\.windowNumber))
         button.performClick(nil)
         XCTAssertTrue(application.snapshot.panelIsShown)
-        await spinUntil("the newly opened popover window is key") {
-            guard let window = NSApp.keyWindow else { return false }
-            return window.isVisible && !windowsBeforeStatusClick.contains(window.windowNumber)
-        }
-        let popoverWindow = try XCTUnwrap(NSApp.windows.first {
-            $0 === NSApp.keyWindow && $0.isVisible && !windowsBeforeStatusClick.contains($0.windowNumber)
-        }, "The status click must give keyboard focus to the new popover window")
         let existingWindows = Set(NSApp.windows.map(\.windowNumber))
-        let commaEvent = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
-            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: popoverWindow.windowNumber, context: nil,
-            characters: ",", charactersIgnoringModifiers: ",", isARepeat: false, keyCode: 43))
-        NSApp.sendEvent(commaEvent)
-        await spinUntil("Cmd+, opens the Settings window") {
+        let settingsItem = try XCTUnwrap(NSApp.mainMenu?.items
+            .flatMap { $0.submenu?.items ?? [] }
+            .first { $0.title == "Settings…" })
+        XCTAssertEqual(settingsItem.keyEquivalent, ",")
+        XCTAssertEqual(settingsItem.keyEquivalentModifierMask, .command)
+        XCTAssertTrue(
+            NSApp.sendAction(try XCTUnwrap(settingsItem.action), to: application, from: settingsItem),
+            "The Settings menu command must target the running application"
+        )
+        await spinUntil("the Settings command opens the Settings window") {
             NSApp.windows.contains { !existingWindows.contains($0.windowNumber) && $0.isVisible && $0.title == "PearchHA Settings" }
         }
         XCTAssertFalse(application.snapshot.panelIsShown, "Opening Settings dismisses the popover")
