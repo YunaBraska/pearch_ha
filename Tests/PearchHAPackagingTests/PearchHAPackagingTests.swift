@@ -464,7 +464,8 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertTrue(pullRequest.contains("ref: ${{ github.event.pull_request.head.sha || github.sha }}"))
         XCTAssertFalse(pullRequest.contains("secrets: inherit"))
         XCTAssertTrue(snapshot.contains("wc_swift_snapshot.yml@"))
-        XCTAssertTrue(snapshot.contains("contents: write"))
+        XCTAssertTrue(snapshot.contains("contents: read"))
+        XCTAssertFalse(snapshot.contains("contents: write"))
     }
 
     func testCheckScriptEnforcesTestsCoverageSmokeAndAudit() throws {
