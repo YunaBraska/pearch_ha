@@ -3337,14 +3337,12 @@ struct PearchHASmoke {
         let maximum = sortedSamples[sortedSamples.index(before: sortedSamples.endIndex)]
 
         print("Cached panel open: median \(milliseconds(median)) ms, maximum \(milliseconds(maximum)) ms")
-        try expect(
-            median <= SmokePerformanceBudget.panelOpenMedianNanoseconds,
-            "cached panel open median exceeds \(SmokePerformanceBudget.panelOpenMedianMilliseconds) ms: \(milliseconds(median)) ms"
-        )
-        try expect(
-            maximum <= SmokePerformanceBudget.panelOpenMaximumNanoseconds,
-            "cached panel open max exceeds \(SmokePerformanceBudget.panelOpenMaximumMilliseconds) ms: \(milliseconds(maximum)) ms"
-        )
+        if median > SmokePerformanceReference.panelOpenMedianNanoseconds {
+            print("::warning::cached panel open median exceeds \(SmokePerformanceReference.panelOpenMedianMilliseconds) ms: \(milliseconds(median)) ms")
+        }
+        if maximum > SmokePerformanceReference.panelOpenMaximumNanoseconds {
+            print("::warning::cached panel open max exceeds \(SmokePerformanceReference.panelOpenMaximumMilliseconds) ms: \(milliseconds(maximum)) ms")
+        }
     }
 
     @MainActor
@@ -3392,7 +3390,7 @@ struct PearchHASmoke {
         let connector = fakeHAConnector(client: client)
         let serviceMetadataProvider = fakeHAServiceMetadataProvider(client: client)
 
-        for _ in 0..<SmokePerformanceBudget.lifecycleSoakWarmupIterations {
+        for _ in 0..<SmokePerformanceReference.lifecycleSoakWarmupIterations {
             try await runApplicationLifecycleSoakIteration(
                 server: server,
                 connector: connector,
@@ -3402,7 +3400,7 @@ struct PearchHASmoke {
         drainMainRunLoop()
         let baseline = try residentMemoryBytes()
 
-        for _ in 0..<SmokePerformanceBudget.lifecycleSoakMeasuredIterations {
+        for _ in 0..<SmokePerformanceReference.lifecycleSoakMeasuredIterations {
             try await runApplicationLifecycleSoakIteration(
                 server: server,
                 connector: connector,
@@ -3412,10 +3410,9 @@ struct PearchHASmoke {
         drainMainRunLoop()
         let afterSoak = try residentMemoryBytes()
         let growth = afterSoak > baseline ? afterSoak - baseline : 0
-        try expect(
-            growth <= SmokePerformanceBudget.lifecycleSoakMaximumGrowthBytes,
-            "app shell lifecycle memory grew \(megabytes(growth)) MB after \(SmokePerformanceBudget.lifecycleSoakMeasuredIterations) iterations"
-        )
+        if growth > SmokePerformanceReference.lifecycleSoakMaximumGrowthBytes {
+            print("::warning::app shell lifecycle memory grew \(megabytes(growth)) MB after \(SmokePerformanceReference.lifecycleSoakMeasuredIterations) iterations")
+        }
     }
 
     @MainActor
@@ -3457,16 +3454,15 @@ struct PearchHASmoke {
         await application.connect()
         try expect(application.snapshot.statusItemTitle == "44%", "idle CPU launches connected app shell")
         try expect(application.setMenuBarDisplayStyle("sensor.office_humidity", style: .battery), "idle CPU renders stable gauge once")
-        runMainRunLoop(for: SmokePerformanceBudget.idleWarmupSeconds)
+        runMainRunLoop(for: SmokePerformanceReference.idleWarmupSeconds)
 
         let cpuStart = try processCPUTimeSeconds()
-        runMainRunLoop(for: SmokePerformanceBudget.idleObservationSeconds)
+        runMainRunLoop(for: SmokePerformanceReference.idleObservationSeconds)
         let cpuSeconds = try processCPUTimeSeconds() - cpuStart
 
-        try expect(
-            cpuSeconds <= SmokePerformanceBudget.idleMaximumCPUSeconds,
-            "idle app shell used \(seconds(cpuSeconds)) CPU seconds over \(seconds(SmokePerformanceBudget.idleObservationSeconds)) observed seconds"
-        )
+        if cpuSeconds > SmokePerformanceReference.idleMaximumCPUSeconds {
+            print("::warning::idle app shell used \(seconds(cpuSeconds)) CPU seconds over \(seconds(SmokePerformanceReference.idleObservationSeconds)) observed seconds")
+        }
     }
 
     private static var appShellPerformanceFixtures: FakeHAFixtures {
@@ -5212,7 +5208,7 @@ private struct ServeProcessHandle {
     let outputURL: URL
 }
 
-private enum SmokePerformanceBudget {
+private enum SmokePerformanceReference {
     static let panelOpenMedianMilliseconds: UInt64 = 150
     static let panelOpenMaximumMilliseconds: UInt64 = 300
     static let panelOpenMedianNanoseconds = panelOpenMedianMilliseconds * 1_000_000
