@@ -8,6 +8,18 @@ identity=${MACOS_SIGNING_IDENTITY:--}
 notary_profile=${MACOS_NOTARY_PROFILE:-}
 update_private_key=${MACOS_UPDATE_PRIVATE_KEY:-}
 update_public_key=${MACOS_UPDATE_PUBLIC_KEY:-}
+oauth_environment=$(mktemp "${TMPDIR:-/tmp}/pearchha-oauth.XXXXXX")
+update_stage=''
+
+cleanup() {
+  rm -f "${oauth_environment}"
+  if [ -n "${update_stage}" ]; then
+    rm -rf "${update_stage}"
+  fi
+}
+trap cleanup 0 HUP INT TERM
+
+sh scripts/write-oauth-environment.sh docs/Page/_config.yml "${oauth_environment}"
 
 if [ -n "${update_public_key}" ] || [ -n "${update_private_key}" ]; then
   test -n "${update_public_key}"
@@ -45,6 +57,7 @@ set -- \
   --release-manifest dist/pearchha-release-manifest.json \
   --bundle-release-evidence dist/pearchha-release-evidence \
   --snapshot-dir .build/pearchha-snapshots/current \
+  --oauth-env "${oauth_environment}" \
   --framework "${sparkle_framework}"
 if [ -n "${update_public_key}" ]; then
   set -- "$@" \
@@ -65,7 +78,6 @@ codesign --verify --deep --verbose=2 dist/PearchHA.app
 if [ -n "${update_public_key}" ]; then
   update_stage=$(mktemp -d)
   update_key="${update_stage}/private-key"
-  trap 'rm -rf "${update_stage}"' 0 HUP INT TERM
   (umask 077; printf '%s' "${update_private_key}" > "${update_key}")
   generate_appcast=$(find .build-release-arm64 -type f -name generate_appcast -print -quit)
   sign_update=$(find .build-release-arm64 -type f -name sign_update -print -quit)

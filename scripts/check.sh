@@ -10,6 +10,14 @@ swift run pearchha-xcode-doctor --json --strict
 swift test --disable-swift-testing --enable-xctest list
 
 swift build -Xswiftc -warnings-as-errors
+oauth_environment=$(mktemp "${TMPDIR:-/tmp}/pearchha-oauth.XXXXXX")
+oauth_site=$(mktemp "${TMPDIR:-/tmp}/pearchha-oauth-site.XXXXXX")
+trap 'rm -f "${oauth_environment}" "${oauth_site}"' 0 HUP INT TERM
+sh scripts/write-oauth-environment.sh docs/Page/_config.yml "${oauth_environment}"
+swift run pearchha-package-app --write-oauth-site "${oauth_site}" --oauth-env "${oauth_environment}" --replace
+swift run pearchha-package-app --verify-oauth-site "${oauth_site}" --oauth-env "${oauth_environment}"
+grep -F 'site.oauth_client_id' docs/Page/_layouts/default.html >/dev/null
+grep -F 'site.oauth_redirect_uri' docs/Page/_layouts/default.html >/dev/null
 # Keep test progress unbuffered so a hung test is identifiable in CI.
 script -q -e /dev/null swift test --disable-swift-testing --enable-xctest -Xswiftc -warnings-as-errors --enable-code-coverage
 coverage_path="$(swift test --disable-swift-testing --enable-xctest --enable-code-coverage --show-codecov-path)"

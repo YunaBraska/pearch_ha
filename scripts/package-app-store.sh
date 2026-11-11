@@ -10,13 +10,18 @@ build_dir=$(mktemp -d "${TMPDIR:-/tmp}/pearchha-app-store.XXXXXX")
 stage_dir=$(mktemp -d "${TMPDIR:-/tmp}/pearchha-app-store-stage.XXXXXX")
 dist_dir="${workspace_dir}/dist/app-store"
 app_dir="${dist_dir}/PearchHA.app"
+oauth_environment=$(mktemp "${TMPDIR:-/tmp}/pearchha-oauth.XXXXXX")
 
 : "${APP_STORE_BUNDLE_ID:?}"
 : "${APP_STORE_TEAM_ID:?}"
 : "${MACOS_APP_STORE_APPLICATION_IDENTITY:?}"
 : "${MACOS_APP_STORE_PROFILE_PATH:?}"
 
-trap 'rm -rf "${build_dir}" "${stage_dir}"' EXIT HUP INT TERM
+cleanup() {
+  rm -rf "${build_dir}" "${stage_dir}"
+  rm -f "${oauth_environment}"
+}
+trap cleanup 0 HUP INT TERM
 rm -rf "${dist_dir}"
 mkdir -p "${dist_dir}"
 rsync -a \
@@ -27,6 +32,7 @@ rsync -a \
   "${workspace_dir}/" "${build_dir}/"
 cd "${build_dir}"
 export PEARCHHA_APP_STORE=1
+sh scripts/write-oauth-environment.sh docs/Page/_config.yml "${oauth_environment}"
 
 swift build -c release --arch arm64 --product PearchHA --scratch-path .build-app-store-arm64
 swift build -c release --arch x86_64 --product PearchHA --scratch-path .build-app-store-x86_64
@@ -47,6 +53,7 @@ tool_bin=$(swift build -c release --product pearchha-package-app --scratch-path 
   --bundle-id "${APP_STORE_BUNDLE_ID}" \
   --version "${version}" \
   --build-version "${build_number}" \
+  --oauth-env "${oauth_environment}" \
   --replace
 
 cp "${MACOS_APP_STORE_PROFILE_PATH}" "${app_dir}/Contents/embedded.provisionprofile"

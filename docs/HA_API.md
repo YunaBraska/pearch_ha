@@ -36,10 +36,10 @@ Finder launches do not require a shell environment. Explicit process values or
 `PEARCHHA_ENV_FILE` retain the development override. Only unbundled development
 runs fall back to a relative `.env.local` file.
 
-For direct bundles, export both public values during packaging or pass
-`pearchha-package-app --oauth-env <local-env-file>`. Only those two fields are
-embedded. Tokens and other env-file contents are never bundled. The Store
-packaging script uses the same package tool and embeds both values when exported.
+Release bundles read both public values from `docs/Page/_config.yml`, the same
+versioned source that publishes the application website declaration. Only those
+two fields are embedded. Tokens and other env-file contents are never bundled.
+The direct and Store packaging scripts use the same package tool and source.
 Unconfigured local builds can continue to use token sign-in.
 
 The packaged `.app` must declare the callback scheme in `CFBundleURLTypes` with
@@ -57,8 +57,8 @@ For native callback schemes such as `pearchha://auth`, the application website m
 <link rel="redirect_uri" href="pearchha://auth">
 ```
 
-Run `swift run hamirror oauth-check --env <local-env-file>` before real browser sign-in. The check reads only `PEARCHHA_OAUTH_CLIENT_ID` and `PEARCHHA_OAUTH_REDIRECT_URI`, verifies the public client website declaration, reports redacted setup guidance when OAuth config is incomplete, and does not send the Home Assistant token, user, or password.
-Run `swift run pearchha-package-app --write-oauth-site .build/pearchha-oauth-site/index.html --oauth-env <local-env-file>` to generate the static HTML artifact that should be published at the configured client website, then `swift run pearchha-package-app --verify-oauth-site .build/pearchha-oauth-site/index.html --oauth-env <local-env-file>` to confirm the artifact still matches the configured website URL and redirect declaration before deployment. After publishing, run `swift run pearchha-package-app --verify-published-oauth-site --oauth-env <local-env-file>` to fetch the live client website URL and verify the deployed HTML declaration without sending Home Assistant secrets.
+Run `sh scripts/write-oauth-environment.sh docs/Page/_config.yml <temporary-env-file>` followed by `swift run hamirror oauth-check --env <temporary-env-file>` before real browser sign-in. The check reads only `PEARCHHA_OAUTH_CLIENT_ID` and `PEARCHHA_OAUTH_REDIRECT_URI`, verifies the public client website declaration, reports redacted setup guidance when OAuth config is incomplete, and does not send the Home Assistant token, user, or password.
+The product Pages layout publishes this declaration from the same configuration. For another static host, run `swift run pearchha-package-app --write-oauth-site .build/pearchha-oauth-site/index.html --oauth-env <temporary-env-file>`, then `swift run pearchha-package-app --verify-oauth-site .build/pearchha-oauth-site/index.html --oauth-env <temporary-env-file>` before deployment. After publishing, run `swift run pearchha-package-app --verify-published-oauth-site --oauth-env <temporary-env-file>` to fetch the live client website URL and verify the deployed HTML declaration without sending Home Assistant secrets.
 For releasable builds, include `--oauth-site .build/pearchha-oauth-site/index.html` when writing the release manifest so the retained release evidence can re-verify the exact OAuth declaration page that was meant to be deployed.
 
 ## Transport and state
