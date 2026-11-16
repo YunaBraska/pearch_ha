@@ -83,6 +83,13 @@ real devices are involved. Each run retains its logs, screenshots and `.xcresult
 for seven days. These tests do not publish or install a release.
 The macOS 26 job also retains smoke screenshots and the native 100–200% text-size
 checks for visual review. All captures use fixtures, without personal HA data.
+It then runs `scripts/package.sh 0.0.0` with ad-hoc signing, moves both native
+SwiftPM build directories out of their original paths, and repeats XCUITest against
+the packaged app. A fresh macOS 27 job tests the same ZIP. This verifies that the
+direct app loads its bundled resources without falling back to a build-machine
+path. `PEARCHHA_E2E_OUTPUT_DIR` keeps the second run's logs and results separate.
+Manual `release_tag` runs test the unchanged published ZIP instead. Startup logs
+and PearchHA crash reports accompany the test results. No signing secrets are used.
 
 Snapshots and a contact sheet are written under `.build/pearchha-snapshots/current`.
 Panel and history captures use the production 384×468 view. Settings captures

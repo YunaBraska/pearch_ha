@@ -79,12 +79,18 @@ public enum LocalMacText: String, CaseIterable, Sendable {
     case source, readOnly, localDescription, cpuDescription, memoryDescription, thermalDescription
     case historyUnavailable
 
+    // Native SwiftPM's accessor searches the app root and its original build
+    // tree. Installed apps keep the bundle in Contents/Resources instead.
+    private static let resourceBundle: Bundle = Bundle.main
+        .url(forResource: "PearchHA_PearchHACore", withExtension: "bundle")
+        .flatMap(Bundle.init(url:)) ?? .module
+
     /// The direct-distribution packager embeds the same resources as Xcode.
-    public static var resourceBundleURL: URL { Bundle.module.bundleURL }
+    public static var resourceBundleURL: URL { resourceBundle.bundleURL }
 
     private static let preferredLanguage = Bundle.preferredLocalizations(from: ["en", "de"], forPreferences: Locale.preferredLanguages).first ?? "en"
     private static let translations: [String: [LocalMacText: String]] = Dictionary(uniqueKeysWithValues: ["en", "de"].map { language in
-        let bundle = Bundle.module.path(forResource: language, ofType: "lproj").flatMap(Bundle.init(path:)) ?? .module
+        let bundle = resourceBundle.path(forResource: language, ofType: "lproj").flatMap(Bundle.init(path:)) ?? resourceBundle
         return (language, Dictionary(uniqueKeysWithValues: allCases.map {
             ($0, bundle.localizedString(forKey: $0.rawValue, value: nil, table: "LocalMac"))
         }))
