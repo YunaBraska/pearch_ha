@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   release:
-    uses: YunaBraska/YunaBraska/.github/workflows/wc_swift_release.yml@29bd56f4cc120be2bdcab1b484c34fae14c51b35
+    uses: YunaBraska/YunaBraska/.github/workflows/wc_swift_release.yml@b37f72aaab2392700a6085eb57a1cd96a73034fb
     with:
       force: ${{ inputs.force }}
       app_store_app_name: PearchHA
