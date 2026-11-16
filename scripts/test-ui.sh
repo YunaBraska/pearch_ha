@@ -20,7 +20,7 @@ export PEARCHHA_APP_STORE=1
 export TEST_RUNNER_GITHUB_ACTIONS="$GITHUB_ACTIONS"
 export TEST_RUNNER_RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT"
 export TEST_RUNNER_PEARCHHA_NATIVE_E2E=1
-export TEST_RUNNER_PEARCHHA_E2E_APP_PATH="$PWD/.build/ui-tests/DerivedData/Build/Products/Debug/PearchHA.app"
+export TEST_RUNNER_PEARCHHA_E2E_APP_PATH="${PEARCHHA_E2E_APP_PATH:-$PWD/.build/ui-tests/DerivedData/Build/Products/Debug/PearchHA.app}"
 
 if xcodebuild test \
     -project PearchHA.xcodeproj \

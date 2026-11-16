@@ -6,6 +6,12 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published release to test instead of the source-built app.
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -30,11 +36,36 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
+      - name: Download published app for startup verification
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          case "$RELEASE_TAG" in
+            ''|*[!A-Za-z0-9._-]*) exit 2 ;;
+          esac
+          mkdir -p .build/ui-tests/release
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "PearchHA-$RELEASE_TAG.zip" --dir .build/ui-tests/release
+          ditto -x -k ".build/ui-tests/release/PearchHA-$RELEASE_TAG.zip" .build/ui-tests/release
+          codesign --verify --deep --strict .build/ui-tests/release/PearchHA.app
+          printf 'PEARCHHA_E2E_APP_PATH=%s\n' "$PWD/.build/ui-tests/release/PearchHA.app" >> "$GITHUB_ENV"
+
       - name: Run native UI tests on the isolated runner
         run: sh scripts/test-ui.sh
 
+      - name: Collect published app startup diagnostics
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        run: |
+          /usr/bin/log show --last 15m --style compact --predicate 'process == "PearchHA"' \
+            > .build/ui-tests/release-startup.log
+          for report in "$HOME"/Library/Logs/DiagnosticReports/PearchHA*.ips; do
+            if test -f "$report"; then cp "$report" .build/ui-tests/; fi
+          done
+
       - name: Render public UI states for visual review
-        if: matrix.os == 'macos-26'
+        if: matrix.os == 'macos-26' && inputs.release_tag == ''
         run: |
           swift build -Xswiftc -warnings-as-errors
           PEARCHHA_SMOKE_SNAPSHOT_DIR=.build/pearchha-snapshots swift run pearchha-smoke
@@ -50,5 +81,6 @@ jobs:
           path: |
             .build/ui-tests/*.log
             .build/ui-tests/*.xcresult
+            .build/ui-tests/*.ips
             .build/pearchha-snapshots/current/
             .build/pearchha-snapshots/controls/
