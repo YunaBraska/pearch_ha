@@ -55,21 +55,38 @@ jobs:
       - name: Run native UI tests on the isolated runner
         run: sh scripts/test-ui.sh
 
-      - name: Collect published app startup diagnostics
-        if: always() && github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
-        run: |
-          /usr/bin/log show --last 15m --style compact --predicate 'process == "PearchHA"' \
-            > .build/ui-tests/release-startup.log
-          for report in "$HOME"/Library/Logs/DiagnosticReports/PearchHA*.ips; do
-            if test -f "$report"; then cp "$report" .build/ui-tests/; fi
-          done
-
       - name: Render public UI states for visual review
         if: matrix.os == 'macos-26' && inputs.release_tag == ''
         run: |
           swift build -Xswiftc -warnings-as-errors
           PEARCHHA_SMOKE_SNAPSHOT_DIR=.build/pearchha-snapshots swift run pearchha-smoke
           PEARCHHA_CONTROL_SNAPSHOT_DIR=.build/pearchha-snapshots/controls swift test --disable-swift-testing --enable-xctest --filter testLargerText
+
+      - name: Package the native SwiftPM app without release credentials
+        if: matrix.os == 'macos-26' && inputs.release_tag == ''
+        run: |
+          MACOS_SIGNING_IDENTITY=- MACOS_NOTARY_PROFILE='' \
+            MACOS_UPDATE_PRIVATE_KEY='' MACOS_UPDATE_PUBLIC_KEY='' sh scripts/package.sh 0.0.0
+          mkdir -p .build/ui-tests/native-builds
+          mv .build-release-arm64 .build/ui-tests/native-builds/
+          mv .build-release-x86_64 .build/ui-tests/native-builds/
+          test ! -e .build-release-arm64
+          test ! -e .build-release-x86_64
+
+      - name: Run native UI tests against the relocated package
+        if: matrix.os == 'macos-26' && inputs.release_tag == ''
+        run: |
+          PEARCHHA_E2E_APP_PATH="$PWD/dist/PearchHA.app" \
+            PEARCHHA_E2E_OUTPUT_DIR=.build/ui-tests/packaged sh scripts/test-ui.sh
+
+      - name: Share the packaged candidate with macOS 27
+        if: matrix.os == 'macos-26' && inputs.release_tag == ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: native-package-${{ github.sha }}
+          path: dist/PearchHA-0.0.0.zip
+          retention-days: 7
+          if-no-files-found: error
 
       - name: Upload test results and screenshots
         if: always()
@@ -82,5 +99,48 @@ jobs:
             .build/ui-tests/*.log
             .build/ui-tests/*.xcresult
             .build/ui-tests/*.ips
+            .build/ui-tests/packaged/*.log
+            .build/ui-tests/packaged/*.xcresult
+            .build/ui-tests/packaged/*.ips
             .build/pearchha-snapshots/current/
             .build/pearchha-snapshots/controls/
+
+  packaged-ui:
+    name: Packaged XCUITest (xcode-27)
+    if: inputs.release_tag == ''
+    needs: native-ui
+    runs-on: xcode-27
+    timeout-minutes: 15
+    steps:
+      - name: Checkout tested revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Download the native packaged candidate
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: native-package-${{ github.sha }}
+          path: .build/ui-tests/package
+
+      - name: Run native UI tests with no original build paths
+        run: |
+          ditto -x -k .build/ui-tests/package/PearchHA-0.0.0.zip .build/ui-tests/package
+          codesign --verify --deep --strict .build/ui-tests/package/PearchHA.app
+          test ! -e .build-release-arm64
+          test ! -e .build-release-x86_64
+          PEARCHHA_E2E_APP_PATH="$PWD/.build/ui-tests/package/PearchHA.app" \
+            sh scripts/test-ui.sh
+
+      - name: Upload packaged app test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: packaged-native-ui-xcode-27-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            .build/ui-tests/*.log
+            .build/ui-tests/*.xcresult
+            .build/ui-tests/*.ips

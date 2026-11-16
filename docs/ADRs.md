@@ -166,7 +166,10 @@ They are opt-in, read-only, excluded from HA requests, and never recorded to dis
 CPU requires two samples. Memory is active, wired and compressed pages as a share
 of physical RAM, not memory pressure. Battery readings require an internal battery.
 Thermal load is a state, not a temperature. Both packaging channels embed the same
-localization bundle. App Store signing and review remain separate release gates.
+localization bundle. Resource lookup prefers the installed app's resources before
+SwiftPM's development bundle, whose generated accessor can contain build-machine
+paths. Packaged startup tests must run with those build paths unavailable.
+App Store signing and review remain separate release gates.
 
 Alternatives: Fake HA entities, a separate selection store, persistent local history,
 private SMC access, fan control and a general plugin framework are unnecessary for
