@@ -1,11 +1,13 @@
 import Foundation
 import PearchHAClient
+import PearchHACore
 import PearchHAPackaging
 import PearchHASupport
 
 @main
 struct PearchHAPackageAppCommand {
     private static let defaultAppIconURL = URL(fileURLWithPath: "Xcode/PearchHA/PearchHA.icns", isDirectory: false)
+    private static let defaultPrivacyManifestURL = URL(fileURLWithPath: "Xcode/PearchHA/PrivacyInfo.xcprivacy", isDirectory: false)
 
     static func main() {
         do {
@@ -69,13 +71,24 @@ struct PearchHAPackageAppCommand {
         let iconURL = FileManager.default.fileExists(atPath: defaultAppIconURL.path)
             ? defaultAppIconURL
             : nil
+        let privacyManifestURL = FileManager.default.fileExists(atPath: defaultPrivacyManifestURL.path)
+            ? defaultPrivacyManifestURL
+            : nil
+        let environment = ProcessInfo.processInfo.environment
+        let includesOAuth = options.value(for: "--oauth-env") != nil
+            || environment["PEARCHHA_OAUTH_CLIENT_ID"] != nil
+            || environment["PEARCHHA_OAUTH_REDIRECT_URI"] != nil
+        let oauthClient = includesOAuth ? try oauthSiteManifest(options: options) : nil
         let manifest = try PearchHAAppBundleManifest(
             bundleIdentifier: options.value(for: "--bundle-id") ?? "dev.pearchha.app",
             version: options.value(for: "--version") ?? "0.1.0",
             buildVersion: options.value(for: "--build-version") ?? "1",
             minimumSystemVersion: options.value(for: "--minimum-system-version") ?? "13.0",
             callbackURLScheme: options.value(for: "--callback-scheme") ?? "pearchha",
-            iconFileName: iconURL?.deletingPathExtension().lastPathComponent
+            iconFileName: iconURL?.deletingPathExtension().lastPathComponent,
+            updateFeedURL: options.value(for: "--update-feed-url"),
+            updatePublicKey: options.value(for: "--update-public-key"),
+            oauthClient: oauthClient
         )
         let result = try PearchHAAppBundleBuilder().build(
             PearchHAAppBundleBuildConfiguration(
@@ -83,10 +96,13 @@ struct PearchHAPackageAppCommand {
                 outputURL: URL(fileURLWithPath: options.value(for: "--output") ?? ".build/PearchHA.app"),
                 manifest: manifest,
                 iconURL: iconURL,
+                privacyManifestURL: privacyManifestURL,
+                resourceBundleURLs: [LocalMacText.resourceBundleURL],
                 replaceExisting: options.flags.contains("--replace")
             )
         )
         print("created \(result.appURL.path)")
+        try embedFrameworks(options.values(for: "--framework"), in: result.appURL)
         if options.flags.contains("--verify-launch-services") {
             let verification = try PearchHALaunchServicesVerifier().verify(
                 PearchHALaunchServicesVerificationConfiguration(
@@ -123,8 +139,43 @@ struct PearchHAPackageAppCommand {
             fileURLWithPath: options.value(for: "--dmg-output")
                 ?? result.appURL.deletingPathExtension().appendingPathExtension("dmg").path
         )
+        let zipOutputURL = options.value(for: "--zip-output").map { URL(fileURLWithPath: $0) }
         let hdiutilURL = URL(fileURLWithPath: options.value(for: "--hdiutil") ?? PearchHADMGBuilder.defaultHdiutilURL.path)
         let signatureVerified = signingIdentity != nil || options.flags.contains("--verify-signature")
+        let archiveBuilder = PearchHAArchiveBuilder()
+        let notarySubmitter = PearchHANotarySubmitter(
+            xcrunURL: URL(fileURLWithPath: options.value(for: "--xcrun") ?? PearchHANotarySubmitter.defaultXcrunURL.path)
+        )
+        var appNotarySubmission: PearchHANotarySubmissionResult?
+        var dmgNotarySubmission: PearchHANotarySubmissionResult?
+        if let notaryProfile = options.value(for: "--notary-profile") {
+            let temporaryArchiveURL = result.appURL.deletingLastPathComponent()
+                .appendingPathComponent(".\(result.appURL.lastPathComponent).notary.zip", isDirectory: false)
+            defer {
+                try? FileManager.default.removeItem(at: temporaryArchiveURL)
+            }
+            _ = try archiveBuilder.build(
+                PearchHAArchiveBuildConfiguration(
+                    appURL: result.appURL,
+                    outputURL: temporaryArchiveURL,
+                    replaceExisting: true
+                )
+            )
+            let shouldWait = !options.flags.contains("--notary-no-wait")
+            let submission = try notarySubmitter.submit(
+                PearchHANotarySubmissionConfiguration(
+                    artifactURL: temporaryArchiveURL,
+                    keychainProfile: notaryProfile,
+                    waitForCompletion: shouldWait,
+                    timeout: options.value(for: "--notary-timeout"),
+                    staple: shouldWait && !options.flags.contains("--skip-staple"),
+                    stapleURL: result.appURL
+                )
+            )
+            appNotarySubmission = submission
+            let stapleStatus = submission.stapled ? "stapled" : "not stapled"
+            print("app notary submission complete: \(submission.artifactURL.path) (\(stapleStatus))")
+        }
         if options.flags.contains("--package-dmg") {
             let dmg = try PearchHADMGBuilder(hdiutilURL: hdiutilURL).build(
                 PearchHADMGBuildConfiguration(
@@ -151,13 +202,9 @@ struct PearchHAPackageAppCommand {
             )
             print("DMG contents verified: \(verification.mountedAppURL.lastPathComponent)")
         }
-        var notarySubmitted = false
-        var stapled = false
         if let notaryProfile = options.value(for: "--notary-profile") {
             let shouldWait = !options.flags.contains("--notary-no-wait")
-            let submission = try PearchHANotarySubmitter(
-                xcrunURL: URL(fileURLWithPath: options.value(for: "--xcrun") ?? PearchHANotarySubmitter.defaultXcrunURL.path)
-            ).submit(
+            let submission = try notarySubmitter.submit(
                 PearchHANotarySubmissionConfiguration(
                     artifactURL: dmgOutputURL,
                     keychainProfile: notaryProfile,
@@ -166,11 +213,22 @@ struct PearchHAPackageAppCommand {
                     staple: shouldWait && !options.flags.contains("--skip-staple")
                 )
             )
-            notarySubmitted = true
-            stapled = submission.stapled
+            dmgNotarySubmission = submission
             let stapleStatus = submission.stapled ? "stapled" : "not stapled"
-            print("notary submission complete: \(submission.artifactURL.path) (\(stapleStatus))")
+            print("DMG notary submission complete: \(submission.artifactURL.path) (\(stapleStatus))")
         }
+        if let zipOutputURL {
+            let archive = try archiveBuilder.build(
+                PearchHAArchiveBuildConfiguration(
+                    appURL: result.appURL,
+                    outputURL: zipOutputURL,
+                    replaceExisting: options.flags.contains("--replace")
+                )
+            )
+            print("created \(archive.archiveURL.path)")
+        }
+        let notarySubmitted = appNotarySubmission != nil && dmgNotarySubmission != nil
+        let stapled = appNotarySubmission?.stapled == true && dmgNotarySubmission?.stapled == true
         if let releaseManifestPath = options.value(for: "--release-manifest") {
             let snapshotDirectoryURL = options.value(for: "--snapshot-dir").map {
                 URL(fileURLWithPath: $0, isDirectory: true)
@@ -223,22 +281,27 @@ struct PearchHAPackageAppCommand {
       pearchha-package-app --write-oauth-site PATH [--oauth-env PATH] [--replace]
       pearchha-package-app --verify-oauth-site PATH [--oauth-env PATH]
       pearchha-package-app --verify-published-oauth-site [--oauth-env PATH]
-      pearchha-package-app [--executable PATH] [--output PATH] [--callback-scheme SCHEME] [--replace] [--verify-launch-services] [--sign-identity IDENTITY|--sign-ad-hoc] [--verify-signature] [--package-dmg] [--verify-dmg] [--verify-dmg-contents] [--release-manifest PATH] [--verify-release-manifest PATH] [--bundle-release-evidence PATH] [--oauth-site PATH] [--require-screenshot NAME] [--notary-profile PROFILE]
+      pearchha-package-app [--executable PATH] [--output PATH] [--callback-scheme SCHEME] [--framework PATH] [--update-feed-url URL --update-public-key KEY] [--replace] [--verify-launch-services] [--sign-identity IDENTITY|--sign-ad-hoc] [--verify-signature] [--package-dmg] [--verify-dmg] [--verify-dmg-contents] [--release-manifest PATH] [--verify-release-manifest PATH] [--bundle-release-evidence PATH] [--oauth-site PATH] [--require-screenshot NAME] [--notary-profile PROFILE]
 
     Options:
       --write-oauth-site PATH       Write a deployable OAuth client-website HTML artifact from exported OAuth env values or an env file.
       --verify-oauth-site PATH      Verify an OAuth client-website HTML artifact against exported OAuth env values or an env file.
       --verify-published-oauth-site Fetch the configured OAuth client website URL and verify the published HTML declaration against the configured redirect URI.
-      --oauth-env PATH              Env file path used for OAuth site generation or verification. Default: .env.local or PEARCHHA_ENV_FILE.
+      --oauth-env PATH              Env file path used for OAuth site generation, verification, or bundle metadata. Default: .env.local or PEARCHHA_ENV_FILE.
+                                    When packaging, pass this option or export an OAuth key to opt in. Only the public client ID and redirect URI are copied into Info.plist.
       --executable PATH             SwiftPM-built PearchHA executable. Default: .build/debug/PearchHA
       --output PATH                 Output .app bundle. Default: .build/PearchHA.app
       --dmg-output PATH             Output DMG path. Default: app output path with .dmg extension
+      --zip-output PATH             Output ZIP containing the app bundle.
       --dmg-volume-name NAME        DMG volume name. Default: PearchHA
       --hdiutil PATH                hdiutil executable. Default: /usr/bin/hdiutil
       --security PATH               security executable. Default: /usr/bin/security
       --codesign PATH               codesign executable. Default: /usr/bin/codesign
       --xcrun PATH                  xcrun executable. Default: /usr/bin/xcrun
       --callback-scheme SCHEME      OAuth callback URL scheme. Default: pearchha
+      --framework PATH              Embed a framework in Contents/Frameworks before signing. May be repeated.
+      --update-feed-url URL         Sparkle appcast URL. Requires --update-public-key.
+      --update-public-key KEY       Sparkle Ed25519 public key. Requires --update-feed-url.
       --bundle-id ID                Bundle identifier. Default: dev.pearchha.app
       --version VERSION             CFBundleShortVersionString. Default: 0.1.0
       --build-version VERSION       CFBundleVersion. Default: 1
@@ -266,7 +329,7 @@ struct PearchHAPackageAppCommand {
       --snapshot-dir PATH           Screenshot directory to include in the release manifest. Required with --release-manifest.
       --release-preflight           Check Developer ID identity and notary profile readiness without building.
       --json                        Print release preflight as machine-readable redacted JSON.
-      --notary-profile PROFILE      Submit the DMG with xcrun notarytool using a stored Keychain profile. Actual submission requires --package-dmg and a Developer ID --sign-identity.
+      --notary-profile PROFILE      Submit an app ZIP, staple the app, then submit and staple the DMG with xcrun notarytool. Actual submission requires --package-dmg and a Developer ID --sign-identity.
       --notary-timeout DURATION     Wait timeout passed to notarytool, for example 30m.
       --notary-no-wait              Submit without waiting for notary completion.
       --skip-staple                 Do not staple after a completed notary submission.
@@ -368,10 +431,26 @@ struct PearchHAPackageAppCommand {
         if verifiesPublishedSite && verifyPath != nil {
             throw CommandError.conflictingOptions("--verify-published-oauth-site", "--verify-oauth-site")
         }
-        if options.value(for: "--oauth-env") != nil && writePath == nil && verifyPath == nil {
-            if !verifiesPublishedSite {
-                throw CommandError.requiresOption("--oauth-env", "--write-oauth-site or --verify-oauth-site or --verify-published-oauth-site")
+    }
+
+    private static func embedFrameworks(_ paths: [String], in appURL: URL) throws {
+        guard !paths.isEmpty else {
+            return
+        }
+        let fileManager = FileManager.default
+        let destination = appURL.appendingPathComponent("Contents/Frameworks", isDirectory: true)
+        try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+        for path in paths {
+            let source = URL(fileURLWithPath: path, isDirectory: true)
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: source.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                throw CommandError.invalidOption("--framework", "does not name a framework directory: \(path)")
             }
+            let framework = destination.appendingPathComponent(source.lastPathComponent, isDirectory: true)
+            if fileManager.fileExists(atPath: framework.path) {
+                try fileManager.removeItem(at: framework)
+            }
+            try fileManager.copyItem(at: source, to: framework)
         }
     }
 
@@ -580,11 +659,15 @@ struct PearchHAPackageAppCommand {
                     "--executable",
                     "--output",
                     "--callback-scheme",
+                    "--framework",
+                    "--update-feed-url",
+                    "--update-public-key",
                     "--bundle-id",
                     "--version",
                     "--build-version",
                     "--minimum-system-version",
                     "--dmg-output",
+                    "--zip-output",
                     "--dmg-volume-name",
                     "--hdiutil",
                     "--security",

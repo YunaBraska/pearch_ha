@@ -4,6 +4,8 @@ import Foundation
 public enum PearchHAAppBundleManifestError: Error, Equatable, CustomStringConvertible, Sendable {
     case blankField(String)
     case invalidCallbackURLScheme(String)
+    case oauthRedirectSchemeMismatch(expected: String, actual: String)
+    case incompleteUpdateConfiguration
 
     public var description: String {
         switch self {
@@ -11,6 +13,10 @@ public enum PearchHAAppBundleManifestError: Error, Equatable, CustomStringConver
             "\(name) is required"
         case let .invalidCallbackURLScheme(value):
             "invalid callback URL scheme: \(value)"
+        case let .oauthRedirectSchemeMismatch(expected, actual):
+            "OAuth redirect URI scheme \(actual) does not match callback URL scheme \(expected)"
+        case .incompleteUpdateConfiguration:
+            "update feed URL and public key must be provided together"
         }
     }
 }
@@ -24,6 +30,9 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
     public let minimumSystemVersion: String
     public let callbackURLScheme: String
     public let iconFileName: String?
+    public let updateFeedURL: String?
+    public let updatePublicKey: String?
+    public let oauthClient: PearchHAOAuthClientWebsiteManifest?
 
     public init(
         appName: String = "PearchHA",
@@ -33,7 +42,10 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
         buildVersion: String = "1",
         minimumSystemVersion: String = "13.0",
         callbackURLScheme: String = "pearchha",
-        iconFileName: String? = nil
+        iconFileName: String? = nil,
+        updateFeedURL: String? = nil,
+        updatePublicKey: String? = nil,
+        oauthClient: PearchHAOAuthClientWebsiteManifest? = nil
     ) throws {
         self.appName = try Self.required(appName, name: "appName")
         self.bundleIdentifier = try Self.required(bundleIdentifier, name: "bundleIdentifier")
@@ -47,6 +59,25 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
         }
         self.callbackURLScheme = normalizedScheme
         self.iconFileName = try Self.optional(iconFileName, name: "iconFileName")
+        let updateFeedURL = try Self.optional(updateFeedURL, name: "updateFeedURL")
+        let updatePublicKey = try Self.optional(updatePublicKey, name: "updatePublicKey")
+        guard (updateFeedURL == nil) == (updatePublicKey == nil) else {
+            throw PearchHAAppBundleManifestError.incompleteUpdateConfiguration
+        }
+        if let oauthClient {
+            guard let redirectScheme = URL(string: oauthClient.redirectURI)?.scheme,
+                  redirectScheme.caseInsensitiveCompare(normalizedScheme) == .orderedSame
+            else {
+                let actualScheme = URL(string: oauthClient.redirectURI)?.scheme ?? ""
+                throw PearchHAAppBundleManifestError.oauthRedirectSchemeMismatch(
+                    expected: normalizedScheme,
+                    actual: actualScheme
+                )
+            }
+        }
+        self.updateFeedURL = updateFeedURL
+        self.updatePublicKey = updatePublicKey
+        self.oauthClient = oauthClient
     }
 
     public func propertyListData() throws -> Data {
@@ -58,7 +89,10 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
             buildVersion: buildVersion,
             minimumSystemVersion: minimumSystemVersion,
             callbackURLScheme: callbackURLScheme,
-            iconFileName: iconFileName
+            iconFileName: iconFileName,
+            updateFeedURL: updateFeedURL,
+            updatePublicKey: updatePublicKey,
+            oauthClient: oauthClient
         )
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .xml
@@ -94,6 +128,8 @@ public struct PearchHAAppBundleManifest: Equatable, Sendable {
 public enum PearchHAAppBundleBuildError: Error, Equatable, CustomStringConvertible, Sendable {
     case executableMissing(String)
     case iconMissing(String)
+    case privacyManifestMissing(String)
+    case resourceBundleInfoInvalid(String)
     case outputExists(String)
 
     public var description: String {
@@ -102,6 +138,10 @@ public enum PearchHAAppBundleBuildError: Error, Equatable, CustomStringConvertib
             "executable does not exist: \(path)"
         case let .iconMissing(path):
             "icon file does not exist: \(path)"
+        case let .privacyManifestMissing(path):
+            "privacy manifest does not exist: \(path)"
+        case let .resourceBundleInfoInvalid(path):
+            "resource bundle info is invalid: \(path)"
         case let .outputExists(path):
             "output app already exists: \(path)"
         }
@@ -113,6 +153,8 @@ public struct PearchHAAppBundleBuildConfiguration: Equatable, Sendable {
     public let outputURL: URL
     public let manifest: PearchHAAppBundleManifest
     public let iconURL: URL?
+    public let privacyManifestURL: URL?
+    public let resourceBundleURLs: [URL]
     public let replaceExisting: Bool
 
     public init(
@@ -120,12 +162,16 @@ public struct PearchHAAppBundleBuildConfiguration: Equatable, Sendable {
         outputURL: URL,
         manifest: PearchHAAppBundleManifest,
         iconURL: URL? = nil,
+        privacyManifestURL: URL? = nil,
+        resourceBundleURLs: [URL] = [],
         replaceExisting: Bool = false
     ) {
         self.executableURL = executableURL
         self.outputURL = outputURL
         self.manifest = manifest
         self.iconURL = iconURL
+        self.privacyManifestURL = privacyManifestURL
+        self.resourceBundleURLs = resourceBundleURLs
         self.replaceExisting = replaceExisting
     }
 }
@@ -470,6 +516,11 @@ public struct PearchHAAppBundleBuilder {
         {
             throw PearchHAAppBundleBuildError.iconMissing(iconURL.path)
         }
+        if let privacyManifestURL = configuration.privacyManifestURL,
+           !fileManager.fileExists(atPath: privacyManifestURL.path)
+        {
+            throw PearchHAAppBundleBuildError.privacyManifestMissing(privacyManifestURL.path)
+        }
         if fileManager.fileExists(atPath: configuration.outputURL.path) {
             guard configuration.replaceExisting else {
                 throw PearchHAAppBundleBuildError.outputExists(configuration.outputURL.path)
@@ -491,6 +542,56 @@ public struct PearchHAAppBundleBuilder {
             try fileManager.copyItem(
                 at: iconURL,
                 to: resourcesURL.appendingPathComponent(iconURL.lastPathComponent, isDirectory: false)
+            )
+        }
+        if let privacyManifestURL = configuration.privacyManifestURL {
+            try fileManager.copyItem(
+                at: privacyManifestURL,
+                to: resourcesURL.appendingPathComponent("PrivacyInfo.xcprivacy", isDirectory: false)
+            )
+        }
+
+        for bundleURL in configuration.resourceBundleURLs {
+            let copiedBundleURL = resourcesURL.appendingPathComponent(bundleURL.lastPathComponent, isDirectory: true)
+            try fileManager.copyItem(at: bundleURL, to: copiedBundleURL)
+            let copiedContentsURL = copiedBundleURL.appendingPathComponent("Contents", isDirectory: true)
+            let copiedInfoURL = copiedContentsURL.appendingPathComponent("Info.plist", isDirectory: false)
+            guard !fileManager.fileExists(atPath: copiedInfoURL.path) else {
+                continue
+            }
+
+            let copiedResourcesURL = copiedContentsURL.appendingPathComponent("Resources", isDirectory: true)
+            try fileManager.createDirectory(at: copiedResourcesURL, withIntermediateDirectories: true)
+            let legacyInfoURL = copiedBundleURL.appendingPathComponent("Info.plist", isDirectory: false)
+            var propertyList: [String: Any] = [:]
+            if fileManager.fileExists(atPath: legacyInfoURL.path) {
+                let data = try Data(contentsOf: legacyInfoURL)
+                guard let values = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
+                    throw PearchHAAppBundleBuildError.resourceBundleInfoInvalid(legacyInfoURL.path)
+                }
+                propertyList = values
+                try fileManager.removeItem(at: legacyInfoURL)
+            }
+            for itemURL in try fileManager.contentsOfDirectory(
+                at: copiedBundleURL,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) where itemURL.lastPathComponent != "Contents" {
+                try fileManager.moveItem(
+                    at: itemURL,
+                    to: copiedResourcesURL.appendingPathComponent(itemURL.lastPathComponent)
+                )
+            }
+            let bundleName = copiedBundleURL.deletingPathExtension().lastPathComponent
+            let bundleSuffix = bundleName.lowercased().unicodeScalars.map {
+                CharacterSet.alphanumerics.contains($0) ? String($0) : "-"
+            }.joined()
+            propertyList["CFBundleIdentifier"] = "\(configuration.manifest.bundleIdentifier).resources.\(bundleSuffix)"
+            propertyList["CFBundleName"] = propertyList["CFBundleName"] ?? bundleName
+            propertyList["CFBundlePackageType"] = propertyList["CFBundlePackageType"] ?? "BNDL"
+            try PropertyListSerialization.data(fromPropertyList: propertyList, format: .xml, options: 0).write(
+                to: copiedInfoURL,
+                options: .atomic
             )
         }
 
@@ -2342,6 +2443,7 @@ public struct PearchHACodeSigner {
         if configuration.force {
             arguments.append("--force")
         }
+        arguments.append("--deep")
         if configuration.timestamp {
             arguments.append("--timestamp")
         }
@@ -2452,6 +2554,7 @@ public enum PearchHANotaryError: Error, Equatable, CustomStringConvertible, Send
     case stapleRequiresCompletedSubmission
     case xcrunMissing(String)
     case notaryToolFailed(status: Int32, output: String)
+    case notarySubmissionNotAccepted(String)
     case staplerFailed(status: Int32, output: String)
 
     public var description: String {
@@ -2466,6 +2569,8 @@ public enum PearchHANotaryError: Error, Equatable, CustomStringConvertible, Send
             "xcrun does not exist: \(path)"
         case let .notaryToolFailed(status, output):
             "notarytool submit failed with status \(status): \(output)"
+        case let .notarySubmissionNotAccepted(output):
+            "notarytool submit did not accept the artifact: \(output)"
         case let .staplerFailed(status, output):
             "stapler staple failed with status \(status): \(output)"
         }
@@ -2478,19 +2583,23 @@ public struct PearchHANotarySubmissionConfiguration: Equatable, Sendable {
     public let waitForCompletion: Bool
     public let timeout: String?
     public let staple: Bool
+    /// Optional packaged member that receives Apple's ticket after artifact submission.
+    public let stapleURL: URL?
 
     public init(
         artifactURL: URL,
         keychainProfile: String,
         waitForCompletion: Bool = true,
         timeout: String? = nil,
-        staple: Bool = true
+        staple: Bool = true,
+        stapleURL: URL? = nil
     ) {
         self.artifactURL = artifactURL
         self.keychainProfile = keychainProfile
         self.waitForCompletion = waitForCompletion
         self.timeout = timeout
         self.staple = staple
+        self.stapleURL = stapleURL
     }
 }
 
@@ -2540,7 +2649,9 @@ public struct PearchHANotarySubmitter {
             artifactURL.path,
             "--keychain-profile",
             keychainProfile,
-            "--no-progress"
+            "--no-progress",
+            "--output-format",
+            "json"
         ]
         if configuration.waitForCompletion {
             submitArguments.append("--wait")
@@ -2554,14 +2665,36 @@ public struct PearchHANotarySubmitter {
         guard submitResult.status == 0 else {
             throw PearchHANotaryError.notaryToolFailed(status: submitResult.status, output: submitResult.output)
         }
+        if configuration.waitForCompletion {
+            let response = try? JSONDecoder().decode(
+                PearchHANotarySubmissionResponse.self,
+                from: Data(submitResult.output.utf8)
+            )
+            guard response?.status == "Accepted" else {
+                throw PearchHANotaryError.notarySubmissionNotAccepted(
+                    notaryDiagnostic(
+                        submission: response,
+                        submissionOutput: submitResult.output,
+                        keychainProfile: keychainProfile
+                    )
+                )
+            }
+        }
 
         if configuration.staple {
+            let stapleURL = URL(fileURLWithPath: (configuration.stapleURL ?? artifactURL).path)
+            guard fileManager.fileExists(atPath: stapleURL.path) else {
+                throw PearchHANotaryError.artifactMissing(stapleURL.path)
+            }
             let stapleResult = try commandRunner.run(
                 executableURL: xcrunURL,
-                arguments: ["stapler", "staple", artifactURL.path]
+                arguments: ["stapler", "staple", stapleURL.path]
             )
             guard stapleResult.status == 0 else {
-                throw PearchHANotaryError.staplerFailed(status: stapleResult.status, output: stapleResult.output)
+                throw PearchHANotaryError.staplerFailed(
+                    status: stapleResult.status,
+                    output: "\(stapleResult.output)\nnotary submission: \(submitResult.output)"
+                )
             }
         }
 
@@ -2571,6 +2704,139 @@ public struct PearchHANotarySubmitter {
             waitedForCompletion: configuration.waitForCompletion,
             stapled: configuration.staple
         )
+    }
+
+    private func notaryDiagnostic(
+        submission: PearchHANotarySubmissionResponse?,
+        submissionOutput: String,
+        keychainProfile: String
+    ) -> String {
+        guard let identifier = submission?.id,
+              !identifier.isEmpty else {
+            return submissionOutput
+        }
+        let logURL = fileManager.temporaryDirectory
+            .appendingPathComponent("pearchha-notary-\(UUID().uuidString).json", isDirectory: false)
+        defer {
+            try? fileManager.removeItem(at: logURL)
+        }
+        guard let result = try? commandRunner.run(
+            executableURL: xcrunURL,
+            arguments: [
+                "notarytool",
+                "log",
+                identifier,
+                "--keychain-profile",
+                keychainProfile,
+                "--no-progress",
+                logURL.path
+            ]
+        ) else {
+            return submissionOutput
+        }
+        let log = (try? String(contentsOf: logURL, encoding: .utf8)) ?? result.output
+        return "\(submissionOutput)\nnotary log: \(log)"
+    }
+}
+
+private struct PearchHANotarySubmissionResponse: Decodable {
+    let id: String?
+    let status: String
+}
+
+/// Reports a rejected or incomplete app ZIP archive build.
+public enum PearchHAArchiveBuildError: Error, Equatable, CustomStringConvertible, Sendable {
+    case appBundleMissing(String)
+    case outputExists(String)
+    case dittoMissing(String)
+    case dittoFailed(status: Int32, output: String)
+    case archiveMissing(String)
+
+    public var description: String {
+        switch self {
+        case let .appBundleMissing(path):
+            "app bundle does not exist: \(path)"
+        case let .outputExists(path):
+            "output archive already exists: \(path)"
+        case let .dittoMissing(path):
+            "ditto does not exist: \(path)"
+        case let .dittoFailed(status, output):
+            "ditto archive failed with status \(status): \(output)"
+        case let .archiveMissing(path):
+            "archive does not exist: \(path)"
+        }
+    }
+}
+
+/// Configures a ZIP archive that preserves one app bundle.
+public struct PearchHAArchiveBuildConfiguration: Equatable, Sendable {
+    public let appURL: URL
+    public let outputURL: URL
+    public let replaceExisting: Bool
+
+    /// Creates a configuration for the source app, destination archive, and overwrite policy.
+    public init(appURL: URL, outputURL: URL, replaceExisting: Bool = false) {
+        self.appURL = appURL
+        self.outputURL = outputURL
+        self.replaceExisting = replaceExisting
+    }
+}
+
+/// Identifies the app and ZIP archive produced by a completed build.
+public struct PearchHAArchiveBuildResult: Equatable, Sendable {
+    public let archiveURL: URL
+    public let appURL: URL
+}
+
+/// Creates ZIP archives suitable for macOS app distribution and notarization.
+public struct PearchHAArchiveBuilder {
+    public static let defaultDittoURL = URL(fileURLWithPath: "/usr/bin/ditto")
+
+    private let fileManager: FileManager
+    private let dittoURL: URL
+    private let commandRunner: any PearchHACommandRunning
+
+    /// Creates an archive builder with the provided filesystem and command boundary.
+    public init(
+        fileManager: FileManager = .default,
+        dittoURL: URL = Self.defaultDittoURL,
+        commandRunner: any PearchHACommandRunning = PearchHAFoundationCommandRunner()
+    ) {
+        self.fileManager = fileManager
+        self.dittoURL = dittoURL
+        self.commandRunner = commandRunner
+    }
+
+    /// Archives the configured app bundle or throws an actionable packaging error.
+    public func build(_ configuration: PearchHAArchiveBuildConfiguration) throws -> PearchHAArchiveBuildResult {
+        let appURL = URL(fileURLWithPath: configuration.appURL.path).standardizedFileURL.resolvingSymlinksInPath()
+        let outputURL = URL(fileURLWithPath: configuration.outputURL.path)
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: appURL.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw PearchHAArchiveBuildError.appBundleMissing(appURL.path)
+        }
+        if fileManager.fileExists(atPath: outputURL.path) {
+            guard configuration.replaceExisting else {
+                throw PearchHAArchiveBuildError.outputExists(outputURL.path)
+            }
+            try fileManager.removeItem(at: outputURL)
+        }
+        guard fileManager.isExecutableFile(atPath: dittoURL.path) else {
+            throw PearchHAArchiveBuildError.dittoMissing(dittoURL.path)
+        }
+        try fileManager.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        let result = try commandRunner.run(
+            executableURL: dittoURL,
+            arguments: ["-c", "-k", "--sequesterRsrc", "--keepParent", appURL.path, outputURL.path]
+        )
+        guard result.status == 0 else {
+            throw PearchHAArchiveBuildError.dittoFailed(status: result.status, output: result.output)
+        }
+        guard fileManager.fileExists(atPath: outputURL.path) else {
+            throw PearchHAArchiveBuildError.archiveMissing(outputURL.path)
+        }
+        return PearchHAArchiveBuildResult(archiveURL: outputURL, appURL: appURL)
     }
 }
 
@@ -2881,12 +3147,19 @@ private struct PearchHAInfoPlist: Encodable {
     let infoDictionaryVersion = "6.0"
     let appName: String
     let packageType = "APPL"
+    let applicationCategory = "public.app-category.utilities"
+    let exportedTypeDeclarations = [PearchHAInfoPlistExportedTypeDeclaration()]
     let version: String
     let buildVersion: String
     let minimumSystemVersion: String
     let highResolutionCapable = true
     let agentApplication = true
+    let localNetworkUsageDescription = "PearchHA connects to your Home Assistant instance on your network."
     let iconFileName: String?
+    let updateFeedURL: String?
+    let updatePublicKey: String?
+    let oauthClientID: String?
+    let oauthRedirectURI: String?
     let urlTypes: [PearchHAInfoPlistURLType]
 
     init(
@@ -2897,7 +3170,10 @@ private struct PearchHAInfoPlist: Encodable {
         buildVersion: String,
         minimumSystemVersion: String,
         callbackURLScheme: String,
-        iconFileName: String?
+        iconFileName: String?,
+        updateFeedURL: String?,
+        updatePublicKey: String?,
+        oauthClient: PearchHAOAuthClientWebsiteManifest?
     ) {
         self.appName = appName
         self.bundleIdentifier = bundleIdentifier
@@ -2906,6 +3182,10 @@ private struct PearchHAInfoPlist: Encodable {
         self.buildVersion = buildVersion
         self.minimumSystemVersion = minimumSystemVersion
         self.iconFileName = iconFileName
+        self.updateFeedURL = updateFeedURL
+        self.updatePublicKey = updatePublicKey
+        self.oauthClientID = oauthClient?.clientID
+        self.oauthRedirectURI = oauthClient?.redirectURI
         self.urlTypes = [
             PearchHAInfoPlistURLType(
                 name: "\(bundleIdentifier).oauth",
@@ -2921,13 +3201,32 @@ private struct PearchHAInfoPlist: Encodable {
         case infoDictionaryVersion = "CFBundleInfoDictionaryVersion"
         case appName = "CFBundleName"
         case packageType = "CFBundlePackageType"
+        case applicationCategory = "LSApplicationCategoryType"
+        case exportedTypeDeclarations = "UTExportedTypeDeclarations"
         case version = "CFBundleShortVersionString"
         case buildVersion = "CFBundleVersion"
         case minimumSystemVersion = "LSMinimumSystemVersion"
         case highResolutionCapable = "NSHighResolutionCapable"
         case agentApplication = "LSUIElement"
+        case localNetworkUsageDescription = "NSLocalNetworkUsageDescription"
         case iconFileName = "CFBundleIconFile"
+        case updateFeedURL = "SUFeedURL"
+        case updatePublicKey = "SUPublicEDKey"
+        case oauthClientID = "PEARCHHA_OAUTH_CLIENT_ID"
+        case oauthRedirectURI = "PEARCHHA_OAUTH_REDIRECT_URI"
         case urlTypes = "CFBundleURLTypes"
+    }
+}
+
+private struct PearchHAInfoPlistExportedTypeDeclaration: Encodable {
+    let identifier = "dev.pearchha.panel-selection"
+    let conformsTo = ["public.data"]
+    let description = "PearchHA panel selection"
+
+    private enum CodingKeys: String, CodingKey {
+        case identifier = "UTTypeIdentifier"
+        case conformsTo = "UTTypeConformsTo"
+        case description = "UTTypeDescription"
     }
 }
 

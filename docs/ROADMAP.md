@@ -1,40 +1,37 @@
-# Roadmap - PearchHA
+# Roadmap
 
-This file is now the live backlog. Done work stays out unless it changes a release decision.
+Implemented features are described in the [README](../README.md). This file owns
+remaining work and release evidence gaps.
 
-## Shipping now
+## Open: App Store submission and public sign-in
 
-- Native macOS menu bar app built with Swift, SwiftUI, and AppKit.
-- Real Home Assistant connection with browser sign-in or bearer-token auth.
-- Multi-address connection fallback, Keychain-backed session restore, and FakeHA-backed tests.
-- Menu bar values, gauges, thresholds, custom actions, linked averages, entity settings, and cached history detail.
-- Pull requests and merges build the universal app; weekly or forced manual releases publish stable GitHub releases from `main`.
+- Supply and verify the production OAuth client website and redirect declaration
+  for public browser sign-in. See [HA_API.md](HA_API.md#authentication).
+- The existing direct-release CI has Developer ID signing and notarization
+  inputs configured. Those do not establish App Store distribution readiness.
+- The separate Store lane produced a signed package in
+  [run 40836734856](https://github.com/YunaBraska/pearch_ha/actions/runs/40836734856)
+  on 2026-10-29 at `5c6f06e`. Reverify the final submission revision. The upload
+  workflow has not run, so App Store Connect acceptance remains unverified.
+- The [public privacy policy](https://yunabraska.github.io/pearch_ha/privacy.html)
+  returned HTTP 200 on 2026-10-29 and is linked from Settings About. Complete
+  App Store privacy metadata and verify an isolated, reachable Home Assistant
+  review account. Review access outside the repository remains unverified. Do
+  not use a personal home installation.
+- Verify Keychain continuity with the actual Store distribution identity and
+  configuration migration on each supported macOS release before submission.
 
-## Release gates still open
+## In progress: runtime verification
 
-### 1. Public release credentials
+- Extend the Settings responsiveness checks beyond the verified 500-entity
+  fixture and the manually reviewed 1,154-entity installation.
+- Extend closed-menu CPU/memory measurements to open history, Settings, standby,
+  reconnects, stale-cache recovery, and long sessions.
+- Verify the final Store archive's runtime before submission. A successful signed
+  package build does not establish sandbox, migration or Keychain behavior.
 
-- Provide production OAuth client values if browser sign-in must ship against a public Home Assistant setup.
-- Provide a real Developer ID signing certificate and notarization API key to enable the already-configured signed and notarized release path.
+## Planned
 
-### 2. Verification hardening
-
-- Raise `PearchHAClient` coverage from the low-90s toward the project target.
-- Keep chasing the Settings entity-view freeze until we have repeatable evidence that the hot loop is gone.
-- Add stronger evidence for long-range history cache behavior under standby, reconnects, and stale-cache recovery.
-
-### 3. Performance hardening
-
-- Keep reducing Settings entity-list work so large installs stay cheap while scrolling.
-- Keep the panel and history detail strictly cache-first; background sync should stay asynchronous and bounded.
-- Verify idle CPU and memory on a long-running real-HA session after the latest settings and history changes.
-
-### 4. Product decisions
-
-- Decide localization posture and record it in an ADR if v1 remains English-only.
-
-## Next engineering slice
-
-1. Finish the Settings freeze investigation with samples and regression coverage.
-2. Tighten history cache maintenance for day/week/month so visible panel rows stay warm without repeated full-range fetches.
-3. Re-run the full CI/release dry-run path after the repo cleanup lands.
+- Raise client coverage toward 95% without weakening the existing gates.
+- Extend localization beyond the German/English **This Mac** source before claiming
+  whole-app language support.

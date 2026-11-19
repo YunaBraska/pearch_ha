@@ -19,6 +19,9 @@ public struct PearchHAGitHubReleaseUpdateChecker: Sendable {
     }
 
     public func checkLatest(currentVersion: String) async -> PearchHAReleaseUpdateCheckResult {
+        #if PEARCHHA_APP_STORE
+        return .failed("App updates are managed by the Mac App Store.")
+        #else
         let normalizedCurrentVersion = currentVersion.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedCurrentVersion.isEmpty else {
             return .failed("current version is unavailable")
@@ -73,6 +76,7 @@ public struct PearchHAGitHubReleaseUpdateChecker: Sendable {
         } catch {
             return .failed("GitHub release check failed: \(error.localizedDescription)")
         }
+        #endif
     }
 
     public static func isNewerRelease(currentVersion: String, latestVersion: String) -> Bool {

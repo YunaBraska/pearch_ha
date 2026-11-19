@@ -74,6 +74,24 @@ public enum PearchHAThemeMode: String, CaseIterable, Codable, Equatable, Sendabl
     }
 }
 
+/// The user's reading size for application content, expressed as a percentage.
+public enum PearchHATextSize: Int, CaseIterable, Codable, Equatable, Sendable {
+    case standard = 100
+    case large = 125
+    case extraLarge = 150
+    case veryLarge = 175
+    case maximum = 200
+
+    /// The reading size used when no preference has been saved.
+    public static let defaultSize = PearchHATextSize.standard
+
+    /// The multiplier applied to the application's baseline text sizes.
+    public var scale: Double { Double(rawValue) / 100 }
+
+    /// The percentage displayed in the reading-size picker.
+    public var displayName: String { "\(rawValue)%" }
+}
+
 /// A persisted accent color expressed as sRGB components in `0...1`.
 ///
 /// Stored as four `Double` channels so the value round-trips through JSON
@@ -216,6 +234,8 @@ public struct PearchHADisplayPreferences: Equatable, Sendable {
     public let stableMenuBarWidth: Bool
     /// The application appearance override (system/light/dark).
     public let themeMode: PearchHAThemeMode
+    /// The reading size applied across application content.
+    public let textSize: PearchHATextSize
     /// The minimum cadence at which menu-bar items repaint.
     public let menuBarRefreshInterval: PearchHAMenuBarRefreshInterval
     /// The cadence for background cache/data synchronization loops.
@@ -256,6 +276,7 @@ public struct PearchHADisplayPreferences: Equatable, Sendable {
         menuBarAppearance: PearchHAMenuBarAppearance = .defaultAppearance,
         stableMenuBarWidth: Bool = false,
         themeMode: PearchHAThemeMode = .defaultMode,
+        textSize: PearchHATextSize = .defaultSize,
         menuBarRefreshInterval: PearchHAMenuBarRefreshInterval = .defaultInterval,
         dataSyncInterval: PearchHAMenuBarRefreshInterval = .fiveSeconds,
         historyDetailRefreshInterval: PearchHAMenuBarRefreshInterval = .thirtySeconds,
@@ -271,6 +292,7 @@ public struct PearchHADisplayPreferences: Equatable, Sendable {
         self.menuBarAppearance = menuBarAppearance
         self.stableMenuBarWidth = stableMenuBarWidth
         self.themeMode = themeMode
+        self.textSize = textSize
         self.menuBarRefreshInterval = menuBarRefreshInterval
         self.dataSyncInterval = dataSyncInterval
         self.historyDetailRefreshInterval = historyDetailRefreshInterval
@@ -321,6 +343,11 @@ public struct PearchHADisplayPreferences: Equatable, Sendable {
     /// Returns a copy with the theme mode replaced.
     public func with(themeMode: PearchHAThemeMode) -> PearchHADisplayPreferences {
         copy(themeMode: themeMode)
+    }
+
+    /// Returns a copy with the reading size replaced.
+    public func with(textSize: PearchHATextSize) -> PearchHADisplayPreferences {
+        copy(textSize: textSize)
     }
 
     /// Returns a copy with the menu-bar repaint cadence replaced.
@@ -384,6 +411,7 @@ public struct PearchHADisplayPreferences: Equatable, Sendable {
         menuBarAppearance: PearchHAMenuBarAppearance? = nil,
         stableMenuBarWidth: Bool? = nil,
         themeMode: PearchHAThemeMode? = nil,
+        textSize: PearchHATextSize? = nil,
         menuBarRefreshInterval: PearchHAMenuBarRefreshInterval? = nil,
         dataSyncInterval: PearchHAMenuBarRefreshInterval? = nil,
         historyDetailRefreshInterval: PearchHAMenuBarRefreshInterval? = nil,
@@ -400,6 +428,7 @@ public struct PearchHADisplayPreferences: Equatable, Sendable {
             menuBarAppearance: menuBarAppearance ?? self.menuBarAppearance,
             stableMenuBarWidth: stableMenuBarWidth ?? self.stableMenuBarWidth,
             themeMode: themeMode ?? self.themeMode,
+            textSize: textSize ?? self.textSize,
             menuBarRefreshInterval: menuBarRefreshInterval ?? self.menuBarRefreshInterval,
             dataSyncInterval: dataSyncInterval ?? self.dataSyncInterval,
             historyDetailRefreshInterval: historyDetailRefreshInterval ?? self.historyDetailRefreshInterval,

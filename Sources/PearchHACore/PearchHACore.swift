@@ -22,7 +22,12 @@ public struct EntityID: Hashable, Codable, Sendable, ExpressibleByStringLiteral 
     }
 
     public var domain: String {
-        rawValue.split(separator: ".", maxSplits: 1).first.map(String.init) ?? rawValue
+        if source == .thisMac { return "sensor" }
+        return rawValue.split(separator: ".", maxSplits: 1).first.map(String.init) ?? rawValue
+    }
+
+    public var source: EntitySource {
+        rawValue.hasPrefix("local-mac:") ? .thisMac : .homeAssistant
     }
 }
 
@@ -48,13 +53,17 @@ public struct EntityState: Equatable, Codable, Sendable {
     public let state: String
     public let unit: String?
     public let currentPosition: Int?
+    /// Capability and control-state attributes reported by Home Assistant.
+    /// Absent for older snapshots or entities without additional controls.
+    public let controlAttributes: [String: ActionValue]?
 
-    public init(id: EntityID, name: String, state: String, unit: String?, currentPosition: Int? = nil) {
+    public init(id: EntityID, name: String, state: String, unit: String?, currentPosition: Int? = nil, controlAttributes: [String: ActionValue]? = nil) {
         self.id = id
         self.name = name
         self.state = state
         self.unit = unit
         self.currentPosition = currentPosition
+        self.controlAttributes = controlAttributes?.isEmpty == false ? controlAttributes : nil
     }
 }
 
@@ -850,6 +859,9 @@ public struct DiscoveredEntity: Equatable, Codable, Sendable {
     public let deviceModel: String?
     public let deviceDomain: String?
     public let currentPosition: Int?
+    /// Capability and control-state attributes reported by Home Assistant.
+    /// Absent for older snapshots or entities without additional controls.
+    public let controlAttributes: [String: ActionValue]?
 
     public init(
         id: EntityID,
@@ -862,7 +874,8 @@ public struct DiscoveredEntity: Equatable, Codable, Sendable {
         deviceManufacturer: String? = nil,
         deviceModel: String? = nil,
         deviceDomain: String? = nil,
-        currentPosition: Int? = nil
+        currentPosition: Int? = nil,
+        controlAttributes: [String: ActionValue]? = nil
     ) {
         self.id = id
         self.name = name
@@ -875,6 +888,7 @@ public struct DiscoveredEntity: Equatable, Codable, Sendable {
         self.deviceModel = deviceModel
         self.deviceDomain = deviceDomain
         self.currentPosition = currentPosition
+        self.controlAttributes = controlAttributes?.isEmpty == false ? controlAttributes : nil
     }
 
     public init(
@@ -884,7 +898,8 @@ public struct DiscoveredEntity: Equatable, Codable, Sendable {
         unit: String?,
         areaID: AreaID?,
         deviceID: DeviceID?,
-        currentPosition: Int? = nil
+        currentPosition: Int? = nil,
+        controlAttributes: [String: ActionValue]? = nil
     ) {
         self.init(
             id: id,
@@ -897,7 +912,8 @@ public struct DiscoveredEntity: Equatable, Codable, Sendable {
             deviceManufacturer: nil,
             deviceModel: nil,
             deviceDomain: nil,
-            currentPosition: currentPosition
+            currentPosition: currentPosition,
+            controlAttributes: controlAttributes
         )
     }
 }
@@ -994,7 +1010,8 @@ public struct RoomResolver: Sendable {
                 deviceManufacturer: registryEntry?.deviceID.flatMap { devicesByID[$0]?.manufacturer },
                 deviceModel: registryEntry?.deviceID.flatMap { devicesByID[$0]?.model },
                 deviceDomain: registryEntry?.deviceID.flatMap { devicesByID[$0]?.domain },
-                currentPosition: state.currentPosition
+                currentPosition: state.currentPosition,
+                controlAttributes: state.controlAttributes
             )
             groupedEntities[roomID, default: []].append(entity)
         }
@@ -1047,11 +1064,4 @@ public struct RoomResolver: Sendable {
         }
         return value
     }
-}
-
-public enum PearchHACore {
-    public static let module = PearchHAModule(
-        name: "PearchHACore",
-        responsibility: "Pure domain state and behavior for PearchHA."
-    )
 }

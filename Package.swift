@@ -1,9 +1,25 @@
 // swift-tools-version: 6.0
 
+import Foundation
 import PackageDescription
+
+let isAppStoreBuild = ProcessInfo.processInfo.environment["PEARCHHA_APP_STORE"] == "1"
+let packageDependencies: [Package.Dependency] = isAppStoreBuild
+    ? []
+    : [.package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0")]
+let appShellDependencies: [Target.Dependency] = [
+    "PearchHACore",
+    "PearchHAClient",
+    "PearchHAPersistence",
+    "PearchHAUI"
+] + (isAppStoreBuild ? [] : [.product(name: "Sparkle", package: "Sparkle")])
+let appStoreSettings: [SwiftSetting] = isAppStoreBuild
+    ? [.define("PEARCHHA_APP_STORE")]
+    : []
 
 let package = Package(
     name: "PearchHA",
+    defaultLocalization: "en",
     platforms: [
         .macOS(.v13)
     ],
@@ -26,6 +42,7 @@ let package = Package(
         .library(name: "FakeHA", targets: ["FakeHA"]),
         .executable(name: "pearchha-package-app", targets: ["pearchha-package-app"])
     ],
+    dependencies: packageDependencies,
     targets: [
         .executableTarget(
             name: "PearchHAApp",
@@ -35,19 +52,17 @@ let package = Package(
         ),
         .target(
             name: "PearchHAAppShell",
-            dependencies: [
-                "PearchHACore",
-                "PearchHAClient",
-                "PearchHAPersistence",
-                "PearchHAUI"
-            ],
+            dependencies: appShellDependencies,
             resources: [
                 .copy("Resources/PearchHA.icns")
-            ]
+            ],
+            swiftSettings: appStoreSettings
         ),
         .target(
             name: "PearchHACore",
-            dependencies: ["PearchHASupport"]
+            dependencies: ["PearchHASupport"],
+            exclude: isAppStoreBuild ? ["Resources/Sparkle-LICENSE.txt"] : [],
+            resources: [.process("Resources")]
         ),
         .target(
             name: "PearchHAClient",
@@ -72,7 +87,8 @@ let package = Package(
         ),
         .target(
             name: "PearchHAUI",
-            dependencies: ["PearchHACore"]
+            dependencies: ["PearchHACore"],
+            swiftSettings: appStoreSettings
         ),
         .target(
             name: "PearchHACoverageCheck",
@@ -129,6 +145,7 @@ let package = Package(
             name: "pearchha-package-app",
             dependencies: [
                 "PearchHAClient",
+                "PearchHACore",
                 "PearchHAPackaging",
                 "PearchHASupport"
             ],
@@ -137,8 +154,7 @@ let package = Package(
         .target(
             name: "FakeHA",
             dependencies: ["PearchHASupport"],
-            path: "Tests/FakeHA",
-            exclude: ["README.md"]
+            path: "Tests/FakeHA"
         ),
         .testTarget(
             name: "PearchHACoreTests",
@@ -159,7 +175,7 @@ let package = Package(
         ),
         .testTarget(
             name: "PearchHAPackagingTests",
-            dependencies: ["PearchHAPackaging"]
+            dependencies: ["PearchHAPackaging", "PearchHACore"]
         ),
         .testTarget(
             name: "PearchHASupportTests",

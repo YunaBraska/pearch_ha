@@ -22,6 +22,7 @@ labels: bug
 - Connection mode: local / Nabu Casa / self-signed / other
 
 ## Evidence
+Remove tokens, protected values and private Home Assistant addresses before sharing.
 - Screenshot or screen recording if relevant
 - Relevant logs or FakeHA journal excerpt
 

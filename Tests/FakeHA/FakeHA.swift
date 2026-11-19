@@ -51,11 +51,30 @@ private final class FakeHAListenerStartup: @unchecked Sendable {
     }
 }
 
+// Bind the chosen port atomically instead of reserving and releasing a socket
+// before NWListener starts, which lets another connection take that port.
+private func makeLoopbackListener(tlsIdentity: SecIdentity?) throws -> NWListener {
+    let parameters: NWParameters
+    if let tlsIdentity {
+        guard let localIdentity = sec_identity_create(tlsIdentity) else {
+            throw FakeHAError.tlsIdentityUnavailable
+        }
+        let tls = NWProtocolTLS.Options()
+        sec_protocol_options_set_local_identity(tls.securityProtocolOptions, localIdentity)
+        parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
+    } else {
+        parameters = .tcp
+    }
+    parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+    return try NWListener(using: parameters, on: .any)
+}
+
 public struct FakeHAFixtures: Equatable, Sendable {
     public let apiBody: String
     public let statesBody: String
     public let historyBody: String
     public let stateChangedEventBody: String
+    public let removedAttributeNames: [String]
     public let areaRegistryBody: String
     public let deviceRegistryBody: String
     public let entityRegistryDisplayBody: String?
@@ -63,24 +82,28 @@ public struct FakeHAFixtures: Equatable, Sendable {
     public let recorderStatisticsBody: String
     public let servicesBody: String
     public let bearerToken: String
+    public let serviceCallFailureMessage: String?
 
     public init(
         apiBody: String,
         statesBody: String,
         historyBody: String = "[]",
         stateChangedEventBody: String? = nil,
+        removedAttributeNames: [String] = ["friendly_name", "unit_of_measurement", "current_position"],
         areaRegistryBody: String = "[]",
         deviceRegistryBody: String = "[]",
         entityRegistryDisplayBody: String? = nil,
         entityRegistryBody: String = "[]",
         recorderStatisticsBody: String = "{}",
         servicesBody: String = "{}",
-        bearerToken: String = "fake-token"
+        bearerToken: String = "fake-token",
+        serviceCallFailureMessage: String? = nil
     ) {
         self.apiBody = apiBody
         self.statesBody = statesBody
         self.historyBody = historyBody
         self.stateChangedEventBody = stateChangedEventBody ?? Self.defaultStateChangedEventBody(statesBody: statesBody)
+        self.removedAttributeNames = removedAttributeNames
         self.areaRegistryBody = areaRegistryBody
         self.deviceRegistryBody = deviceRegistryBody
         self.entityRegistryDisplayBody = entityRegistryDisplayBody
@@ -88,6 +111,7 @@ public struct FakeHAFixtures: Equatable, Sendable {
         self.recorderStatisticsBody = recorderStatisticsBody
         self.servicesBody = servicesBody
         self.bearerToken = bearerToken
+        self.serviceCallFailureMessage = serviceCallFailureMessage
     }
 
     public static let minimal = FakeHAFixtures(
@@ -226,35 +250,55 @@ public actor FakeHAJournal {
     }
 }
 
+public struct FakeHAHTTPResponse: Equatable, Sendable {
+    public let statusCode: Int
+    public let headers: [String: String]
+    public let body: String
+
+    public init(statusCode: Int, headers: [String: String] = [:], body: String = "") {
+        self.statusCode = statusCode
+        self.headers = headers
+        self.body = body
+    }
+}
+
 public final class FakeHARESTServer: @unchecked Sendable {
-    public let baseURL: URL
+    /// The loopback address assigned when start() makes the listener ready.
+    public var baseURL: URL {
+        guard let port = listener.port else {
+            preconditionFailure("Start Fake Home Assistant before requesting its address")
+        }
+        return URL(string: "\(scheme)://127.0.0.1:\(port.rawValue)\(pathPrefix)")!
+    }
     public let journal: FakeHAJournal
 
     private let listener: NWListener
+    private let scheme: String
     private let queue: DispatchQueue
     private let fixtures: FakeHAFixtures
     private let redactor: Redactor
     private let pathPrefix: String
+    private let responseOverrides: [String: FakeHAHTTPResponse]
 
     public init(
         fixtures: FakeHAFixtures = .minimal,
         pathPrefix: String = "",
         redactor: Redactor = Redactor(),
-        tlsIdentity: SecIdentity? = nil
+        tlsIdentity: SecIdentity? = nil,
+        responseOverrides: [String: FakeHAHTTPResponse] = [:]
     ) throws {
-        let endpoint = try Self.makeLoopbackListener(tlsIdentity: tlsIdentity)
-        let port = endpoint.port
-        let listener = endpoint.listener
+        let listener = try makeLoopbackListener(tlsIdentity: tlsIdentity)
         let normalizedPathPrefix = Self.normalizedPathPrefix(pathPrefix)
         let scheme = tlsIdentity == nil ? "http" : "https"
 
         self.listener = listener
+        self.scheme = scheme
         self.fixtures = fixtures
         self.redactor = redactor
         self.pathPrefix = normalizedPathPrefix
+        self.responseOverrides = responseOverrides
         self.journal = FakeHAJournal()
         self.queue = DispatchQueue(label: "dev.pearchha.fakeha.rest")
-        self.baseURL = URL(string: "\(scheme)://127.0.0.1:\(port)\(normalizedPathPrefix)")!
     }
 
     public func start() {
@@ -293,17 +337,21 @@ public final class FakeHARESTServer: @unchecked Sendable {
                         headers: redactor.redact(headers: request.headers)
                     )
                 )
+                let response = self.response(for: request)
+                connection.send(content: response, completion: .contentProcessed { _ in
+                    connection.cancel()
+                })
             }
-            let response = self.response(for: request)
-            connection.send(content: response, completion: .contentProcessed { _ in
-                connection.cancel()
-            })
         }
     }
 
     private func response(for request: HTTPRequest) -> Data {
         guard let effectivePath = effectivePath(for: request.path) else {
             return httpResponse(status: 404, reason: "Not Found", body: #"{"message":"Not found"}"#)
+        }
+
+        if let response = responseOverrides[effectivePath] {
+            return httpResponse(status: response.statusCode, reason: "Fixture Response", body: response.body, headers: response.headers)
         }
 
         guard request.headers["authorization"] == "Bearer \(fixtures.bearerToken)" else {
@@ -359,86 +407,20 @@ public final class FakeHARESTServer: @unchecked Sendable {
         return suffix.isEmpty ? "/" : suffix
     }
 
-    private func httpResponse(status: Int, reason: String, body: String) -> Data {
+    private func httpResponse(status: Int, reason: String, body: String, headers: [String: String] = [:]) -> Data {
         let bytes = body.data(using: .utf8) ?? Data()
+        let additionalHeaders = headers.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)\r\n" }.joined()
         let header = """
         HTTP/1.1 \(status) \(reason)\r
         Content-Type: application/json\r
         Content-Length: \(bytes.count)\r
         Connection: close\r
-        \r
+        \(additionalHeaders)\r
 
         """
         var data = Data(header.utf8)
         data.append(bytes)
         return data
-    }
-
-    private static func makeLoopbackListener(
-        tlsIdentity: SecIdentity? = nil,
-        maxAttempts: Int = 16
-    ) throws -> (port: UInt16, listener: NWListener) {
-        let parameters = try makeParameters(tlsIdentity: tlsIdentity)
-        for _ in 0..<maxAttempts {
-            let port = try reserveLoopbackPort()
-            do {
-                return try (port, NWListener(using: parameters, on: NWEndpoint.Port(rawValue: port)!))
-            } catch {
-                continue
-            }
-        }
-        throw FakeHAError.portReservationFailed
-    }
-
-    private static func makeParameters(tlsIdentity: SecIdentity?) throws -> NWParameters {
-        guard let tlsIdentity else {
-            return .tcp
-        }
-        guard let localIdentity = sec_identity_create(tlsIdentity) else {
-            throw FakeHAError.tlsIdentityUnavailable
-        }
-        let tls = NWProtocolTLS.Options()
-        sec_protocol_options_set_local_identity(tls.securityProtocolOptions, localIdentity)
-        return NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
-    }
-
-    private static func reserveLoopbackPort() throws -> UInt16 {
-        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
-        guard descriptor >= 0 else {
-            throw FakeHAError.portReservationFailed
-        }
-        defer {
-            close(descriptor)
-        }
-
-        var address = sockaddr_in(
-            sin_len: UInt8(MemoryLayout<sockaddr_in>.size),
-            sin_family: sa_family_t(AF_INET),
-            sin_port: 0,
-            sin_addr: in_addr(s_addr: INADDR_LOOPBACK.bigEndian),
-            sin_zero: (0, 0, 0, 0, 0, 0, 0, 0)
-        )
-
-        let bindResult = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
-                bind(descriptor, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        guard bindResult == 0 else {
-            throw FakeHAError.portReservationFailed
-        }
-
-        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let nameResult = withUnsafeMutablePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
-                getsockname(descriptor, sockaddrPointer, &length)
-            }
-        }
-        guard nameResult == 0 else {
-            throw FakeHAError.portReservationFailed
-        }
-
-        return UInt16(bigEndian: address.sin_port)
     }
 
     private static func normalizedPathPrefix(_ pathPrefix: String) -> String {
@@ -448,8 +430,6 @@ public final class FakeHARESTServer: @unchecked Sendable {
 }
 
 public enum FakeHAError: Error, Equatable {
-    case missingPort
-    case portReservationFailed
     case tlsIdentityUnavailable
     case invalidWebSocketKey
 }
@@ -737,10 +717,17 @@ public enum FakeHAWebSocketMode: Equatable, Sendable {
 }
 
 public final class FakeHAWebSocketServer: @unchecked Sendable {
-    public let baseURL: URL
+    /// The loopback address assigned when start() makes the listener ready.
+    public var baseURL: URL {
+        guard let port = listener.port else {
+            preconditionFailure("Start Fake Home Assistant before requesting its address")
+        }
+        return URL(string: "\(scheme)://127.0.0.1:\(port.rawValue)\(pathPrefix)")!
+    }
     public let journal: FakeHAJournal
 
     private let listener: NWListener
+    private let scheme: String
     private let queue: DispatchQueue
     private let fixtures: FakeHAFixtures
     private let redactor: Redactor
@@ -756,20 +743,18 @@ public final class FakeHAWebSocketServer: @unchecked Sendable {
         redactor: Redactor = Redactor(),
         tlsIdentity: SecIdentity? = nil
     ) throws {
-        let endpoint = try Self.makeLoopbackListener(tlsIdentity: tlsIdentity)
-        let port = endpoint.port
-        let listener = endpoint.listener
+        let listener = try makeLoopbackListener(tlsIdentity: tlsIdentity)
         let normalizedPathPrefix = Self.normalizedPathPrefix(pathPrefix)
         let scheme = tlsIdentity == nil ? "http" : "https"
 
         self.listener = listener
+        self.scheme = scheme
         self.fixtures = fixtures
         self.redactor = redactor
         self.mode = mode
         self.pathPrefix = normalizedPathPrefix
         self.journal = FakeHAJournal()
         self.queue = DispatchQueue(label: "dev.pearchha.fakeha.websocket")
-        self.baseURL = URL(string: "\(scheme)://127.0.0.1:\(port)\(normalizedPathPrefix)")!
     }
 
     public func start() {
@@ -1037,7 +1022,7 @@ public final class FakeHAWebSocketServer: @unchecked Sendable {
         } else {
             disconnectAfterResult = false
         }
-        Task {
+        Task { [self] in
             await journal.record(
                 FakeHAJournalEntry(
                     method: "WS",
@@ -1068,7 +1053,7 @@ public final class FakeHAWebSocketServer: @unchecked Sendable {
             receiveCommand(on: connection, buffer: nextBuffer)
             return
         }
-        Task {
+        Task { [self] in
             await journal.record(
                 FakeHAJournalEntry(
                     method: "WS",
@@ -1103,7 +1088,14 @@ public final class FakeHAWebSocketServer: @unchecked Sendable {
                     bodyText: redactor.redact(message: rawMessage)
                 )
             )
-            sendText(#"{"id":\#(id),"type":"result","success":true,"result":{"context":{"id":"fake-context"},"response":null}}"#, to: connection)
+            if let message = fixtures.serviceCallFailureMessage,
+               let data = try? JSONSerialization.data(withJSONObject: ["id": id, "type": "result", "success": false,
+                                                                     "error": ["code": "failed", "message": message]]),
+               let text = String(data: data, encoding: .utf8) {
+                sendText(text, to: connection)
+            } else {
+                sendText(#"{"id":\#(id),"type":"result","success":true,"result":{"context":{"id":"fake-context"},"response":null}}"#, to: connection)
+            }
             receiveCommand(on: connection, buffer: nextBuffer)
         }
     }
@@ -1149,8 +1141,9 @@ public final class FakeHAWebSocketServer: @unchecked Sendable {
                 #"{"id":\#(id),"type":"event","event":{"c":{"\#(eventEntityID())":{"+":\#(subscribeEntitiesStateBody)}}}}"#
             ]
         case .attributeRemovalSubscribeEntitiesChange:
+            let attributes = String(decoding: try! JSONEncoder().encode(fixtures.removedAttributeNames), as: UTF8.self)
             return [
-                #"{"id":\#(id),"type":"event","event":{"c":{"\#(eventEntityID())":{"-":{"a":["friendly_name","unit_of_measurement","current_position"]}}}}}"#
+                #"{"id":\#(id),"type":"event","event":{"c":{"\#(eventEntityID())":{"-":{"a":\#(attributes)}}}}}"#
             ]
         case .entityRemovalThenSubscribeEntitiesAddition:
             return [
@@ -1194,12 +1187,12 @@ public final class FakeHAWebSocketServer: @unchecked Sendable {
     private var subscribeEntitiesStateBody: String {
         guard
             let data = fixtures.stateChangedEventBody.data(using: .utf8),
-            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let state = object["state"] as? String
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
             return #"{"s":"0","a":{}}"#
         }
-        var compact: [String: Any] = ["s": state]
+        var compact: [String: Any] = [:]
+        if let state = object["state"] as? String { compact["s"] = state }
         if let attributes = object["attributes"] as? [String: Any] {
             compact["a"] = attributes
         }
@@ -1285,73 +1278,6 @@ public final class FakeHAWebSocketServer: @unchecked Sendable {
         default:
             return httpResponse(status: 404, reason: "Not Found", body: #"{"message":"Not found"}"#)
         }
-    }
-
-    private static func makeLoopbackListener(
-        tlsIdentity: SecIdentity? = nil,
-        maxAttempts: Int = 16
-    ) throws -> (port: UInt16, listener: NWListener) {
-        let parameters = try makeParameters(tlsIdentity: tlsIdentity)
-        for _ in 0..<maxAttempts {
-            let port = try reserveLoopbackPort()
-            do {
-                return try (port, NWListener(using: parameters, on: NWEndpoint.Port(rawValue: port)!))
-            } catch {
-                continue
-            }
-        }
-        throw FakeHAError.portReservationFailed
-    }
-
-    private static func makeParameters(tlsIdentity: SecIdentity?) throws -> NWParameters {
-        guard let tlsIdentity else {
-            return .tcp
-        }
-        guard let localIdentity = sec_identity_create(tlsIdentity) else {
-            throw FakeHAError.tlsIdentityUnavailable
-        }
-        let tls = NWProtocolTLS.Options()
-        sec_protocol_options_set_local_identity(tls.securityProtocolOptions, localIdentity)
-        return NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
-    }
-
-    private static func reserveLoopbackPort() throws -> UInt16 {
-        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
-        guard descriptor >= 0 else {
-            throw FakeHAError.portReservationFailed
-        }
-        defer {
-            close(descriptor)
-        }
-
-        var address = sockaddr_in(
-            sin_len: UInt8(MemoryLayout<sockaddr_in>.size),
-            sin_family: sa_family_t(AF_INET),
-            sin_port: 0,
-            sin_addr: in_addr(s_addr: INADDR_LOOPBACK.bigEndian),
-            sin_zero: (0, 0, 0, 0, 0, 0, 0, 0)
-        )
-
-        let bindResult = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
-                bind(descriptor, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        guard bindResult == 0 else {
-            throw FakeHAError.portReservationFailed
-        }
-
-        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let nameResult = withUnsafeMutablePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
-                getsockname(descriptor, sockaddrPointer, &length)
-            }
-        }
-        guard nameResult == 0 else {
-            throw FakeHAError.portReservationFailed
-        }
-
-        return UInt16(bigEndian: address.sin_port)
     }
 
     private static func normalizedPathPrefix(_ pathPrefix: String) -> String {

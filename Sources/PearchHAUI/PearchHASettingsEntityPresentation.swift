@@ -83,6 +83,9 @@ struct PearchHAEntityMetadataPresentation: Equatable {
             Field(label: "Entity ID", value: entity.id.rawValue, usesMonospacedFont: true),
             Field(label: "Room", value: roomName, usesMonospacedFont: false)
         ]
+        if entity.id.source == .thisMac {
+            fields.append(Field(label: LocalMacText.source.localized(), value: LocalMacText.thisMac.localized(), usesMonospacedFont: false))
+        }
         if let areaID = entity.areaID?.rawValue,
            !Self.matchesIgnoringCaseAndPunctuation(areaID, roomName) {
             fields.append(Field(label: "Area ID", value: areaID, usesMonospacedFont: true))
@@ -227,6 +230,11 @@ struct PearchHAEntityMetadataLinksPresentation: Equatable {
     let deviceURL: URL?
 
     init(baseURL: URL?, entity: DiscoveredEntity) {
+        guard entity.id.source == .homeAssistant else {
+            entitiesURL = nil
+            deviceURL = nil
+            return
+        }
         entitiesURL = Self.resolvedURL(baseURL: baseURL, path: "/config/entities")
         if let deviceID = entity.deviceID?.rawValue.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) {
             deviceURL = Self.resolvedURL(baseURL: baseURL, path: "/config/devices/device/\(deviceID)")

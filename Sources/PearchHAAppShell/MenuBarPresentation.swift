@@ -136,7 +136,7 @@ public struct PearchHAMenuBarPresenter: Sendable {
                 configuration: itemConfiguration,
                 availableEntities: availableEntities,
                 locale: locale,
-                isStale: panelSnapshot.valuesAreStale
+                isStale: panelSnapshot.valuesAreStale && entity.id.source == .homeAssistant
             )
             // A per-entity appearance always wins over the global default.
             let appearance = itemConfiguration.appearance ?? globalAppearance

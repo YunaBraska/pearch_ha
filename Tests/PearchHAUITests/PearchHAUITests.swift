@@ -14,7 +14,1063 @@ import PearchHATestSupport
 @testable import PearchHAUI
 
 @MainActor
+private final class PearchHATestPopoverPresentation {
+    let popover: PearchHAStatusPopover
+    let anchor: NSView
+    let anchorWindow: NSWindow
+    let window: NSWindow
+
+    init(model: PearchHAPanelModel) throws {
+        _ = NSApplication.shared
+        guard let visibleFrame = NSScreen.main?.visibleFrame else {
+            throw NSError(domain: "PearchHAUITests", code: 2, userInfo: [NSLocalizedDescriptionKey: "A visible screen is required for native popover tests"])
+        }
+        let anchorWindow = NSWindow(contentRect: NSRect(x: visibleFrame.midX, y: visibleFrame.maxY - 80, width: 40, height: 40),
+                                    styleMask: [.titled], backing: .buffered, defer: false)
+        anchorWindow.isReleasedWhenClosed = false
+        let anchor = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+        anchorWindow.contentView = anchor
+        anchorWindow.orderFront(nil)
+        let popover = PearchHAApplication.makePopover(model: model)
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        guard let window = popover.contentViewController?.view.window, popover.isShown else {
+            popover.close()
+            anchorWindow.close()
+            throw NSError(domain: "PearchHAUITests", code: 1, userInfo: [NSLocalizedDescriptionKey: "Popover did not present from its visible test anchor"])
+        }
+        self.popover = popover
+        self.anchor = anchor
+        self.anchorWindow = anchorWindow
+        self.window = window
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func close() {
+        popover.close()
+        popover.contentViewController = nil
+        anchorWindow.close()
+    }
+}
+
+@MainActor
 final class PearchHAUITests: XCTestCase {
+    private func entity(_ domain: String, state: String = "on", attributes: [String: ActionValue] = [:]) -> DiscoveredEntity {
+        DiscoveredEntity(id: EntityID("\(domain).office"), name: "Office \(domain)", state: state,
+                         unit: nil, areaID: "office", deviceID: nil, controlAttributes: attributes)
+    }
+
+    private func connectedModel(_ entities: [DiscoveredEntity], server: FakeHAWebSocketServer) async -> PearchHAPanelModel {
+        let rooms = [Room(id: "office", name: "Office", entities: entities)]
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: rooms) }, actionRunner: { form, action in
+            let input = HAConnectionInput(endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil), token: form.trimmedToken)
+            switch await HomeAssistantClient().callService(input, call: action) {
+            case .success: return .success
+            case let .failure(failure): return .failed(failure.description)
+            }
+        })
+        model.updateConnectionForm(urlString: server.baseURL.absoluteString, token: "fake-token")
+        await model.connect()
+        model.setPanelActive(true)
+        return model
+    }
+
+    private func applicationForTest(configStore: ConfigStore?) -> PearchHAApplication {
+        PearchHAApplication(
+            configStore: configStore,
+            connector: { _ in .success(rooms: []) },
+            protectedActionValueStore: InMemoryProtectedActionValueStore()
+        )
+    }
+
+    func testControlsDispatchAdvertisedServicePayloadsThroughWebSocket() async throws {
+        let server = try FakeHAWebSocketServer()
+        server.start()
+        defer { server.stop() }
+        let climate = entity("climate", state: "off", attributes: [
+            "supported_features": 441, "temperature": 22, "min_temp": 16, "max_temp": 30, "target_temp_step": 1,
+            "hvac_modes": .array(["cool", "heat", "off"]), "fan_modes": .array(["Auto", "Low"]),
+            "preset_modes": .array(["eco"]), "swing_modes": .array([])
+        ])
+        let entities = [climate,
+            entity("number", state: "10", attributes: ["min": 0, "max": 100, "step": 0.5]),
+            entity("select", state: "a", attributes: ["options": .array(["a", "b"])]),
+            entity("light", attributes: ["supported_features": 4, "supported_color_modes": .array(["color_temp", "xy"]),
+                                         "min_color_temp_kelvin": 2000, "max_color_temp_kelvin": 6500, "effect_list": .array(["rainbow"])]),
+            entity("fan", attributes: ["supported_features": 63, "preset_modes": .array(["auto", "sleep"])]),
+            entity("scene", state: "unknown"), entity("button", state: "unknown"), entity("automation"),
+            entity("media_player", attributes: ["supported_features": 384445, "source_list": .array(["HDMI"]), "sound_mode_list": .array(["Movie"])]),
+            entity("update", attributes: ["supported_features": 1, "in_progress": false, "skipped_version": "2.0"]),
+            entity("notify", state: "unknown")
+        ]
+        let model = await connectedModel(entities, server: server)
+        let cases: [(String, String, ActionValue?, [String: ActionValue])] = [
+            ("climate", "set_temperature.temperature", 23, ["temperature": 23]),
+            ("climate", "set_hvac_mode.hvac_mode", "cool", ["hvac_mode": "cool"]),
+            ("climate", "set_fan_mode.fan_mode", "Low", ["fan_mode": "Low"]),
+            ("climate", "set_preset_mode.preset_mode", "eco", ["preset_mode": "eco"]),
+            ("climate", "turn_on", nil, [:]),
+            ("number", "set_value.value", 12.5, ["value": 12.5]),
+            ("select", "select_option.option", "b", ["option": "b"]),
+            ("light", "turn_on.brightness_pct", 50, ["brightness_pct": 50]),
+            ("light", "turn_on.color_temp_kelvin", 3000, ["color_temp_kelvin": 3000]),
+            ("light", "turn_on.rgb_color", .array([255, 30, 0]), ["rgb_color": .array([255, 30, 0])]),
+            ("light", "turn_on.effect", "rainbow", ["effect": "rainbow"]),
+            ("fan", "turn_off", nil, [:]),
+            ("fan", "set_percentage.percentage", 60, ["percentage": 60]),
+            ("fan", "set_preset_mode.preset_mode", "sleep", ["preset_mode": "sleep"]),
+            ("fan", "oscillate.oscillating", true, ["oscillating": true]),
+            ("fan", "set_direction.direction", "reverse", ["direction": "reverse"]),
+            ("scene", "turn_on", nil, [:]), ("button", "press", nil, [:]),
+            ("automation", "turn_off", nil, ["stop_actions": false]),
+            ("automation", "trigger", nil, ["skip_condition": false]),
+            ("media_player", "media_play", nil, [:]), ("media_player", "media_pause", nil, [:]),
+            ("media_player", "media_stop", nil, [:]), ("media_player", "media_next_track", nil, [:]),
+            ("media_player", "media_previous_track", nil, [:]), ("media_player", "volume_up", nil, [:]),
+            ("media_player", "volume_down", nil, [:]),
+            ("media_player", "volume_set.volume_level", 0.4, ["volume_level": 0.4]),
+            ("media_player", "volume_mute.is_volume_muted", true, ["is_volume_muted": true]),
+            ("media_player", "select_source.source", "HDMI", ["source": "HDMI"]),
+            ("media_player", "select_sound_mode.sound_mode", "Movie", ["sound_mode": "Movie"]),
+            ("media_player", "shuffle_set.shuffle", false, ["shuffle": false]),
+            ("media_player", "repeat_set.repeat", "all", ["repeat": "all"]),
+            ("update", "install", nil, [:]), ("update", "skip", nil, [:]),
+            ("update", "clear_skipped", nil, [:]),
+            ("notify", "send_message.message", "Dinner is ready", ["message": "Dinner is ready"])
+        ]
+        for (domain, controlID, value, data) in cases {
+            let id = EntityID("\(domain).office")
+            let success = await model.setEntityControlValue(id, controlID: controlID, value: value, confirmed: true)
+            XCTAssertTrue(success, "\(domain).\(controlID): \(model.snapshot.controlActionState)")
+            let entries = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
+            let body = try XCTUnwrap(entries.last?.bodyText?.data(using: .utf8))
+            let request = try JSONDecoder().decode([String: ActionValue].self, from: body)
+            XCTAssertEqual(request["domain"], .string(domain))
+            XCTAssertEqual(request["service"], .string(String(controlID.split(separator: ".")[0])))
+            XCTAssertEqual(request["target"], .object(["entity_id": .string(id.rawValue)]))
+            XCTAssertEqual(request["service_data"], .object(data))
+        }
+        let calls = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
+        XCTAssertEqual(calls.count, cases.count)
+        XCTAssertEqual(model.snapshot.availableRooms.first?.entities.first?.controlAttributes?["temperature"], 22,
+                       "A successful command must not invent a reported target temperature")
+    }
+
+    func testUnsupportedCapabilitiesAndInvalidValuesNeverDispatch() async throws {
+        let server = try FakeHAWebSocketServer()
+        server.start()
+        defer { server.stop() }
+        let entities = [
+            entity("climate", attributes: ["supported_features": 33, "min_temp": 16, "max_temp": 30, "target_temp_step": 1, "swing_modes": .array([])]),
+            entity("number", attributes: ["min": -1, "max": 1, "step": 0.5]),
+            entity("select", attributes: ["options": .array(["a", "b"])]),
+            entity("light", attributes: ["supported_color_modes": .array(["rgb"])]),
+            entity("notify", state: "unknown"), entity("button", state: "unknown"), entity("scene", state: "unavailable"),
+            entity("update", attributes: ["supported_features": 1, "in_progress": 50])
+        ]
+        let model = await connectedModel(entities, server: server)
+        let invalid: [(String, String, ActionValue?)] = [
+            ("climate", "set_temperature.temperature", 15), ("climate", "set_temperature.temperature", 30.5),
+            ("climate", "set_temperature.temperature", 22.5), ("climate", "set_temperature.temperature", .number(.infinity)),
+            ("climate", "set_temperature.temperature", "22"), ("climate", "set_swing_mode.swing_mode", "on"),
+            ("number", "set_value.value", 0.25), ("number", "set_value.value", .number(.nan)),
+            ("select", "select_option.option", "c"), ("select", "select_option.option", nil),
+            ("light", "turn_on.rgb_color", .array([256, 0, 0])), ("light", "turn_on.rgb_color", .array([1, 2])),
+            ("light", "turn_on.rgb_color", .array([0.5, 1, 2])), ("light", "turn_on.effect", "rainbow"),
+            ("notify", "send_message.message", " \n"), ("notify", "send_message.message", 123),
+            ("button", "press", nil), ("scene", "turn_on", nil), ("update", "install", nil)
+        ]
+        for (domain, controlID, value) in invalid {
+            let accepted = await model.setEntityControlValue(EntityID("\(domain).office"), controlID: controlID, value: value)
+            XCTAssertFalse(accepted, "\(domain).\(controlID)")
+        }
+        let calls = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
+        XCTAssertTrue(calls.isEmpty)
+        for domain in ["sensor", "binary_sensor", "event", "device_tracker", "person", "sun", "weather", "zone", "conversation"] {
+            XCTAssertTrue(PearchHAEntityControlField.controls(for: entity(domain)).isEmpty, domain)
+        }
+        for attributes: [String: ActionValue] in [["min": 2, "max": 1], ["min": 0], ["min": 0, "max": 1, "step": 0]] {
+            XCTAssertTrue(PearchHAEntityControlField.controls(for: entity("number", attributes: attributes)).isEmpty)
+        }
+        XCTAssertTrue(PearchHAEntityControlField.controls(for: entity("select", attributes: ["options": .array([])])).isEmpty)
+        XCTAssertTrue(PearchHAEntityControlField.controls(for: entity("light", attributes: ["supported_color_modes": .array(["onoff"])] )).isEmpty)
+    }
+
+    func testRangeTemperaturePreservesOtherEndpointAndHonorsBounds() throws {
+        let fields = PearchHAEntityControlField.controls(for: entity("climate", attributes: [
+            "supported_features": 518, "min_temp": 5, "max_temp": 30, "target_temp_step": 0.5,
+            "target_temp_low": 18, "target_temp_high": 24, "min_humidity": 30, "max_humidity": 70,
+            "swing_horizontal_modes": .array(["off", "on"])
+        ]))
+        let low = try XCTUnwrap(fields.first { $0.id == "set_temperature.target_temp_low" })
+        let high = try XCTUnwrap(fields.first { $0.id == "set_temperature.target_temp_high" })
+        XCTAssertEqual(low.actionSpec(value: 19.5)?.serviceData, ["target_temp_low": 19.5, "target_temp_high": 24])
+        XCTAssertEqual(high.actionSpec(value: 25)?.serviceData, ["target_temp_low": 18, "target_temp_high": 25])
+        XCTAssertNil(low.actionSpec(value: 25))
+        XCTAssertNil(high.actionSpec(value: 17))
+        XCTAssertTrue(fields.contains { $0.id == "set_humidity.humidity" })
+        XCTAssertTrue(fields.contains { $0.id == "set_swing_horizontal_mode.swing_horizontal_mode" })
+        XCTAssertTrue(PearchHAEntityControlField.controls(for: entity("climate", attributes: [
+            "supported_features": 2, "min_temp": 5, "max_temp": 30, "target_temp_low": 3, "target_temp_high": 24
+        ])).isEmpty)
+    }
+
+    func testLiveCapabilityChangesInvalidateAnOpenControl() async throws {
+        let server = try FakeHAWebSocketServer()
+        server.start()
+        defer { server.stop() }
+        let model = await connectedModel([entity("select", state: "a", attributes: ["options": .array(["a", "b"])])], server: server)
+        XCTAssertTrue(model.applyLiveState(EntityState(id: "select.office", name: "Office select", state: "a", unit: nil,
+                                                      controlAttributes: ["options": .array(["a"])])))
+        let stale = await model.setEntityControlValue("select.office", controlID: "select_option.option", value: "b")
+        XCTAssertFalse(stale)
+        let accepted = await model.setEntityControlValue("select.office", controlID: "select_option.option", value: "a")
+        XCTAssertTrue(accepted)
+        let calls = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
+        XCTAssertEqual(calls.count, 1)
+    }
+
+    func testFailurePreservesReportedValuesAndAllowsRetry() async throws {
+        let entities = [entity("number", state: "10", attributes: ["min": 0, "max": 100, "step": 1])]
+        let rooms = [Room(id: "office", name: "Office", entities: entities)]
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: rooms) }, actionRunner: { _, _ in .failed("Permission denied") })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        for _ in 0..<2 {
+            let success = await model.setEntityControlValue("number.office", controlID: "set_value.value", value: 20)
+            XCTAssertFalse(success)
+            XCTAssertEqual(model.snapshot.availableRooms.first?.entities.first?.state, "10")
+            XCTAssertEqual(model.snapshot.controlActionState.failureMessage(for: "number.office"), "Permission denied")
+        }
+    }
+
+    func testCancellationCannotFinishOrClearANewerControl() async {
+        let gate = ActionRunnerRecorder(results: [.success, .success], waitForRelease: true)
+        let rooms = [Room(id: "office", name: "Office", entities: [entity("scene", state: "unknown")])]
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: rooms) }, actionRunner: { form, action in await gate.run(form: form, action: action) })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let first = Task { await model.setEntityControlValue("scene.office", controlID: "turn_on") }
+        await spinUntil { await gate.callCount() == 1 }
+        XCTAssertFalse(model.startEntityControlValue("scene.office", controlID: "turn_on"))
+        model.cancelInFlightAction()
+        XCTAssertEqual(model.snapshot.controlActionState, .idle)
+        let second = Task { await model.setEntityControlValue("scene.office", controlID: "turn_on") }
+        await spinUntil { await gate.callCount() == 2 }
+        await gate.releaseNext()
+        let firstResult = await first.value
+        XCTAssertFalse(firstResult)
+        XCTAssertEqual(model.snapshot.controlActionState, .running(entityID: "scene.office"))
+        await gate.releaseNext()
+        let secondResult = await second.value
+        XCTAssertTrue(secondResult)
+        XCTAssertEqual(model.snapshot.controlActionState, .idle)
+    }
+
+    func testCancellationBeforeExecutionDoesNotSendACommand() async {
+        let rooms = [Room(id: "office", name: "Office", entities: [entity("scene", state: "unknown")])]
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: rooms) }, actionRunner: { _, _ in
+            XCTFail("Cancelled pending controls must not reach the action runner")
+            return .success
+        })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let task = Task { await model.setEntityControlValue("scene.office", controlID: "turn_on") }
+        task.cancel()
+        let result = await task.value
+        XCTAssertFalse(result)
+        XCTAssertEqual(model.snapshot.controlActionState, .idle)
+    }
+
+    func testTaskCancellationClearsBusyState() async {
+        let gate = ActionRunnerRecorder(results: [.success, .success], waitForRelease: true)
+        let rooms = [Room(id: "office", name: "Office", entities: [entity("scene", state: "unknown")])]
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: rooms) }, actionRunner: { form, action in await gate.run(form: form, action: action) })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let task = Task { await model.setEntityControlValue("scene.office", controlID: "turn_on") }
+        await spinUntil { await gate.callCount() == 1 }
+        task.cancel()
+        await gate.releaseNext()
+        let result = await task.value
+        XCTAssertFalse(result)
+        XCTAssertEqual(model.snapshot.controlActionState, .idle)
+    }
+
+    func testRefreshFailureReportsCommandSentWithoutInventingState() async {
+        let rooms = [Room(id: "office", name: "Office", entities: [entity("number", state: "10", attributes: ["min": 0, "max": 100])])]
+        let connection = ConnectionResultRecorder(results: [.success(rooms: rooms), .failure(.unreachable(host: "localhost"))])
+        let model = PearchHAPanelModel(connector: { _ in await connection.next() }, actionRunner: { _, _ in .success })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let result = await model.setEntityControlValue("number.office", controlID: "set_value.value", value: 20)
+        XCTAssertTrue(result, "The command was accepted even though refreshing its state failed")
+        XCTAssertEqual(model.snapshot.availableRooms.first?.entities.first?.state, "10")
+        XCTAssertEqual(model.snapshot.controlActionState.failureMessage(for: "number.office"), "Command sent. State refresh failed; values may be stale.")
+    }
+
+    func testEditorRendersNativeControlsInBothAppearances() async throws {
+        let server = try FakeHAWebSocketServer()
+        server.start()
+        defer { server.stop() }
+        let model = await connectedModel([entity("climate", state: "off", attributes: [
+            "supported_features": 441, "temperature": 22, "current_temperature": 21.5,
+            "min_temp": 16, "max_temp": 30, "target_temp_step": 1,
+            "hvac_modes": .array(["auto", "cool", "dry", "fan_only", "heat", "off"]),
+            "fan_modes": .array(["Auto", "Low", "Medium", "High"]), "fan_mode": "Low", "preset_modes": .array(["eco"])
+        ])], server: server)
+        for (name, scheme) in [("light", ColorScheme.light), ("dark", ColorScheme.dark)] {
+            let view = NSHostingView(rootView: PearchHAEntityControlEditor(model: model, entityID: "climate.office").environment(\.colorScheme, scheme).background(Color(nsColor: .windowBackgroundColor)))
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 460), styleMask: [.titled], backing: .buffered, defer: false)
+            window.appearance = NSAppearance(named: name == "dark" ? .darkAqua : .aqua)
+            window.contentView = view
+            window.orderFront(nil)
+            try await Task.sleep(for: .milliseconds(100))
+            defer { window.orderOut(nil) }
+            view.layoutSubtreeIfNeeded()
+            XCTAssertGreaterThan(view.fittingSize.height, 200)
+            try saveControlSnapshot(view, name: "climate-\(name)")
+        }
+    }
+
+    func testSliderPreciseEntryTakesFocusFromAnotherNumber() async throws {
+        let light = DiscoveredEntity(id: "light.office", name: "Desk light", state: "on", unit: nil, areaID: "office", deviceID: nil,
+                                     controlAttributes: ["supported_color_modes": .array(["brightness"]), "brightness": 128])
+        let number = DiscoveredEntity(id: "number.office", name: "Temperature", state: "22", unit: "°C", areaID: "office", deviceID: nil,
+                                      controlAttributes: ["min": 16, "max": 30, "step": 0.5])
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: [Room(id: "office", name: "Office", entities: [light, number])]) },
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+                                      selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [light.id, number.id], isExplicit: true))
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
+        panel.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        let previousField = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
+        XCTAssertTrue(panel.makeFirstResponder(previousField))
+        try XCTUnwrap(nativeButtons(in: panel.contentView).first).performClick(nil)
+        drainPanelRunLoop()
+        let brightnessField = try XCTUnwrap(editableTextFields(in: panel.contentView).first { $0.stringValue == "50" })
+        await spinUntil { brightnessField.currentEditor() != nil }
+        XCTAssertNotNil(brightnessField.currentEditor(), "The newly opened field must receive typing immediately")
+        XCTAssertNil(previousField.currentEditor())
+    }
+
+    func testSliderControlsRevealPreciseEntryOnClick() async throws {
+        let cases: [(String, [String: ActionValue], String, Double, String)] = [
+            ("light", ["supported_color_modes": .array(["brightness"]), "brightness": 128], "50 %", 62, "brightness_pct"),
+            ("fan", ["supported_features": 1, "percentage": 40], "40 %", 62, "percentage"),
+            ("media_player", ["supported_features": 4, "volume_level": 0.4], 0.4.formatted(.number.grouping(.never)), 0.62, "volume_level"),
+            ("light", ["supported_color_modes": .array(["brightness"])], "-", 62, "brightness_pct")
+        ]
+        for (inline, textSize) in [(true, PearchHATextSize.standard), (false, .standard), (true, .maximum), (false, .maximum)] {
+            for (domain, attributes, label, target, parameter) in cases {
+                let clock = TestPearchClock()
+                let runner = ActionRunnerRecorder(results: [.success])
+                let entity = DiscoveredEntity(id: EntityID("\(domain).office"), name: "Office control", state: "on", unit: nil,
+                                              areaID: "office", deviceID: nil, controlAttributes: attributes)
+                let model = PearchHAPanelModel(connector: { _ in .success(rooms: [Room(id: "office", name: "Office", entities: [entity])]) },
+                                              actionRunner: { form, action in await runner.run(form: form, action: action) }, clock: clock,
+                                              bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+                                              selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
+                model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+                await model.connect()
+                model.applyDisplayPreferences(.defaults.with(textSize: textSize))
+                let presentation: PearchHATestPopoverPresentation?
+                let window: NSWindow
+                if inline {
+                    presentation = try PearchHATestPopoverPresentation(model: model)
+                    window = try XCTUnwrap(presentation).window
+                } else {
+                    presentation = nil
+                    window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 220), styleMask: [.titled], backing: .buffered, defer: false)
+                    window.contentView = NSHostingView(rootView: PearchHAEntityControlEditor(model: model, entityID: entity.id)
+                        .environment(\.pearchHATextSize, textSize))
+                }
+                window.makeKeyAndOrderFront(nil)
+                defer {
+                    if let presentation { presentation.close() }
+                    else { window.orderOut(nil); window.contentView = nil; window.contentViewController = nil }
+                }
+                drainPanelRunLoop()
+                XCTAssertTrue(editableTextFields(in: window.contentView).isEmpty, "\(domain) should show a quiet value until clicked")
+                XCTAssertTrue(nativeSteppers(in: window.contentView).isEmpty, "The slider replaces extra stepper arrows")
+                if label != "-" {
+                    try saveControlSnapshot(window.contentView, name: "\(domain)-\(inline ? "panel" : "popup")-\(textSize.rawValue)")
+                }
+                let buttons = nativeButtons(in: window.contentView)
+                XCTAssertEqual(buttons.count, 1, "The single control exposes its clickable value")
+                if inline, domain == "light" {
+                    let valueButton = try XCTUnwrap(buttons.first)
+                    let toggle = try XCTUnwrap(nativeSwitches(in: window.contentView).first)
+                    let gap = toggle.convert(toggle.bounds, to: nil).minX - valueButton.convert(valueButton.bounds, to: nil).maxX
+                    XCTAssertGreaterThanOrEqual(gap, 17, "The requested indicator must fit between the value and its switch")
+                }
+                try XCTUnwrap(buttons.first).performClick(nil)
+                drainPanelRunLoop()
+                let field = try XCTUnwrap(editableTextFields(in: window.contentView).first)
+                XCTAssertEqual(field.stringValue, label == "-" ? "" : label.replacingOccurrences(of: " %", with: ""))
+                await spinUntil("\(domain) inline=\(inline) initial=\(label): focus") { field.currentEditor() != nil }
+                XCTAssertNotNil(field.currentEditor(), "Clicking the value must focus precise entry without a second click")
+                try setNativeTextFieldDraft(target.formatted(.number.grouping(.never)), for: field, in: window)
+                await spinUntil("\(domain) inline=\(inline) initial=\(label): debounce") { await clock.sleepingTaskCount() == 1 }
+                _ = await clock.advance(by: .milliseconds(599))
+                let beforeDelay = await runner.callCount()
+                XCTAssertEqual(beforeDelay, 0)
+                _ = await clock.advance(by: .milliseconds(1))
+                await spinUntil("\(domain) inline=\(inline) initial=\(label): dispatch") { await runner.callCount() == 1 }
+                await spinUntil("\(domain) inline=\(inline) initial=\(label): completion") { model.snapshot.controlActionState == .idle }
+                drainPanelRunLoop()
+                XCTAssertTrue(editableTextFields(in: window.contentView).isEmpty, "Successful entry returns to a quiet value")
+                let actions = await runner.actions()
+                XCTAssertEqual(actions.first?.serviceData, [parameter: .number(target)])
+                _ = await clock.advance(by: .seconds(1))
+                let count = await runner.callCount()
+                XCTAssertEqual(count, 1)
+
+                try XCTUnwrap(nativeButtons(in: window.contentView).first).performClick(nil)
+                drainPanelRunLoop()
+                let canceledField = try XCTUnwrap(editableTextFields(in: window.contentView).first)
+                if label == "-" {
+                    XCTAssertEqual(canceledField.stringValue, target.formatted(.number.grouping(.never)), "Missing telemetry must retain the requested value")
+                }
+                try setNativeTextFieldDraft((target / 2).formatted(.number.grouping(.never)), for: canceledField, in: window)
+                await spinUntil("\(domain) inline=\(inline) initial=\(label): cancellation debounce") { await clock.sleepingTaskCount() == 1 }
+                try XCTUnwrap(canceledField.currentEditor() as? NSTextView).doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+                drainPanelRunLoop()
+                await spinUntil { await clock.sleepingTaskCount() == 0 }
+                XCTAssertTrue(editableTextFields(in: window.contentView).isEmpty, "Escape restores the quiet value")
+                _ = await clock.advance(by: .seconds(1))
+                let afterEscape = await runner.callCount()
+                XCTAssertEqual(afterEscape, 1)
+            }
+        }
+    }
+
+    func testCoverPositionFieldDebouncesAndMovementCancelsPendingPosition() async throws {
+        let clock = TestPearchClock()
+        let runner = ActionRunnerRecorder(results: [.success, .success, .success, .success])
+        let entity = DiscoveredEntity(id: "cover.office", name: "Office blinds", state: "open", unit: nil,
+                                      areaID: "office", deviceID: nil, currentPosition: 40)
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: [Room(id: "office", name: "Office", entities: [entity])]) },
+                                      actionRunner: { form, action in await runner.run(form: form, action: action) }, clock: clock,
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+                                      selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
+        panel.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        XCTAssertTrue(editableTextFields(in: panel.contentView).isEmpty)
+        XCTAssertTrue(nativeSteppers(in: panel.contentView).isEmpty)
+        try saveControlSnapshot(panel.contentView, name: "cover-panel")
+        XCTAssertEqual(nativeButtons(in: panel.contentView).count, 4, "Movement buttons and one clickable position value")
+        try XCTUnwrap(nativeButtons(in: panel.contentView).last).performClick(nil)
+        drainPanelRunLoop()
+        let field = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
+        XCTAssertEqual(field.stringValue, "40")
+        try setNativeTextFieldDraft("52", for: field, in: panel)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .milliseconds(599))
+        let beforeDelay = await runner.callCount()
+        XCTAssertEqual(beforeDelay, 0)
+        _ = await clock.advance(by: .milliseconds(1))
+        await spinUntil { await runner.callCount() == 1 }
+        await spinUntil { model.snapshot.controlActionState == .idle }
+        drainPanelRunLoop()
+        for (index, buttonIndex) in [1, 0, 2].enumerated() {
+            try XCTUnwrap(nativeButtons(in: panel.contentView).last).performClick(nil)
+            drainPanelRunLoop()
+            let field = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
+            try setNativeTextFieldDraft("60", for: field, in: panel)
+            await spinUntil { await clock.sleepingTaskCount() == 1 }
+            let buttons = nativeButtons(in: panel.contentView)
+            XCTAssertEqual(buttons.count, 3, "The cover row exposes Open, Stop and Close in that order")
+            try XCTUnwrap(buttons.indices.contains(buttonIndex) ? buttons[buttonIndex] : nil).performClick(nil)
+            drainPanelRunLoop()
+            await spinUntil { await runner.callCount() == index + 2 }
+            await spinUntil { model.snapshot.controlActionState == .idle }
+            await spinUntil { await clock.sleepingTaskCount() == 0 }
+            _ = await clock.advance(by: .seconds(1))
+            let count = await runner.callCount()
+            XCTAssertEqual(count, index + 2, "Movement must cancel the pending position rather than sending it later")
+        }
+        let actions = await runner.actions()
+        XCTAssertEqual(actions.map(\.service), ["set_cover_position", "stop_cover", "open_cover", "close_cover"])
+        XCTAssertEqual(actions.first?.serviceData, ["position": 52])
+    }
+
+    func testRequestedNumberSurvivesSubmissionAndPanelRecreationUntilNextReport() async throws {
+        let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+        let refreshEntered = ConnectionGate()
+        let refreshRelease = ConnectionGate()
+        let calls = CallCounter()
+        let entity = DiscoveredEntity(id: "number.office", name: "Target temperature", state: "27", unit: "°C",
+                                      areaID: "office", deviceID: nil, controlAttributes: ["min": 16, "max": 30, "step": 1])
+        let model = PearchHAPanelModel(connector: { _ in
+            if await calls.next() > 1 {
+                await refreshEntered.open()
+                await refreshRelease.wait()
+            }
+            return .success(rooms: [Room(id: "office", name: "Office", entities: [entity])])
+        }, actionRunner: { form, action in await runner.run(form: form, action: action) }, clock: TestPearchClock(),
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+                                      selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        var presentation = try PearchHATestPopoverPresentation(model: model)
+        var panel = presentation.window
+        defer { presentation.close() }
+        panel.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        let field = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
+        let idleFrame = field.convert(field.bounds, to: nil)
+        try setNativeTextFieldValue("30", for: field, in: panel)
+        await spinUntil { await runner.callCount() == 1 }
+        drainPanelRunLoop()
+        XCTAssertEqual(field.stringValue, "30", "Submitting must retain the requested value while HA has not reported again")
+        XCTAssertEqual(field.convert(field.bounds, to: nil), idleFrame, "Waiting for HA must not move or resize the control")
+        XCTAssertEqual(model.snapshot.availableRooms.first?.entities.first?.state, "27", "Requested values are not reported telemetry")
+
+        await runner.releaseNext()
+        await refreshEntered.wait()
+        presentation.close()
+        presentation = try PearchHATestPopoverPresentation(model: model)
+        panel = presentation.window
+        panel.makeKeyAndOrderFront(nil)
+        try await Task.sleep(for: .milliseconds(100))
+        drainPanelRunLoop()
+        let reopenedField = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
+        XCTAssertEqual(model.requestedControlValue(for: entity.id, controlID: "set_value.value"), 30)
+        XCTAssertEqual(reopenedField.stringValue, "30", "A recreated panel must retain the request until the next report")
+        XCTAssertEqual(reopenedField.convert(reopenedField.bounds, to: nil), idleFrame)
+        try saveControlSnapshot(panel.contentView, name: "requested-number-panel")
+
+        await refreshRelease.open()
+        await spinUntil { model.snapshot.controlActionState == .idle }
+        drainPanelRunLoop()
+        XCTAssertNil(model.requestedControlValue(for: entity.id, controlID: "set_value.value"))
+        let reportedField = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
+        XCTAssertEqual(reportedField.stringValue, "27", "The next report wins, even when unchanged or different from the request")
+        XCTAssertEqual(reportedField.convert(reportedField.bounds, to: nil), idleFrame, "Clearing the request must not move or resize the control")
+        try saveControlSnapshot(panel.contentView, name: "reported-number-panel")
+    }
+
+    func testRequestedValuesEndOnTheNextReportWithoutRequiringAMatch() async {
+        let cases: [(DiscoveredEntity, String, ActionValue)] = [
+            (entity("climate", state: "heat", attributes: ["hvac_modes": .array(["heat", "dry"])]), "set_hvac_mode.hvac_mode", "dry"),
+            (entity("select", state: "Celsius", attributes: ["options": .array(["Celsius", "Fahrenheit"])]), "select_option.option", "Fahrenheit"),
+            (entity("number", state: "27", attributes: ["min": 16, "max": 30, "step": 1]), "set_value.value", 30),
+            (entity("fan", attributes: ["supported_features": 2, "oscillating": false]), "oscillate.oscillating", true),
+            (entity("light", attributes: ["supported_color_modes": .array(["rgb"]), "rgb_color": .array([1, 2, 3])]), "turn_on.rgb_color", .array([4, 5, 6]))
+        ]
+        for (entity, controlID, value) in cases {
+            let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+            let model = PearchHAPanelModel(connector: { _ in .success(rooms: [Room(id: "office", name: "Office", entities: [entity])]) },
+                                          actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                          bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+            model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+            await model.connect()
+            model.setPanelActive(true)
+            let task = Task { await model.setEntityControlValue(entity.id, controlID: controlID, value: value) }
+            await spinUntil { await runner.callCount() == 1 }
+            XCTAssertEqual(model.requestedControlValue(for: entity.id, controlID: controlID), value)
+            XCTAssertFalse(model.applyLiveState(EntityState(id: "sensor.other", name: "Other", state: "0", unit: nil)))
+            XCTAssertTrue(model.hasRequestedControls(for: entity.id))
+            XCTAssertTrue(model.applyLiveState(EntityState(id: entity.id, name: entity.name, state: entity.state, unit: entity.unit,
+                                                           controlAttributes: entity.controlAttributes)))
+            XCTAssertFalse(model.hasRequestedControls(for: entity.id), "An unchanged report also ends the request for \(controlID)")
+            await runner.releaseNext()
+            let sent = await task.value
+            XCTAssertTrue(sent)
+            XCTAssertFalse(model.hasRequestedControls(for: entity.id), "Service acceptance must not resurrect an already reported request")
+        }
+    }
+
+    func testLightBrightnessRequestEndsOnRefreshedValueWithoutLiveUpdates() async throws {
+        let initial = entity("light", state: "off", attributes: ["supported_color_modes": .array(["brightness"]), "brightness": .null])
+        let reported = entity("light", attributes: ["supported_color_modes": .array(["brightness"]), "brightness": 158])
+        let connector = ConnectionResultRecorder(results: [
+            .success(rooms: [Room(id: "office", name: "Office", entities: [initial])]),
+            .success(rooms: [Room(id: "office", name: "Office", entities: [reported])])
+        ])
+        let runner = ActionRunnerRecorder(results: [.success, .success], waitForRelease: true)
+        let model = PearchHAPanelModel(connector: { _ in await connector.next() },
+                                      actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let task = Task { await model.setEntityControlValue(initial.id, controlID: "turn_on.brightness_pct", value: 62) }
+        await spinUntil { await runner.callCount() == 1 }
+        XCTAssertEqual(model.requestedControlValue(for: initial.id, controlID: "turn_on.brightness_pct"), 62)
+        await runner.releaseNext()
+        let sent = await task.value
+        XCTAssertTrue(sent)
+        XCTAssertEqual(model.snapshot.availableRooms.first?.entities.first?.controlAttributes?["brightness"], 158)
+        XCTAssertFalse(model.hasRequestedControls(for: initial.id), "The new REST brightness must retire the request even with unchanged entity IDs")
+        XCTAssertTrue(model.startEntityControlToggle(initial.id, isOn: false), "Control validation must use the refreshed on state")
+        await spinUntil { await runner.callCount() == 2 }
+        await runner.releaseNext()
+        await spinUntil { model.snapshot.controlActionState == .idle }
+        let actions = await runner.actions()
+        XCTAssertEqual(actions.last?.service, "turn_off", "The newly reported light must be switchable off")
+    }
+
+    func testLightBrightnessRequestEndsWhenHomeAssistantReportsOff() async throws {
+        let initial = entity("light", attributes: ["supported_color_modes": .array(["brightness"]), "brightness": 128])
+        for brightness: ActionValue? in [nil, .null, 0, 128] {
+            for useLiveReport in [false, true] {
+                var attributes: [String: ActionValue] = ["supported_color_modes": .array(["brightness"])]
+                attributes["brightness"] = brightness
+                let reported = entity("light", state: "off", attributes: attributes)
+                let connector = ConnectionResultRecorder(results: [
+                    .success(rooms: [Room(id: "office", name: "Office", entities: [initial])]),
+                    .success(rooms: [Room(id: "office", name: "Office", entities: [reported])])
+                ])
+                let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+                let model = PearchHAPanelModel(connector: { _ in await connector.next() },
+                                              actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                              bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+                model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+                await model.connect()
+                model.setPanelActive(true)
+                let task = Task { await model.setEntityControlValue(initial.id, controlID: "turn_on.brightness_pct", value: 0) }
+                await spinUntil { await runner.callCount() == 1 }
+                XCTAssertEqual(model.requestedControlValue(for: initial.id, controlID: "turn_on.brightness_pct"), 0)
+                if useLiveReport {
+                    XCTAssertTrue(model.applyLiveState(EntityState(id: reported.id, name: reported.name, state: reported.state,
+                                                                   unit: nil, controlAttributes: attributes)))
+                    XCTAssertFalse(model.hasRequestedControls(for: initial.id), "An off report must end brightness waiting")
+                }
+                await runner.releaseNext()
+                let sent = await task.value
+                XCTAssertTrue(sent)
+                XCTAssertFalse(model.hasRequestedControls(for: initial.id), "The refreshed off state must end brightness waiting")
+                let current = try XCTUnwrap(model.snapshot.availableRooms.flatMap(\.entities).first)
+                let field = try XCTUnwrap(PearchHAEntityControlField.controls(for: current).first { $0.id == "turn_on.brightness_pct" })
+                XCTAssertEqual(field.input.reportedValue, 0, "An off light has zero brightness, including when HA retains its previous setting")
+                let actions = await runner.actions()
+                XCTAssertEqual(actions, [ActionSpec(domain: "light", service: "turn_on", targetEntityID: initial.id,
+                                                    serviceData: ["brightness_pct": 0])])
+            }
+        }
+    }
+
+    func testRequestedModeIsVisibleInPanelUntilReported() async throws {
+        let entity = entity("climate", state: "heat", attributes: ["hvac_modes": .array(["heat", "dry"])])
+        let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: [Room(id: "office", name: "Office", entities: [entity])]) },
+                                      actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+                                      selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.setPanelActive(true)
+        let task = Task { await model.setEntityControlValue(entity.id, controlID: "set_hvac_mode.hvac_mode", value: "dry") }
+        await spinUntil { await runner.callCount() == 1 }
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let window = presentation.window
+        defer { presentation.close() }
+        window.makeKeyAndOrderFront(nil)
+        try await Task.sleep(for: .milliseconds(100))
+        window.contentView?.layoutSubtreeIfNeeded()
+        drainPanelRunLoop()
+        let requestedElements = accessibilityElements(in: try XCTUnwrap(window.contentView))
+        XCTAssertTrue(requestedElements.contains { $0.accessibilityLabel() == "dry" || $0.accessibilityValue() as? String == "dry" }, requestedElements.map { $0.accessibilityLabel() ?? "" }.description)
+        XCTAssertTrue(model.hasRequestedControls(for: entity.id))
+        try saveControlSnapshot(window.contentView, name: "requested-mode-panel")
+        XCTAssertTrue(model.applyLiveState(EntityState(id: entity.id, name: entity.name, state: "heat", unit: nil, controlAttributes: entity.controlAttributes)))
+        drainPanelRunLoop()
+        let reportedElements = accessibilityElements(in: try XCTUnwrap(window.contentView))
+        XCTAssertTrue(reportedElements.contains { $0.accessibilityLabel() == "heat" || $0.accessibilityValue() as? String == "heat" }, reportedElements.map { $0.accessibilityLabel() ?? "" }.description)
+        XCTAssertFalse(model.hasRequestedControls(for: entity.id))
+        await runner.releaseNext()
+        _ = await task.value
+    }
+
+    func testOlderRefreshCannotRetireANewerControlRequest() async {
+        let clock = TestPearchClock()
+        let entered = ConnectionGate()
+        let release = ConnectionGate()
+        let calls = CallCounter()
+        let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+        let entity = entity("number", state: "27", attributes: ["min": 16, "max": 30])
+        let model = PearchHAPanelModel(connector: { _ in
+            if await calls.next() == 2 {
+                await entered.open()
+                await release.wait()
+            }
+            return .success(rooms: [Room(id: "office", name: "Office", entities: [entity])])
+        }, actionRunner: { form, action in await runner.run(form: form, action: action) }, clock: clock,
+                                      bulkSyncConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.setPanelActive(true)
+        defer { model.setPanelActive(false) }
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .seconds(45))
+        await entered.wait()
+        let task = Task { await model.setEntityControlValue(entity.id, controlID: "set_value.value", value: 30) }
+        await spinUntil { await runner.callCount() == 1 }
+        await release.open()
+        await spinUntil { model.snapshot.refreshCount == 1 }
+        XCTAssertEqual(model.requestedControlValue(for: entity.id, controlID: "set_value.value"), 30)
+        XCTAssertTrue(model.applyLiveState(EntityState(id: entity.id, name: entity.name, state: "28", unit: nil, controlAttributes: entity.controlAttributes)))
+        XCTAssertFalse(model.hasRequestedControls(for: entity.id))
+        await runner.releaseNext()
+        _ = await task.value
+    }
+
+    func testRequestedValueSurvivesRefreshFailureButEndsOnCancellationOrServiceFailure() async {
+        let entity = entity("number", state: "27", attributes: ["min": 16, "max": 30])
+        let rooms = [Room(id: "office", name: "Office", entities: [entity])]
+        let connection = ConnectionResultRecorder(results: [.success(rooms: rooms), .failure(.unreachable(host: "localhost")), .success(rooms: rooms)])
+        let runner = ActionRunnerRecorder(results: [.success, .failed("Rejected"), .success], waitForRelease: true)
+        let model = PearchHAPanelModel(connector: { _ in await connection.next() },
+                                      actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let first = Task { await model.setEntityControlValue(entity.id, controlID: "set_value.value", value: 30) }
+        await spinUntil { await runner.callCount() == 1 }
+        await runner.releaseNext()
+        _ = await first.value
+        XCTAssertEqual(model.requestedControlValue(for: entity.id, controlID: "set_value.value"), 30)
+        XCTAssertNotNil(model.snapshot.controlActionState.failureMessage(for: entity.id))
+        await model.refresh()
+        XCTAssertFalse(model.hasRequestedControls(for: entity.id))
+
+        let second = Task { await model.setEntityControlValue(entity.id, controlID: "set_value.value", value: 29) }
+        await spinUntil { await runner.callCount() == 2 }
+        await runner.releaseNext()
+        _ = await second.value
+        XCTAssertFalse(model.hasRequestedControls(for: entity.id))
+        XCTAssertEqual(model.snapshot.controlActionState.failureMessage(for: entity.id), "Rejected")
+
+        let third = Task { await model.setEntityControlValue(entity.id, controlID: "set_value.value", value: 28) }
+        await spinUntil { await runner.callCount() == 3 }
+        third.cancel()
+        await runner.releaseNext()
+        _ = await third.value
+        XCTAssertFalse(model.hasRequestedControls(for: entity.id))
+        XCTAssertEqual(model.snapshot.controlActionState, .idle)
+    }
+
+    func testNumericInputsDebounceTypingInPanelAndPopup() async throws {
+        for inline in [true, false] {
+            let clock = TestPearchClock()
+            let runner = ActionRunnerRecorder(results: [.success, .success], waitForRelease: true)
+            let entity = DiscoveredEntity(id: "number.office", name: "Target temperature", state: "22", unit: "°C",
+                                          areaID: "office", deviceID: nil, controlAttributes: ["min": 16, "max": 30, "step": 0.5])
+            let model = PearchHAPanelModel(connector: { _ in .success(rooms: [Room(id: "office", name: "Office", entities: [entity])]) },
+                                          actionRunner: { form, action in await runner.run(form: form, action: action) }, clock: clock,
+                                          bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+                                          selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
+            model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+            await model.connect()
+            model.setPanelActive(true)
+            let presentation: PearchHATestPopoverPresentation?
+            let window: NSWindow
+            if inline {
+                presentation = try PearchHATestPopoverPresentation(model: model)
+                window = try XCTUnwrap(presentation).window
+            } else {
+                presentation = nil
+                window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 220), styleMask: [.titled], backing: .buffered, defer: false)
+                window.contentView = NSHostingView(rootView: PearchHAEntityControlEditor(model: model, entityID: entity.id))
+            }
+            window.makeKeyAndOrderFront(nil)
+            defer {
+                if let presentation { presentation.close() }
+                else { window.orderOut(nil); window.contentView = nil; window.contentViewController = nil }
+            }
+            drainPanelRunLoop()
+            let field = try XCTUnwrap(editableTextFields(in: window.contentView).first)
+            let idleFrame = field.convert(field.bounds, to: nil)
+            let idleSize = window.contentView?.fittingSize
+            try saveControlSnapshot(window.contentView, name: inline ? "numeric-panel" : "numeric-popup")
+            XCTAssertFalse(nativeButtons(in: window.contentView).contains { $0.title == "Set" })
+            try setNativeTextFieldDraft("23", for: field, in: window)
+            await spinUntil("numeric debounce to start") { await clock.sleepingTaskCount() == 1 }
+            _ = await clock.advance(by: .milliseconds(400))
+            try setNativeTextFieldDraft("24", for: field, in: window)
+            await spinUntil { await clock.sleepingTaskCount() == 1 }
+            _ = await clock.advance(by: .milliseconds(599))
+            await Task.yield()
+            let beforeDelay = await runner.callCount()
+            XCTAssertEqual(beforeDelay, 0)
+            XCTAssertEqual(field.stringValue, "24")
+            _ = await clock.advance(by: .milliseconds(1))
+            await spinUntil { await runner.callCount() == 1 }
+            let actions = await runner.actions()
+            XCTAssertEqual(actions, [ActionSpec(domain: "number", service: "set_value", targetEntityID: entity.id, serviceData: ["value": 24])])
+            _ = await clock.advance(by: .seconds(5))
+            await Task.yield()
+            let afterDelay = await runner.callCount()
+            XCTAssertEqual(afterDelay, 1, "Only the final edit is sent")
+
+            drainPanelRunLoop()
+            XCTAssertEqual(field.convert(field.bounds, to: nil), idleFrame, "The pending indicator must not shift the input")
+            XCTAssertEqual(window.contentView?.fittingSize, idleSize, "Waiting must not resize the panel or editor")
+            XCTAssertTrue(model.applyLiveState(EntityState(id: entity.id, name: entity.name, state: entity.state, unit: entity.unit,
+                                                           controlAttributes: entity.controlAttributes)))
+            drainPanelRunLoop()
+            XCTAssertEqual(field.convert(field.bounds, to: nil), idleFrame)
+            XCTAssertEqual(window.contentView?.fittingSize, idleSize, "A report arriving before service completion must not add a status row")
+            await runner.releaseNext()
+
+            await spinUntil { model.snapshot.controlActionState == .idle }
+            drainPanelRunLoop()
+            let stepper = try XCTUnwrap(nativeSteppers(in: window.contentView).first)
+            for _ in 0..<3 {
+                stepper.doubleValue += stepper.increment
+                XCTAssertTrue(stepper.sendAction(stepper.action, to: stepper.target))
+                drainPanelRunLoop()
+            }
+            XCTAssertEqual(field.stringValue, 23.5.formatted(.number.grouping(.never)))
+            await spinUntil { await clock.sleepingTaskCount() == 1 }
+            _ = await clock.advance(by: .milliseconds(599))
+            let duringStepping = await runner.callCount()
+            XCTAssertEqual(duringStepping, 1)
+            _ = await clock.advance(by: .milliseconds(1))
+            await spinUntil { await runner.callCount() == 2 }
+            let steppedActions = await runner.actions()
+            XCTAssertEqual(steppedActions.last?.serviceData, ["value": 23.5])
+            await runner.releaseNext()
+            await spinUntil { model.snapshot.controlActionState == .idle }
+        }
+    }
+
+    func testNumericInputCancelsInvalidUnchangedAndEscapedDrafts() async throws {
+        let clock = TestPearchClock()
+        let runner = ActionRunnerRecorder(results: [.success])
+        let entity = DiscoveredEntity(id: "number.office", name: "Target temperature", state: "22", unit: "°C",
+                                      areaID: "office", deviceID: nil, controlAttributes: ["min": 16, "max": 30, "step": 0.5])
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: [Room(id: "office", name: "Office", entities: [entity])]) },
+                                      actionRunner: { form, action in await runner.run(form: form, action: action) }, clock: clock,
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+                                      selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
+        panel.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        let field = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
+        for invalid in ["23junk", "40", 22.25.formatted(.number.grouping(.never)), "22"] {
+            try setNativeTextFieldDraft("23", for: field, in: panel)
+            await spinUntil { await clock.sleepingTaskCount() == 1 }
+            try setNativeTextFieldDraft(invalid, for: field, in: panel)
+            await spinUntil { await clock.sleepingTaskCount() == 0 }
+            _ = await clock.advance(by: .seconds(1))
+            let calls = await runner.callCount()
+            XCTAssertEqual(calls, 0)
+        }
+        try setNativeTextFieldDraft("24", for: field, in: panel)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        let editor = try XCTUnwrap(field.currentEditor() as? NSTextView)
+        editor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+        drainPanelRunLoop()
+        await spinUntil { await clock.sleepingTaskCount() == 0 }
+        _ = await clock.advance(by: .seconds(1))
+        let calls = await runner.callCount()
+        XCTAssertEqual(calls, 0)
+        XCTAssertEqual(field.stringValue, "22")
+
+        try setNativeTextFieldDraft("25", for: field, in: panel)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        try setNativeTextFieldValue("25", for: field, in: panel)
+        await spinUntil { await runner.callCount() == 1 }
+        await spinUntil { await clock.sleepingTaskCount() == 0 }
+        _ = await clock.advance(by: .seconds(1))
+        let afterEnter = await runner.callCount()
+        XCTAssertEqual(afterEnter, 1, "Enter must send immediately and cancel the delayed duplicate")
+    }
+
+    func testPanelEditsSingleNumericControlWithoutOpeningAPopover() async throws {
+        let runner = ActionRunnerRecorder(results: [.success])
+        let entity = DiscoveredEntity(id: "number.office", name: "Target temperature", state: "22", unit: "°C",
+                                      areaID: "office", deviceID: nil, controlAttributes: ["min": 16, "max": 30, "step": 0.5])
+        let rooms = [Room(id: "office", name: "Office", entities: [entity])]
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: rooms) }, actionRunner: { form, action in
+            await runner.run(form: form, action: action)
+        }, selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
+        panel.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        let view = try XCTUnwrap(panel.contentView)
+        view.layoutSubtreeIfNeeded()
+        let field = try XCTUnwrap(editableTextFields(in: view).first, "Single numeric values must be editable in the panel itself")
+        try setNativeTextFieldValue("23junk", for: field, in: panel)
+        var calls = await runner.callCount()
+        XCTAssertEqual(calls, 0)
+        try setNativeTextFieldValue(22.25.formatted(.number.grouping(.never)), for: field, in: panel)
+        calls = await runner.callCount()
+        XCTAssertEqual(calls, 0)
+        try setNativeTextFieldValue(23.5.formatted(.number.grouping(.never)), for: field, in: panel)
+        await spinUntil { await runner.callCount() == 1 }
+        let actions = await runner.actions()
+        XCTAssertEqual(actions, [ActionSpec(domain: "number", service: "set_value", targetEntityID: entity.id, serviceData: ["value": 23.5])])
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+    }
+
+    func testInlineNumericDraftSurvivesLiveUpdatesAndUsesLatestBoundsOnSubmit() async throws {
+        let clock = TestPearchClock()
+        let runner = ActionRunnerRecorder(results: [.success])
+        let entity = DiscoveredEntity(id: "number.office", name: "Target temperature", state: "22", unit: "°C",
+                                      areaID: "office", deviceID: nil, controlAttributes: ["min": 16, "max": 30, "step": 0.5])
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: [Room(id: "office", name: "Office", entities: [entity])]) },
+                                      actionRunner: { form, action in await runner.run(form: form, action: action) }, clock: clock,
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+                                      selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: [entity.id], isExplicit: true))
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
+        panel.makeKeyAndOrderFront(nil)
+        model.setPanelActive(true)
+        defer { model.setPanelActive(false) }
+        drainPanelRunLoop()
+        let view = try XCTUnwrap(panel.contentView)
+        view.layoutSubtreeIfNeeded()
+        let field = try XCTUnwrap(editableTextFields(in: view).first)
+        XCTAssertTrue(panel.makeFirstResponder(field))
+        drainPanelRunLoop()
+        let editor = try XCTUnwrap(field.currentEditor())
+        editor.string = "25"
+        field.stringValue = "25"
+        NotificationCenter.default.post(name: NSControl.textDidChangeNotification, object: field, userInfo: ["NSFieldEditor": editor])
+        drainPanelRunLoop()
+        await spinUntil("initial numeric draft timer") { await clock.sleepingTaskCount() == 1 }
+
+        XCTAssertTrue(model.applyLiveState(EntityState(id: entity.id, name: entity.name, state: "23", unit: "°C",
+                                                       controlAttributes: ["min": 16, "max": 24, "step": 0.5])))
+        drainPanelRunLoop()
+        XCTAssertEqual(field.currentEditor()?.string, "25", "A live reading must not replace an unfinished edit")
+        _ = await clock.advance(by: .seconds(1))
+        await spinUntil("invalid draft timer finishes without dispatch") { await clock.sleepingTaskCount() == 0 }
+        let callsBeforeSubmit = await runner.callCount()
+        XCTAssertEqual(callsBeforeSubmit, 0)
+        try setNativeTextFieldValue("25", for: field, in: panel)
+        let callsAfterSubmit = await runner.callCount()
+        XCTAssertEqual(callsAfterSubmit, 0, "The new maximum must reject the now-invalid draft")
+        XCTAssertEqual(field.stringValue, "23", "Leaving the field restores the latest reported reading")
+
+        try setNativeTextFieldDraft(23.5.formatted(.number.grouping(.never)), for: field, in: panel)
+        await spinUntil("next valid draft timer") { await clock.sleepingTaskCount() == 1 }
+        XCTAssertTrue(model.applyLiveState(EntityState(id: entity.id, name: entity.name, state: "unavailable", unit: "°C")))
+        drainPanelRunLoop()
+        await spinUntil("removed control cancels numeric timer") { await clock.sleepingTaskCount() == 0 }
+        _ = await clock.advance(by: .seconds(1))
+        let callsAfterRemoval = await runner.callCount()
+        XCTAssertEqual(callsAfterRemoval, 0, "Removing an unavailable control must cancel its pending edit")
+    }
+
+    func testExplicitHistorySelectionRemainsAvailableDuringTransientTracking() async {
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: selectionRooms()) }, clock: TestPearchClock())
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.beginTransientUITracking()
+        model.presentHistoryDetail("sensor.office_temperature")
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+        model.presentHistoryDetail("sensor.office_humidity")
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
+        model.endTransientUITracking()
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
+        model.dismissHistoryPopover()
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+    }
+
+    func testSettingsEntityListUpdatesWhenControlsBecomeAvailable() async throws {
+        let entity = DiscoveredEntity(id: "select.office", name: "Office mode", state: "auto", unit: nil,
+                                      areaID: "office", deviceID: nil)
+        let model = PearchHAPanelModel(connector: { _ in
+            .success(rooms: [Room(id: "office", name: "Office", entities: [entity])])
+        })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let settings = PearchHASettingsViewState(model: model)
+        settings.setActiveTab(.entities)
+        model.setPanelActive(true)
+        defer { model.setPanelActive(false) }
+        XCTAssertTrue(PearchHAEntityControlField.controls(for: try XCTUnwrap(settings.settingsSelectionTree.first?.entities.first?.entity)).isEmpty)
+
+        XCTAssertTrue(model.applyLiveState(EntityState(id: entity.id, name: entity.name, state: "auto", unit: nil,
+                                                       controlAttributes: ["options": .array(["auto", "manual"])])))
+        XCTAssertFalse(PearchHAEntityControlField.controls(for: try XCTUnwrap(model.snapshot.availableRooms.first?.entities.first)).isEmpty)
+        drainPanelRunLoop()
+        XCTAssertFalse(PearchHAEntityControlField.controls(for: try XCTUnwrap(settings.settingsSelectionTree.first?.entities.first?.entity)).isEmpty)
+
+        XCTAssertTrue(model.applyLiveState(EntityState(id: entity.id, name: entity.name, state: "auto", unit: nil,
+                                                       controlAttributes: ["options": .array(["auto", "manual", "eco"])])))
+        drainPanelRunLoop()
+        let updatedEntity = try XCTUnwrap(settings.settingsSelectionTree.first?.entities.first?.entity)
+        XCTAssertEqual(PearchHAEntityControlField.controls(for: updatedEntity).first?.input,
+                       .choice(options: ["auto", "manual", "eco"], current: "auto"))
+
+        XCTAssertTrue(model.applyLiveState(EntityState(id: entity.id, name: entity.name, state: "unavailable", unit: nil,
+                                                       controlAttributes: ["options": .array(["auto", "manual"])])))
+        drainPanelRunLoop()
+        XCTAssertTrue(PearchHAEntityControlField.controls(for: try XCTUnwrap(settings.settingsSelectionTree.first?.entities.first?.entity)).isEmpty)
+    }
+
+    func testClimateDiscoveryExposesTemperatureAndModeControls() async throws {
+        let server = try FakeHAWebSocketServer(fixtures: FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[{"entity_id":"climate.office_ac","state":"off","attributes":{"friendly_name":"Office AC","supported_features":441,"hvac_modes":["cool","heat","off"],"min_temp":16,"max_temp":30,"target_temp_step":1,"temperature":22,"current_temperature":21.5,"fan_modes":["Auto","Low","High"],"fan_mode":"Low","preset_modes":["eco"],"swing_modes":[]}}]"#
+        ))
+        server.start()
+        defer { server.stop() }
+        let input = HAConnectionInput(endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil), token: "fake-token")
+        guard case let .success(states) = await HomeAssistantClient().webSocketStates(input) else {
+            return XCTFail("Fixture discovery failed")
+        }
+        let rooms = RoomResolver().resolve(snapshot: DiscoverySnapshot(areas: [], devices: [], entities: [], states: states))
+        let entity = try XCTUnwrap(rooms.first?.entities.first)
+        let snapshot = PearchHAPanelSnapshot(connectionState: .connected, phase: .connectedData, rooms: rooms, availableRooms: rooms)
+        let labels = snapshot.accessibilityRow(for: entity).controls.map(\.label)
+        XCTAssertTrue(labels.contains("Temperature for Office AC"))
+        XCTAssertTrue(labels.contains("Mode for Office AC"))
+        XCTAssertFalse(labels.contains("Swing for Office AC"))
+    }
+
+    func testNumericControlEditorRejectsPartialNumbers() async throws {
+        let runner = ActionRunnerRecorder(results: [.success])
+        let rooms = [Room(id: "office", name: "Office", entities: [
+            DiscoveredEntity(id: "number.office", name: "Office number", state: "22", unit: nil,
+                             areaID: "office", deviceID: nil, controlAttributes: ["min": 0, "max": 100])
+        ])]
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: rooms) }, actionRunner: { form, action in
+            await runner.run(form: form, action: action)
+        })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let view = NSHostingView(rootView: PearchHAEntityControlEditor(model: model, entityID: "number.office"))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 220), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = view
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil); window.contentView = nil }
+        drainPanelRunLoop()
+        view.layoutSubtreeIfNeeded()
+        let field = try XCTUnwrap(editableTextFields(in: view).first)
+        try setNativeTextFieldValue("23junk", for: field, in: window)
+        let invalidCalls = await runner.callCount()
+        XCTAssertEqual(invalidCalls, 0)
+        try setNativeTextFieldValue(23.5.formatted(.number.grouping(.never)), for: field, in: window)
+        await spinUntil { await runner.callCount() == 1 }
+        let actions = await runner.actions()
+        XCTAssertEqual(actions, [ActionSpec(domain: "number", service: "set_value", targetEntityID: "number.office", serviceData: ["value": 23.5])])
+    }
+
     func testPanelSnapshotExposesConnectionStateSummary() {
         let snapshot = PearchHAPanelSnapshot(connectionState: .reconnecting(attempt: 2))
 
@@ -906,7 +1962,7 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.rooms.flatMap(\.entities).count, 0)
     }
 
-    func test_t_history_hover_debounces_before_provider_call() async {
+    func test_t_history_selection_debounces_before_provider_call() async {
         let clock = TestPearchClock()
         let recorder = HistoryProviderRecorder(
             results: [
@@ -919,12 +1975,13 @@ final class PearchHAUITests: XCTestCase {
                 await recorder.provide(form: form, entityID: entityID, range: range)
             },
             clock: clock,
-            historyDebounce: .seconds(1)
+            historyDebounce: .seconds(1),
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
         )
 
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        model.startHistoryHover("sensor.office_temperature", range: .hour)
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
 
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         let _hoisted9 = await recorder.callCount()
@@ -953,36 +2010,7 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.historyState.entityID, "sensor.office_temperature")
     }
 
-    func test_t_history_hover_waits_for_debounce_before_presenting_popover() async {
-        let clock = TestPearchClock()
-        let model = PearchHAPanelModel(
-            connector: { _ in .success(rooms: selectionRooms()) },
-            historyProvider: { _, entityID, range in
-                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
-            },
-            clock: clock,
-            historyDebounce: .seconds(1)
-        )
-
-        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
-        await model.connect()
-        model.startHistoryHover("sensor.office_temperature", range: .hour)
-
-        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
-        XCTAssertEqual(model.snapshot.historyState, .loading(entityID: "sensor.office_temperature", range: .hour))
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
-
-        _ = await clock.advance(by: .seconds(1))
-        await spinUntil {
-            if case .loaded = model.snapshot.historyState {
-                return true
-            }
-            return false
-        }
-        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
-    }
-
-    func test_t_history_cancel_hover_resets_loading_state() async {
+    func test_t_history_dismissal_resets_loading_state() async {
         let clock = TestPearchClock()
         let recorder = HistoryProviderRecorder(
             results: [
@@ -996,7 +2024,7 @@ final class PearchHAUITests: XCTestCase {
                 await recorder.provide(form: form, entityID: entityID, range: range)
             },
             clock: clock,
-            historyHoverGrace: .milliseconds(300)
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
         )
 
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
@@ -1157,7 +2185,8 @@ final class PearchHAUITests: XCTestCase {
         let recorder = HistoryProviderRecorder(
             results: [
                 .success(historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4)),
-                .unavailable("server hiccup")
+                .unavailable("server hiccup"),
+                .success(historySeries(entityID: "sensor.office_temperature", range: .day, value: 23))
             ]
         )
         let model = PearchHAPanelModel(
@@ -1183,16 +2212,20 @@ final class PearchHAUITests: XCTestCase {
 
         XCTAssertEqual(
             model.snapshot.historyState,
-            .loaded(historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4))
+            .stale(historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4), message: "server hiccup")
         )
         XCTAssertEqual(
             model.cachedHistorySeries(for: "sensor.office_temperature"),
             historySeries(entityID: "sensor.office_temperature", range: .day, value: 21.4),
             "a failed refetch must not evict the stale-but-displayable series"
         )
+        XCTAssertEqual(model.historyState(for: "sensor.office_temperature").statusHelp, "Failure: server hiccup")
+        await model.loadHistory("sensor.office_temperature", range: .day)
+        XCTAssertNil(model.historyState(for: "sensor.office_temperature").statusHelp)
+        XCTAssertEqual(model.snapshot.historyState, .loaded(historySeries(entityID: "sensor.office_temperature", range: .day, value: 23)))
     }
 
-    func test_t_open_history_detail_refresh_interval_reuses_cache_instead_of_refetching() async {
+    func test_t_disabled_history_sync_does_not_arm_a_separate_detail_timer() async {
         let clock = TestPearchClock()
         let recorder = HistoryProviderRecorder(
             results: [
@@ -1225,7 +2258,7 @@ final class PearchHAUITests: XCTestCase {
         let callCountAfterOpen = await recorder.callCount()
         XCTAssertEqual(callCountAfterOpen, 1)
 
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        await spinUntil { await clock.sleepingTaskCount() == 0 }
         _ = await clock.advance(by: .seconds(1))
         for _ in 0..<10 {
             await Task.yield()
@@ -1270,7 +2303,7 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.historyCacheCapacity(), 4)
     }
 
-    func test_t_clicking_a_row_selects_history_until_dismissed() async {
+    func test_t_selecting_a_preview_opens_history_until_dismissed() async {
         let clock = TestPearchClock()
         let recorder = HistoryProviderRecorder(
             results: [
@@ -1283,21 +2316,19 @@ final class PearchHAUITests: XCTestCase {
                 await recorder.provide(form: form, entityID: entityID, range: range)
             },
             clock: clock,
-            historyDebounce: .milliseconds(0),
-            historyHoverGrace: .milliseconds(300)
+            historyDebounce: .milliseconds(0)
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
-        model.toggleHistoryPin("sensor.office_temperature")
+        model.presentHistoryDetail("sensor.office_temperature")
         await spinUntil { model.snapshot.historyPresentationEntityID == "sensor.office_temperature" }
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
 
-        model.startHistoryHover("sensor.office_humidity")
+        model.presentHistoryDetail("sensor.office_humidity")
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
 
         model.dismissHistoryPopover()
-        XCTAssertNil(model.snapshot.historyPresentationEntityID)
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
     }
 
@@ -1357,8 +2388,9 @@ final class PearchHAUITests: XCTestCase {
 
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
+        model.setAllEntities(isSelected: false)
 
-        // With no visible row and no opened detail, nothing is protected.
+        // With no selected row and no opened detail, nothing is protected.
         // Capacity pressure therefore behaves like plain LRU across the loaded
         // ranges, even if one of them happens to be the entity's preview range.
         await model.loadHistory("sensor.office_temperature", range: .day)
@@ -1380,7 +2412,7 @@ final class PearchHAUITests: XCTestCase {
             historySeries(entityID: "sensor.office_temperature", range: .day, value: 22.0)
         )
     }
-    func test_t_history_hover_out_closes_loaded_and_unavailable_popovers() async {
+    func test_t_history_dismissal_closes_loaded_and_unavailable_popovers() async {
         let loadedClock = TestPearchClock()
         let loadedRecorder = HistoryProviderRecorder(
             results: [
@@ -1394,12 +2426,12 @@ final class PearchHAUITests: XCTestCase {
             },
             clock: loadedClock,
             historyDebounce: .milliseconds(0),
-            historyHoverGrace: .milliseconds(300)
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
         )
         loadedModel.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await loadedModel.connect()
 
-        loadedModel.startHistoryHover("sensor.office_temperature", range: .hour)
+        loadedModel.presentHistoryDetail("sensor.office_temperature", range: .hour)
         await spinUntil {
             if case .loaded = loadedModel.snapshot.historyState {
                 return true
@@ -1421,12 +2453,12 @@ final class PearchHAUITests: XCTestCase {
             historyProvider: { _, _, _ in .unavailable("history unavailable") },
             clock: unavailableClock,
             historyDebounce: .milliseconds(0),
-            historyHoverGrace: .milliseconds(300)
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
         )
         unavailableModel.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await unavailableModel.connect()
 
-        unavailableModel.startHistoryHover("sensor.office_temperature", range: .hour)
+        unavailableModel.presentHistoryDetail("sensor.office_temperature", range: .hour)
         await spinUntil {
             if case .unavailable = unavailableModel.snapshot.historyState {
                 return true
@@ -1446,21 +2478,20 @@ final class PearchHAUITests: XCTestCase {
         )
     }
 
-    func test_t_history_hover_out_closes_immediately() async {
+    func test_t_history_reopening_cached_detail_stays_presented() async {
         let clock = TestPearchClock()
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
             historyProvider: { _, entityID, range in
-                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
+                .success(historySeries(entityID: entityID, range: range, value: 21.4))
             },
             clock: clock,
-            historyDebounce: .milliseconds(0),
-            historyHoverGrace: .milliseconds(300)
+            historyDebounce: .milliseconds(0)
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
-        model.startHistoryHover("sensor.office_temperature", range: .hour)
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
         await spinUntil {
             if case .loaded = model.snapshot.historyState {
                 return true
@@ -1469,67 +2500,7 @@ final class PearchHAUITests: XCTestCase {
         }
 
         model.dismissHistoryPopover()
-        XCTAssertNil(model.snapshot.historyPresentationEntityID)
-        XCTAssertEqual(
-            model.snapshot.historyState,
-            .loaded(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4))
-        )
-    }
-
-    func test_t_history_keep_alive_is_a_no_op_under_explicit_selection() async {
-        let clock = TestPearchClock()
-        let model = PearchHAPanelModel(
-            connector: { _ in .success(rooms: selectionRooms()) },
-            historyProvider: { _, entityID, range in
-                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
-            },
-            clock: clock,
-            historyDebounce: .milliseconds(0),
-            historyHoverGrace: .milliseconds(300)
-        )
-        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
-        await model.connect()
-
-        model.startHistoryHover("sensor.office_temperature", range: .hour)
-        await spinUntil {
-            if case .loaded = model.snapshot.historyState {
-                return true
-            }
-            return false
-        }
-
-        model.dismissHistoryPopover()
-        XCTAssertNil(model.snapshot.historyPresentationEntityID)
-        XCTAssertEqual(
-            model.snapshot.historyState,
-            .loaded(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4))
-        )
-    }
-
-    func test_t_history_re_entering_row_cancels_pending_grace_close() async {
-        let clock = TestPearchClock()
-        let model = PearchHAPanelModel(
-            connector: { _ in .success(rooms: selectionRooms()) },
-            historyProvider: { _, entityID, range in
-                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
-            },
-            clock: clock,
-            historyDebounce: .milliseconds(0),
-            historyHoverGrace: .milliseconds(300)
-        )
-        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
-        await model.connect()
-
-        model.startHistoryHover("sensor.office_temperature", range: .hour)
-        await spinUntil {
-            if case .loaded = model.snapshot.historyState {
-                return true
-            }
-            return false
-        }
-
-        model.dismissHistoryPopover()
-        model.startHistoryHover("sensor.office_temperature", range: .hour)
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
         await spinUntil {
             if case .loaded = model.snapshot.historyState {
                 return true
@@ -1542,39 +2513,132 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
     }
 
-    func test_t_history_surface_tracking_only_closes_when_surface_leaves() async {
-        let clock = TestPearchClock()
+    func testHistoryDismissalBeforeDebounceTaskStartsRemainsDismissed() async {
+        let recorder = HistoryProviderRecorder(results: [])
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
-            historyProvider: { _, entityID, range in
-                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
+            historyProvider: { form, entityID, range in
+                await recorder.provide(form: form, entityID: entityID, range: range)
             },
-            clock: clock,
             historyDebounce: .milliseconds(0),
-            historyHoverGrace: .milliseconds(300)
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
-        model.startHistoryHover("sensor.office_temperature", range: .hour)
-        await spinUntil {
-            if case .loaded = model.snapshot.historyState {
-                return true
-            }
-            return false
-        }
-
-        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
-
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
         model.dismissHistoryPopover()
-        XCTAssertNil(model.snapshot.historyPresentationEntityID)
-        XCTAssertEqual(
-            model.snapshot.historyState,
-            .loaded(historySeries(entityID: "sensor.office_temperature", range: .hour, value: 21.4))
-        )
+        for _ in 0..<20 { await Task.yield() }
+
+        XCTAssertNil(model.snapshot.historyPresentationEntityID, "Canceled detail work must not restore the dismissed history surface")
+        XCTAssertEqual(model.snapshot.historyState, .idle)
+        let callCount = await recorder.callCount()
+        XCTAssertEqual(callCount, 0)
     }
 
-    func test_t_history_switches_immediately_between_rows_while_pointer_stays_inside_panel() async {
+    func testHistoryReplacementBeforeDebounceTaskStartsNeverRestoresOldSelection() async {
+        var presentedEntities: [EntityID] = []
+        let recorder = HistoryProviderRecorder(results: [
+            .success(historySeries(entityID: "sensor.office_humidity", range: .hour, value: 46.0))
+        ])
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { form, entityID, range in
+                await recorder.provide(form: form, entityID: entityID, range: range)
+            },
+            historyDebounce: .milliseconds(0),
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+            snapshotSink: { snapshot, _ in
+                if let entityID = snapshot.historyPresentationEntityID { presentedEntities.append(entityID) }
+            }
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
+        model.presentHistoryDetail("sensor.office_humidity", range: .hour)
+        presentedEntities.removeAll()
+        await spinUntil {
+            if case let .loaded(series) = model.snapshot.historyState { return series.entityID == "sensor.office_humidity" }
+            return false
+        }
+        for _ in 0..<20 { await Task.yield() }
+
+        XCTAssertFalse(presentedEntities.contains("sensor.office_temperature"), "Canceled detail work must not republish the replaced selection")
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
+        let callCount = await recorder.callCount()
+        XCTAssertEqual(callCount, 1)
+    }
+
+    func testRefreshRemovingPresentedHistoryEntityDismissesAndCancelsDetail() async {
+        let clock = TestPearchClock()
+        let roomsWithoutTemperature = selectionRooms().map { room in
+            Room(id: room.id, name: room.name, entities: room.entities.filter { $0.id != "sensor.office_temperature" })
+        }
+        let connections = ConnectionResultRecorder(results: [
+            .success(rooms: selectionRooms()), .success(rooms: roomsWithoutTemperature)
+        ])
+        let history = HistoryProviderRecorder(results: [])
+        let model = PearchHAPanelModel(
+            connector: { _ in await connections.next() },
+            historyProvider: { form, entityID, range in
+                await history.provide(form: form, entityID: entityID, range: range)
+            },
+            clock: clock, historyDebounce: .seconds(1),
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+
+        await model.refresh()
+
+        XCTAssertFalse(model.snapshot.availableRooms.flatMap(\.entities).contains { $0.id == "sensor.office_temperature" })
+        XCTAssertTrue(model.snapshot.rooms.flatMap(\.entities).contains { $0.id == "sensor.office_humidity" })
+        XCTAssertNil(model.snapshot.historyPresentationEntityID, "Missing detail content must reveal the rooms view")
+        XCTAssertEqual(model.snapshot.historyState, .idle)
+        await spinUntil("removed history detail cancels its debounce") { await clock.sleepingTaskCount() == 0 }
+        _ = await clock.advance(by: .seconds(2))
+        for _ in 0..<20 { await Task.yield() }
+        let historyCalls = await history.callCount()
+        XCTAssertEqual(historyCalls, 0)
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+    }
+
+    func testRefreshKeepsAvailableHistoryEntityAfterUnselectionAndUnpinning() async {
+        let clock = TestPearchClock()
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, entityID, range in
+                .success(historySeries(entityID: entityID, range: range, value: 21.4))
+            },
+            clock: clock, historyDebounce: .seconds(1),
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        XCTAssertTrue(model.setMenuBarEntity("sensor.office_temperature", isVisible: true))
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        model.setEntity("sensor.office_temperature", isSelected: false)
+        XCTAssertTrue(model.setMenuBarEntity("sensor.office_temperature", isVisible: false))
+
+        await model.refresh()
+
+        XCTAssertFalse(model.snapshot.rooms.flatMap(\.entities).contains { $0.id == "sensor.office_temperature" })
+        XCTAssertFalse(model.snapshot.menuBarDisplayConfiguration.isPromoted("sensor.office_temperature"))
+        XCTAssertTrue(model.snapshot.availableRooms.flatMap(\.entities).contains { $0.id == "sensor.office_temperature" })
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+        _ = await clock.advance(by: .seconds(1))
+        await spinUntil {
+            if case let .loaded(series) = model.snapshot.historyState { return series.entityID == "sensor.office_temperature" }
+            return false
+        }
+        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
+    }
+
+    func test_t_history_selection_switches_immediately_and_cancels_previous_load() async {
         let clock = TestPearchClock()
         let recorder = HistoryProviderRecorder(
             results: [
@@ -1589,12 +2653,12 @@ final class PearchHAUITests: XCTestCase {
             },
             clock: clock,
             historyDebounce: .seconds(1),
-            historyHoverGrace: .milliseconds(300)
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
-        model.startHistoryHover("sensor.office_temperature", range: .hour)
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: .seconds(1))
         await spinUntil {
@@ -1605,7 +2669,7 @@ final class PearchHAUITests: XCTestCase {
         }
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
 
-        model.startHistoryHover("sensor.office_humidity", range: .hour)
+        model.presentHistoryDetail("sensor.office_humidity", range: .hour)
 
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
         XCTAssertEqual(model.snapshot.historyState.entityID, "sensor.office_humidity")
@@ -1628,17 +2692,17 @@ final class PearchHAUITests: XCTestCase {
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
             historyProvider: { _, entityID, range in
-                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
+                .success(historySeries(entityID: entityID, range: range, value: 21.4))
             },
             historyDebounce: .milliseconds(0)
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
-        model.startHistoryHover("sensor.office_temperature", range: .hour)
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
         await spinUntil { model.snapshot.historyPresentationEntityID == "sensor.office_temperature" }
 
-        model.startHistoryHover("sensor.office_humidity", range: .hour)
+        model.presentHistoryDetail("sensor.office_humidity", range: .hour)
         await spinUntil { model.snapshot.historyPresentationEntityID == "sensor.office_humidity" }
 
         model.dismissHistoryPopover(ifPresenting: "sensor.office_temperature")
@@ -1646,52 +2710,20 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
     }
 
-    func test_t_history_context_menu_suppression_ignores_hover_switches() async {
+    func test_t_history_dismissal_allows_explicit_reopen() async {
         let clock = TestPearchClock()
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
             historyProvider: { _, entityID, range in
-                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
+                .success(historySeries(entityID: entityID, range: range, value: 21.4))
             },
             clock: clock,
-            historyDebounce: .milliseconds(0),
-            historyHoverGrace: .milliseconds(300)
+            historyDebounce: .milliseconds(0)
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
-        model.startHistoryHover("sensor.office_temperature", range: .hour)
-        await spinUntil {
-            if case .loaded = model.snapshot.historyState {
-                return true
-            }
-            return false
-        }
-
-        model.beginHistoryHoverSuppression()
-        model.startHistoryHover("sensor.office_humidity", range: .hour)
-        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
-
-        model.endHistoryHoverSuppression()
-        model.startHistoryHover("sensor.office_humidity", range: .hour)
-        XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_humidity")
-    }
-
-    func test_t_scroll_activity_closes_history_and_blocks_reopen_until_scroll_settles() async {
-        let clock = TestPearchClock()
-        let model = PearchHAPanelModel(
-            connector: { _ in .success(rooms: selectionRooms()) },
-            historyProvider: { _, entityID, range in
-                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
-            },
-            clock: clock,
-            historyDebounce: .milliseconds(0),
-            historyHoverGrace: .milliseconds(300)
-        )
-        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
-        await model.connect()
-
-        model.startHistoryHover("sensor.office_temperature", range: .hour)
+        model.presentHistoryDetail("sensor.office_temperature", range: .hour)
         await spinUntil {
             if case .loaded = model.snapshot.historyState {
                 return true
@@ -1700,10 +2732,10 @@ final class PearchHAUITests: XCTestCase {
         }
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
 
-        model.notePanelScrollActivity()
+        model.dismissHistoryPopover()
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
 
-        model.startHistoryHover("sensor.office_humidity", range: .hour)
+        model.presentHistoryDetail("sensor.office_humidity", range: .hour)
         await spinUntil {
             if case let .loaded(series) = model.snapshot.historyState {
                 return series.entityID == "sensor.office_humidity"
@@ -1717,7 +2749,7 @@ final class PearchHAUITests: XCTestCase {
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
             historyProvider: { _, entityID, range in
-                .success(historySeriesFixture(entityID: entityID, range: range, value: 21.4))
+                .success(historySeries(entityID: entityID, range: range, value: 21.4))
             },
             historyDebounce: .milliseconds(0)
         )
@@ -1725,13 +2757,12 @@ final class PearchHAUITests: XCTestCase {
         await model.connect()
         model.setPanelActive(true)
 
-        model.toggleHistoryPin("sensor.office_temperature")
+        model.presentHistoryDetail("sensor.office_temperature")
         await spinUntil { model.snapshot.historyPresentationEntityID == "sensor.office_temperature" }
         XCTAssertEqual(model.snapshot.historyPresentationEntityID, "sensor.office_temperature")
 
         model.setPanelActive(false)
 
-        XCTAssertNil(model.snapshot.historyPresentationEntityID)
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
         XCTAssertEqual(model.snapshot.historyState, .idle)
     }
@@ -1955,13 +2986,11 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(readout, "Bad · 01.01.70 · 7h")
     }
 
-    func testSliderValueFormattingUsesCompactPercentLabel() {
-        XCTAssertEqual(PearchHASliderValueFormatting.label(for: 42, unit: "%"), "42%")
+    func testSliderAccessibilityValueReadsPercent() {
         XCTAssertEqual(PearchHASliderValueFormatting.accessibilityValue(for: 42, unit: "%"), "42 percent")
     }
 
     func testSliderValueFormattingUsesNumericValueAndUnitWhenPresent() {
-        XCTAssertEqual(PearchHASliderValueFormatting.label(for: 21.4, unit: "°C"), "21.4 °C")
         XCTAssertEqual(PearchHASliderValueFormatting.accessibilityValue(for: 21.4, unit: "°C"), "21.4 °C")
     }
 
@@ -2446,7 +3475,7 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.entityState("switch.office_lamp"), "off")
     }
 
-    func testBuiltInControlSuccessReassertsTargetStateAfterStaleRefreshDuringInFlightAction() async {
+    func testBuiltInControlKeepsTheNextReportedStateAfterServiceAcceptance() async {
         let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
         let connector = ConnectionResultRecorder(results: [
             .success(rooms: controlRooms()),
@@ -2476,9 +3505,28 @@ final class PearchHAUITests: XCTestCase {
             model.snapshot.controlActionState == .idle
         }
 
-        XCTAssertEqual(model.entityState("switch.office_lamp"), "on")
+        XCTAssertEqual(model.entityState("switch.office_lamp"), "off")
+        XCTAssertFalse(model.hasRequestedControls(for: "switch.office_lamp"))
         let _hoisted23 = await connector.callCount()
         XCTAssertEqual(_hoisted23, 2)
+    }
+
+    func testCancelingControlPreservesItsNextReportedState() async {
+        let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: controlRooms()) },
+                                      actionRunner: { form, action in await runner.run(form: form, action: action) },
+                                      bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.setPanelActive(true)
+        XCTAssertTrue(model.startEntityControlToggle("switch.office_lamp", isOn: true))
+        await spinUntil { await runner.callCount() == 1 }
+        XCTAssertTrue(model.applyLiveState(EntityState(id: "switch.office_lamp", name: "Office lamp", state: "on", unit: nil)))
+        XCTAssertFalse(model.hasRequestedControls(for: "switch.office_lamp"))
+        model.cancelInFlightAction()
+        await runner.releaseNext()
+        XCTAssertEqual(model.entityState("switch.office_lamp"), "on", "Cancellation must not roll back an already reported value")
+        XCTAssertEqual(model.snapshot.controlActionState, .idle)
     }
 
     func testBuiltInControlSuccessIgnoresStaleLiveUpdateWhileActionIsInFlight() async {
@@ -2670,7 +3718,7 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.entityPosition("cover.office_blinds"), 42)
     }
 
-    func testBuiltInCoverPositionSuccessReassertsTargetAfterStaleRefreshDuringInFlightAction() async {
+    func testBuiltInCoverPositionKeepsTheNextReportAfterServiceAcceptance() async {
         let runner = ActionRunnerRecorder(results: [.success], waitForRelease: true)
         let connector = ConnectionResultRecorder(results: [
             .success(rooms: controlRooms()),
@@ -2701,7 +3749,8 @@ final class PearchHAUITests: XCTestCase {
         }
 
         XCTAssertEqual(model.entityState("cover.office_blinds"), "open")
-        XCTAssertEqual(model.entityPosition("cover.office_blinds"), 75)
+        XCTAssertEqual(model.entityPosition("cover.office_blinds"), 42)
+        XCTAssertFalse(model.hasRequestedControls(for: "cover.office_blinds"))
         let _hoisted30 = await connector.callCount()
         XCTAssertEqual(_hoisted30, 2)
     }
@@ -3568,6 +4617,95 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertTrue(serviceEntry?.bodyText?.contains(#""duration":15"#) == true)
     }
 
+    func testCustomActionCancellationDuringProtectedReadDoesNotSendOrOverwriteNewerAction() async {
+        for readFails in [false, true] {
+            let store = InMemoryProtectedActionValueStore()
+            let readEntered = ConnectionGate()
+            let readRelease = DispatchSemaphore(value: 0)
+            defer { readRelease.signal() }
+            let newerEntered = ConnectionGate()
+            let newerRelease = ConnectionGate()
+            let runner = ActionRunnerRecorder(results: [.success, .success])
+            let model = PearchHAPanelModel(connector: { _ in .success(rooms: selectionRooms()) },
+                actionRunner: { form, action in
+                    let result = await runner.run(form: form, action: action)
+                    if action.serviceData["marker"] == .string("newer") {
+                        await newerEntered.open()
+                        await newerRelease.wait()
+                    }
+                    return result
+                }, bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+                protectedActionValueStore: store)
+            model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+            await model.connect()
+            let first = EntityCustomAction(id: "protected-first", entityID: "sensor.office_humidity", title: "First",
+                action: ActionSpec(domain: "script", service: "turn_on", targetEntityID: "script.first", serviceData: ["pin": "493817"]))
+            let newer = EntityCustomAction(id: "newer", entityID: first.entityID, title: "Newer",
+                action: ActionSpec(domain: "script", service: "turn_on", targetEntityID: "script.newer", serviceData: ["marker": "newer"]))
+            XCTAssertTrue(model.setCustomAction(first))
+            XCTAssertTrue(model.setCustomAction(newer))
+            store.interceptNextLoad {
+                Task { await readEntered.open() }
+                readRelease.wait()
+                if readFails { throw ProtectedActionValueStoreError.invalidStoredValues }
+            }
+            let firstTask = Task { await model.runCustomAction(first.id) }
+            await spinUntil { await readEntered.isOpen }
+            firstTask.cancel()
+            model.cancelInFlightAction()
+            let newerTask = Task { await model.runCustomAction(newer.id) }
+            await spinUntil { await newerEntered.isOpen }
+            readRelease.signal()
+
+            let firstResult = await firstTask.value
+
+            XCTAssertFalse(firstResult)
+            let calls = await runner.actions()
+            XCTAssertEqual(calls, [newer.action], "A canceled protected read must not send its service request")
+            XCTAssertEqual(model.snapshot.controlActionState, .running(entityID: newer.entityID),
+                           "The canceled read must not overwrite a newer action, including when the read fails")
+            await newerRelease.open()
+            let newerResult = await newerTask.value
+            XCTAssertTrue(newerResult)
+            XCTAssertEqual(model.snapshot.controlActionState, .idle)
+        }
+    }
+
+    func testCustomActionRedactsProtectedValuesEchoedByHomeAssistant() async throws {
+        let pin = "493817"
+        let nestedSecret = "key-493817-protected"
+        let server = try FakeHAWebSocketServer(fixtures: FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#,
+            statesBody: #"[{"entity_id":"sensor.office_humidity","state":"44","attributes":{"friendly_name":"Office humidity","unit_of_measurement":"%"}}]"#,
+            serviceCallFailureMessage: "Denied PIN \(pin) and nested \(nestedSecret); try again."
+        ))
+        server.start()
+        defer { server.stop() }
+        let gateway = PearchHAAuthorizedHomeAssistantGateway()
+        let model = PearchHAPanelModel(connector: gateway.connect(form:), actionRunner: gateway.action(form:action:),
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled,
+            protectedActionValueStore: InMemoryProtectedActionValueStore())
+        model.updateConnectionForm(urlString: server.baseURL.absoluteString, token: "fake-token")
+        await model.connect()
+        let action = EntityCustomAction(id: "protected-failure", entityID: "sensor.office_humidity", title: "Arm home",
+            action: ActionSpec(domain: "alarm_control_panel", service: "alarm_arm_home", targetEntityID: "alarm_control_panel.home",
+                serviceData: ["pin": .string(pin), "steps": .array([.object(["token": .string(nestedSecret)])])]))
+        XCTAssertTrue(model.setCustomAction(action))
+        XCTAssertEqual(model.customAction(id: action.id)?.action.protectedValueReferences.count, 2)
+
+        let succeeded = await model.runCustomAction(action.id)
+
+        XCTAssertFalse(succeeded)
+        let message = try XCTUnwrap(model.snapshot.controlActionState.failureMessage(for: action.entityID))
+        XCTAssertTrue(message.contains("Denied PIN <redacted> and nested <redacted>; try again."))
+        for secret in [pin, nestedSecret] {
+            XCTAssertFalse(message.contains(secret))
+            XCTAssertFalse(model.snapshot.redactedForDiagnostics().controlActionState.failureMessage(for: action.entityID)?.contains(secret) == true)
+        }
+        let requests = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
+        XCTAssertEqual(requests.count, 1, "The protected action must reach the real service transport")
+    }
+
     func testCustomActionRunFailsExplicitlyWhenProtectedValueIsMissing() async {
         let reference: ProtectedActionValueReference = "protected-pin"
         let action = EntityCustomAction(
@@ -3833,7 +4971,7 @@ final class PearchHAUITests: XCTestCase {
             loadedConfiguration: PearchHAConfiguration(customActions: [action]),
             saveError: .writeFailed(URL(fileURLWithPath: "/tmp/pearchha-config.json"), message: "disk full")
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -3861,7 +4999,7 @@ final class PearchHAUITests: XCTestCase {
         let store = FailingConfigStore(
             loadedConfiguration: PearchHAConfiguration(customActions: [action])
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -4160,6 +5298,14 @@ final class PearchHAUITests: XCTestCase {
                 target: .entity("sensor.office_temperature"),
                 tree: tree
             ),
+            .unsupported
+        )
+        XCTAssertEqual(
+            translator.translate(source: .entity("sensor.office_temperature"), target: .entity("sensor.office_temperature"), tree: tree),
+            .unsupported
+        )
+        XCTAssertEqual(
+            translator.translate(source: .room("office"), target: .entity("sensor.office_temperature"), tree: tree),
             .unsupported
         )
     }
@@ -4762,39 +5908,24 @@ final class PearchHAUITests: XCTestCase {
 
     func test_t_cancelling_reconnect_does_not_mark_state_connected() async {
         let gate = ConnectionGate()
-        let model = PearchHAPanelModel { _ in
-            await gate.wait()
+        let calls = ConnectionFormRecorder()
+        let model = PearchHAPanelModel(connector: { form in
+            await calls.record(form)
+            if await calls.callCount() > 1 { await gate.wait() }
             return .success(rooms: selectionRooms())
-        }
-
+        }, bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
-        await gate.open()
         await model.connect()
-
-        let refreshGate = ConnectionGate()
-        let refreshing = PearchHAPanelModel { _ in
-            await refreshGate.wait()
-            return .success(rooms: selectionRooms())
-        }
-        refreshing.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
-        await refreshGate.open()
-        await refreshing.connect()
-
-        let blockedGate = ConnectionGate()
-        let blocked = PearchHAPanelModel { _ in
-            await blockedGate.wait()
-            return .success(rooms: selectionRooms())
-        }
-        blocked.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
-        await blockedGate.open()
-        await blocked.connect()
-        blocked.startRefresh()
-        await spinUntil { blocked.snapshot.connectionState == .reconnecting(attempt: 1) }
-        blocked.cancelInFlightAction()
-
-        XCTAssertEqual(blocked.snapshot.connectionState, .reconnecting(attempt: 1))
-        XCTAssertEqual(blocked.snapshot.phase, .reconnecting(attempt: 1))
-        XCTAssertTrue(blocked.snapshot.valuesAreStale)
+        let refresh = Task { await model.refresh() }
+        await spinUntil { await calls.callCount() == 2 }
+        XCTAssertEqual(model.snapshot.connectionState, .reconnecting(attempt: 1))
+        refresh.cancel()
+        model.cancelInFlightAction()
+        await gate.open()
+        await refresh.value
+        XCTAssertEqual(model.snapshot.connectionState, .reconnecting(attempt: 1))
+        XCTAssertEqual(model.snapshot.phase, .reconnecting(attempt: 1))
+        XCTAssertTrue(model.snapshot.valuesAreStale)
     }
 
     func test_t_vanished_selected_ids_are_removed_when_selection_changes() async {
@@ -4882,29 +6013,16 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertFalse(snapshot.redactedForDiagnostics().accessibilitySummary.contains("secret-token"))
     }
 
-    func testAppShellPanelCanBecomeKeyForFirstRunTextEntry() {
-        let panel = PearchHAApplication.makePanel(model: PearchHAPanelModel())
-        defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
-        }
-        let frameSize = panel.frame.size
-
-        XCTAssertTrue(panel.canBecomeKey)
-        XCTAssertTrue(panel.canBecomeMain)
-        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
-        // The panel is borderless so the SwiftUI root paints the rounded
-        // dashboard surface itself: no titlebar, no window frame/background.
-        XCTAssertTrue(panel.styleMask.contains(.borderless))
-        XCTAssertFalse(panel.styleMask.contains(.titled))
-        XCTAssertFalse(panel.isOpaque)
-        XCTAssertEqual(panel.backgroundColor, .clear)
-        XCTAssertFalse(panel.hasShadow)
-        XCTAssertTrue(panel.isFloatingPanel)
-        XCTAssertTrue(panel.hidesOnDeactivate)
-        XCTAssertNotNil(panel.contentViewController)
-        XCTAssertEqual(Int(frameSize.width.rounded()), 384)
-        XCTAssertGreaterThanOrEqual(Int(frameSize.height.rounded()), 468)
+    func testAppShellPopoverHostsKeyCapableContent() throws {
+        let presentation = try PearchHATestPopoverPresentation(model: PearchHAPanelModel())
+        defer { presentation.close() }
+        XCTAssertEqual(presentation.popover.behavior, .transient)
+        XCTAssertFalse(presentation.popover.animates)
+        XCTAssertTrue(presentation.popover.isShown)
+        XCTAssertTrue(presentation.window.canBecomeKey)
+        XCTAssertNotNil(presentation.popover.contentViewController)
+        XCTAssertEqual(Int(presentation.popover.contentSize.width.rounded()), 384)
+        XCTAssertEqual(Int(presentation.popover.contentSize.height.rounded()), 468)
     }
 
     func testAppShellConnectionFormNormalizesFrontendURLsThroughNativeTextFields() throws {
@@ -5030,58 +6148,287 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.snapshot.connectionForm.urlString, "https://ha-primary.example")
     }
 
-    func testAppShellBuiltInControlsExposeNativeSwitchAndSlider() {
+    func testAppShellBuiltInControlsExposeNativeSwitchAndCoverPositionEntry() async throws {
         let rooms = controlRooms()
-        let snapshot = PearchHAPanelSnapshot(
-            connectionState: .connected,
-            phase: .connectedData,
-            rooms: rooms,
-            availableRooms: rooms,
-            lastUpdateDescription: "Snapshot ready",
-            canRetry: true,
-            controlActionState: .failed(entityID: "switch.office_lamp", message: "planned service failure")
+        let clock = TestPearchClock()
+        let runner = ActionRunnerRecorder(results: [.success])
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: rooms) },
+            actionRunner: { form, action in await runner.run(form: form, action: action) },
+            clock: clock,
+            bulkSyncConfiguration: .disabled,
+            periodicRefreshConfiguration: .disabled
         )
-        let model = PearchHAPanelModel(snapshot: snapshot)
-        let panel = PearchHAApplication.makePanel(model: model)
-        defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
-        }
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
 
         panel.makeKeyAndOrderFront(nil)
         drainPanelRunLoop()
         panel.contentView?.layoutSubtreeIfNeeded()
+        panel.recalculateKeyViewLoop()
 
         let switches = nativeSwitches(in: panel.contentView)
-        let sliders = nativeSliders(in: panel.contentView)
-        let buttons = nativeButtons(in: panel.contentView)
         let debugSummary = nativeControlDebugSummary(in: panel.contentView)
-
-        let controlSwitch = switches.first
-        let coverSlider = sliders.first
-        let coverButtons = buttons.filter { String(describing: type(of: $0)).contains("SwiftUIAppKitButton") }
-
         XCTAssertEqual(switches.count, 3, debugSummary)
-        XCTAssertEqual(sliders.count, 1, debugSummary)
-        XCTAssertGreaterThanOrEqual(coverButtons.count, 3, debugSummary)
-        XCTAssertTrue(controlSwitch.map { String(describing: type(of: $0)).contains("PlatformSwitch") } == true, debugSummary)
-        XCTAssertTrue(coverSlider.map { String(describing: type(of: $0)).contains("CustomMarkedSlider") } == true, debugSummary)
+        let controlSwitch = try XCTUnwrap(switches.first)
+        XCTAssertTrue(panel.makeFirstResponder(controlSwitch))
+        XCTAssertTrue(panel.firstResponder === controlSwitch || panel.firstResponder === controlSwitch.currentEditor())
 
-        if let controlSwitch {
-            XCTAssertTrue(controlSwitch.acceptsFirstResponder, debugSummary)
-            XCTAssertTrue(panel.makeFirstResponder(controlSwitch))
-            let firstResponder = panel.firstResponder as AnyObject?
-            XCTAssertTrue(firstResponder === controlSwitch || firstResponder === controlSwitch.currentEditor())
+        let buttons = nativeButtons(in: panel.contentView)
+        XCTAssertEqual(buttons.count, 7, "Two sets of movement buttons and one precise position value")
+        let positionButton = try XCTUnwrap(buttons.dropFirst(3).first)
+        XCTAssertTrue(panel.makeFirstResponder(positionButton))
+        positionButton.performClick(nil)
+        drainPanelRunLoop()
+        let positionField = try XCTUnwrap(editableTextFields(in: panel.contentView).first)
+        await spinUntil { positionField.currentEditor() != nil }
+        XCTAssertEqual(positionField.stringValue, "42")
+        try setNativeTextFieldDraft("43", for: positionField, in: panel)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .milliseconds(600))
+        await spinUntil { await runner.callCount() == 1 }
+        let actions = await runner.actions()
+        XCTAssertEqual(actions, [ActionSpec(domain: "cover", service: "set_cover_position",
+                                            targetEntityID: "cover.office_blinds", serviceData: ["position": 43])])
+        try saveControlSnapshot(panel.contentView, name: "native-cover-panel")
+    }
+
+    func testAppShellSwitchesWaitForPendingCommandAndRecoverAfterFailure() async throws {
+        let runner = ActionRunnerRecorder(results: [.failed("Service unavailable")], waitForRelease: true)
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: controlRooms()) },
+            actionRunner: { form, action in await runner.run(form: form, action: action) },
+            bulkSyncConfiguration: .disabled,
+            periodicRefreshConfiguration: .disabled
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
+
+        panel.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        let switches = nativeSwitches(in: panel.contentView)
+        XCTAssertEqual(switches.count, 3)
+        let idleFrames = switches.map { $0.convert($0.bounds, to: nil) }
+        let control = try XCTUnwrap(switches.first)
+        control.performClick(nil)
+        await spinUntil { await runner.callCount() == 1 }
+        await spinUntil("every switch reflects the shared command lock") { switches.allSatisfy { !$0.isEnabled } }
+        drainPanelRunLoop()
+        XCTAssertEqual(switches.map { $0.convert($0.bounds, to: nil) }, idleFrames, "Waiting must not shift toggle controls")
+        try saveControlSnapshot(panel.contentView, name: "requested-switch-panel")
+        await runner.releaseNext()
+        await spinUntil { !model.snapshot.controlActionState.isRunning }
+        await spinUntil("switches recover after the failed command") { switches.allSatisfy(\.isEnabled) }
+        drainPanelRunLoop()
+        XCTAssertEqual(switches.map { $0.convert($0.bounds, to: nil).minX }, idleFrames.map(\.minX), "The failure message must not shift the control column")
+        XCTAssertEqual(control.state, .off)
+    }
+
+    func testAppShellLightSwitchSendsOnAndOffAfterReopeningPanel() async throws {
+        func click(_ control: NSSwitch, in panel: NSWindow) -> [String] {
+            XCTAssertTrue(control.window === panel, "Native switch must belong to the current panel")
+            control.performClick(nil)
+            NSApp.updateWindows()
+            return ["performClick:state=\(control.state.rawValue)"]
         }
-        if let slider = coverSlider {
-            XCTAssertTrue(slider.acceptsFirstResponder, debugSummary)
-            XCTAssertTrue(panel.makeFirstResponder(slider))
-            let firstResponder = panel.firstResponder as AnyObject?
-            XCTAssertTrue(firstResponder === slider || firstResponder === slider.currentEditor())
+        let server = try FakeHAWebSocketServer()
+        server.start()
+        defer { server.stop() }
+        let lamp = entity("light", state: "off", attributes: [
+            "supported_features": 44, "supported_color_modes": .array(["color_temp", "xy"]),
+            "min_color_temp_kelvin": 2000, "max_color_temp_kelvin": 6535,
+            "effect_list": .array(["off", "candle"])
+        ])
+        let model = await connectedModel([lamp], server: server)
+        for (index, service) in ["turn_on", "turn_off"].enumerated() {
+            let presentation = try PearchHATestPopoverPresentation(model: model)
+            let panel = presentation.window
+            defer { presentation.close() }
+
+            panel.makeKeyAndOrderFront(nil)
+            drainPanelRunLoop()
+            panel.contentView?.layoutSubtreeIfNeeded()
+            let control = try XCTUnwrap(nativeSwitches(in: panel.contentView).first)
+            XCTAssertTrue(control.isEnabled)
+            XCTAssertEqual(control.state, service == "turn_on" ? .off : .on)
+            let point = control.convert(NSPoint(x: control.bounds.midX, y: control.bounds.midY), to: nil)
+            let content = try XCTUnwrap(panel.contentView)
+            let hitPoint = content.superview?.convert(point, from: nil) ?? point
+            let hit = content.hitTest(hitPoint)
+            let clickTarget = "point=\(point), switchBounds=\(control.bounds), switchFrame=\(control.frame), "
+                + "visibleRect=\(control.visibleRect), hit=\(String(describing: hit)), "
+                + "hitsSwitch=\(hit === control || hit?.isDescendant(of: control) == true), "
+                + "visible=\(panel.isVisible), key=\(panel.isKeyWindow), active=\(NSApp.isActive)"
+            let deliveredEvents = click(control, in: panel)
+            await spinUntil("light switch sends \(service)") {
+                let calls = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
+                return calls.count == index + 1 && model.snapshot.controlActionState == .idle
+            }
+            let calls = await server.journal.snapshot().filter { $0.path == "/api/websocket/call_service" }
+            XCTAssertEqual(calls.count, index + 1,
+                           "\(clickTarget), delivered=\(deliveredEvents), state=\(control.state.rawValue), action=\(model.snapshot.controlActionState)")
+            let body = try XCTUnwrap(calls.last?.bodyText)
+            let payload = try JSONDecoder().decode([String: ActionValue].self, from: Data(body.utf8))
+            XCTAssertEqual(payload["domain"], "light")
+            XCTAssertEqual(payload["service"], .string(service))
+            XCTAssertEqual(payload["target"], .object(["entity_id": "light.office"]))
+            XCTAssertEqual(payload["service_data"], .object([:]))
+            XCTAssertEqual(model.snapshot.rooms.first?.entities.first?.state, service == "turn_on" ? "on" : "off")
         }
     }
 
-    func testSettingsEntitiesTabExposesNativeSearchPopupsAndKeyViewLoop() async throws {
+    func testSettingsInspectorKeepsSearchAndEntityRowsInPlace() async throws {
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: selectionRooms()) })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        var searchFrame: NSRect?
+        for id: EntityID in ["sensor.office_humidity", "sensor.office_temperature"] {
+            let window = PearchHAApplication.makeSettingsWindow(model: model, initialTab: .entities,
+                initiallyExpandedEntityIDs: [id])
+            window.setContentSize(NSSize(width: 1120, height: 700))
+            window.makeKeyAndOrderFront(nil)
+            defer { window.orderOut(nil); window.contentView = nil }
+            try await Task.sleep(for: .milliseconds(100))
+            drainPanelRunLoop()
+            let search = try XCTUnwrap(editableTextFields(in: window.contentView).first { $0.placeholderString == "Search" })
+            let unit = try XCTUnwrap(nativePopUpButtons(in: window.contentView).first { $0.title.hasPrefix("Detected") })
+            let frame = search.convert(search.bounds, to: nil)
+            XCTAssertGreaterThan(unit.convert(unit.bounds, to: nil).minX, frame.maxX,
+                                 "Entity settings must be beside the list, never inserted between its rows")
+            if let searchFrame { XCTAssertEqual(frame, searchFrame, "Changing the inspected entity preserves list geometry") }
+            searchFrame = frame
+            try saveControlSnapshot(window.contentView, name: "entity-inspector-\(id.rawValue)")
+            window.setContentSize(NSSize(width: 660, height: 560))
+            drainPanelRunLoop()
+            XCTAssertNotNil(nativePopUpButtons(in: window.contentView).first { $0.title.hasPrefix("Detected") },
+                            "The inspector stays reachable at minimum window size")
+            try saveControlSnapshot(window.contentView, name: "entity-inspector-narrow")
+        }
+    }
+
+    func testSettingsSearchHandlesMixedFiveHundredEntityInstallation() async throws {
+        let domains = ["sensor", "light", "cover", "climate", "select"]
+        let rooms = (0..<20).map { room in
+            Room(id: RoomID("room_\(room)"), name: "Room \(room)", entities: (0..<25).map { item in
+                DiscoveredEntity(id: EntityID("\(domains[item % domains.count]).room_\(room)_item_\(item)"),
+                    name: "\(item == 24 ? "Long balcony temperature · Temperatur Außenbereich" : "Device \(item)")",
+                    state: item % 17 == 0 ? "unavailable" : "21", unit: item % 5 == 0 ? "°C" : nil,
+                    areaID: AreaID("room_\(room)"), deviceID: DeviceID("device_\(room)_\(item / 3)"),
+                    controlAttributes: ["supported_features": 15, "options": .array(["Celsius", "Fahrenheit"])] )
+            })
+        }
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: rooms) },
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let start = DispatchTime.now().uptimeNanoseconds
+        let window = PearchHAApplication.makeSettingsWindow(model: model, initialTab: .entities,
+            initiallyExpandedEntityIDs: ["sensor.room_0_item_0"])
+        window.makeKeyAndOrderFront(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        let openMilliseconds = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+        defer { window.orderOut(nil); window.contentView = nil }
+        drainPanelRunLoop()
+        let search = try XCTUnwrap(editableTextFields(in: window.contentView).first { $0.placeholderString == "Search" })
+        try setNativeTextFieldValue("room_19_item_24", for: search, in: window)
+        await spinUntil { model.snapshot.selectionQuery == "room_19_item_24" }
+        XCTAssertEqual(model.settingsSelectionTree.flatMap(\.entities).map { $0.entity.id }, ["select.room_19_item_24"])
+        XCTAssertEqual(model.snapshot.availableRooms.flatMap(\.entities).count, 500, "Filtering must not discard discovery data")
+        try setNativeTextFieldValue("", for: search, in: window)
+        await spinUntil { model.snapshot.selectionQuery.isEmpty }
+        XCTAssertEqual(model.settingsSelectionTree.flatMap(\.entities).count, 500)
+        print("Settings open with 500 mixed entities: \(String(format: "%.1f", openMilliseconds)) ms")
+    }
+
+    func testStandardMenusExposeSettingsHelpAndQuit() {
+        let menu = PearchHAApplication.standardMainMenu()
+        XCTAssertEqual(menu.items.compactMap { $0.submenu?.title }, ["PearchHA", "Edit", "Window", "Help"])
+        let appMenu = menu.items.first?.submenu
+        XCTAssertEqual(appMenu?.items.first { $0.title == "Settings…" }?.keyEquivalent, ",")
+        XCTAssertEqual(appMenu?.items.first { $0.title == "Quit PearchHA" }?.keyEquivalent, "q")
+    }
+
+    func testHistoryOpensInsidePanelAndReturnsWithoutClosingPanel() async throws {
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, id, range in .success(historySeries(entityID: id, range: range, value: 44)) },
+            historyDebounce: .milliseconds(0), bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
+        panel.makeKeyAndOrderFront(nil)
+
+        model.presentHistoryDetail("sensor.office_humidity")
+        await spinUntil { if case .loaded = model.snapshot.historyState { return true }; return false }
+        try await Task.sleep(for: .milliseconds(100))
+        drainPanelRunLoop()
+        XCTAssertEqual(nativeSegmentedControls(in: panel.contentView).count, 1,
+                       "History range control is inside the same panel window")
+        try saveControlSnapshot(panel.contentView, name: "history-in-panel")
+        let sendQueuedEvent = { (event: NSEvent, mask: NSEvent.EventTypeMask) throws in
+            NSApp.postEvent(event, atStart: true)
+            let queued = try XCTUnwrap(NSApp.nextEvent(matching: mask, until: .distantPast, inMode: .default, dequeue: true))
+            XCTAssertEqual(queued.type, event.type)
+            XCTAssertEqual(queued.windowNumber, event.windowNumber)
+            NSApp.sendEvent(queued)
+        }
+        let escape = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber, context: nil,
+            characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        try sendQueuedEvent(escape, .keyDown)
+        drainPanelRunLoop()
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+        XCTAssertTrue(presentation.popover.isShown, "Escape returns to rooms first")
+        let secondEscape = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber, context: nil,
+            characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        try sendQueuedEvent(secondEscape, .keyDown)
+        await spinUntil("second Escape closes the panel") { !presentation.popover.isShown }
+        XCTAssertFalse(presentation.popover.isShown, "A second Escape closes the panel")
+
+        let screen = try XCTUnwrap(presentation.anchorWindow.screen?.visibleFrame)
+        let outsideWindow = NSWindow(contentRect: NSRect(x: screen.minX + 12, y: screen.minY + 12, width: 80, height: 60),
+                                     styleMask: [.titled], backing: .buffered, defer: false)
+        outsideWindow.isReleasedWhenClosed = false
+        outsideWindow.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 80, height: 60))
+        defer { outsideWindow.close(); outsideWindow.contentView = nil }
+        outsideWindow.orderFront(nil)
+        drainPanelRunLoop()
+        presentation.popover.show(relativeTo: presentation.anchor.bounds, of: presentation.anchor, preferredEdge: .minY)
+        let reopenedWindow = try XCTUnwrap(presentation.popover.contentViewController?.view.window)
+        reopenedWindow.makeKeyAndOrderFront(nil)
+        model.presentHistoryDetail("sensor.office_humidity")
+        await spinUntil { if case .loaded = model.snapshot.historyState { return true }; return false }
+        XCTAssertNotNil(model.snapshot.historyPresentationEntityID)
+        XCTAssertFalse(reopenedWindow.frame.intersects(outsideWindow.frame), "The outside target must be separate from the popover")
+        XCTAssertTrue(presentation.popover.isShown, "Preparing the outside target must not dismiss history")
+        // Queue the release before dispatching the press so native tracking can consume it.
+        for type: NSEvent.EventType in [.leftMouseUp, .leftMouseDown] {
+            let outsideClick = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: NSPoint(x: 20, y: 20),
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: outsideWindow.windowNumber, context: nil, eventNumber: 1,
+                clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0))
+            NSApp.postEvent(outsideClick, atStart: true)
+        }
+        let outsideDown = try XCTUnwrap(NSApp.nextEvent(matching: .leftMouseDown, until: .distantPast, inMode: .default, dequeue: true))
+        NSApp.sendEvent(outsideDown)
+        if let outsideUp = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: true) {
+            NSApp.sendEvent(outsideUp)
+        }
+        drainPanelRunLoop()
+        XCTAssertFalse(presentation.popover.isShown, "An outside click closes the popover while history is open")
+        XCTAssertNil(model.snapshot.historyPresentationEntityID)
+    }
+
+    func testSettingsEntitiesTabExposesNativeSearchUnitMenuAndKeyViewLoop() async throws {
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) }
         )
@@ -5104,30 +6451,94 @@ final class PearchHAUITests: XCTestCase {
         window.recalculateKeyViewLoop()
 
         let textFields = editableTextFields(in: window.contentView)
-        let popUpButtons = nativePopUpButtons(in: window.contentView)
-        let buttons = nativeButtons(in: window.contentView)
         let debugSummary = nativeControlDebugSummary(in: window.contentView)
         let searchField = textFields.first { $0.placeholderString == "Search" }
         let minField = textFields.first { $0.placeholderString == "0" }
         let maxField = textFields.first { $0.placeholderString == "100" }
-        let firstPopup = popUpButtons.first
+        let unitPopup = try XCTUnwrap(nativePopUpButtons(in: window.contentView).first {
+            $0.title == "Detected · Percent"
+        }, debugSummary)
 
         XCTAssertNotNil(searchField, debugSummary)
         XCTAssertNotNil(minField, debugSummary)
         XCTAssertNotNil(maxField, debugSummary)
-        XCTAssertGreaterThanOrEqual(popUpButtons.count, 4, debugSummary)
-        XCTAssertGreaterThanOrEqual(buttons.count, 4, debugSummary)
-
         if let searchField {
             XCTAssertTrue(window.makeFirstResponder(searchField), debugSummary)
             let labels = nativeKeyViewLoopLabels(startingAt: searchField)
             XCTAssertGreaterThanOrEqual(labels.count, 3, "\(labels)")
             XCTAssertTrue(labels.contains(where: { $0.contains("placeholder:Search") }), "\(labels)")
         }
-        if let firstPopup {
-            XCTAssertTrue(firstPopup.acceptsFirstResponder, debugSummary)
-            XCTAssertTrue(window.makeFirstResponder(firstPopup), debugSummary)
+        XCTAssertTrue(unitPopup.acceptsFirstResponder, debugSummary)
+        XCTAssertTrue(window.makeFirstResponder(unitPopup), debugSummary)
+    }
+
+    func testLargerTextKeepsNativeHistoryAndConnectionControlsReadable() throws {
+        for size: PearchHATextSize in [.standard, .extraLarge, .maximum] {
+            let model = PearchHAPanelModel()
+            let settings = PearchHAApplication.makeSettingsWindow(model: model, initialTab: .connection,
+                displayPreferencesProvider: { .defaults.with(textSize: size) })
+            settings.setContentSize(NSSize(width: 660, height: 560))
+            settings.makeKeyAndOrderFront(nil)
+            defer { settings.orderOut(nil); settings.contentViewController = nil }
+            drainPanelRunLoop()
+            let address = try XCTUnwrap(editableTextFields(in: settings.contentView).first)
+            XCTAssertEqual(try XCTUnwrap(address.font).pointSize, 13 * size.scale, accuracy: 0.1)
+            XCTAssertTrue(settings.makeFirstResponder(address))
+            let frame = address.convert(address.bounds, to: settings.contentView)
+            XCTAssertLessThanOrEqual(frame.maxX, try XCTUnwrap(settings.contentView).bounds.maxX)
+            try saveControlSnapshot(settings.contentView, name: "text-connection-\(size.rawValue)")
+
+            for (scheme, increasedContrast) in [(ColorScheme.light, false), (.dark, false), (.light, true), (.dark, true)] {
+                let history = NSHostingView(rootView: PearchHAHistoryPopoverContent(
+                    entityID: "sensor.temperature", entityName: "Außentemperatur im Schlafzimmer",
+                    valueText: "24.5 °C", state: .loaded(HistorySeries(entityID: "sensor.temperature", range: .day, samples: [])),
+                    increaseContrastOverride: increasedContrast,
+                    selectedRange: .constant(.day))
+                    .environment(\.pearchHATextSize, size).environment(\.colorScheme, scheme))
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 280 + 140 * (size.scale - 1), height: 350),
+                                      styleMask: [.titled], backing: .buffered, defer: true)
+                window.contentView = history
+                window.makeKeyAndOrderFront(nil)
+                defer { window.orderOut(nil); window.contentView = nil }
+                drainPanelRunLoop()
+                let ranges = try XCTUnwrap(nativeSegmentedControls(in: history).first)
+                XCTAssertEqual(try XCTUnwrap(ranges.font).pointSize, 11 * size.scale, accuracy: 0.1)
+                XCTAssertEqual(ranges.segmentCount, 4)
+                let bezel = try XCTUnwrap(ranges.selectedSegmentBezelColor?.usingColorSpace(.sRGB))
+                let luminance = zip([bezel.redComponent, bezel.greenComponent, bezel.blueComponent], [0.2126, 0.7152, 0.0722])
+                    .reduce(0.0) { result, channel in
+                        let value = channel.0 <= 0.04045 ? channel.0 / 12.92 : pow((channel.0 + 0.055) / 1.055, 2.4)
+                        return result + value * channel.1
+                    }
+                XCTAssertGreaterThanOrEqual(1.05 / (luminance + 0.05), increasedContrast ? 7 : 4.5,
+                                            "The native selected segment has a white label")
+                XCTAssertTrue(window.makeFirstResponder(ranges))
+                XCTAssertLessThanOrEqual(ranges.convert(ranges.bounds, to: history).maxX, history.bounds.maxX)
+                try saveControlSnapshot(history, name: "text-history-\(size.rawValue)-\(scheme == .dark ? "dark" : "light")-\(increasedContrast ? "contrast" : "normal")")
+            }
         }
+    }
+
+    func testLargerTextKeepsInspectorBoundsEditableAtMinimumWindowWidth() async throws {
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: selectionRooms()) })
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        let window = PearchHAApplication.makeSettingsWindow(model: model, initialTab: .entities,
+            initiallyExpandedEntityIDs: ["sensor.office_humidity"],
+            displayPreferencesProvider: { .defaults.with(textSize: .maximum) })
+        window.setContentSize(NSSize(width: 660, height: 560))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil); window.contentViewController = nil }
+        drainPanelRunLoop()
+        let content = try XCTUnwrap(window.contentView)
+        for placeholder in ["0", "100"] {
+            let field = try XCTUnwrap(editableTextFields(in: content).first { $0.placeholderString == placeholder })
+            XCTAssertTrue(window.makeFirstResponder(field))
+            XCTAssertGreaterThanOrEqual(field.bounds.width, 120)
+            XCTAssertLessThanOrEqual(field.convert(field.bounds, to: content).maxX, content.bounds.maxX)
+            XCTAssertGreaterThanOrEqual(try XCTUnwrap(field.font).pointSize, 20)
+        }
+        try saveControlSnapshot(content, name: "text-inspector-200")
     }
 
     func testHistoryPopoverExposesNativeRangeControlAndFocus() {
@@ -5255,11 +6666,9 @@ final class PearchHAUITests: XCTestCase {
         await model.connect()
         XCTAssertTrue(model.setCustomAction(sensorCustomAction(requiresConfirmation: true)))
 
-        let panel = PearchHAApplication.makePanel(model: model)
-        defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
-        }
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
 
         panel.makeKeyAndOrderFront(nil)
         drainPanelRunLoop()
@@ -5279,7 +6688,7 @@ final class PearchHAUITests: XCTestCase {
     }
 
     func test_t_app_shell_launch_wires_status_item_panel_and_cleanup() {
-        let application = PearchHAApplication()
+        let application = applicationForTest(configStore: nil)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -5294,10 +6703,8 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertTrue(snapshot.statusItemHasAction)
         XCTAssertTrue(snapshot.hasPanel)
         XCTAssertTrue(snapshot.hasPanelModel)
-        XCTAssertTrue(snapshot.panelCanBecomeKey)
-        XCTAssertTrue(snapshot.panelCanBecomeMain)
-        XCTAssertTrue(snapshot.panelIsFloating)
-        XCTAssertTrue(snapshot.panelHidesOnDeactivate)
+        XCTAssertTrue(snapshot.panelIsTransient)
+        XCTAssertFalse(snapshot.panelIsShown)
         XCTAssertEqual(snapshot.panelContentWidth, 384)
         XCTAssertEqual(snapshot.panelContentHeight, 468)
         XCTAssertEqual(snapshot.selectedEntityIDs, [])
@@ -5312,6 +6719,56 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertFalse(application.snapshot.statusItemHasImage)
         XCTAssertFalse(application.snapshot.hasPanel)
         XCTAssertFalse(application.snapshot.hasPanelModel)
+    }
+
+    func testSettingsImportSurvivesPendingSavesAndRelaunch() throws {
+        let destination = temporaryConfigURL()
+        let source = temporaryConfigURL()
+        defer {
+            try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: source.deletingLastPathComponent())
+        }
+        let store = JSONConfigStore(fileURL: destination)
+        try store.save(.empty)
+        let imported = PearchHAConfiguration(
+            selectedEntityIDs: ["sensor.office_humidity"],
+            menuBarEntityIDs: ["sensor.office_humidity"],
+            isEntitySelectionExplicit: true,
+            themeMode: .dark
+        )
+        try JSONConfigStore(fileURL: source).save(imported)
+        let sourceBytes = try Data(contentsOf: source)
+        let application = applicationForTest(configStore: store)
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        let importedSnapshot = try store.readImport(from: source)
+        XCTAssertEqual(application.importSettings(importedSnapshot), .saved)
+        // A disappearing Settings view or a late model callback must not write
+        // its pre-import snapshot while the application is quitting.
+        XCTAssertNotEqual(application.persist(displayPreferences: .defaults), .saved)
+        XCTAssertNotEqual(application.persist(selection: PearchHAConfiguration.empty.selectionConfiguration), .saved)
+        XCTAssertNotEqual(application.persist(menuBarDisplayConfiguration: PearchHAConfiguration.empty.menuBarDisplayConfiguration), .saved)
+        XCTAssertNotEqual(application.persist(customActionConfiguration: PearchHAConfiguration.empty.customActionConfiguration), .saved)
+        application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        XCTAssertEqual(try store.load(), imported)
+        XCTAssertEqual(try Data(contentsOf: source), sourceBytes)
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer { application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification)) }
+        XCTAssertEqual(application.snapshot.selectedEntityIDs, imported.selectedEntityIDs)
+        XCTAssertEqual(application.displayPreferences.themeMode, .dark)
+        XCTAssertEqual(application.persist(displayPreferences: .defaults), .saved)
+    }
+
+    func testSettingsImportFailureKeepsCurrentConfigurationEditable() throws {
+        let destination = temporaryConfigURL()
+        defer { try? FileManager.default.removeItem(at: destination.deletingLastPathComponent()) }
+        let store = JSONConfigStore(fileURL: destination)
+        try store.save(.empty)
+        let application = applicationForTest(configStore: store)
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer { application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification)) }
+        XCTAssertNotEqual(application.importSettings(PearchHAConfiguration(schemaVersion: 99)), .saved)
+        XCTAssertEqual(try store.load(), .empty)
+        XCTAssertEqual(application.persist(displayPreferences: .defaults), .saved)
     }
 
     func test_t_app_shell_launch_loads_selection_config() throws {
@@ -5330,7 +6787,7 @@ final class PearchHAUITests: XCTestCase {
             )
         )
 
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -5495,6 +6952,7 @@ final class PearchHAUITests: XCTestCase {
     }
 
     func test_t_app_shell_persists_and_reloads_display_preferences() async throws {
+        _ = NSApplication.shared
         let url = temporaryConfigURL()
         defer {
             try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
@@ -5504,7 +6962,22 @@ final class PearchHAUITests: XCTestCase {
             configStore: store,
             connector: { _ in .success(rooms: selectionRooms()) }
         )
+        let previousAppearance = NSApp.appearance
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+            NSApp.appearance = previousAppearance
+        }
+        XCTAssertEqual(application.persist(displayPreferences: application.displayPreferences.with(themeMode: .light)), .saved)
+        let button = try XCTUnwrap(NSApp.windows.flatMap { nativeViews(in: $0.contentView, of: NSStatusBarButton.self) }
+            .first { $0.target === application })
+        await spinUntil("the shell status anchor is visible") { button.window?.isVisible == true && !button.visibleRect.isEmpty }
+        drainPanelRunLoop()
+        let existingWindows = Set(NSApp.windows.map(\.windowNumber))
+        button.performClick(nil)
+        XCTAssertTrue(application.snapshot.panelIsShown)
+        let contentWindow = try XCTUnwrap(NSApp.windows.first { !existingWindows.contains($0.windowNumber) && $0.isVisible })
+        XCTAssertEqual(contentWindow.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .aqua)
 
         let preferences = PearchHADisplayPreferences(
             menuBarAppearance: .iconOnly,
@@ -5521,6 +6994,15 @@ final class PearchHAUITests: XCTestCase {
         )
         XCTAssertEqual(application.persist(displayPreferences: preferences), .saved)
         XCTAssertEqual(application.displayPreferences, preferences)
+        drainPanelRunLoop()
+        XCTAssertEqual(contentWindow.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .darkAqua,
+                       "Changing the theme updates the retained native popover")
+        button.performClick(nil)
+        XCTAssertFalse(application.snapshot.panelIsShown)
+        button.performClick(nil)
+        XCTAssertTrue(application.snapshot.panelIsShown)
+        XCTAssertEqual(contentWindow.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .darkAqua,
+                       "Reopening retains the current native appearance")
         application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
 
         let reloaded = try store.load()
@@ -5599,35 +7081,67 @@ final class PearchHAUITests: XCTestCase {
         )
     }
 
-    func test_t_status_panel_escape_closes_and_command_comma_opens_settings() {
-        var openedSettings = 0
-        let panel = PearchHAStatusPanel()
-        panel.onOpenSettings = {
-            openedSettings += 1
+    func testAppShellStatusButtonOpensClosesAndReopensPopover() async throws {
+        _ = NSApplication.shared
+        let application = applicationForTest(configStore: nil)
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer { application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification)) }
+        let button = try XCTUnwrap(NSApp.windows.flatMap { nativeViews(in: $0.contentView, of: NSStatusBarButton.self) }
+            .first { $0.target === application })
+        await spinUntil("the shell status anchor is visible") { button.window?.isVisible == true && !button.visibleRect.isEmpty }
+        drainPanelRunLoop()
+        for _ in 0..<3 {
+            button.performClick(nil)
+            XCTAssertTrue(application.snapshot.panelIsShown, "One status action opens the popover; anchorVisible=\(button.window?.isVisible == true) rect=\(button.visibleRect)")
+            button.performClick(nil)
+            XCTAssertFalse(application.snapshot.panelIsShown, "One status action closes the popover")
         }
-        panel.makeKeyAndOrderFront(nil)
-        XCTAssertTrue(panel.isVisible)
+    }
 
-        panel.cancelOperation(nil)
-        XCTAssertFalse(panel.isVisible, "Escape (cancelOperation) closes the panel")
+    func testStatusPopoverEscapeCloses() throws {
+        let presentation = try PearchHATestPopoverPresentation(model: PearchHAPanelModel())
+        defer { presentation.close() }
+        XCTAssertTrue(presentation.popover.isShown)
+        presentation.popover.cancelOperation(nil)
+        XCTAssertFalse(presentation.popover.isShown, "Escape closes the native popover")
+    }
 
-        let commaEvent = NSEvent.keyEvent(
-            with: .keyDown,
-            location: .zero,
-            modifierFlags: .command,
-            timestamp: 0,
-            windowNumber: 0,
-            context: nil,
-            characters: ",",
-            charactersIgnoringModifiers: ",",
-            isARepeat: false,
-            keyCode: 43
+    func testAppShellSettingsCommandOpensSettingsFromPopover() async throws {
+        _ = NSApplication.shared
+        let previousDelegate = NSApp.delegate
+        let previousMenu = NSApp.mainMenu
+        let previousPolicy = NSApp.activationPolicy()
+        XCTAssertTrue(NSApp.setActivationPolicy(.accessory), "The harness must use the production accessory activation policy")
+        let application = applicationForTest(configStore: nil)
+        NSApp.delegate = application
+        NSApp.mainMenu = PearchHAApplication.standardMainMenu()
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+            NSApp.delegate = previousDelegate
+            NSApp.mainMenu = previousMenu
+            NSApp.setActivationPolicy(previousPolicy)
+        }
+        let button = try XCTUnwrap(NSApp.windows.flatMap { nativeViews(in: $0.contentView, of: NSStatusBarButton.self) }
+            .first { $0.target === application })
+        await spinUntil("the shell status anchor is visible") { button.window?.isVisible == true && !button.visibleRect.isEmpty }
+        drainPanelRunLoop()
+        button.performClick(nil)
+        XCTAssertTrue(application.snapshot.panelIsShown)
+        let existingWindows = Set(NSApp.windows.map(\.windowNumber))
+        let settingsItem = try XCTUnwrap(NSApp.mainMenu?.items
+            .flatMap { $0.submenu?.items ?? [] }
+            .first { $0.title == "Settings…" })
+        XCTAssertEqual(settingsItem.keyEquivalent, ",")
+        XCTAssertEqual(settingsItem.keyEquivalentModifierMask, .command)
+        XCTAssertTrue(
+            NSApp.sendAction(try XCTUnwrap(settingsItem.action), to: application, from: settingsItem),
+            "The Settings menu command must target the running application"
         )
-        XCTAssertNotNil(commaEvent)
-        if let commaEvent {
-            XCTAssertTrue(panel.performKeyEquivalent(with: commaEvent), "Cmd+, is handled by the panel")
+        await spinUntil("the Settings command opens the Settings window") {
+            NSApp.windows.contains { !existingWindows.contains($0.windowNumber) && $0.isVisible && $0.title == "PearchHA Settings" }
         }
-        XCTAssertEqual(openedSettings, 1, "Cmd+, routes to the open-settings path")
+        XCTAssertFalse(application.snapshot.panelIsShown, "Opening Settings dismisses the popover")
     }
 
     func test_t_menu_bar_presenter_reads_promotions_from_live_snapshot() {
@@ -5804,6 +7318,11 @@ final class PearchHAUITests: XCTestCase {
         // The stacked style renders the caps label on its own line above the
         // value, so the status-item title carries exactly one line break.
         XCTAssertEqual(application.snapshot.menuBarItems[0].title, "OFFICE HUMIDITY\n44%")
+        XCTAssertEqual(application.persist(displayPreferences: application.displayPreferences.with(textSize: .maximum)), .saved)
+        XCTAssertEqual(application.snapshot.menuBarItems[0].title, "Office humidity 44%",
+                       "Larger text must apply immediately even when sensor values are unchanged")
+        XCTAssertEqual(application.persist(displayPreferences: application.displayPreferences.with(textSize: .standard)), .saved)
+        XCTAssertEqual(application.snapshot.menuBarItems[0].title, "OFFICE HUMIDITY\n44%")
     }
 
     func test_t_app_shell_promoted_items_stay_visible_under_icon_only_appearance() async throws {
@@ -5947,7 +7466,7 @@ final class PearchHAUITests: XCTestCase {
     }
 
     func test_t_app_shell_no_promotion_shows_single_fallback_item() {
-        let application = PearchHAApplication()
+        let application = applicationForTest(configStore: nil)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -6403,6 +7922,67 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(try sessionStore.load().accessToken, "fresh-access")
         XCTAssertEqual(try sessionStore.load().refreshToken, "refresh-token")
         XCTAssertEqual(try sessionStore.load().clientID, "https://pearchha.dev/app")
+    }
+
+    func testPackagedOAuthConfigurationLoadsWithoutShellEnvironment() throws {
+        let bundle = try oauthTestBundle([
+            "PEARCHHA_OAUTH_CLIENT_ID": "https://example.invalid/pearchha/",
+            "PEARCHHA_OAUTH_REDIRECT_URI": "pearchha://auth"
+        ])
+        defer { try? FileManager.default.removeItem(at: bundle.bundleURL.deletingLastPathComponent()) }
+        let configuration = try XCTUnwrap(PearchHAOAuthApplicationConfiguration.fromEnvironment([:], bundle: bundle))
+        XCTAssertEqual(configuration.clientID, "https://example.invalid/pearchha/")
+        XCTAssertEqual(configuration.redirectURI, "pearchha://auth")
+        XCTAssertTrue(configuration.acceptsCallbackURL(try XCTUnwrap(URL(string: "pearchha://auth?code=test&state=test"))))
+    }
+
+    func testPackagedOAuthConfigurationCanBeOverriddenExplicitlyForDevelopment() throws {
+        let bundle = try oauthTestBundle([
+            "PEARCHHA_OAUTH_CLIENT_ID": "https://example.invalid/packaged/",
+            "PEARCHHA_OAUTH_REDIRECT_URI": "pearchha://auth"
+        ])
+        defer { try? FileManager.default.removeItem(at: bundle.bundleURL.deletingLastPathComponent()) }
+        let configuration = try XCTUnwrap(PearchHAOAuthApplicationConfiguration.fromEnvironment([
+            "PEARCHHA_OAUTH_CLIENT_ID": "https://example.invalid/development/",
+            "PEARCHHA_OAUTH_REDIRECT_URI": "pearchha-development://auth"
+        ], bundle: bundle))
+        XCTAssertEqual(configuration.clientID, "https://example.invalid/development/")
+        XCTAssertEqual(configuration.redirectURI, "pearchha-development://auth")
+    }
+
+    func testPackagedOAuthConfigurationWithoutMetadataIsUnavailable() throws {
+        let bundle = try oauthTestBundle([:])
+        defer { try? FileManager.default.removeItem(at: bundle.bundleURL.deletingLastPathComponent()) }
+        XCTAssertNil(try PearchHAOAuthApplicationConfiguration.fromEnvironment([:], bundle: bundle))
+    }
+
+    func testPackagedOAuthConfigurationRejectsInvalidMetadata() throws {
+        let cases: [([String: String], String)] = [
+            (["PEARCHHA_OAUTH_CLIENT_ID": "https://example.invalid/app/"], "OAuth redirect URI is invalid"),
+            (["PEARCHHA_OAUTH_CLIENT_ID": "$(PEARCHHA_OAUTH_CLIENT_ID)", "PEARCHHA_OAUTH_REDIRECT_URI": "pearchha://auth"], "OAuth client ID must be an application website URL"),
+            (["PEARCHHA_OAUTH_CLIENT_ID": "https://example.invalid/app/", "PEARCHHA_OAUTH_REDIRECT_URI": "other-app://auth"], "OAuth callback scheme is not declared by this app")
+        ]
+        for (metadata, message) in cases {
+            let bundle = try oauthTestBundle(metadata)
+            defer { try? FileManager.default.removeItem(at: bundle.bundleURL.deletingLastPathComponent()) }
+            XCTAssertThrowsError(try PearchHAOAuthApplicationConfiguration.fromEnvironment([:], bundle: bundle)) { error in
+                XCTAssertEqual(error as? PearchHAOAuthSignInFailure, .configuration(message))
+            }
+        }
+    }
+
+    private func oauthTestBundle(_ configuration: [String: String]) throws -> Bundle {
+        let directory = try temporaryEnvironmentFileURL().deletingLastPathComponent()
+        let bundleURL = directory.appendingPathComponent("PearchHA.app")
+        let contents = bundleURL.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        var metadata: [String: Any] = configuration
+        metadata["CFBundleIdentifier"] = "dev.pearchha.tests.oauth.\(UUID().uuidString)"
+        metadata["CFBundlePackageType"] = "APPL"
+        metadata["CFBundleURLTypes"] = [["CFBundleURLSchemes": ["pearchha"]]]
+        try PropertyListSerialization.data(fromPropertyList: metadata, format: .xml, options: 0)
+            .write(to: contents.appendingPathComponent("Info.plist"))
+        return try XCTUnwrap(Bundle(url: bundleURL))
     }
 
     func testOAuthApplicationConfigurationLoadsFromExplicitEnvironmentFile() throws {
@@ -7274,7 +8854,56 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(gaugeRenderer.renderCount, 1)
     }
 
+    func testCanceledStatusRefreshCannotFlushANewerPassiveRollback() async throws {
+        _ = NSApplication.shared
+        let previousDelegate = NSApp.delegate
+        let previousAppearance = NSApp.appearance
+        let url = temporaryConfigURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let store = JSONConfigStore(fileURL: url)
+        try store.save(PearchHAConfiguration(selectedEntityIDs: ["cover.office_blinds"],
+            menuBarEntityIDs: ["cover.office_blinds"],
+            menuBarItemConfigurations: [MenuBarItemConfiguration(entityID: "cover.office_blinds", displayUnit: .number)],
+            isEntitySelectionExplicit: true, menuBarRefreshInterval: .thirtySeconds))
+        let rooms = [Room(id: "office", name: "Office", entities: [DiscoveredEntity(id: "cover.office_blinds",
+            name: "Office blinds", state: "open", unit: nil, areaID: nil, deviceID: nil, currentPosition: 42)])]
+        let application = PearchHAApplication(configStore: store,
+            connector: { _ in .success(rooms: rooms) },
+            historyProvider: { _, _, _ in .unavailable("history is not used by this refresh regression") },
+            actionRunner: { @MainActor _, _ in
+                guard let shell = NSApp.delegate as? PearchHAApplication else {
+                    XCTFail("The test must use its real application delegate")
+                    return .failed("application delegate unavailable")
+                }
+                XCTAssertEqual(shell.snapshot.statusItemTitle, "open", "The optimistic snapshot must enter passive throttling")
+                XCTAssertEqual(shell.persist(displayPreferences: shell.displayPreferences), .saved)
+                XCTAssertEqual(shell.snapshot.statusItemTitle, "closed", "The explicit preference save must render the optimistic value")
+                // Returning without suspension makes the failure publish its passive rollback
+                // before the canceled refresh task can resume on the main actor.
+                return .failed("Permission denied")
+            })
+        NSApp.delegate = application
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+            NSApp.delegate = previousDelegate
+            NSApp.appearance = previousAppearance
+        }
+        application.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await application.connect()
+        XCTAssertEqual(application.snapshot.statusItemTitle, "open")
+
+        let changed = await application.setCoverControl("cover.office_blinds", command: .close)
+
+        XCTAssertFalse(changed)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(application.snapshot.statusItemTitle, "closed", "A canceled timer must not flush the newer passive rollback before its interval")
+        XCTAssertEqual(application.persist(displayPreferences: application.displayPreferences), .saved)
+        XCTAssertEqual(application.snapshot.statusItemTitle, "open", "An explicit refresh must still publish the pending rollback")
+    }
+
     func testHistoryKnownUnavailableRangesMarksCachedEmptyAndUnavailableRanges() async throws {
+        let clock = TestPearchClock()
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
             historyProvider: { _, entityID, range in
@@ -7284,9 +8913,12 @@ final class PearchHAUITests: XCTestCase {
                 case .month:
                     return .unavailable("history unavailable")
                 default:
-                    return .success(historySeriesFixture(entityID: entityID, range: range, value: 44))
+                    return .success(historySeries(entityID: entityID, range: range, value: 44))
                 }
-            }
+            },
+            clock: clock,
+            bulkSyncConfiguration: .disabled,
+            periodicRefreshConfiguration: .disabled
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
@@ -7297,6 +8929,13 @@ final class PearchHAUITests: XCTestCase {
         await model.loadHistory("sensor.office_humidity", range: .month)
         XCTAssertEqual(model.knownUnavailableHistoryRanges(for: "sensor.office_humidity"), [.month, .week])
         XCTAssertFalse(model.knownUnavailableHistoryRanges(for: "sensor.office_humidity").contains(.day))
+        _ = await clock.advance(by: .seconds(45))
+        await model.loadHistory("sensor.office_humidity", range: .hour)
+        XCTAssertNotNil(model.cachedHistorySeries(for: "sensor.office_humidity", range: .week))
+        XCTAssertFalse(
+            model.knownUnavailableHistoryRanges(for: "sensor.office_humidity").contains(.week),
+            "a previously empty cached range must become selectable again without background prefetch"
+        )
     }
 
     func test_t_status_item_gauge_image_renderer_draws_severity_colors() {
@@ -7680,7 +9319,7 @@ final class PearchHAUITests: XCTestCase {
                 menuBarEntityIDs: ["sensor.office_humidity"]
             )
         )
-        let firstApplication = PearchHAApplication(configStore: store)
+        let firstApplication = applicationForTest(configStore: store)
         firstApplication.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         var firstApplicationIsRunning = true
         defer {
@@ -7704,7 +9343,7 @@ final class PearchHAUITests: XCTestCase {
         firstApplication.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
         firstApplicationIsRunning = false
 
-        let secondApplication = PearchHAApplication(configStore: store)
+        let secondApplication = applicationForTest(configStore: store)
         secondApplication.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             secondApplication.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -7728,7 +9367,7 @@ final class PearchHAUITests: XCTestCase {
             try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
         }
         let store = JSONConfigStore(fileURL: url)
-        let firstApplication = PearchHAApplication(configStore: store)
+        let firstApplication = applicationForTest(configStore: store)
         firstApplication.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         var firstApplicationIsRunning = true
         defer {
@@ -8204,7 +9843,7 @@ final class PearchHAUITests: XCTestCase {
         let store = FailingConfigStore(
             loadError: .malformedConfig(URL(fileURLWithPath: "/tmp/pearchha-bad-config.json"), message: "bad json")
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -8241,7 +9880,7 @@ final class PearchHAUITests: XCTestCase {
             ),
             saveError: .writeFailed(URL(fileURLWithPath: "/tmp/pearchha-config.json"), message: "disk full")
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -8274,7 +9913,7 @@ final class PearchHAUITests: XCTestCase {
         let store = FailingConfigStore(
             saveError: .writeFailed(URL(fileURLWithPath: "/tmp/pearchha-config.json"), message: "disk full")
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -8306,7 +9945,7 @@ final class PearchHAUITests: XCTestCase {
         let store = FailingConfigStore(
             saveError: .writeFailed(URL(fileURLWithPath: "/tmp/pearchha-config.json"), message: "disk full")
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -8333,7 +9972,7 @@ final class PearchHAUITests: XCTestCase {
         let store = FailingConfigStore(
             saveError: .writeFailed(URL(fileURLWithPath: "/tmp/pearchha-config.json"), message: "disk full")
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -8363,7 +10002,7 @@ final class PearchHAUITests: XCTestCase {
         let store = FailingConfigStore(
             saveError: .writeFailed(URL(fileURLWithPath: "/tmp/pearchha-config.json"), message: "disk full")
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -8393,7 +10032,7 @@ final class PearchHAUITests: XCTestCase {
         let store = FailingConfigStore(
             saveError: .writeFailed(URL(fileURLWithPath: "/tmp/pearchha-config.json"), message: "disk full")
         )
-        let application = PearchHAApplication(configStore: store)
+        let application = applicationForTest(configStore: store)
         application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer {
             application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
@@ -8430,18 +10069,12 @@ final class PearchHAUITests: XCTestCase {
         historyDebounce: PearchDuration = .milliseconds(250),
         cacheTTL: PearchDuration = .seconds(60),
         capacity: Int = 64,
-        panelActive: Bool = false,
-        startupWarm: Bool = false
+        panelActive: Bool = false
     ) async -> PearchHAPanelModel {
-        let suppressStartupWarm = !startupWarm && !panelActive && bulkSync.isEnabled && !rooms.isEmpty
-        let startupWarmBlocker = StartupWarmBlocker(suppressedRequestCount: suppressStartupWarm ? 1 : 0)
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: rooms) },
             historyProvider: historyProvider,
             bulkHistoryProvider: { form, entityIDs, range in
-                if await startupWarmBlocker.shouldSuppressRequest() {
-                    return [:]
-                }
                 return await recorder.provide(form: form, entityIDs: entityIDs, range: range)
             },
             clock: clock,
@@ -8450,30 +10083,20 @@ final class PearchHAUITests: XCTestCase {
             bulkSyncConfiguration: bulkSync,
             // Isolate bulk sync from the active-panel periodic refresh safety net so
             // its clock sleeper-count assertions stay exact.
-            periodicRefreshConfiguration: .disabled
+            periodicRefreshConfiguration: .disabled,
+            selectionConfiguration: EntitySelectionConfiguration(isExplicit: true)
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         model.setPanelActive(panelActive)
         await model.connect()
-        await startupWarmBlocker.waitUntilSuppressionCompletes()
         return model
     }
 
-    /// Lets the freshly armed bulk-sync loop reach its settle sleep, fires the
-    /// settle delay, and waits for the first cycle's batches to land.
-    private func runSettledBulkSyncCycle(
-        clock: TestPearchClock,
-        recorder: BulkHistoryRecorder,
-        settleDelay: PearchDuration,
-        expectedBatches: Int
-    ) async {
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
-        _ = await clock.advance(by: settleDelay)
-        await spinUntil { await recorder.batchCount() >= expectedBatches }
+    private func selectHistoryEntities(_ ids: [EntityID], in model: PearchHAPanelModel) {
+        model.setAllEntities(isSelected: false)
+        for id in ids { model.setEntity(id, isSelected: true) }
     }
 
-    /// Advances the clock by one interval to drive the next re-armed cycle and
-    /// waits for its batches.
     private func advanceBulkSyncCycle(
         clock: TestPearchClock,
         recorder: BulkHistoryRecorder,
@@ -8485,7 +10108,7 @@ final class PearchHAUITests: XCTestCase {
         await spinUntil { await recorder.batchCount() >= untilBatches }
     }
 
-    func test_t_bulk_sync_syncs_all_displayed_entities_in_one_request() async {
+    func test_t_bulk_sync_groups_visible_previews_in_one_request() async {
         let clock = TestPearchClock()
         let recorder = BulkHistoryRecorder()
         let settleDelay = PearchDuration.milliseconds(250)
@@ -8493,28 +10116,30 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 10),
-            // Cold divisor 1 so every entity syncs the first cycle regardless of
-            // interest; batch cap above the count so a cycle is a single request.
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40, coldRefreshDivisor: 1)
+            // A batch cap above the visible count makes a cycle one request.
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40)
         )
 
         let baselineBatches = await recorder.batchCount()
+        let baselineRevision = model.historyRevision
         model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
+        selectHistoryEntities(["sensor.prefetch_0", "sensor.prefetch_1"], in: model)
         await spinUntil { await clock.sleepingTaskCount() >= 1 }
         _ = await clock.advance(by: settleDelay)
-        await spinUntil { await recorder.batchCount() >= baselineBatches + 3 }
+        await spinUntil { await recorder.batchCount() >= baselineBatches + 1 }
 
         // One grouped batch per due range covered the currently visible rows —
         // not one request per entity and never off-screen rows.
+        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_1") != nil }
+        XCTAssertEqual(model.historyRevision - baselineRevision, 2, "publish grouped request start and finish, not once per row")
         let batchCount = await recorder.batchCount()
-        XCTAssertEqual(batchCount - baselineBatches, 3, "cold visible rows warm in grouped day/week/month requests")
+        XCTAssertEqual(batchCount - baselineBatches, 1, "visible previews share one grouped request")
         let requested = await recorder.requestedIDs(afterBatchCount: baselineBatches)
         XCTAssertEqual(requested, Set([EntityID("sensor.prefetch_0"), EntityID("sensor.prefetch_1")]))
         model.setPanelActive(false)
     }
 
-    func test_t_visible_hour_preview_keeps_day_history_warm_in_background() async {
+    func test_t_daily_preview_does_not_prefetch_the_configured_detail_range() async {
         let clock = TestPearchClock()
         let recorder = BulkHistoryRecorder()
         let settleDelay = PearchDuration.milliseconds(250)
@@ -8522,17 +10147,17 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 1),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40, coldRefreshDivisor: 1)
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40)
         )
         XCTAssertTrue(model.setMenuBarDefaultHistoryRange("sensor.prefetch_0", defaultHistoryRange: HistoryRange.hour))
 
         model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 4)
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: settleDelay, untilBatches: 1)
 
         let requestedRanges = await recorder.requestedRanges()
-        XCTAssertTrue(Set(requestedRanges).isSuperset(of: Set([HistoryRange.hour, HistoryRange.day])))
-        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0", range: HistoryRange.day) != nil }
+        XCTAssertEqual(requestedRanges, [.day])
+        XCTAssertNil(model.cachedHistorySeries(for: "sensor.prefetch_0", range: .hour))
         model.setPanelActive(false)
     }
 
@@ -8548,139 +10173,51 @@ final class PearchHAUITests: XCTestCase {
             },
             clock: clock,
             wallClock: { dates.now },
-            bulkSyncConfiguration: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40, coldRefreshDivisor: 1),
+            bulkSyncConfiguration: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40),
             periodicRefreshConfiguration: .disabled
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        model.setPanelActive(true)
         await model.connect()
         let baseline = model.requestsPerMinute()
         XCTAssertTrue(model.setMenuBarDefaultHistoryRange("sensor.prefetch_0", defaultHistoryRange: HistoryRange.hour))
 
         model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 4)
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: settleDelay, untilBatches: 1)
 
         XCTAssertEqual(
             model.requestsPerMinute(),
-            baseline + 4,
+            baseline + 1,
             "each background history batch must count toward the diagnostics RPM"
         )
         model.setPanelActive(false)
     }
 
-    func test_t_visible_row_warms_day_week_and_month_layers_when_long_ranges_are_cold() async {
+
+    func test_t_opened_month_history_uses_refresh_interval_instead_of_long_cache_ttl() async {
         let clock = TestPearchClock()
-        let recorder = BulkHistoryRecorder()
-        let settleDelay = PearchDuration.milliseconds(250)
+        let cached = historySeries(entityID: "sensor.prefetch_0", range: .month, value: 21)
+        let fresh = historySeries(entityID: "sensor.prefetch_0", range: .month, value: 22)
+        let recorder = HistoryProviderRecorder(results: [.success(cached), .success(fresh)])
         let model = await makeConnectedBulkSyncModel(
-            recorder: recorder,
-            clock: clock,
-            rooms: prefetchRooms(count: 1),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40, coldRefreshDivisor: 1),
-            historyDebounce: PearchDuration.seconds(600)
+            recorder: BulkHistoryRecorder(), clock: clock, rooms: prefetchRooms(count: 1),
+            bulkSync: .disabled,
+            historyProvider: { form, id, range in await recorder.provide(form: form, entityID: id, range: range) }
         )
-        XCTAssertTrue(model.setMenuBarDefaultHistoryRange("sensor.prefetch_0", defaultHistoryRange: HistoryRange.hour))
-
-        let baselineBatches = await recorder.batchCount()
-        model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0"])
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
-        _ = await clock.advance(by: settleDelay)
-        await spinUntil { await recorder.batchCount() >= baselineBatches + 4 }
-
-        let requestedRanges = await recorder.requestedRanges(afterBatchCount: baselineBatches)
-        let requestedRangeSet = Set(requestedRanges)
-        let hourRequests = await recorder.requestCount(for: HistoryRange.hour, afterBatchCount: baselineBatches)
-        let dayRequests = await recorder.requestCount(for: HistoryRange.day, afterBatchCount: baselineBatches)
-        let weekRequests = await recorder.requestCount(for: HistoryRange.week, afterBatchCount: baselineBatches)
-        let monthRequests = await recorder.requestCount(for: HistoryRange.month, afterBatchCount: baselineBatches)
-        XCTAssertEqual(requestedRangeSet, Set([HistoryRange.hour, HistoryRange.day, HistoryRange.week, HistoryRange.month]))
-        XCTAssertEqual(hourRequests, 1)
-        XCTAssertEqual(dayRequests, 1)
-        XCTAssertEqual(weekRequests, 1)
-        XCTAssertEqual(monthRequests, 1)
-        model.setPanelActive(false)
+        model.applyDisplayPreferences(.defaults.with(historyDetailRefreshInterval: .fortyFiveSeconds))
+        await model.loadHistory("sensor.prefetch_0", range: .month)
+        _ = await clock.advance(by: .seconds(44))
+        await model.loadHistory("sensor.prefetch_0", range: .month)
+        let freshCacheCalls = await recorder.callCount()
+        XCTAssertEqual(freshCacheCalls, 1)
+        _ = await clock.advance(by: .seconds(1))
+        await model.loadHistory("sensor.prefetch_0", range: .month)
+        let dueCalls = await recorder.callCount()
+        XCTAssertEqual(dueCalls, 2)
+        XCTAssertEqual(model.snapshot.historyState, .loaded(fresh))
     }
 
-    func test_t_opened_history_detail_reuses_warmed_month_cache_without_refetching() async {
-        let clock = TestPearchClock()
-        let bulkRecorder = BulkHistoryRecorder()
-        let historyRecorder = HistoryProviderRecorder(results: [.unavailable("should stay cached")])
-        let settleDelay = PearchDuration.milliseconds(250)
-        let model = await makeConnectedBulkSyncModel(
-            recorder: bulkRecorder,
-            clock: clock,
-            rooms: prefetchRooms(count: 1),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40, coldRefreshDivisor: 1),
-            historyProvider: { form, entityID, range in
-                await historyRecorder.provide(form: form, entityID: entityID, range: range)
-            },
-            historyDebounce: PearchDuration.seconds(600),
-            cacheTTL: PearchDuration.seconds(60)
-        )
-        XCTAssertTrue(model.setMenuBarDefaultHistoryRange("sensor.prefetch_0", defaultHistoryRange: HistoryRange.hour))
-
-        model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0"])
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
-        _ = await clock.advance(by: settleDelay)
-        await spinUntil { await bulkRecorder.batchCount() >= 4 }
-        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0", range: HistoryRange.month) != nil }
-        _ = await clock.advance(by: PearchDuration.seconds(120))
-
-        await model.loadHistory("sensor.prefetch_0", range: HistoryRange.month)
-
-        let directHistoryCallCount = await historyRecorder.callCount()
-        XCTAssertEqual(
-            directHistoryCallCount,
-            0,
-            "the warmed month layer should satisfy history reads without another full-range fetch"
-        )
-        model.setPanelActive(false)
-    }
-
-    func test_t_opened_history_detail_refreshes_week_and_month_only_after_24_hours() async {
-        let clock = TestPearchClock()
-        let recorder = BulkHistoryRecorder()
-        let settleDelay = PearchDuration.milliseconds(250)
-        let interval = PearchDuration.seconds(30)
-        let model = await makeConnectedBulkSyncModel(
-            recorder: recorder,
-            clock: clock,
-            rooms: prefetchRooms(count: 1),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, batchSize: 40, coldRefreshDivisor: 1),
-            historyDebounce: PearchDuration.seconds(600)
-        )
-        XCTAssertTrue(model.setMenuBarDefaultHistoryRange("sensor.prefetch_0", defaultHistoryRange: HistoryRange.hour))
-
-        let baselineBatches = await recorder.batchCount()
-        model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0"])
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
-        _ = await clock.advance(by: settleDelay)
-        await spinUntil { await recorder.batchCount() >= baselineBatches + 4 }
-
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
-        _ = await clock.advance(by: interval)
-        await spinUntil { await recorder.batchCount() >= baselineBatches + 6 }
-        let hourRequestsAfterFirstRefresh = await recorder.requestCount(for: HistoryRange.hour, afterBatchCount: baselineBatches)
-        let dayRequestsAfterFirstRefresh = await recorder.requestCount(for: HistoryRange.day, afterBatchCount: baselineBatches)
-        let weekRequestsAfterFirstRefresh = await recorder.requestCount(for: HistoryRange.week, afterBatchCount: baselineBatches)
-        let monthRequestsAfterFirstRefresh = await recorder.requestCount(for: HistoryRange.month, afterBatchCount: baselineBatches)
-        XCTAssertEqual(hourRequestsAfterFirstRefresh, 2)
-        XCTAssertEqual(dayRequestsAfterFirstRefresh, 2)
-        XCTAssertEqual(weekRequestsAfterFirstRefresh, 1)
-        XCTAssertEqual(monthRequestsAfterFirstRefresh, 1)
-
-        await spinUntil { await clock.sleepingTaskCount() == 1 }
-        _ = await clock.advance(by: PearchDuration.seconds(86_400))
-        await spinUntil { await recorder.batchCount() >= baselineBatches + 10 }
-        let weekRequestsAfterOneDay = await recorder.requestCount(for: HistoryRange.week, afterBatchCount: baselineBatches)
-        let monthRequestsAfterOneDay = await recorder.requestCount(for: HistoryRange.month, afterBatchCount: baselineBatches)
-        XCTAssertEqual(weekRequestsAfterOneDay, 2)
-        XCTAssertEqual(monthRequestsAfterOneDay, 2)
-        model.setPanelActive(false)
-    }
 
     func test_t_cancelled_bulk_cycle_never_writes_previous_connections_history() async {
         let clock = TestPearchClock()
@@ -8690,12 +10227,11 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 1),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40, coldRefreshDivisor: 1)
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, batchSize: 40)
         )
         await recorder.holdNextBatches(1)
 
-        model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0"])
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: settleDelay)
         await spinUntil { await recorder.heldBatchCount() == 1 }
@@ -8717,10 +10253,10 @@ final class PearchHAUITests: XCTestCase {
             model.cachedHistorySeries(for: "sensor.prefetch_0"),
             "a cancelled bulk cycle must not write the previous connection's history"
         )
-        model.setPanelActive(false)
+        model.signOut()
     }
 
-    func test_t_scroll_pause_rearm_does_not_refetch_recently_synced_entities() async {
+    func test_t_selection_change_does_not_refetch_recently_synced_entities() async {
         let clock = TestPearchClock()
         let recorder = BulkHistoryRecorder()
         let settleDelay = PearchDuration.milliseconds(250)
@@ -8729,37 +10265,34 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 3),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, coldRefreshDivisor: 1)
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay)
         )
 
         let baselineBatches = await recorder.batchCount()
         model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
-        await runSettledBulkSyncCycle(
+        selectHistoryEntities(["sensor.prefetch_0", "sensor.prefetch_1"], in: model)
+        await advanceBulkSyncCycle(
             clock: clock,
             recorder: recorder,
-            settleDelay: settleDelay,
-            expectedBatches: baselineBatches + 3
+            interval: settleDelay,
+            untilBatches: baselineBatches + 1
         )
         let afterFirstCycle = await recorder.batchCount()
-        XCTAssertEqual(afterFirstCycle - baselineBatches, 3)
+        XCTAssertEqual(afterFirstCycle - baselineBatches, 1)
         // Wait for the cycle's results to land in the cache — re-arming while
         // the apply is still in flight would cancel it and drop the sync marks.
         await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0") != nil }
 
-        // Narrowing the visible set rearms the loop, but recently synced layers
-        // stay warm. Depending on scheduling, the re-arm may do nothing or may
-        // emit one immediate maintenance batch for the still-visible row; it must
-        // never refetch the removed row or fan out into multiple fresh batches.
-        model.updateVisibleEntities(["sensor.prefetch_0"])
+        // Narrowing the selection rearms the loop without refetching fresh data.
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: settleDelay)
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         let afterRearm = await recorder.batchCount()
-        XCTAssertLessThanOrEqual(
+        XCTAssertEqual(
             afterRearm - afterFirstCycle,
-            1,
-            "a re-arm within the interval should add at most one maintenance batch"
+            0,
+            "a re-arm within the interval must reuse the cache"
         )
         let removedRowRefetches = await recorder.requestCountForEntity(
             EntityID("sensor.prefetch_1"),
@@ -8839,25 +10372,23 @@ final class PearchHAUITests: XCTestCase {
                 await recorder.provide(form: form, entityIDs: entityIDs, range: range)
             },
             clock: clock,
-            bulkSyncConfiguration: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, coldRefreshDivisor: 1),
+            bulkSyncConfiguration: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay),
             periodicRefreshConfiguration: .disabled
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
-        // Connecting while hidden performs the intentional one-shot startup warmup.
-        // Let it finish before activating the panel, so the outage assertion only
-        // measures requests made by the recurring bulk-sync loop.
-        await spinUntil { await recorder.batchCount() == 1 }
         let baselineBatches = await recorder.batchCount()
+        XCTAssertEqual(baselineBatches, 0)
         model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0"])
-        await runSettledBulkSyncCycle(
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        await advanceBulkSyncCycle(
             clock: clock,
             recorder: recorder,
-            settleDelay: settleDelay,
-            expectedBatches: baselineBatches + 3
+            interval: settleDelay,
+            untilBatches: baselineBatches + 1
         )
+        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0") != nil }
 
         // The connection drops: while the state is failed, interval ticks must
         // not hammer the dead server with bulk batches across fallback URLs.
@@ -8876,7 +10407,7 @@ final class PearchHAUITests: XCTestCase {
         await model.refresh()
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: interval)
-        await spinUntil { await recorder.batchCount() >= baselineBatches + 4 }
+        await spinUntil { await recorder.batchCount() >= outageBaseline + 1 }
         model.setPanelActive(false)
     }
 
@@ -8889,21 +10420,21 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 3),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, coldRefreshDivisor: 1)
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay)
         )
 
         model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 3)
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: settleDelay, untilBatches: 1)
         let firstCycleBatches = await recorder.batchCount()
-        XCTAssertEqual(firstCycleBatches, 3, "first cycle warms the cold visible ranges")
+        XCTAssertEqual(firstCycleBatches, 1, "first cycle loads the visible preview")
 
         // The loop must RE-ARM on its own: advancing the clock by the interval (no
         // new visibility change) triggers further cycles.
-        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: 4)
-        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: 5)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: 2)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: 3)
         let laterBatchCount = await recorder.batchCount()
-        XCTAssertEqual(laterBatchCount, 5, "the sync re-arms and keeps running after the cold-start warmup")
+        XCTAssertEqual(laterBatchCount, 3, "the sync re-arms and keeps running after the cold-start warmup")
         model.setPanelActive(false)
     }
 
@@ -8917,12 +10448,12 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 1),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, coldRefreshDivisor: 1)
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay)
         )
 
         model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: settleDelay, untilBatches: 1)
         await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0")?.samples.first?.numericValue == 10.0 }
 
         // A later cycle returns a NEW value; the cache entry is overridden in place.
@@ -8947,30 +10478,34 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 1),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, coldRefreshDivisor: 1)
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay)
         )
 
         model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: settleDelay, untilBatches: 1)
         await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0") != nil }
 
         // The next cycle returns NO series for _0 (partial response). The prior
         // cached series must survive — a cycle never deletes a valid entry.
         await recorder.omit("sensor.prefetch_0")
         await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: 2)
-        for _ in 0..<10 {
-            await Task.yield()
-        }
+        await spinUntil { model.historyState(for: "sensor.prefetch_0").statusHelp != nil }
 
         XCTAssertEqual(
             model.cachedHistorySeries(for: "sensor.prefetch_0")?.samples.first?.numericValue,
             5.0,
             "an entity absent from a bulk result keeps its prior cached series (no deletion)"
         )
+        await recorder.restore("sensor.prefetch_0")
+        await recorder.setValue(8, for: "sensor.prefetch_0")
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: 3)
+        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0")?.samples.first?.numericValue == 8 }
+        XCTAssertNil(model.historyState(for: "sensor.prefetch_0").statusHelp)
+        model.setPanelActive(false)
     }
 
-    func test_t_bulk_sync_syncs_visible_entities_and_ignores_hidden_ones() async {
+    func test_t_bulk_sync_syncs_selected_entities_and_ignores_unselected_ones() async {
         let clock = TestPearchClock()
         let recorder = BulkHistoryRecorder()
         let settleDelay = PearchDuration.milliseconds(250)
@@ -8979,29 +10514,29 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 4),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, coldRefreshDivisor: 3)
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay)
         )
 
         let baselineBatches = await recorder.batchCount()
         model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0"])
-        await runSettledBulkSyncCycle(
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        await advanceBulkSyncCycle(
             clock: clock,
             recorder: recorder,
-            settleDelay: settleDelay,
-            expectedBatches: baselineBatches + 3
+            interval: settleDelay,
+            untilBatches: baselineBatches + 1
         )
-        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: baselineBatches + 4)
-        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: baselineBatches + 5)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: baselineBatches + 2)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: baselineBatches + 3)
 
         let visibleRequests = await recorder.requestCountForEntity("sensor.prefetch_0", afterBatchCount: baselineBatches)
         let hiddenRequests = await recorder.requestCountForEntity("sensor.prefetch_3", afterBatchCount: baselineBatches)
-        XCTAssertEqual(visibleRequests, 5, "the visible entity gets cold long-range warmup plus recurring day refreshes")
+        XCTAssertEqual(visibleRequests, 3, "the visible entity gets only recurring preview refreshes")
         XCTAssertEqual(hiddenRequests, 0, "hidden entities are ignored by the background history sync")
         model.setPanelActive(false)
     }
 
-    func test_t_bulk_sync_does_nothing_while_inactive() async {
+    func test_t_bulk_sync_does_nothing_without_selected_entities() async {
         let clock = TestPearchClock()
         let recorder = BulkHistoryRecorder()
         let settleDelay = PearchDuration.milliseconds(250)
@@ -9009,16 +10544,11 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 20),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1),
-            startupWarm: true
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay)
         )
 
-        // Connecting while hidden performs the intentional one-shot startup warmup.
-        // Wait for it before asserting that an inactive visibility update adds
-        // neither another fetch nor a settle sleeper.
-        await spinUntil { await recorder.batchCount() == 1 }
         let baselineBatches = await recorder.batchCount()
-        model.updateVisibleEntities(["sensor.prefetch_18", "sensor.prefetch_19"])
+        XCTAssertEqual(baselineBatches, 0)
         for _ in 0..<10 {
             await Task.yield()
         }
@@ -9041,14 +10571,13 @@ final class PearchHAUITests: XCTestCase {
             bulkSync: PearchHAHistoryBulkSyncConfiguration(
                 settleDelay: settleDelay,
                 batchSize: 4,
-                maxConcurrentBatches: 1,
-                coldRefreshDivisor: 1
+                maxConcurrentBatches: 1
             )
         )
 
         model.setPanelActive(true)
-        model.updateVisibleEntities((0..<10).map { EntityID("sensor.prefetch_\($0)") })
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 3)
+        selectHistoryEntities((0..<10).map { EntityID("sensor.prefetch_\($0)") }, in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: settleDelay, untilBatches: 3)
         for _ in 0..<10 {
             await Task.yield()
         }
@@ -9064,19 +10593,19 @@ final class PearchHAUITests: XCTestCase {
         let clock = TestPearchClock()
         let recorder = BulkHistoryRecorder()
         let settleDelay = PearchDuration.milliseconds(250)
-        // 40 visible entities with the default cache capacity (256): one cycle's
-        // bulk results must all stay cached — no eviction churn flickering previews.
+        // Selected previews remain cached even when their count exceeds the
+        // base capacity for unprotected history.
         let model = await makeConnectedBulkSyncModel(
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 40),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1),
-            capacity: 256
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay),
+            capacity: 8
         )
 
         model.setPanelActive(true)
-        model.updateVisibleEntities((0..<40).map { EntityID("sensor.prefetch_\($0)") })
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
+        selectHistoryEntities((0..<40).map { EntityID("sensor.prefetch_\($0)") }, in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: settleDelay, untilBatches: 1)
         await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_39") != nil }
 
         XCTAssertNotNil(
@@ -9098,13 +10627,13 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 2),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: .seconds(120), settleDelay: settleDelay, coldRefreshDivisor: 1),
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: .seconds(120), settleDelay: settleDelay),
             cacheTTL: .seconds(60)
         )
 
         model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: settleDelay, untilBatches: 1)
         await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0") != nil }
 
         // Let _0's cache TTL lapse (advance past it). The already-synced inline
@@ -9121,7 +10650,7 @@ final class PearchHAUITests: XCTestCase {
         )
     }
 
-    func test_t_successful_sync_prunes_expired_hidden_history_but_keeps_visible_stale_cache() async {
+    func test_t_successful_sync_retains_unused_history_within_cache_capacity() async {
         let clock = TestPearchClock()
         let recorder = BulkHistoryRecorder()
         let settleDelay = PearchDuration.milliseconds(250)
@@ -9130,13 +10659,13 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 2),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay, coldRefreshDivisor: 1),
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: settleDelay),
             cacheTTL: PearchDuration.seconds(60)
         )
 
         model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
+        selectHistoryEntities(["sensor.prefetch_0", "sensor.prefetch_1"], in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: settleDelay, untilBatches: 1)
         await spinUntil {
             model.cachedHistorySeries(for: "sensor.prefetch_0") != nil &&
             model.cachedHistorySeries(for: "sensor.prefetch_1") != nil
@@ -9146,7 +10675,7 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertNotNil(model.cachedHistorySeries(for: "sensor.prefetch_1"))
         let batchesBeforeVisibilityChange = await recorder.batchCount()
 
-        model.updateVisibleEntities(["sensor.prefetch_0"])
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
         await spinUntil { await clock.sleepingTaskCount() >= 1 }
         _ = await clock.advance(by: settleDelay)
         await spinUntil { await clock.sleepingTaskCount() >= 1 }
@@ -9157,13 +10686,13 @@ final class PearchHAUITests: XCTestCase {
         }
         await spinUntil {
             model.cachedHistorySeries(for: "sensor.prefetch_0") != nil &&
-            model.cachedHistorySeries(for: "sensor.prefetch_1") == nil
+            model.cachedHistorySeries(for: "sensor.prefetch_1") != nil
         }
 
         XCTAssertNotNil(model.cachedHistorySeries(for: "sensor.prefetch_0"))
-        XCTAssertNil(
+        XCTAssertNotNil(
             model.cachedHistorySeries(for: "sensor.prefetch_1"),
-            "expired hidden cache is pruned only after a successful visible-row sync lands"
+            "unused ranges remain available for immediate cached display"
         )
         model.setPanelActive(false)
     }
@@ -9181,7 +10710,7 @@ final class PearchHAUITests: XCTestCase {
         let release = ConnectionGate()
         let calls = CallCounter()
         let clock = TestPearchClock()
-        var model: PearchHAPanelModel? = PearchHAPanelModel(
+        let currentModel = PearchHAPanelModel(
             connector: { _ in
                 let n = await calls.next()
                 // The initial connect is call 1; the first scheduled periodic
@@ -9193,13 +10722,9 @@ final class PearchHAUITests: XCTestCase {
                 }
                 return .success(rooms: selectionRooms())
             },
-            historyProvider: { _, _, _ in .unavailable("no history") },
-            clock: clock
+            clock: clock,
+            bulkSyncConfiguration: .disabled
         )
-        guard let currentModel = model else {
-            XCTFail("expected model")
-            return
-        }
         currentModel.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await currentModel.connect()
         switch currentModel.snapshot.phase {
@@ -9210,7 +10735,7 @@ final class PearchHAUITests: XCTestCase {
         }
 
         currentModel.setPanelActive(true)
-        await spinUntil { await clock.sleepingTaskCount() >= 1 }
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: .seconds(45))
         // Wait until the background sync is genuinely in flight (connector blocked).
         await entered.wait()
@@ -9227,9 +10752,7 @@ final class PearchHAUITests: XCTestCase {
         await spinUntil {
             if case .connected = currentModel.snapshot.connectionState { return true } else { return false }
         }
-        currentModel.setPanelActive(false)
-        await Task.yield()
-        model = nil
+        currentModel.signOut()
         await spinUntil { await clock.sleepingTaskCount() == 0 }
     }
 
@@ -9327,7 +10850,7 @@ final class PearchHAUITests: XCTestCase {
         )
     }
 
-    func test_t_bulk_sync_cancels_in_flight_on_deactivate() async {
+    func test_t_bulk_sync_warmup_survives_panel_close() async {
         let clock = TestPearchClock()
         let recorder = BulkHistoryRecorder()
         let settleDelay = PearchDuration.milliseconds(250)
@@ -9335,23 +10858,23 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 4),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1),
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay),
             panelActive: true
         )
 
         let batchesBeforeActivation = await recorder.batchCount()
-        model.updateVisibleEntities(["sensor.prefetch_0"])
-        // Arm the settle sleep, then deactivate before it fires: no cycle should run.
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        // Closing before the first cycle must not cancel the background warmup.
         await spinUntil { await clock.sleepingTaskCount() == 1 }
         model.setPanelActive(false)
         _ = await clock.advance(by: settleDelay)
-        for _ in 0..<10 {
-            await Task.yield()
-        }
+        await spinUntil { await recorder.batchCount() == batchesBeforeActivation + 1 }
 
         let batches = await recorder.batchCount()
-        XCTAssertEqual(batches, batchesBeforeActivation, "deactivating before the settle fires cancels the armed sync")
-        XCTAssertNil(model.cachedHistorySeries(for: "sensor.prefetch_0"))
+        XCTAssertEqual(batches, batchesBeforeActivation + 1)
+        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0") != nil }
+        XCTAssertFalse(model.isInitialHistoryLoading)
+        model.signOut()
     }
 
     func test_t_cache_insert_publishes_observable_revision() async {
@@ -9365,7 +10888,7 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 2),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1)
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay)
         )
 
         let revisionBefore = model.historyRevision
@@ -9375,8 +10898,8 @@ final class PearchHAUITests: XCTestCase {
 
         XCTAssertNil(model.cachedHistorySeries(for: "sensor.prefetch_0"))
         model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: settleDelay, untilBatches: 1)
         await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0") != nil }
 
         XCTAssertGreaterThan(model.historyRevision, revisionBefore)
@@ -9385,7 +10908,7 @@ final class PearchHAUITests: XCTestCase {
     }
 
     func test_t_inline_history_available_without_hover() async {
-        // Driving only panel-active + visible entities (no startHistoryHover call)
+        // Driving only panel-active + visible entities (no detail selection)
         // populates the inline cache purely from the background bulk sync path.
         let clock = TestPearchClock()
         let recorder = BulkHistoryRecorder()
@@ -9394,14 +10917,14 @@ final class PearchHAUITests: XCTestCase {
             recorder: recorder,
             clock: clock,
             rooms: prefetchRooms(count: 3),
-            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay, coldRefreshDivisor: 1)
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: settleDelay)
         )
 
         // No hover popover is open and none is requested.
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
         model.setPanelActive(true)
-        model.updateVisibleEntities(["sensor.prefetch_0", "sensor.prefetch_1"])
-        await runSettledBulkSyncCycle(clock: clock, recorder: recorder, settleDelay: settleDelay, expectedBatches: 1)
+        selectHistoryEntities(["sensor.prefetch_0", "sensor.prefetch_1"], in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: settleDelay, untilBatches: 1)
         await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_1") != nil }
 
         XCTAssertNotNil(model.cachedHistorySeries(for: "sensor.prefetch_0"))
@@ -9410,78 +10933,519 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertNil(model.snapshot.historyPresentationEntityID)
     }
 
-    func test_t_inactive_panel_primes_history_once_then_stays_push_driven() async {
-        // Closed-panel startup now does one hidden warm so the first explicit
-        // open can render cached previews/history immediately. After that it
-        // stays push-driven: no recurring settle loop is armed while closed.
+    func test_t_history_detail_waits_for_inflight_preview_without_duplicate_fetch() async {
         let clock = TestPearchClock()
-        let recorder = BulkHistoryRecorder()
-        let promoted = EntityID("sensor.prefetch_0")
-        let model = PearchHAPanelModel(
-            connector: { _ in .success(rooms: prefetchRooms(count: 4)) },
-            bulkHistoryProvider: { form, entityIDs, range in
-                await recorder.provide(form: form, entityIDs: entityIDs, range: range)
-            },
-            clock: clock,
-            bulkSyncConfiguration: PearchHAHistoryBulkSyncConfiguration(settleDelay: .milliseconds(250)),
-            periodicRefreshConfiguration: .disabled,
-            menuBarDisplayConfiguration: MenuBarDisplayConfiguration(promotedEntityIDs: [promoted])
+        let recorder = BulkHistoryRecorder(defaultValue: 42)
+        let single = HistoryProviderRecorder(results: [.unavailable("must use the pending batch")])
+        let model = await makeConnectedBulkSyncModel(
+            recorder: recorder, clock: clock, rooms: prefetchRooms(count: 1),
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: .milliseconds(250)),
+            historyProvider: { form, id, range in await single.provide(form: form, entityID: id, range: range) },
+            historyDebounce: .seconds(0), panelActive: true
         )
-        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
-        await model.connect()
-        await spinUntil { await recorder.batchCount() >= 1 }
-        await spinUntil { model.cachedHistorySeries(for: promoted) != nil }
-
-        // Panel stays closed: reporting visibility must not arm a recurring loop.
-        model.updateVisibleEntities([promoted])
-        for _ in 0..<10 {
-            await Task.yield()
+        await recorder.holdNextBatches(1)
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .milliseconds(250))
+        await spinUntil { await recorder.heldBatchCount() == 1 }
+        model.presentHistoryDetail("sensor.prefetch_0")
+        for _ in 0..<20 { await Task.yield() }
+        let beforeRelease = await single.callCount()
+        XCTAssertEqual(beforeRelease, 0)
+        await recorder.releaseHeldBatches()
+        await spinUntil {
+            if case let .loaded(series) = model.snapshot.historyState {
+                return series.samples.first?.numericValue == 42
+            }
+            return false
         }
-        let closedSleepers = await clock.sleepingTaskCount()
-        let closedBatches = await recorder.batchCount()
-        XCTAssertEqual(closedSleepers, 0)
-        XCTAssertEqual(closedBatches, 1)
-        XCTAssertNotNil(model.cachedHistorySeries(for: promoted))
-
-        // Live push updates the promoted entity while the panel is closed.
-        let didUpdate = model.applyLiveState(
-            EntityState(id: promoted, name: "Prefetch 0", state: "42.0", unit: "°C")
-        )
-        XCTAssertTrue(didUpdate)
-        let entity = model.snapshot.rooms.flatMap(\.entities).first { $0.id == promoted }
-        XCTAssertEqual(entity?.state, "42.0")
-        // No extra history sync was triggered by the closed panel.
-        let afterLiveBatches = await recorder.batchCount()
-        XCTAssertEqual(afterLiveBatches, 1)
+        let singleCount = await single.callCount()
+        let batchCount = await recorder.batchCount()
+        XCTAssertEqual(singleCount, 0)
+        XCTAssertEqual(batchCount, 1)
+        model.signOut()
+        await spinUntil { await clock.sleepingTaskCount() == 0 }
     }
 
-    func test_t_inactive_panel_startup_warm_caps_prefetch_working_set() async {
+    func test_t_history_reopen_near_deadline_waits_only_until_cache_is_due() async {
         let clock = TestPearchClock()
         let recorder = BulkHistoryRecorder()
-        let rooms = prefetchRooms(count: 30)
-        let model = PearchHAPanelModel(
-            connector: { _ in .success(rooms: rooms) },
-            bulkHistoryProvider: { form, entityIDs, range in
-                await recorder.provide(form: form, entityIDs: entityIDs, range: range)
-            },
-            clock: clock,
-            bulkSyncConfiguration: PearchHAHistoryBulkSyncConfiguration(
-                settleDelay: .milliseconds(250),
-                batchSize: 40
-            ),
-            periodicRefreshConfiguration: .disabled
+        let model = await makeConnectedBulkSyncModel(
+            recorder: recorder, clock: clock, rooms: prefetchRooms(count: 1),
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: .milliseconds(250))
         )
+        model.applyDisplayPreferences(.defaults.with(dataSyncInterval: .fortyFiveSeconds))
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        model.setPanelActive(true)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .milliseconds(250), untilBatches: 1)
+        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0") != nil }
+        model.setPanelActive(false)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .seconds(44))
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        model.setPanelActive(true)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .milliseconds(250))
+        for _ in 0..<20 { await Task.yield() }
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        let freshBatches = await recorder.batchCount()
+        XCTAssertEqual(freshBatches, 1)
+        _ = await clock.advance(by: .seconds(1))
+        await spinUntil { await recorder.batchCount() == 2 }
+        model.setPanelActive(false)
+    }
 
+    func test_t_history_refresh_reports_progress_without_replacing_the_chart() async {
+        let clock = TestPearchClock()
+        let id = EntityID("sensor.office_temperature")
+        let series = historySeries(entityID: id, range: .day, value: 21)
+        let recorder = HistoryProviderRecorder(results: [.success(series), .unavailable("Offline"), .success(series)], waitForRelease: true)
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { form, id, range in await recorder.provide(form: form, entityID: id, range: range) },
+            clock: clock, bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
+        )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
-        await spinUntil { await recorder.batchCount() >= 1 }
+        await recorder.releaseNext()
+        await model.loadHistory(id)
+        _ = await clock.advance(by: .seconds(60))
+        let revision = model.historyRevision
+        let refresh = Task { await model.loadHistory(id) }
+        await spinUntil { await recorder.callCount() == 2 }
+        XCTAssertEqual(model.snapshot.historyState, .updating(series))
+        XCTAssertEqual(model.historyState(for: id).statusHelp, "Updating history")
+        XCTAssertNil(model.historyState(for: id, range: .week).statusSymbolName)
+        XCTAssertNil(model.historyState(for: "sensor.office_humidity").statusSymbolName)
+        XCTAssertEqual(PearchHAHistoryBodyPresentation(state: model.snapshot.historyState, entityID: id), PearchHAHistoryBodyPresentation(state: .loaded(series), entityID: id))
+        XCTAssertGreaterThan(model.historyRevision, revision, "the inline preview must observe request start")
+        await recorder.releaseNext()
+        await refresh.value
+        XCTAssertEqual(model.snapshot.historyState, .stale(series, message: "Offline"))
+        let retry = Task { await model.loadHistory(id) }
+        await spinUntil { await recorder.callCount() == 3 }
+        XCTAssertEqual(model.historyState(for: id).statusHelp, "Updating history")
+        await recorder.releaseNext()
+        await retry.value
+        XCTAssertEqual(model.snapshot.historyState, .loaded(series))
+        XCTAssertNil(model.historyState(for: id).statusSymbolName)
+    }
 
-        let batchCount = await recorder.batchCount()
-        let largestBatchSize = await recorder.largestBatchSize()
-        let requestedIDCount = await recorder.requestedIDs().count
-        XCTAssertEqual(batchCount, 1)
-        XCTAssertEqual(largestBatchSize, 12)
-        XCTAssertEqual(requestedIDCount, 12)
+    func test_t_history_initial_loading_ends_for_success_empty_and_failure() async {
+        let id = EntityID("sensor.office_temperature")
+        let outcomes: [PearchHAHistoryProviderResult] = [
+            .success(historySeries(entityID: id, range: .day, value: 21)),
+            .success(HistorySeries(entityID: id, range: .day, samples: [])),
+            .unavailable("Offline")
+        ]
+        for outcome in outcomes {
+            let recorder = HistoryProviderRecorder(results: [outcome, .unavailable("Offline")], waitForRelease: true)
+            let model = PearchHAPanelModel(
+                connector: { _ in .success(rooms: selectionRooms()) },
+                historyProvider: { form, id, range in await recorder.provide(form: form, entityID: id, range: range) },
+                bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
+            )
+            model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+            await model.connect()
+            XCTAssertFalse(model.isInitialHistoryLoading)
+            model.setPanelActive(true)
+            var loadingChanges: [Bool] = []
+            let observer = model.$isInitialHistoryLoading.sink { loadingChanges.append($0) }
+            let first = Task { await model.loadHistory(id, range: .day) }
+            await spinUntil { await recorder.callCount() == 1 }
+            XCTAssertTrue(model.isInitialHistoryLoading)
+            await recorder.releaseNext()
+            await first.value
+            XCTAssertFalse(model.isInitialHistoryLoading)
+            model.setPanelActive(false)
+            model.setPanelActive(true)
+            let nextRange = Task { await model.loadHistory(id, range: .month) }
+            await spinUntil { await recorder.callCount() == 2 }
+            XCTAssertFalse(model.isInitialHistoryLoading, "later loads use only the inline status")
+            XCTAssertEqual(model.historyState(for: id, range: .month).statusHelp, "Updating history")
+            await recorder.releaseNext()
+            await nextRange.value
+            XCTAssertEqual(loadingChanges, [false, true, false], "publish only actual initial-state transitions")
+            observer.cancel()
+            model.setPanelActive(false)
+        }
+    }
+
+    func test_t_history_initial_loading_ends_before_later_batches() async {
+        let clock = TestPearchClock()
+        let recorder = BulkHistoryRecorder()
+        await recorder.holdNextBatches(2)
+        await recorder.omit("sensor.prefetch_0")
+        let model = await makeConnectedBulkSyncModel(
+            recorder: recorder, clock: clock, rooms: prefetchRooms(count: 2),
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: .milliseconds(250), batchSize: 1, maxConcurrentBatches: 1),
+            panelActive: true
+        )
+        selectHistoryEntities(["sensor.prefetch_0", "sensor.prefetch_1"], in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .milliseconds(250), untilBatches: 1)
+        await spinUntil { await recorder.heldBatchCount() == 1 }
+        XCTAssertTrue(model.isInitialHistoryLoading)
+        await recorder.releaseHeldBatches()
+        await spinUntil { await recorder.batchCount() == 2 }
+        await spinUntil { await recorder.heldBatchCount() == 1 }
+        XCTAssertFalse(model.isInitialHistoryLoading, "the first failure completes loading even with another batch pending")
+        XCTAssertEqual(model.historyCacheEntryCount(), 0, "no graph is required to end initial loading")
+        XCTAssertEqual(model.historyState(for: "sensor.prefetch_1").statusHelp, "Updating history")
+        await recorder.releaseHeldBatches()
+        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_1") != nil }
+        model.setPanelActive(false)
+    }
+
+    func test_t_history_initial_loading_cancellation_and_connection_reset() async {
+        let id = EntityID("sensor.office_temperature")
+        let recorder = HistoryProviderRecorder(results: Array(repeating: .unavailable("Offline"), count: 4), waitForRelease: true)
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { form, id, range in await recorder.provide(form: form, entityID: id, range: range) },
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.setPanelActive(true)
+        let cancelled = Task { await model.loadHistory(id) }
+        await spinUntil { await recorder.callCount() == 1 }
+        XCTAssertTrue(model.isInitialHistoryLoading)
+        model.setPanelActive(false)
+        XCTAssertFalse(model.isInitialHistoryLoading)
+        cancelled.cancel()
+        await recorder.releaseNext()
+        await cancelled.value
+        model.setPanelActive(true)
+        let retry = Task { await model.loadHistory(id) }
+        await spinUntil { await recorder.callCount() == 2 }
+        XCTAssertTrue(model.isInitialHistoryLoading, "cancellation did not complete the first load")
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8124", token: "fake-token")
+        await model.connect()
+        XCTAssertFalse(model.isInitialHistoryLoading)
+        await recorder.releaseNext()
+        await retry.value
+        let reconnected = Task { await model.loadHistory(id) }
+        await spinUntil { await recorder.callCount() == 3 }
+        XCTAssertTrue(model.isInitialHistoryLoading, "an old response must not complete the new connection's first load")
+        await recorder.releaseNext()
+        await reconnected.value
+        XCTAssertFalse(model.isInitialHistoryLoading)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8125", token: "fake-token")
+        await model.connect()
+        let newConnection = Task { await model.loadHistory(id) }
+        await spinUntil { await recorder.callCount() == 4 }
+        XCTAssertTrue(model.isInitialHistoryLoading, "a connection change resets a completed first load")
+        await recorder.releaseNext()
+        await newConnection.value
+        model.setPanelActive(false)
+    }
+
+    func test_t_history_initial_loading_native_panel_uses_selected_entities() async throws {
+        let clock = TestPearchClock()
+        let recorder = BulkHistoryRecorder()
+        await recorder.holdNextBatches(1)
+        await recorder.omit("sensor.office_temperature")
+        let model = await makeConnectedBulkSyncModel(
+            recorder: recorder, clock: clock, rooms: selectionRooms(),
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: .milliseconds(250)), panelActive: true
+        )
+        model.setAllEntities(isSelected: true)
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        let panel = presentation.window
+        defer { presentation.close() }
+        defer { model.setPanelActive(false) }
+        panel.makeKeyAndOrderFront(nil)
+        drainPanelRunLoop()
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .milliseconds(250), untilBatches: 1)
+        await spinUntil { await recorder.heldBatchCount() == 1 }
+        XCTAssertTrue(model.isInitialHistoryLoading)
+        drainPanelRunLoop()
+        try saveControlSnapshot(panel.contentView, name: "history-initial-loading")
+        await recorder.releaseHeldBatches()
+        await spinUntil { !model.isInitialHistoryLoading }
+        XCTAssertEqual(model.historyState(for: "sensor.office_temperature").statusHelp, "Failure: History could not be refreshed.")
+        drainPanelRunLoop()
+        try saveControlSnapshot(panel.contentView, name: "history-initial-completed")
+        let batches = await recorder.batchCount()
+        XCTAssertEqual(batches, 1, "showing and hiding the placeholder must not trigger duplicate requests")
+    }
+
+    func test_t_history_first_batch_failure_is_exposed_without_cached_data() async {
+        let clock = TestPearchClock()
+        let recorder = BulkHistoryRecorder()
+        await recorder.omit("sensor.prefetch_0")
+        let model = await makeConnectedBulkSyncModel(
+            recorder: recorder, clock: clock, rooms: prefetchRooms(count: 1),
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: .milliseconds(250)), panelActive: true
+        )
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .milliseconds(250), untilBatches: 1)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        XCTAssertEqual(model.historyState(for: "sensor.prefetch_0").statusHelp, "Failure: History could not be refreshed.")
+        XCTAssertNil(model.cachedHistorySeries(for: "sensor.prefetch_0"))
+        model.setPanelActive(false)
+    }
+
+    func test_t_history_batch_status_is_scoped_and_clears_on_completion_and_cancellation() async {
+        let clock = TestPearchClock()
+        let recorder = BulkHistoryRecorder()
+        let id = EntityID("sensor.prefetch_0")
+        let interval = PearchDuration.seconds(30)
+        let model = await makeConnectedBulkSyncModel(
+            recorder: recorder, clock: clock, rooms: prefetchRooms(count: 2),
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(interval: interval, settleDelay: .milliseconds(250)), panelActive: true
+        )
+        var observedStates: [PearchHAHistoryPanelState] = []
+        let observer = model.historyRevisionPublisher(for: id).sink { _ in observedStates.append(model.historyState(for: id)) }
+        defer { observer.cancel() }
+        await recorder.holdNextBatches(1)
+        selectHistoryEntities([id], in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .milliseconds(250), untilBatches: 1)
+        await spinUntil { await recorder.heldBatchCount() == 1 }
+        XCTAssertEqual(model.historyState(for: id), .loading(entityID: id, range: .day))
+        XCTAssertNil(model.historyState(for: "sensor.prefetch_1").statusSymbolName)
+        await recorder.releaseHeldBatches()
+        await spinUntil { model.cachedHistorySeries(for: id) != nil }
+        let series = model.cachedHistorySeries(for: id)!
+        XCTAssertEqual(observedStates.map(\.statusHelp), [nil, "Updating history", nil])
+
+        await recorder.holdNextBatches(1)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: interval, untilBatches: 2)
+        await spinUntil { await recorder.heldBatchCount() == 1 }
+        XCTAssertEqual(model.historyState(for: id), .updating(series))
+        model.setPanelActive(false)
+        await recorder.releaseHeldBatches()
+        await spinUntil { model.historyState(for: id).statusSymbolName == nil }
+        XCTAssertEqual(model.historyState(for: id), .loaded(series))
+        XCTAssertEqual(observedStates.map(\.statusHelp), [nil, "Updating history", nil, "Updating history", nil])
+    }
+
+    func test_t_history_failed_entries_obey_capacity_and_clear_on_reconnect() async {
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: selectionRooms()) },
+            historyProvider: { _, _, _ in .unavailable("Offline") },
+            historyCacheConfiguration: PearchHAHistoryCacheConfiguration(capacity: 1),
+            bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled
+        )
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        model.setAllEntities(isSelected: false)
+        await model.loadHistory("sensor.office_temperature")
+        XCTAssertEqual(model.historyState(for: "sensor.office_temperature").statusHelp, "Failure: Offline")
+        await model.loadHistory("sensor.office_humidity")
+        XCTAssertNil(model.historyState(for: "sensor.office_temperature").statusHelp)
+        XCTAssertEqual(model.historyState(for: "sensor.office_humidity").statusHelp, "Failure: Offline")
+        XCTAssertEqual(model.historyCacheEntryCount(), 0)
+        XCTAssertEqual(model.historyCacheSampleCount(), 0)
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8124", token: "fake-token")
+        await model.connect()
+        XCTAssertNil(model.historyState(for: "sensor.office_humidity").statusHelp)
+    }
+
+    func testHistoryStalePresentationKeepsChartAndExposesFailure() throws {
+        let series = historySeries(entityID: "sensor.office_temperature", range: .day, value: 21)
+        let stale = PearchHAHistoryPanelState.stale(series, message: "Connection unavailable")
+        XCTAssertEqual(stale.entityID, series.entityID)
+        XCTAssertEqual(stale.range, .day)
+        XCTAssertEqual(stale.statusHelp, "Failure: Connection unavailable")
+        XCTAssertEqual(
+            PearchHAHistoryBodyPresentation(state: stale, entityID: series.entityID),
+            PearchHAHistoryBodyPresentation(state: .loaded(series), entityID: series.entityID)
+        )
+        XCTAssertEqual(PearchHAHistoryBodyPresentation(state: stale, entityID: "sensor.other"), .hidden)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 310), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let states: [(String, PearchHAHistoryPanelState, String?, String?)] = [
+            ("history-failure", stale, "exclamationmark.triangle", "Failure: Connection unavailable"),
+            ("history-updating", .updating(series), "arrow.triangle.2.circlepath", "Updating history"),
+            ("history-success", .loaded(series), nil, nil)
+        ]
+        for (name, state, symbol, help) in states {
+            XCTAssertEqual(state.statusSymbolName, symbol)
+            XCTAssertEqual(state.statusHelp, help)
+            XCTAssertEqual(PearchHAHistoryBodyPresentation(state: state, entityID: series.entityID), PearchHAHistoryBodyPresentation(state: .loaded(series), entityID: series.entityID))
+            window.contentView = NSHostingView(rootView: PearchHAHistoryPopoverContent(
+                entityID: series.entityID, entityName: "Office temperature", valueText: "21 °C",
+                state: state, selectedRange: .constant(.day)
+            ))
+            window.contentView?.layoutSubtreeIfNeeded()
+            drainPanelRunLoop()
+            try saveControlSnapshot(window.contentView, name: name)
+            XCTAssertFalse(nativeSegmentedControls(in: window.contentView).isEmpty)
+        }
+        XCTAssertNil(PearchHAHistoryPanelState.idle.statusSymbolName)
+        XCTAssertNil(PearchHAHistoryPanelState.idle.statusHelp)
+        XCTAssertEqual(PearchHAHistoryPanelState.loading(entityID: series.entityID, range: .day).statusHelp, "Updating history")
+        XCTAssertEqual(PearchHAHistoryPanelState.unavailable(entityID: series.entityID, range: .day, message: "Offline").statusHelp, "Failure: Offline")
+    }
+
+    func test_t_history_connect_warms_selected_daily_previews_while_closed() async {
+        let clock = TestPearchClock()
+        let recorder = BulkHistoryRecorder()
+        let selected: [EntityID] = ["sensor.prefetch_0", "sensor.prefetch_1"]
+        let model = PearchHAPanelModel(
+            connector: { _ in .success(rooms: prefetchRooms(count: 4)) },
+            bulkHistoryProvider: { form, ids, range in
+                await recorder.provide(form: form, entityIDs: ids, range: range)
+            },
+            clock: clock,
+            periodicRefreshConfiguration: .disabled,
+            selectionConfiguration: EntitySelectionConfiguration(selectedEntityIDs: selected, isExplicit: true),
+            menuBarDisplayConfiguration: MenuBarDisplayConfiguration(promotedEntityIDs: ["sensor.prefetch_3"])
+        )
+        model.applyDisplayPreferences(.defaults.with(defaultHistoryRange: .month).with(dataSyncInterval: .fortyFiveSeconds))
+        model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
+        await model.connect()
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .milliseconds(250), untilBatches: 1)
+        await spinUntil { model.cachedHistorySeries(for: selected[0]) != nil }
+        for tick in 2...3 {
+            await recorder.setValue(Double(tick), for: selected[0])
+            await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .seconds(45), untilBatches: tick)
+            await spinUntil { model.cachedHistorySeries(for: selected[0])?.samples.first?.numericValue == Double(tick) }
+        }
+        let ids = await recorder.requestedIDs()
+        let ranges = await recorder.requestedRanges()
+        XCTAssertEqual(ids, Set(selected), "only panel selections are maintained, including before the first open")
+        XCTAssertEqual(ranges, [.day, .day, .day], "the configured detail range must not expand background work")
+        XCTAssertFalse(model.isPanelActive)
+        XCTAssertFalse(model.isInitialHistoryLoading)
+        model.setPanelActive(true)
+        XCTAssertNotNil(model.cachedInlinePreview(for: selected[0]))
+        XCTAssertFalse(model.isInitialHistoryLoading, "a completed background load must not show Loading on open")
+        model.signOut()
+    }
+
+    func test_t_history_reopen_keeps_background_graph_during_refresh_and_failure() async {
+        let clock = TestPearchClock()
+        let recorder = BulkHistoryRecorder()
+        let model = await makeConnectedBulkSyncModel(
+            recorder: recorder, clock: clock, rooms: prefetchRooms(count: 2),
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: .milliseconds(250))
+        )
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .milliseconds(250), untilBatches: 1)
+        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0") != nil }
+        let cached = model.cachedHistorySeries(for: "sensor.prefetch_0")!
+        await recorder.holdNextBatches(1)
+        await recorder.omit("sensor.prefetch_0")
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .seconds(45), untilBatches: 2)
+        await spinUntil { await recorder.heldBatchCount() == 1 }
+        model.setPanelActive(true)
+        XCTAssertEqual(model.cachedHistorySeries(for: "sensor.prefetch_0"), cached)
+        XCTAssertEqual(model.historyState(for: "sensor.prefetch_0"), .updating(cached))
+        XCTAssertFalse(model.isInitialHistoryLoading)
+        model.setPanelActive(false)
+        await recorder.releaseHeldBatches()
+        await spinUntil { model.historyState(for: "sensor.prefetch_0").statusSymbolName == "exclamationmark.triangle" }
+        model.setPanelActive(true)
+        XCTAssertEqual(model.cachedHistorySeries(for: "sensor.prefetch_0"), cached)
+        XCTAssertFalse(model.isInitialHistoryLoading)
+        let batches = await recorder.batchCount()
+        XCTAssertEqual(batches, 2, "opening must reuse the background request and cached graph")
+        model.signOut()
+    }
+
+    func test_t_history_selected_month_refreshes_without_fetching_unused_ranges() async {
+        let clock = TestPearchClock()
+        let recorder = BulkHistoryRecorder(defaultValue: 42)
+        let cached = historySeries(entityID: "sensor.prefetch_0", range: .month, value: 21)
+        let model = await makeConnectedBulkSyncModel(
+            recorder: recorder, clock: clock, rooms: prefetchRooms(count: 1),
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: .milliseconds(250)),
+            historyProvider: { _, _, _ in .success(cached) }, historyDebounce: .seconds(0)
+        )
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .milliseconds(250), untilBatches: 1)
+        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0") != nil }
+        await model.loadHistory("sensor.prefetch_0", range: .month)
+        model.applyDisplayPreferences(.defaults.with(dataSyncInterval: .fortyFiveSeconds).with(historyDetailRefreshInterval: .fortyFiveSeconds))
+        model.setPanelActive(true)
+        model.presentHistoryDetail("sensor.prefetch_0", range: .month)
+        XCTAssertEqual(model.snapshot.historyState, .loaded(cached))
+        for _ in 0..<20 { await Task.yield() }
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .milliseconds(250))
+        await spinUntil { await clock.sleepingTaskCount() >= 1 }
+        _ = await clock.advance(by: .seconds(45))
+        await spinUntil { await recorder.batchCount() >= 1 }
+        await spinUntil {
+            if case let .loaded(series) = model.snapshot.historyState {
+                return series.range == .month && series.samples.first?.numericValue == 42
+            }
+            return false
+        }
+        let ranges = await recorder.requestedRanges()
+        XCTAssertEqual(ranges.count, 3)
+        XCTAssertEqual(ranges.filter { $0 == .day }.count, 2)
+        XCTAssertEqual(ranges.filter { $0 == .month }.count, 1)
+        let baseline = await recorder.batchCount()
+        model.setPanelActive(false)
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .milliseconds(250))
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .seconds(45), untilBatches: baseline + 1)
+        let closedRanges = await recorder.requestedRanges(afterBatchCount: baseline)
+        XCTAssertEqual(closedRanges, [.day], "closed detail ranges must stop refreshing")
+        model.signOut()
+    }
+
+    func test_t_history_selection_and_interval_changes_rearm_while_closed() async {
+        let clock = TestPearchClock()
+        let recorder = BulkHistoryRecorder()
+        let model = await makeConnectedBulkSyncModel(
+            recorder: recorder, clock: clock, rooms: prefetchRooms(count: 3),
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: .milliseconds(250))
+        )
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .milliseconds(250), untilBatches: 1)
+        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0") != nil }
+        selectHistoryEntities(["sensor.prefetch_1"], in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .milliseconds(250), untilBatches: 2)
+        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_1") != nil }
+        model.applyDisplayPreferences(.defaults.with(dataSyncInterval: .fiveSeconds))
+        await spinUntil { await clock.sleepingTaskCount() == 1 }
+        _ = await clock.advance(by: .milliseconds(250))
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .seconds(5), untilBatches: 3)
+        let ids = await recorder.requestedIDs(afterBatchCount: 1)
+        XCTAssertEqual(ids, ["sensor.prefetch_1"])
+        model.setAllEntities(isSelected: false)
+        await spinUntil { await clock.sleepingTaskCount() == 0 }
+        let baseline = await recorder.batchCount()
+        _ = await clock.advance(by: .seconds(90))
+        let emptySelectionBatches = await recorder.batchCount()
+        XCTAssertEqual(emptySelectionBatches, baseline)
+        model.signOut()
+    }
+
+    func test_t_history_close_skips_queued_detail_batch_and_keeps_daily_result() async {
+        let clock = TestPearchClock()
+        let recorder = BulkHistoryRecorder(defaultValue: 42)
+        let cached = historySeries(entityID: "sensor.prefetch_0", range: .month, value: 21)
+        let model = await makeConnectedBulkSyncModel(
+            recorder: recorder, clock: clock, rooms: prefetchRooms(count: 1),
+            bulkSync: PearchHAHistoryBulkSyncConfiguration(settleDelay: .milliseconds(250), maxConcurrentBatches: 1),
+            historyProvider: { _, _, _ in .success(cached) }, historyDebounce: .seconds(0)
+        )
+        selectHistoryEntities(["sensor.prefetch_0"], in: model)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .milliseconds(250), untilBatches: 1)
+        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0") != nil }
+        await model.loadHistory("sensor.prefetch_0", range: .month)
+        model.setPanelActive(true)
+        model.presentHistoryDetail("sensor.prefetch_0", range: .month)
+        for _ in 0..<20 { await Task.yield() }
+        await recorder.holdNextBatches(1)
+        await advanceBulkSyncCycle(clock: clock, recorder: recorder, interval: .seconds(45), untilBatches: 2)
+        await spinUntil { await recorder.heldBatchCount() == 1 }
+        XCTAssertEqual(model.historyState(for: "sensor.prefetch_0", range: .month), .updating(cached))
+        model.setPanelActive(false)
+        await recorder.setValue(43, for: "sensor.prefetch_0")
+        await recorder.releaseHeldBatches()
+        await spinUntil { model.cachedHistorySeries(for: "sensor.prefetch_0")?.samples.first?.numericValue == 43 }
+        await spinUntil { model.historyState(for: "sensor.prefetch_0", range: .month).statusSymbolName == nil }
+        let ranges = await recorder.requestedRanges()
+        XCTAssertEqual(ranges, [.day, .day], "closing must drop queued detail work without discarding the daily response")
+        XCTAssertEqual(model.cachedHistorySeries(for: "sensor.prefetch_0", range: .month), cached)
+        model.signOut()
     }
 
     func test_t_history_range_picker_offers_month_for_older_history() {
@@ -9587,6 +11551,7 @@ final class PearchHAUITests: XCTestCase {
                 return .success(rooms: refreshedRooms)
             },
             clock: clock,
+            bulkSyncConfiguration: .disabled,
             periodicRefreshConfiguration: PearchHAPeriodicRefreshConfiguration(interval: interval),
             menuBarDisplayConfiguration: MenuBarDisplayConfiguration(promotedEntityIDs: [promoted])
         )
@@ -9615,8 +11580,12 @@ final class PearchHAUITests: XCTestCase {
             model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
             await model.connect()
             model.setPanelActive(true)
-            // Let both loops arm and reach their clock sleeps.
-            await spinUntil { await clock.sleepingTaskCount() >= 1 }
+            selectHistoryEntities(["sensor.prefetch_0"], in: model)
+            // Run the first history cycle, then release while both loops sleep.
+            await spinUntil { await clock.sleepingTaskCount() == 2 }
+            _ = await clock.advance(by: .milliseconds(250))
+            for _ in 0..<20 { await Task.yield() }
+            await spinUntil { await clock.sleepingTaskCount() == 2 }
             weakModel = model
         }
         // The loops re-bind self weakly per iteration, so dropping the last
@@ -9655,40 +11624,72 @@ final class PearchHAUITests: XCTestCase {
         model.setPanelActive(false)
     }
 
-    func test_t_status_panel_reports_visibility_changes_on_every_dismissal_path() {
-        let panel = PearchHAStatusPanel()
-        var reported: [Bool] = []
-        panel.onVisibilityChange = { reported.append($0) }
+    func testNativePopoverKeepsPreferredSizeWithinScreenAndClearOfAnchor() async throws {
+        for textSize: PearchHATextSize in [.standard, .maximum] {
+            let model = PearchHAPanelModel(bulkSyncConfiguration: .disabled, periodicRefreshConfiguration: .disabled)
+            model.applyDisplayPreferences(.defaults.with(textSize: textSize))
+            let presentation = try PearchHATestPopoverPresentation(model: model)
+            defer { presentation.close() }
+            let content = try XCTUnwrap(presentation.popover.contentViewController?.view)
+            content.layoutSubtreeIfNeeded()
+            drainPanelRunLoop()
+            await Task.yield()
+            content.layoutSubtreeIfNeeded()
+            drainPanelRunLoop()
 
-        panel.makeKeyAndOrderFront(nil)
-        XCTAssertEqual(reported, [true])
-
-        // Escape routes through cancelOperation -> orderOut.
-        panel.cancelOperation(nil)
-        XCTAssertEqual(reported, [true, false])
-
-        // Repeated hides do not re-report; only genuine changes fire.
-        panel.orderOut(nil)
-        XCTAssertEqual(reported, [true, false])
+            let preferred = PearchHAPanelView.preferredContentSize(textSize: textSize)
+            XCTAssertEqual(presentation.popover.contentSize.width, preferred.width, accuracy: 1, textSize.displayName)
+            XCTAssertEqual(presentation.popover.contentSize.height, preferred.height, accuracy: 1, textSize.displayName)
+            XCTAssertEqual(content.bounds.width, preferred.width, accuracy: 1, textSize.displayName)
+            XCTAssertEqual(content.bounds.height, preferred.height, accuracy: 1, textSize.displayName)
+            let visibleFrame = try XCTUnwrap(presentation.anchorWindow.screen?.visibleFrame)
+            XCTAssertTrue(visibleFrame.insetBy(dx: -1, dy: -1).contains(presentation.window.frame),
+                          "\(textSize.rawValue): native popover \(presentation.window.frame) must fit within \(visibleFrame)")
+            let anchorFrame = presentation.anchorWindow.convertToScreen(
+                presentation.anchor.convert(presentation.anchor.bounds, to: nil))
+            XCTAssertFalse(presentation.window.frame.intersects(anchorFrame.insetBy(dx: 1, dy: 1)),
+                           "\(textSize.rawValue): native popover \(presentation.window.frame) must leave its anchor \(anchorFrame) clickable")
+        }
     }
 
-    func test_t_panel_dismissal_stops_background_work_without_status_item_toggle() async {
-        let model = PearchHAPanelModel(
-            connector: { _ in .success(rooms: prefetchRooms(count: 1)) }
-        )
-        let panel = PearchHAApplication.makePanel(model: model)
-        defer {
-            panel.orderOut(nil)
-            panel.contentViewController = nil
+    func testStatusPopoverReportsVisibilityChangesOnEveryDismissalPath() throws {
+        let presentation = try PearchHATestPopoverPresentation(model: PearchHAPanelModel())
+        defer { presentation.close() }
+        var reported: [Bool] = []
+        presentation.popover.onVisibilityChange = { reported.append($0) }
+        presentation.popover.cancelOperation(nil)
+        XCTAssertEqual(reported, [false])
+        presentation.popover.show(relativeTo: presentation.anchor.bounds, of: presentation.anchor, preferredEdge: .minY)
+        XCTAssertEqual(reported, [false, true])
+        presentation.popover.close()
+        presentation.popover.close()
+        XCTAssertEqual(reported, [false, true, false])
+    }
+
+    func testPopoverDismissalStopsBackgroundWorkWithoutStatusItemToggle() throws {
+        let model = PearchHAPanelModel(connector: { _ in .success(rooms: prefetchRooms(count: 1)) })
+        let presentation = try PearchHATestPopoverPresentation(model: model)
+        defer { presentation.close() }
+        XCTAssertTrue(model.isPanelActive)
+        presentation.popover.cancelOperation(nil)
+        XCTAssertFalse(model.isPanelActive, "Native dismissal stops panel-only background work")
+    }
+
+    func testAppDeactivationDismissesPanelAndAllowsImmediateReopening() async throws {
+        _ = NSApplication.shared
+        let application = applicationForTest(configStore: nil)
+        application.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer { application.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification)) }
+        let button = try XCTUnwrap(NSApp.windows.flatMap { nativeViews(in: $0.contentView, of: NSStatusBarButton.self) }
+            .first { $0.target === application })
+        await spinUntil("the shell status anchor is visible") { button.window?.isVisible == true && !button.visibleRect.isEmpty }
+        drainPanelRunLoop()
+        for _ in 0..<2 {
+            button.performClick(nil)
+            XCTAssertTrue(application.snapshot.panelIsShown, "anchorVisible=\(button.window?.isVisible == true) rect=\(button.visibleRect)")
+            application.applicationDidResignActive(Notification(name: NSApplication.didResignActiveNotification, object: NSApp))
+            XCTAssertFalse(application.snapshot.panelIsShown, "App deactivation closes the native popover")
         }
-
-        panel.makeKeyAndOrderFront(nil)
-        XCTAssertTrue(model.isPanelActive, "showing the panel activates background sync")
-
-        // Escape (or click-away auto-hide) must deactivate the model even though
-        // the status-item toggle never ran — this leaked background loops before.
-        panel.cancelOperation(nil)
-        XCTAssertFalse(model.isPanelActive, "hiding the panel stops background sync")
     }
 
     func test_t_periodic_refresh_backs_off_after_failure() async {
@@ -9707,6 +11708,7 @@ final class PearchHAUITests: XCTestCase {
         let model = PearchHAPanelModel(
             connector: { _ in await outcomes.next() },
             clock: clock,
+            bulkSyncConfiguration: .disabled,
             periodicRefreshConfiguration: PearchHAPeriodicRefreshConfiguration(
                 interval: interval,
                 maximumBackoff: .seconds(300)
@@ -9787,20 +11789,6 @@ final class PearchHAUITests: XCTestCase {
         XCTFail("Timed out waiting for \(message)")
     }
 
-    private func historySeries(entityID: EntityID, range: HistoryRange, value: Double) -> HistorySeries {
-        HistorySeries(
-            entityID: entityID,
-            range: range,
-            samples: [
-                HistorySample(
-                    timestamp: Date(timeIntervalSince1970: 1_789_999_200),
-                    state: "\(value)",
-                    numericValue: value
-                )
-            ]
-        )
-    }
-
     private func oauthDiscoverySnapshot() -> DiscoverySnapshot {
         DiscoverySnapshot(
             areas: [],
@@ -9823,34 +11811,51 @@ final class PearchHAUITests: XCTestCase {
         }
     }
 
+    private func nativeViews<T: NSView>(in root: NSView?, of type: T.Type) -> [T] {
+        guard let root else { return [] }
+        let matches = (root as? T).map { [$0] } ?? []
+        return matches + root.subviews.flatMap { nativeViews(in: $0, of: type) }
+    }
+
     private func editableTextFields(in root: NSView?) -> [NSTextField] {
-        guard let root else {
-            return []
-        }
-        var result: [NSTextField] = []
-        func collect(_ view: NSView) {
-            if let textField = view as? NSTextField, !textField.isHiddenOrHasHiddenAncestor, textField.isEditable {
-                result.append(textField)
-            }
-            view.subviews.forEach(collect)
-        }
-        collect(root)
-        return result
+        nativeViews(in: root, of: NSTextField.self).filter { !$0.isHiddenOrHasHiddenAncestor && $0.isEditable }
+    }
+
+    private func accessibilityElements(in root: Any) -> [any NSAccessibilityProtocol] {
+        guard let element = root as? any NSAccessibilityProtocol else { return [] }
+        let children = element.accessibilityChildren() ?? []
+        let descendants: [Any] = children.isEmpty ? ((root as? NSView)?.subviews ?? []) : children
+        return [element] + descendants.flatMap { accessibilityElements(in: $0) }
+    }
+
+    private func nativeSteppers(in root: NSView?) -> [NSStepper] {
+        nativeViews(in: root, of: NSStepper.self)
+    }
+
+    private func saveControlSnapshot(_ view: NSView?, name: String) throws {
+        guard let directory = ProcessInfo.processInfo.environment["PEARCHHA_CONTROL_SNAPSHOT_DIR"] else { return }
+        let view = try XCTUnwrap(view)
+        view.layoutSubtreeIfNeeded()
+        let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        let url = URL(fileURLWithPath: directory)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        try png.write(to: url.appendingPathComponent("\(name).png"))
     }
 
     private func secureTextFields(in root: NSView?) -> [NSSecureTextField] {
-        guard let root else {
-            return []
-        }
-        var result: [NSSecureTextField] = []
-        func collect(_ view: NSView) {
-            if let textField = view as? NSSecureTextField, !textField.isHiddenOrHasHiddenAncestor, textField.isEditable {
-                result.append(textField)
-            }
-            view.subviews.forEach(collect)
-        }
-        collect(root)
-        return result
+        nativeViews(in: root, of: NSSecureTextField.self).filter { !$0.isHiddenOrHasHiddenAncestor && $0.isEditable }
+    }
+
+    private func setNativeTextFieldDraft(_ value: String, for textField: NSTextField, in window: NSWindow) throws {
+        XCTAssertTrue(window.makeFirstResponder(textField))
+        drainPanelRunLoop()
+        let editor = try XCTUnwrap(textField.currentEditor())
+        editor.string = value
+        textField.stringValue = value
+        NotificationCenter.default.post(name: NSControl.textDidChangeNotification, object: textField, userInfo: ["NSFieldEditor": editor])
+        drainPanelRunLoop()
     }
 
     private func setNativeTextFieldValue(_ value: String, for textField: NSTextField, in panel: NSWindow) throws {
@@ -9890,83 +11895,20 @@ final class PearchHAUITests: XCTestCase {
         drainPanelRunLoop()
     }
 
-    @MainActor
     private func nativeSwitches(in root: NSView?) -> [NSSwitch] {
-        guard let root else {
-            return []
-        }
-        var result: [NSSwitch] = []
-        func collect(_ view: NSView) {
-            if let controlSwitch = view as? NSSwitch, !controlSwitch.isHiddenOrHasHiddenAncestor {
-                result.append(controlSwitch)
-            }
-            view.subviews.forEach(collect)
-        }
-        collect(root)
-        return result
+        nativeViews(in: root, of: NSSwitch.self).filter { !$0.isHiddenOrHasHiddenAncestor }
     }
 
-    @MainActor
-    private func nativeSliders(in root: NSView?) -> [NSSlider] {
-        guard let root else {
-            return []
-        }
-        var result: [NSSlider] = []
-        func collect(_ view: NSView) {
-            if let slider = view as? NSSlider, !slider.isHiddenOrHasHiddenAncestor {
-                result.append(slider)
-            }
-            view.subviews.forEach(collect)
-        }
-        collect(root)
-        return result
-    }
-
-    @MainActor
     private func nativeButtons(in root: NSView?) -> [NSButton] {
-        guard let root else {
-            return []
-        }
-        var result: [NSButton] = []
-        func collect(_ view: NSView) {
-            if let button = view as? NSButton, !button.isHiddenOrHasHiddenAncestor {
-                result.append(button)
-            }
-            view.subviews.forEach(collect)
-        }
-        collect(root)
-        return result
+        nativeViews(in: root, of: NSButton.self).filter { !$0.isHiddenOrHasHiddenAncestor }
     }
 
-    @MainActor
     private func nativeSegmentedControls(in root: NSView?) -> [NSSegmentedControl] {
-        guard let root else {
-            return []
-        }
-        var result: [NSSegmentedControl] = []
-        func collect(_ view: NSView) {
-            if let control = view as? NSSegmentedControl, !control.isHiddenOrHasHiddenAncestor {
-                result.append(control)
-            }
-            view.subviews.forEach(collect)
-        }
-        collect(root)
-        return result
+        nativeViews(in: root, of: NSSegmentedControl.self).filter { !$0.isHiddenOrHasHiddenAncestor }
     }
 
     private func nativePopUpButtons(in root: NSView?) -> [NSPopUpButton] {
-        guard let root else {
-            return []
-        }
-        var result: [NSPopUpButton] = []
-        func collect(_ view: NSView) {
-            if let popUpButton = view as? NSPopUpButton, !popUpButton.isHiddenOrHasHiddenAncestor {
-                result.append(popUpButton)
-            }
-            view.subviews.forEach(collect)
-        }
-        collect(root)
-        return result
+        nativeViews(in: root, of: NSPopUpButton.self).filter { !$0.isHiddenOrHasHiddenAncestor }
     }
 
     private func nativeKeyViewLoopLabels(startingAt start: NSView) -> [String] {
@@ -10001,21 +11943,13 @@ final class PearchHAUITests: XCTestCase {
     }
 
     private func nativeControlDebugSummary(in root: NSView?) -> String {
-        guard let root else {
-            return "no-root-view"
-        }
-        var result: [String] = []
-        func collect(_ view: NSView) {
-            if let control = view as? NSControl {
-                let placeholder = (control as? NSTextField)?.placeholderString ?? ""
-                let title = control is NSButton ? (control as? NSButton)?.title ?? "" : ""
-                let label = control.accessibilityLabel() ?? ""
-                result.append("\(type(of: control))(placeholder:\(placeholder),title:\(title),label:\(label),enabled:\(control.isEnabled),hidden:\(control.isHiddenOrHasHiddenAncestor))")
-            }
-            view.subviews.forEach(collect)
-        }
-        collect(root)
-        return result.prefix(16).joined(separator: " | ")
+        guard root != nil else { return "no-root-view" }
+        return nativeViews(in: root, of: NSControl.self).prefix(16).map { control in
+            let placeholder = (control as? NSTextField)?.placeholderString ?? ""
+            let title = (control as? NSButton)?.title ?? ""
+            let label = control.accessibilityLabel() ?? ""
+            return "\(type(of: control))(placeholder:\(placeholder),title:\(title),label:\(label),enabled:\(control.isEnabled),hidden:\(control.isHiddenOrHasHiddenAncestor))"
+        }.joined(separator: " | ")
     }
 
     private func sensorCustomAction(requiresConfirmation: Bool = false) -> EntityCustomAction {
@@ -10760,6 +12694,7 @@ final class PearchHAUITests: XCTestCase {
         let model = PearchHAPanelModel(
             connector: { _ in await outcomes.next() },
             clock: clock,
+            bulkSyncConfiguration: .disabled,
             periodicRefreshConfiguration: PearchHAPeriodicRefreshConfiguration(interval: interval, maximumBackoff: .seconds(300))
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
@@ -10767,7 +12702,7 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertEqual(model.retryBackoffState, .connected)
 
         model.setPanelActive(true)
-        await spinUntil("periodic refresh loop should arm at least one sleeper") { await clock.sleepingTaskCount() >= 1 }
+        await spinUntil("periodic refresh loop should arm one sleeper") { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: interval)
         await spinUntil("periodic refresh failure should publish backing-off state") {
             if case .backingOff = model.retryBackoffState { return true } else { return false }
@@ -10796,18 +12731,19 @@ final class PearchHAUITests: XCTestCase {
         let model = PearchHAPanelModel(
             connector: { _ in await outcomes.next() },
             clock: clock,
+            bulkSyncConfiguration: .disabled,
             periodicRefreshConfiguration: PearchHAPeriodicRefreshConfiguration(interval: interval, maximumBackoff: .seconds(300))
         )
         model.updateConnectionForm(urlString: "http://127.0.0.1:8123", token: "fake-token")
         await model.connect()
 
         model.setPanelActive(true)
-        await spinUntil("periodic refresh loop should arm at least one sleeper") { await clock.sleepingTaskCount() >= 1 }
+        await spinUntil("periodic refresh loop should arm one sleeper") { await clock.sleepingTaskCount() == 1 }
         _ = await clock.advance(by: interval)
         await spinUntil("periodic refresh failure should be recorded in diagnostics") {
             model.diagnosticEvents.contains { $0.kind == .refreshFailed }
         }
-        await spinUntil("backoff delay should re-arm the periodic refresh loop") { await clock.sleepingTaskCount() >= 1 }
+        await spinUntil("backoff delay should re-arm the periodic refresh loop") { await clock.sleepingTaskCount() == 1 }
 
         // Wake the backed-off sleep (failure doubled the base interval).
         _ = await clock.advance(by: interval)
@@ -11249,11 +13185,6 @@ private actor HistoryProviderRecorder {
     }
 }
 
-/// Records every history request and answers with a series matching the
-/// requested entity and range, so concurrent prefetch fetches never depend on
-/// call ordering. Optionally blocks each call until released, letting tests
-/// observe in-flight concurrency.
-
 /// Records bulk-history requests for the background sync loop, returning one
 /// series per requested entity. Each request (one batch) is logged so tests can
 /// count cycles, assert which entities synced, and verify batching.
@@ -11284,6 +13215,10 @@ private actor BulkHistoryRecorder {
 
     func omit(_ entityID: EntityID) {
         omitted.insert(entityID)
+    }
+
+    func restore(_ entityID: EntityID) {
+        omitted.remove(entityID)
     }
 
     func holdNextBatches(_ count: Int) {
@@ -11436,7 +13371,7 @@ private actor ActionRunnerRecorder {
 }
 
 private actor ConnectionGate {
-    private var isOpen = false
+    private(set) var isOpen = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     func wait() async {
@@ -11537,29 +13472,41 @@ private final class CustomActionSinkRecorder {
 }
 
 private final class InMemoryProtectedActionValueStore: ProtectedActionValueStore, @unchecked Sendable {
+    private let lock = NSLock()
     private var values: [ProtectedActionValueReference: String] = [:]
+    private var nextLoad: (@Sendable () throws -> Void)?
+
+    func interceptNextLoad(_ action: @escaping @Sendable () throws -> Void) {
+        lock.withLock { nextLoad = action }
+    }
 
     func save(_ value: String, for reference: ProtectedActionValueReference) throws {
         let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else {
             throw SecretStoreError.emptySecret(.customActionProtectedValues)
         }
-        values[reference] = normalized
+        lock.withLock { values[reference] = normalized }
     }
 
     func load(_ reference: ProtectedActionValueReference) throws -> String {
-        guard let value = values[reference] else {
+        let (value, action) = lock.withLock {
+            let action = nextLoad
+            nextLoad = nil
+            return (values[reference], action)
+        }
+        try action?()
+        guard let value else {
             throw ProtectedActionValueStoreError.missingValue(reference)
         }
         return value
     }
 
     func delete(_ reference: ProtectedActionValueReference) throws {
-        values.removeValue(forKey: reference)
+        _ = lock.withLock { values.removeValue(forKey: reference) }
     }
 
     func snapshot() throws -> [ProtectedActionValueReference: String] {
-        values
+        lock.withLock { values }
     }
 }
 
@@ -11633,10 +13580,6 @@ private final class FailingConfigStore: ConfigStore, @unchecked Sendable {
         self.saveError = saveError
     }
 
-    func describe() -> PearchHAModule {
-        PearchHAPersistence.module
-    }
-
     func load() throws -> PearchHAConfiguration {
         if let loadError {
             throw loadError
@@ -11677,30 +13620,6 @@ actor CallCounter {
     func next() -> Int {
         count += 1
         return count
-    }
-}
-
-/// Keeps generic active-panel tests independent from the one-shot hidden warmup.
-/// Tests for that warmup opt in through `startupWarm` on their shared setup.
-private actor StartupWarmBlocker {
-    private var remainingSuppressedRequests: Int
-
-    init(suppressedRequestCount: Int) {
-        remainingSuppressedRequests = suppressedRequestCount
-    }
-
-    func shouldSuppressRequest() -> Bool {
-        guard remainingSuppressedRequests > 0 else {
-            return false
-        }
-        remainingSuppressedRequests -= 1
-        return true
-    }
-
-    func waitUntilSuppressionCompletes() async {
-        while remainingSuppressedRequests > 0 {
-            await Task.yield()
-        }
     }
 }
 
@@ -11927,7 +13846,7 @@ func energyRooms() -> [Room] {
     ]
 }
 
-private func historySeriesFixture(entityID: EntityID, range: HistoryRange, value: Double) -> HistorySeries {
+private func historySeries(entityID: EntityID, range: HistoryRange, value: Double) -> HistorySeries {
     HistorySeries(
         entityID: entityID,
         range: range,

@@ -59,7 +59,7 @@ public enum PearchHAEntityRowPresentation: Equatable, Sendable {
                 )
             )
         }
-        if let isActive = activePillState(entity.state) {
+        if entity.id.source == .homeAssistant, let isActive = activePillState(entity.state) {
             return .statePill(isActive: isActive)
         }
         return .value(severity: rendered.severity)

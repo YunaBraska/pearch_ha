@@ -6,16 +6,43 @@ import UniformTypeIdentifiers
 import PearchHACore
 import PearchHASupport
 
+private struct PanelSelectionDropDelegate: DropDelegate {
+    let translation: SelectionDropTranslation
+    let setTargeted: (Bool) -> Void
+    let move: () -> Bool
+
+    func validateDrop(info: DropInfo) -> Bool {
+        return translation != .unsupported
+    }
+
+    func dropEntered(info: DropInfo) { setTargeted(validateDrop(info: info)) }
+
+    func dropExited(info: DropInfo) { setTargeted(false) }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: validateDrop(info: info) ? .move : .forbidden)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        setTargeted(false)
+        guard validateDrop(info: info) else { return false }
+        return move()
+    }
+}
+
 @MainActor
 private final class PearchHAPanelViewState: ObservableObject {
     @Published private(set) var snapshot: PearchHAPanelSnapshot
     @Published private(set) var oauthSignInState: PearchHAOAuthSignInState
     @Published private(set) var displayPreferences: PearchHADisplayPreferences
+    @Published private(set) var isInitialHistoryLoading: Bool
+    private var controlRequestsSubscription: AnyCancellable?
 
     init(model: PearchHAPanelModel) {
         self.snapshot = model.snapshot
         self.oauthSignInState = model.oauthSignInState
         self.displayPreferences = model.displayPreferences
+        self.isInitialHistoryLoading = model.isInitialHistoryLoading
         model.$snapshot
             .receive(on: RunLoop.main)
             .assign(to: &$snapshot)
@@ -25,6 +52,12 @@ private final class PearchHAPanelViewState: ObservableObject {
         model.$displayPreferences
             .receive(on: RunLoop.main)
             .assign(to: &$displayPreferences)
+        model.$isInitialHistoryLoading
+            .receive(on: RunLoop.main)
+            .assign(to: &$isInitialHistoryLoading)
+        controlRequestsSubscription = model.requestedControlsPublisher
+            .receive(on: RunLoop.main)
+            .sink { [weak self] in self?.objectWillChange.send() }
     }
 }
 
@@ -68,6 +101,28 @@ private struct PearchHAInlineHistoryPreview: View {
 
     var body: some View {
         let _ = historyObserver.revision
+        if entity.id.source == .thisMac {
+            preview
+                .frame(width: TelemetryRowMetrics.previewWidth, height: TelemetryRowMetrics.previewHeight)
+                .help(LocalMacText.historyUnavailable.localized())
+                .accessibilityLabel(LocalMacText.readOnly.localized())
+        } else {
+            Button {
+                model.presentHistoryDetail(entity.id)
+            } label: {
+                preview
+                    .frame(width: TelemetryRowMetrics.previewWidth, height: TelemetryRowMetrics.previewHeight)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Show history for \(entity.name)")
+            .accessibilityLabel("Show history for \(entity.name)")
+        }
+    }
+
+    @ViewBuilder
+    private var preview: some View {
+        let _ = historyObserver.revision
         let configuration = model.snapshot.effectiveMenuBarItemConfiguration(for: entity)
         let numericPreviewColor = PearchHAHistoryTint.numericAccent(for: entity, configuration: configuration)
             .map(PearchHATheme.color(for:))
@@ -83,7 +138,7 @@ private struct PearchHAInlineHistoryPreview: View {
             return PearchHATheme.color(for: HistoryStateColorKind.classify(state))
         }
         if case let .gauge(gauge) = presentation,
-           gauge.style != .ring,
+           (gauge.style != .ring || entity.id.source == .thisMac),
            PearchHADashboardPreview.meterShows(for: value.status) {
             MicroMeter(
                 fraction: gauge.fraction,
@@ -112,196 +167,13 @@ private struct PearchHAInlineHistoryPreview: View {
                 MicroDash(color: palette.chartMuted)
             }
         } else {
-            Color.clear
+            MicroDash(color: palette.chartMuted)
         }
     }
 }
 
-@MainActor
-private final class PearchHAHistoryPopoverController: ObservableObject {
-    private static let popoverSize = NSSize(width: 308, height: 244)
-    private weak var model: PearchHAPanelModel?
-    private let onOpenEntitySettings: ((EntityID) -> Void)?
-    private let popover: NSPopover
-    private var snapshotCancellable: AnyCancellable?
-    private var anchors: [EntityID: WeakAnchorView] = [:]
-    private var currentEntityID: EntityID?
-    private weak var currentAnchorView: NSView?
-    private var hostingController: NSHostingController<PearchHAHistoryPopoverRootView>?
-    private var clickOutsideMonitor: Any?
-
-    init(model: PearchHAPanelModel, onOpenEntitySettings: ((EntityID) -> Void)?) {
-        self.model = model
-        self.onOpenEntitySettings = onOpenEntitySettings
-        let popover = NSPopover()
-        popover.behavior = .applicationDefined
-        popover.animates = false
-        self.popover = popover
-        snapshotCancellable = model.$snapshot
-            .receive(on: RunLoop.main)
-            .sink { [weak self] snapshot in
-                self?.update(with: snapshot)
-            }
-    }
-
-    deinit {
-        Task { @MainActor [popover] in
-            if popover.isShown {
-                popover.performClose(nil)
-            }
-        }
-    }
-
-    func register(anchorView: NSView, for entityID: EntityID) {
-        anchors[entityID] = WeakAnchorView(view: anchorView)
-        guard currentEntityID == entityID, let model else {
-            return
-        }
-        update(with: model.snapshot)
-    }
-
-    func unregister(anchorView: NSView, for entityID: EntityID) {
-        guard anchors[entityID]?.view === anchorView else {
-            return
-        }
-        anchors[entityID] = nil
-        if currentEntityID == entityID {
-            dismiss()
-        }
-    }
-
-    private func update(with snapshot: PearchHAPanelSnapshot) {
-        pruneDeadAnchors()
-        guard let model,
-              let entityID = snapshot.historyPresentationEntityID,
-              let anchorView = anchors[entityID]?.view,
-              anchorView.window != nil,
-              let entity = snapshot.rooms
-                .flatMap(\.entities)
-                .first(where: { $0.id == entityID })
-        else {
-            dismiss()
-            return
-        }
-
-        if currentEntityID != entityID || hostingController == nil {
-            let rootView = PearchHAHistoryPopoverRootView(
-                model: model,
-                entity: entity,
-                onOpenEntitySettings: onOpenEntitySettings
-            )
-            let hostingController = NSHostingController(rootView: rootView)
-            hostingController.view.layoutSubtreeIfNeeded()
-            self.hostingController = hostingController
-            popover.contentViewController = hostingController
-            popover.contentSize = Self.popoverSize
-            currentEntityID = entityID
-        }
-
-        let needsReanchor = currentAnchorView !== anchorView
-        currentAnchorView = anchorView
-        if popover.isShown, needsReanchor {
-            popover.performClose(nil)
-        }
-        if !popover.isShown {
-            popover.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .maxX)
-            installClickOutsideMonitor()
-        }
-    }
-
-    private func dismiss() {
-        currentEntityID = nil
-        currentAnchorView = nil
-        hostingController = nil
-        if popover.isShown {
-            popover.performClose(nil)
-        }
-        removeClickOutsideMonitor()
-    }
-
-    private func pruneDeadAnchors() {
-        anchors = anchors.filter { $0.value.view != nil }
-    }
-
-    private func installClickOutsideMonitor() {
-        guard clickOutsideMonitor == nil else {
-            return
-        }
-        clickOutsideMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        ) { [weak self] event in
-            guard let self else {
-                return event
-            }
-            guard popover.isShown else {
-                removeClickOutsideMonitor()
-                return event
-            }
-            if shouldKeepPopoverOpen(for: event) {
-                return event
-            }
-            model?.dismissHistoryPopover()
-            return event
-        }
-    }
-
-    private func removeClickOutsideMonitor() {
-        guard let clickOutsideMonitor else {
-            return
-        }
-        NSEvent.removeMonitor(clickOutsideMonitor)
-        self.clickOutsideMonitor = nil
-    }
-
-    private func shouldKeepPopoverOpen(for event: NSEvent) -> Bool {
-        if let popoverWindow = popover.contentViewController?.view.window,
-           event.window === popoverWindow {
-            return true
-        }
-        guard let anchorView = currentAnchorView,
-              let anchorWindow = anchorView.window,
-              event.window === anchorWindow
-        else {
-            return false
-        }
-        let pointInAnchor = anchorView.convert(event.locationInWindow, from: nil)
-        return anchorView.bounds.contains(pointInAnchor)
-    }
-}
-
-private final class WeakAnchorView {
-    weak var view: NSView?
-
-    init(view: NSView?) {
-        self.view = view
-    }
-}
-
-@MainActor
-private struct PearchHAHistoryPopoverAnchor: NSViewRepresentable {
-    let entityID: EntityID
-    let controller: PearchHAHistoryPopoverController
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.wantsLayer = false
-        controller.register(anchorView: view, for: entityID)
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        controller.register(anchorView: nsView, for: entityID)
-    }
-
-    static func dismantleNSView(_ nsView: NSView, coordinator: ()) {
-        // `NSViewRepresentable` dismantle is static, so unregistration is
-        // driven by the controller pruning dead weak references on the next
-        // snapshot update. That keeps the anchor bookkeeping lightweight.
-    }
-}
-
-private struct PearchHAHistoryPopoverRootView: View {
+private struct PearchHAHistoryDetailView: View {
+    let increasedContrast: Bool
     @ObservedObject var model: PearchHAPanelModel
     let entity: DiscoveredEntity
     let onOpenEntitySettings: ((EntityID) -> Void)?
@@ -312,10 +184,12 @@ private struct PearchHAHistoryPopoverRootView: View {
             entityName: entity.name,
             valueText: model.formattedValue(for: entity).text,
             unit: entity.unit,
+            fillsPanel: true,
             state: model.snapshot.historyState,
             chartTint: historyChartTint,
             numericColorForValue: historyNumericColor,
             stateColorForTimeline: historyStateColor,
+            increaseContrastOverride: increasedContrast,
             onOpenSettings: {
                 onOpenEntitySettings?(entity.id)
             },
@@ -357,14 +231,22 @@ private struct PearchHAHistoryPopoverRootView: View {
 }
 
 public struct PearchHAPanelView: View {
+    /// Preferred content size. AppKit positions the surrounding native popover.
+    public nonisolated static func preferredContentSize(textSize: PearchHATextSize) -> CGSize {
+        CGSize(width: 384 + 156 * (textSize.scale - 1), height: 468 + 96 * (textSize.scale - 1))
+    }
+
     private let model: PearchHAPanelModel
     private let accessibilityPreferencesOverride: PearchHAAccessibilityPreferences?
     private let onOpenSettings: (() -> Void)?
     private let onOpenEntitySettings: ((EntityID) -> Void)?
     @StateObject private var viewState: PearchHAPanelViewState
-    @StateObject private var historyPopoverController: PearchHAHistoryPopoverController
     @State private var pendingCustomActionID: CustomActionID?
     @State private var expandedModuleIDs: Set<String> = []
+    @State private var draggedSelectionItem: SelectionDragItem?
+    @State private var targetedSelectionItem: SelectionDragItem?
+
+    private static let panelSelectionDragType = UTType(exportedAs: PearchHAPanelDrag.typeIdentifier, conformingTo: .data)
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.colorScheme) private var colorScheme
@@ -380,12 +262,7 @@ public struct PearchHAPanelView: View {
         self.onOpenSettings = onOpenSettings
         self.onOpenEntitySettings = onOpenEntitySettings
         _viewState = StateObject(wrappedValue: PearchHAPanelViewState(model: model))
-        _historyPopoverController = StateObject(
-            wrappedValue: PearchHAHistoryPopoverController(
-                model: model,
-                onOpenEntitySettings: onOpenEntitySettings
-            )
-        )
+
     }
 
     private func openSettings() {
@@ -413,23 +290,42 @@ public struct PearchHAPanelView: View {
             snapshot: snapshot,
             preferences: accessibilityPreferences
         )
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         let shape = RoundedRectangle(cornerRadius: PearchHATheme.Dashboard.panelCornerRadius, style: .continuous)
         return VStack(alignment: .leading, spacing: 0) {
             if showsTopBar {
                 topBar
                 dashboardDivider
             }
-            content
+            ZStack(alignment: .topLeading) {
+                content
+                    .opacity(snapshot.historyPresentationEntityID == nil ? 1 : 0)
+                    .allowsHitTesting(snapshot.historyPresentationEntityID == nil)
+                    .accessibilityHidden(snapshot.historyPresentationEntityID != nil)
+                if let id = snapshot.historyPresentationEntityID,
+                   let entity = snapshot.availableRooms.flatMap(\.entities).first(where: { $0.id == id }) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Button { model.dismissHistoryPopover() } label: {
+                            Label("Back to rooms", systemImage: "chevron.left")
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Back to rooms")
+                        .padding(.horizontal, 16).padding(.top, 12)
+                        ScrollView {
+                            PearchHAHistoryDetailView(increasedContrast: accessibilityPreferences.contrastPolicy == .increased, model: model, entity: entity, onOpenEntitySettings: onOpenEntitySettings)
+                        }
+                    }
+                }
+            }
             dashboardDivider
             footer
         }
-        .frame(width: 384, height: 468, alignment: .top)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .pearchHAFont(.body)
+        .environment(\.pearchHATextSize, panelDisplayPreferences.textSize)
         .environment(\.dashboardPalette, palette)
         .environment(\.dashboardRowDensity, panelDisplayPreferences.dashboardRowDensity)
-        .background(
-            dashboardBackground(palette)
-        )
+        .tint(palette.accentPrimary)
+        .background(palette.surfaceRoot)
         .clipShape(shape)
         .overlay {
             shape.strokeBorder(
@@ -440,8 +336,8 @@ public struct PearchHAPanelView: View {
             )
         }
         .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.45 : 0.22), radius: 18, x: 0, y: 8)
-        .contrast(accessibility.contrastPolicy == .increased ? 1.12 : 1)
         .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("pearchha.menuPopover")
         .accessibilityLabel(accessibility.label)
         .accessibilityValue(accessibility.value)
         .accessibilityHint(accessibility.hint)
@@ -471,6 +367,10 @@ public struct PearchHAPanelView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
             model.endTransientUITracking()
         }
+        .onDisappear {
+            draggedSelectionItem = nil
+            targetedSelectionItem = nil
+        }
     }
 
     public static func rootAccessibilityPresentation(
@@ -494,6 +394,10 @@ public struct PearchHAPanelView: View {
             showsLabel: configuration.showsLabel,
             showsUnit: configuration.showsUnit
         )
+    }
+
+    private var palette: PearchHATheme.DashboardPalette {
+        PearchHATheme.Dashboard.palette(colorScheme, increasedContrast: accessibilityPreferences.contrastPolicy == .increased)
     }
 
     private var accessibilityPreferences: PearchHAAccessibilityPreferences {
@@ -523,19 +427,9 @@ public struct PearchHAPanelView: View {
         )
     }
 
-    /// The appearance-aware base fill plus a thin translucent material, painted
-    /// edge-to-edge so the popover reads as a designed instrument panel (graphite
-    /// in dark, light translucent graphite in light) and never shows a transparent
-    /// seam. The SwiftUI root clips the rounded corners and provides the shadow;
-    /// the base fill keeps every edge opaque against the borderless window.
-    private func dashboardBackground(_ palette: PearchHATheme.DashboardPalette) -> some View {
-        palette.popoverBackground
-            .overlay(Rectangle().fill(.ultraThinMaterial).opacity(0.5))
-    }
-
     private var dashboardDivider: some View {
         Rectangle()
-            .fill(PearchHATheme.Dashboard.palette(colorScheme).separator)
+            .fill(palette.separator)
             .frame(height: 1)
     }
 
@@ -557,14 +451,13 @@ public struct PearchHAPanelView: View {
     }
 
     private var statusBar: some View {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         return HStack(spacing: PearchHASpacing.sm - 2) {
             Circle()
                 .fill(connectionStatusColor)
                 .frame(width: 7, height: 7)
                 .accessibilityHidden(true)
             Text("PearchHA")
-                .font(.system(size: 13, weight: .semibold))
+                .pearchHAFont(size: 13, weight: .semibold)
                 .foregroundStyle(palette.textPrimary)
             Spacer(minLength: 0)
         }
@@ -579,12 +472,12 @@ public struct PearchHAPanelView: View {
     }
 
     private var connectionStatusColor: Color {
-        PearchHATheme.Dashboard.palette(colorScheme).connectionColor(snapshot.connectionState)
+        return snapshot.isLocalOnly ? palette.accentPrimary : palette.connectionColor(snapshot.connectionState)
     }
 
     @ViewBuilder
     private var content: some View {
-        switch PearchHAStateViewKind.forContent(phase: snapshot.phase) {
+        switch snapshot.hasLocalValues ? .data : PearchHAStateViewKind.forContent(phase: snapshot.phase) {
         case .loading:
             loadingState
         case .connectionForm:
@@ -592,21 +485,24 @@ public struct PearchHAPanelView: View {
         case .empty:
             connectedEmptyState
         case .data:
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
-                    ForEach(visibleModules, id: \.id.rawValue) { room in
-                        moduleBlock(room)
+            ZStack {
+                if viewState.isInitialHistoryLoading && !snapshot.hasLocalValues {
+                    Text("Loading")
+                        .pearchHAFont(size: 13)
+                        .foregroundStyle(palette.textSecondary)
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 18) {
+                            ForEach(visibleModules, id: \.id.rawValue) { room in
+                                moduleBlock(room)
+                            }
+                        }
+                        .padding(.top, 4)
+                        .padding(.bottom, 14)
                     }
                 }
-                .padding(.top, 4)
-                .padding(.bottom, 14)
             }
-            .onAppear {
-                syncWarmedEntityIDs()
-            }
-            .onChange(of: warmedEntityIDs) { ids in
-                syncWarmedEntityIDs(ids)
-            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -629,16 +525,6 @@ public struct PearchHAPanelView: View {
     /// place; every entity is still reachable via Settings.
     private var curatedRowCap: Int? {
         panelDisplayPreferences.dashboardRoomRowCap
-    }
-
-    private var warmedEntityIDs: [EntityID] {
-        visibleModules.flatMap { room in
-            let isExpanded = expandedModuleIDs.contains(room.id.rawValue)
-            let visibleEntities = (isExpanded || curatedRowCap == nil)
-                ? room.entities
-                : Array(room.entities.prefix(curatedRowCap ?? room.entities.count))
-            return visibleEntities.map(\.id)
-        }
     }
 
     private var loadingState: some View {
@@ -697,7 +583,15 @@ public struct PearchHAPanelView: View {
         let cap = curatedRowCap
         let visibleEntities = (isExpanded || cap == nil) ? room.entities : Array(room.entities.prefix(cap ?? total))
         let hiddenCount = total - visibleEntities.count
-        return ModuleBlock(title: room.name) {
+        let roomIndex = visibleModules.firstIndex { $0.id == room.id }
+        let earlier = roomIndex.flatMap { $0 > 0 ? visibleModules[$0 - 1] : nil }
+        let later = roomIndex.flatMap { $0 + 1 < visibleModules.count ? visibleModules[$0 + 1] : nil }
+        let block = ModuleBlock(
+            title: room.name,
+            headerDrag: panelDrag(for: .room(room.id), title: room.name),
+            moveEarlier: earlier.map { target in { _ = model.moveRoom(room.id, relativeTo: target.id, placement: .before) } },
+            moveLater: later.map { target in { _ = model.moveRoom(room.id, relativeTo: target.id, placement: .after) } }
+        ) {
             ForEach(Array(visibleEntities.enumerated()), id: \.element.id.rawValue) { index, entity in
                 entityRowBlock(entity, showsSeparator: index < visibleEntities.count - 1)
             }
@@ -706,48 +600,132 @@ public struct PearchHAPanelView: View {
                 moreAffordance(roomID: room.id.rawValue, isExpanded: isExpanded, hiddenCount: hiddenCount)
             }
         }
+        return panelDropTarget(block, item: .room(room.id))
     }
 
     private func entityRowBlock(_ entity: DiscoveredEntity, showsSeparator: Bool) -> some View {
         let value = entityValue(entity)
         let contextPresentation = Self.entityContextPresentation(snapshot: snapshot, entityID: entity.id)
-        return VStack(spacing: 0) {
+        let row = VStack(spacing: 0) {
             telemetryRow(entity)
             if showsSeparator {
                 TelemetryRowSeparator()
             }
         }
         .contentShape(Rectangle())
-        .background(
-            PearchHAHistoryPopoverAnchor(
-                entityID: entity.id,
-                controller: historyPopoverController
-            )
-        )
-        .onTapGesture {
-            if snapshot.historyPresentationEntityID == entity.id {
-                model.dismissHistoryPopover()
-            } else {
-                model.presentHistoryDetail(entity.id)
-            }
-        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(entity.name), \(value.text)")
-        .accessibilityAction(named: "Show history") {
-            model.presentHistoryDetail(entity.id)
-        }
-        .accessibilityAction(named: "Hide history") {
-            model.dismissHistoryPopover()
-        }
+        .accessibilityActions { panelReorderActions(for: entity.id) }
         .contextMenu {
             entityContextMenu(for: entity, contextPresentation: contextPresentation)
+            Divider()
+            panelReorderActions(for: entity.id)
         }
+        let accessibleRow: AnyView
+        if entity.id.source == .thisMac {
+            accessibleRow = AnyView(row)
+        } else {
+            accessibleRow = AnyView(
+                row
+                    .accessibilityAction(named: "Show history") {
+                        model.presentHistoryDetail(entity.id)
+                    }
+                    .accessibilityAction(named: "Hide history") {
+                        model.dismissHistoryPopover()
+                    }
+            )
+        }
+        return panelDropTarget(accessibleRow, item: .entity(entity.id))
+    }
+
+    private var panelSelectionTree: [SelectableRoom] {
+        EntitySelectionProjector().selectionTree(
+            rooms: snapshot.availableRooms,
+            configuration: snapshot.selectionConfiguration
+        )
+    }
+
+    private func panelDropTarget<Content: View>(_ content: Content, item: SelectionDragItem) -> some View {
+        let translation = draggedSelectionItem.map {
+            SelectionDropTranslator().translate(source: $0, target: item, tree: panelSelectionTree)
+        } ?? .unsupported
+        let placement: SelectionDropPlacement? = switch translation {
+        case let .room(_, _, placement), let .entity(_, _, placement): placement
+        case .unsupported: nil
+        }
+        return content
+            .overlay(alignment: .top) {
+                if targetedSelectionItem == item, let placement {
+                    Rectangle()
+                        .fill(palette.accentPrimary)
+                        .frame(height: 2)
+                        .padding(.horizontal, 8)
+                        .frame(maxHeight: .infinity, alignment: placement == .before ? .top : .bottom)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
+            .onDrop(of: [Self.panelSelectionDragType], delegate: PanelSelectionDropDelegate(
+                translation: translation,
+                setTargeted: { isTargeted in
+                    if isTargeted { targetedSelectionItem = item }
+                    else if targetedSelectionItem == item { targetedSelectionItem = nil }
+                },
+                move: {
+                    defer { draggedSelectionItem = nil }
+                    return applyPanelDrop(translation)
+                }
+            ))
+    }
+
+    @ViewBuilder
+    private func panelReorderActions(for entityID: EntityID) -> some View {
+        let item = SelectionDragItem.entity(entityID)
+        let items = snapshot.rooms.first { $0.entities.contains { $0.id == entityID } }?.entities.map { SelectionDragItem.entity($0.id) } ?? []
+        if let index = items.firstIndex(of: item) {
+            if index > 0 {
+                Button("Move earlier") {
+                    _ = applyPanelDrop(SelectionDropTranslator().translate(source: item, target: items[index - 1], tree: panelSelectionTree))
+                }
+            }
+            if index + 1 < items.count {
+                Button("Move later") {
+                    _ = applyPanelDrop(SelectionDropTranslator().translate(source: item, target: items[index + 1], tree: panelSelectionTree))
+                }
+            }
+        }
+    }
+
+    private func applyPanelDrop(_ translation: SelectionDropTranslation) -> Bool {
+        switch translation {
+        case let .room(source, target, placement):
+            return model.moveRoom(source, relativeTo: target, placement: placement)
+        case let .entity(source, target, placement):
+            return model.moveEntity(source, relativeTo: target, placement: placement)
+        case .unsupported:
+            return false
+        }
+    }
+
+    private func panelDrag(for item: SelectionDragItem, title: String) -> PearchHAPanelDrag {
+        PearchHAPanelDrag(
+            payload: item.providerText,
+            title: title,
+            onBegin: {
+                draggedSelectionItem = item
+                model.beginTransientUITracking()
+            },
+            onEnd: { _ in
+                draggedSelectionItem = nil
+                targetedSelectionItem = nil
+                model.endTransientUITracking()
+            }
+        )
     }
 
     /// A quiet "More" / "Less" affordance that expands or collapses a module in
     /// place, keeping overflow rows reachable without a database dump.
     private func moreAffordance(roomID: String, isExpanded: Bool, hiddenCount: Int) -> some View {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         let title = isExpanded ? "Show less" : "\(hiddenCount) more"
         return Button {
             if isExpanded {
@@ -760,7 +738,7 @@ public struct PearchHAPanelView: View {
                 Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                 Text(title)
-                    .font(.system(size: 11, weight: .medium))
+                    .pearchHAFont(size: 11, weight: .medium)
                 Spacer(minLength: 0)
             }
             .foregroundStyle(palette.textSecondary)
@@ -786,26 +764,56 @@ public struct PearchHAPanelView: View {
         let value = entityValue(entity)
         let presentation = model.rowPresentation(for: entity)
         let contextPresentation = Self.entityContextPresentation(snapshot: snapshot, entityID: entity.id)
-        // A row with a real switch reads as `[icon] name ………… [switch]`: the
-        // switch alone communicates the on/off state, so the redundant ON/OFF
-        // pill and the meaningless meter band are dropped. Mixing those in was
-        // what made the column grid feel random next to numeric rows.
+        // Direct switches already communicate the state. Additional settings
+        // use an icon beside the switch instead of repeating its on/off value.
         let hasToggle = snapshot.control(for: entity) != nil
+        let fields = PearchHAEntityControlField.controls(for: entity)
         return TelemetryRow(
             icon: entityIconName(for: entity),
             iconActive: value.status == .available,
             label: entity.name,
             labelAccessories: rowLabelAccessories(contextPresentation: contextPresentation),
+            labelDrag: panelDrag(for: .entity(entity.id), title: entity.name),
             subtitle: rowSubtitle(for: entity, value: value),
             secondLine: rowSecondLine(for: entity),
-            preview: {
-                if !hasToggle {
-                    rowPreview(for: entity, presentation: presentation)
-                }
-            },
+            preview: { rowPreview(for: entity, presentation: presentation) },
             value: {
-                if !hasToggle {
-                    rowValueOrPill(entity: entity, value: value, presentation: presentation)
+                HStack(spacing: 5) {
+                    if fields.count == 1, let field = fields.first {
+                        PearchHAEntityControlInput(field: field, entityName: entity.name, clock: model.clock, isInline: true,
+                                                  isRunning: snapshot.controlActionState.isRunning(for: entity.id),
+                                                  requestedValue: model.requestedControlValue(for: entity.id, controlID: field.id),
+                                                  showsRequestedIndicator: !hasToggle) { value, confirmed in
+                            model.dismissHistoryPopover()
+                            return model.startEntityControlValue(entity.id, controlID: field.id, value: value, confirmed: confirmed)
+                        }
+                        .id(field.id)
+                        .disabled(snapshot.connectionState != .connected || snapshot.controlActionState.isRunning)
+                        .help(PearchHAEntityControlField.controlHelp(for: entity) ?? "No controls available")
+                    } else if !fields.isEmpty {
+                        PearchHAEntityControlsButton(model: model, entity: entity) {
+                            HStack(spacing: 5) {
+                                if !hasToggle {
+                                    rowValueOrPill(entity: entity, value: value, presentation: presentation)
+                                }
+                                Image(systemName: "slider.horizontal.3")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(palette.textSecondary)
+                                    .accessibilityHidden(true)
+                                if !hasToggle {
+                                    PearchHARequestedControlIndicator(isRequested: model.hasRequestedControls(for: entity.id))
+                                }
+                            }
+                            .frame(minHeight: TelemetryRowMetrics.previewHeight)
+                            .contentShape(Rectangle())
+                        }
+                    } else if !hasToggle {
+                        rowValueOrPill(entity: entity, value: value, presentation: presentation)
+                            .help(entity.id.source == .thisMac ? LocalMacText.readOnly.localized() : PearchHAEntityControlField.controlHelp(for: entity) ?? "Read-only")
+                    }
+                    if hasToggle {
+                        PearchHARequestedControlIndicator(isRequested: model.hasRequestedControls(for: entity.id))
+                    }
                 }
             },
             control: { rowControls(for: entity) }
@@ -815,7 +823,6 @@ public struct PearchHAPanelView: View {
     private func rowLabelAccessories(
         contextPresentation: PearchHAPanelEntityContextPresentation
     ) -> [TelemetryRowLabelAccessory] {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         var accessories: [TelemetryRowLabelAccessory] = []
         if contextPresentation.hasAverageLinks {
             accessories.append(
@@ -986,7 +993,6 @@ public struct PearchHAPanelView: View {
     /// message. Returns `nil` when there is nothing to show so the row stays a
     /// single line.
     private func rowSecondLine(for entity: DiscoveredEntity) -> AnyView? {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         let hasCover = snapshot.coverControl(for: entity) != nil
         let failure = snapshot.controlActionState.failureMessage(for: entity.id)
         guard hasCover || failure != nil else {
@@ -997,7 +1003,7 @@ public struct PearchHAPanelView: View {
                 coverControlLine(for: entity)
                 if let failure {
                     Text(failure)
-                        .font(.system(size: 10.5))
+                        .pearchHAFont(size: 10.5)
                         .foregroundStyle(palette.danger)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityLabel("\(entity.name) control failed: \(failure)")
@@ -1005,12 +1011,6 @@ public struct PearchHAPanelView: View {
             }
             .padding(.leading, 26)
         )
-    }
-
-    /// Reports the rows currently rendered in the panel so background history
-    /// warming happens from layout state, not per-row scroll churn.
-    private func syncWarmedEntityIDs(_ ids: [EntityID]? = nil) {
-        model.updateVisibleEntities(ids ?? warmedEntityIDs)
     }
 
     private func entityIconName(for entity: DiscoveredEntity) -> String? {
@@ -1064,11 +1064,13 @@ public struct PearchHAPanelView: View {
         )
     }
 
-    private func entityControlHelp(for entity: DiscoveredEntity, control: PearchHAEntityControl) -> String {
-        if control.isRunning {
+    private func entityControlHelp(for entity: DiscoveredEntity, control: PearchHAEntityControl, isOn: Bool) -> String {
+        if snapshot.connectionState != .connected { return "Reconnect to Home Assistant to control this entity" }
+        if snapshot.controlActionState.isRunning {
             return "Waiting for Home Assistant"
         }
-        return control.isOn ? "Turns \(entity.name) off" : "Turns \(entity.name) on"
+        if let failure = control.failureMessage { return failure }
+        return isOn ? "Turns \(entity.name) off" : "Turns \(entity.name) on"
     }
 
     private func customActionButton(_ action: EntityCustomAction) -> some View {
@@ -1098,72 +1100,6 @@ public struct PearchHAPanelView: View {
         return action.requiresConfirmation ? "Asks before running" : "Runs saved Home Assistant service"
     }
 
-    private func coverButtons(for entity: DiscoveredEntity, control: PearchHACoverControl) -> some View {
-        HStack(spacing: 4) {
-            coverButton(
-                icon: "arrow.up.to.line",
-                label: "Open \(entity.name)",
-                help: coverControlHelp(for: entity, control: control, command: .open),
-                disabled: control.isRunning
-            ) {
-                model.startCoverControl(entity.id, command: .open)
-            }
-            coverButton(
-                icon: "stop.fill",
-                label: "Stop \(entity.name)",
-                help: coverControlHelp(for: entity, control: control, command: .stop),
-                disabled: control.isRunning
-            ) {
-                model.startCoverControl(entity.id, command: .stop)
-            }
-            coverButton(
-                icon: "arrow.down.to.line",
-                label: "Close \(entity.name)",
-                help: coverControlHelp(for: entity, control: control, command: .close),
-                disabled: control.isRunning
-            ) {
-                model.startCoverControl(entity.id, command: .close)
-            }
-        }
-    }
-
-    private func coverButton(
-        icon: String,
-        label: String,
-        help: String,
-        disabled: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            PearchHACircularIconLabel(icon: icon, disabled: disabled)
-        }
-        .buttonStyle(.borderless)
-        .disabled(disabled)
-        .help(help)
-        .accessibilityLabel(label)
-        .accessibilityHint(help)
-    }
-
-    private func coverControlHelp(
-        for entity: DiscoveredEntity,
-        control: PearchHACoverControl,
-        command: PearchHACoverCommand
-    ) -> String {
-        if control.isRunning {
-            return "Waiting for Home Assistant"
-        }
-        switch command {
-        case .open:
-            return "Opens \(entity.name)"
-        case .close:
-            return "Closes \(entity.name)"
-        case .stop:
-            return "Stops \(entity.name)"
-        case let .setPosition(position):
-            return "Sets \(entity.name) to \(position) percent"
-        }
-    }
-
     /// The quiet anchored footer. Shows a short problem message when present,
     /// otherwise the calm "updated" caption, plus the settings and quit controls.
     /// The manual refresh control is intentionally absent: values auto-update
@@ -1186,6 +1122,7 @@ public struct PearchHAPanelView: View {
     /// never hidden; the calm "updated" timestamp is suppressed when the user
     /// turns off the footer-timestamp display preference.
     private var footerUpdatedText: String {
+        if snapshot.isLocalOnly { return LocalMacText.readOnly.localized() }
         if let problem = snapshot.problemDescription {
             return problem
         }
@@ -1216,7 +1153,7 @@ public struct PearchHAPanelView: View {
             entity: entity,
             presentation: presentation,
             value: entityValue(entity),
-            palette: PearchHATheme.Dashboard.palette(colorScheme)
+            palette: palette
         )
     }
 
@@ -1228,7 +1165,6 @@ public struct PearchHAPanelView: View {
         value: FormattedEntityValue,
         presentation: PearchHAEntityRowPresentation
     ) -> some View {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         if case let .statePill(isActive) = presentation, value.iconSymbolName == nil {
             StatusPill(
                 value.text,
@@ -1245,9 +1181,10 @@ public struct PearchHAPanelView: View {
                         .accessibilityHidden(true)
                 }
                 Text(value.text)
-                    .font(.system(size: 14, weight: .semibold).monospacedDigit())
+                    .pearchHAFont(size: 14, weight: .semibold, monospacedDigits: true)
                     .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
+                    .truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: false)
                     .foregroundStyle(value.status == .available ? rowValueColor(presentation) : palette.textTertiary)
                     .accessibilityHidden(true)
             }
@@ -1255,7 +1192,6 @@ public struct PearchHAPanelView: View {
     }
 
     private func rowValueColor(_ presentation: PearchHAEntityRowPresentation) -> Color {
-        let palette = PearchHATheme.Dashboard.palette(colorScheme)
         switch presentation {
         case let .gauge(gauge):
             return gauge.severity == .normal ? palette.textPrimary : palette.severityColor(gauge.severity)
@@ -1272,44 +1208,36 @@ public struct PearchHAPanelView: View {
     @ViewBuilder
     private func rowControls(for entity: DiscoveredEntity) -> some View {
         if let control = snapshot.control(for: entity) {
+            let isOn = model.requestedControlValue(for: entity.id, controlID: "state")?.controlString.map { $0 == "on" } ?? control.isOn
             CompactSwitch(
-                isOn: control.isOn,
-                isRunning: control.isRunning,
+                isOn: isOn,
+                isRunning: snapshot.controlActionState.isRunning,
                 onChange: { isOn in model.startEntityControlToggle(entity.id, isOn: isOn) }
             )
-            .help(entityControlHelp(for: entity, control: control))
-            .accessibilityLabel("\(control.isOn ? "Turn off" : "Turn on") \(entity.name)")
-            .accessibilityHint(entityControlHelp(for: entity, control: control))
+            .disabled(snapshot.connectionState != .connected || entity.state == "unavailable" || entity.state == "unknown")
+            .help(entityControlHelp(for: entity, control: control, isOn: isOn))
+            .accessibilityLabel("\(isOn ? "Turn off" : "Turn on") \(entity.name)")
+            .accessibilityHint(entityControlHelp(for: entity, control: control, isOn: isOn))
         }
         ForEach(model.customActions(for: entity), id: \.id.rawValue) { action in
             customActionButton(action)
         }
     }
 
-    /// The cover controls on the row's compact second line: the up/stop/down
-    /// buttons (when enabled) and the position slider (when enabled). Kept off the
-    /// top line so the cover row reads as a normal named row whose top line is
-    /// `[icon] name [band/sparkline] [state]`. Returns nothing when neither the
-    /// buttons nor the slider are configured.
+    /// Cover movement commands and position share the direct numeric editor.
     @ViewBuilder
     private func coverControlLine(for entity: DiscoveredEntity) -> some View {
-        if let coverControl = snapshot.coverControl(for: entity) {
-            let mode = model.coverControlMode(for: entity)
-            HStack(spacing: 8) {
-                if mode.showsButtons {
-                    coverButtons(for: entity, control: coverControl)
-                }
-                if mode.showsSlider, let position = coverControl.position {
-                    PearchHACoverPositionSlider(
-                        position: position,
-                        disabled: coverControl.isRunning,
-                        accessibilityName: "\(entity.name) position"
-                    ) { position in
-                        model.startCoverPositionChange(entity.id, position: position)
-                    }
-                    .frame(maxWidth: .infinity)
-                }
+        if let control = snapshot.coverControl(for: entity) {
+            PearchHAEntityControlInput(field: .coverPosition(control), entityName: entity.name, clock: model.clock,
+                                      isInline: true, isRunning: control.isRunning,
+                                      requestedValue: model.requestedControlValue(for: entity.id, controlID: "position") ?? model.requestedControlValue(for: entity.id, controlID: "state"),
+                                      coverMode: model.coverControlMode(for: entity), runCoverCommand: { command in
+                model.startCoverControl(entity.id, command: command)
+            }) { value, _ in
+                guard case let .number(position) = value else { return false }
+                return model.startCoverPositionChange(entity.id, position: Int(position))
             }
+            .disabled(snapshot.connectionState != .connected || snapshot.controlActionState.isRunning || entity.state == "unavailable")
         }
     }
 

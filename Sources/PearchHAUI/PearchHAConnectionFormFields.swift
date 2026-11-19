@@ -10,8 +10,8 @@ import PearchHASupport
 ///
 /// The shared fields cover the Home Assistant URL, fallback URL, access token,
 /// the failure/progress banners, the sign-in/connect buttons, and an explicit
-/// self-signed certificate opt-in scoped to the entered HTTPS hosts.
-/// Certificate validation stays strict unless the user opts in.
+/// self-signed certificate preference scoped to the entered HTTPS hosts.
+/// The allowance defaults on; other hosts retain strict certificate validation.
 struct PearchHAConnectionFormFields: View {
     let model: PearchHAPanelModel
     let snapshot: PearchHAPanelSnapshot
@@ -29,9 +29,9 @@ struct PearchHAConnectionFormFields: View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Connect to Home Assistant")
-                    .font(.headline)
+                    .pearchHAFont(.headline)
                 Text("Enter your Home Assistant address, then sign in or paste an access token.")
-                    .font(.callout)
+                    .pearchHAFont(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -49,11 +49,12 @@ struct PearchHAConnectionFormFields: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(PearchHATheme.Dashboard.palette(.light, increasedContrast: true).accentPrimary)
                 .controlSize(.large)
                 .disabled(isConnectionBusy)
                 .help("Open Home Assistant in your browser to sign in. Recommended.")
                 Text("Opens Home Assistant in your browser to approve access. No password is stored.")
-                    .font(.caption)
+                    .pearchHAFont(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -84,7 +85,7 @@ struct PearchHAConnectionFormFields: View {
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Primary address")
-                    .font(.caption)
+                    .pearchHAFont(.caption)
                     .foregroundStyle(.secondary)
                 PearchHANativeTextField(
                     placeholder: "Home Assistant URL",
@@ -107,13 +108,14 @@ struct PearchHAConnectionFormFields: View {
                 model.addConnectionAddress()
             } label: {
                 Label("Add address", systemImage: "plus.circle")
+                    .pearchHAFont(.body)
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
             .accessibilityHint("Adds another Home Assistant address to try")
 
             Text("Add internal, external, or VPN addresses. They are tried in order when an earlier one cannot be reached.")
-                .font(.caption)
+                .pearchHAFont(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -135,7 +137,7 @@ struct PearchHAConnectionFormFields: View {
             .toggleStyle(.switch)
             .controlSize(.small)
             Text("Applies only to the HTTPS addresses listed above — never to other hosts. Turn off for strict certificate validation.")
-                .font(.caption)
+                .pearchHAFont(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -192,7 +194,7 @@ struct PearchHAConnectionFormFields: View {
             }
             if invalid {
                 Text("Enter a valid http or https address.")
-                    .font(.caption)
+                    .pearchHAFont(.caption)
                     .foregroundStyle(.red)
                     .accessibilityLabel("Invalid alternative address")
             }
@@ -226,20 +228,20 @@ struct PearchHAConnectionFormFields: View {
     }
 
     private var connectedState: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        let isConnected = snapshot.connectionState == .connected
+        return VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 3) {
-                Label {
-                    Text("Connected")
-                        .font(.headline)
-                } icon: {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
+                HStack(spacing: 6) {
+                    Image(systemName: isConnected ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath")
+                        .foregroundStyle(isConnected ? PearchHATheme.ok : PearchHATheme.warn)
+                    Text(snapshot.connectionSummary)
+                        .pearchHAFont(.headline)
                 }
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(connectedAccessibilityLabel)
                 if let connectedHost {
-                    Text("Connected to \(connectedHost)")
-                        .font(.callout)
+                    Text(isConnected ? "Connected to \(connectedHost)" : "Server: \(connectedHost)")
+                        .pearchHAFont(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityHidden(true)
@@ -257,6 +259,7 @@ struct PearchHAConnectionFormFields: View {
                     model.applyConnectionEdits()
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(PearchHATheme.Dashboard.palette(.light, increasedContrast: true).accentPrimary)
                 .controlSize(.large)
                 .disabled(isConnectionBusy || !model.canApplyConnectionEdits)
                 .help(tokenAccessPresentation.connectedActionHelp)
@@ -273,16 +276,18 @@ struct PearchHAConnectionFormFields: View {
 
     private var connectedAccessibilityLabel: String {
         if let connectedHost {
-            return "Connected to \(connectedHost)"
+            return snapshot.connectionState == .connected
+                ? "Connected to \(connectedHost)"
+                : "\(snapshot.connectionSummary), server \(connectedHost)"
         }
-        return "Connected"
+        return snapshot.connectionSummary
     }
 
     private var tokenAccessDivider: some View {
         Group {
             line
             Text("or use an access token")
-                .font(.caption)
+                .pearchHAFont(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize()
             line
@@ -298,12 +303,12 @@ struct PearchHAConnectionFormFields: View {
             )
             if let savedTokenGuidance = tokenAccessPresentation.savedTokenGuidance {
                 Text(savedTokenGuidance)
-                    .font(.caption)
+                    .pearchHAFont(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Text(tokenAccessPresentation.tokenCreationGuidance)
-                .font(.caption)
+                .pearchHAFont(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityLabel("Where to find a token: Home Assistant profile, Security, Long-lived access tokens.")
@@ -332,7 +337,7 @@ struct PearchHAConnectionFormFields: View {
                     .accessibilityHidden(true)
                 Text(connectionProgressMessage)
             }
-            .font(.callout)
+            .pearchHAFont(.callout)
             .foregroundStyle(.secondary)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(connectionProgressMessage)

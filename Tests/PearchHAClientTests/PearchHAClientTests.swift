@@ -1,5 +1,6 @@
 #if canImport(XCTest)
 import Foundation
+import Darwin
 import FakeHA
 import XCTest
 import PearchHACore
@@ -17,6 +18,170 @@ func replacingHost(in url: URL, with host: String) throws -> URL {
 }
 
 final class PearchHAClientTests: XCTestCase {
+    private let controlStateJSON = #"{"entity_id":"climate.office","state":"off","attributes":{"friendly_name":"Office AC","supported_features":441,"temperature":22,"min_temp":16,"max_temp":30,"target_temp_step":1,"hvac_modes":["cool","off"],"fan_modes":["Low","High"],"swing_modes":[],"unrelated_metadata":{"ignored":true}}}"#
+
+    private func controlConnection(_ server: FakeHAWebSocketServer) -> HAConnectionInput {
+        HAConnectionInput(endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil), token: "fake-token")
+    }
+
+    func testOAuthRefreshRefusesCrossOriginRedirectsBeforeSendingCredentials() async throws {
+        let tokenBody = #"{"access_token":"refreshed-access","expires_in":1800,"token_type":"Bearer"}"#
+        for status in [307, 308] {
+            let recipient = try FakeHARESTServer(responseOverrides: ["/collect": FakeHAHTTPResponse(statusCode: 200, body: tokenBody)])
+            recipient.start()
+            defer { recipient.stop() }
+            let origin = try FakeHARESTServer(responseOverrides: [
+                "/auth/token": FakeHAHTTPResponse(statusCode: status, headers: ["Location": recipient.baseURL.appendingPathComponent("collect").absoluteString])
+            ])
+            origin.start()
+            defer { origin.stop() }
+
+            let result = await HomeAssistantClient().refreshAccessToken(baseURL: origin.baseURL,
+                refreshToken: "private-refresh-value", clientID: "https://pearchha.example")
+
+            XCTAssertEqual(result, .failure(.httpStatus(path: "/auth/token", statusCode: status)))
+            let received = await recipient.journal.snapshot()
+            XCTAssertTrue(received.isEmpty, "HTTP \(status) must not forward the credential-bearing request to another origin")
+            let sent = await origin.journal.snapshot()
+            XCTAssertEqual(sent.map(\.method), ["POST"])
+        }
+    }
+
+    func testOAuthRefreshPreservesSameOriginRedirects() async throws {
+        let tokenBody = #"{"access_token":"refreshed-access","expires_in":1800,"token_type":"Bearer"}"#
+        for status in [307, 308] {
+            let server = try FakeHARESTServer(responseOverrides: [
+                "/auth/token": FakeHAHTTPResponse(statusCode: status, headers: ["Location": "/token-complete"]),
+                "/token-complete": FakeHAHTTPResponse(statusCode: 200, body: tokenBody)
+            ])
+            server.start()
+            defer { server.stop() }
+
+            let result = await HomeAssistantClient().refreshAccessToken(baseURL: server.baseURL,
+                refreshToken: "private-refresh-value", clientID: "https://pearchha.example")
+
+            XCTAssertEqual(result, .success(HAOAuthToken(accessToken: "refreshed-access", refreshToken: nil,
+                expiresInSeconds: 1800, tokenType: "Bearer")))
+            let requests = await server.journal.snapshot()
+            XCTAssertEqual(requests.map(\.method), ["POST", "POST"])
+            XCTAssertEqual(requests.map(\.path), ["/auth/token", "/token-complete"])
+        }
+    }
+
+    func testRESTRefusesCrossOriginRedirectsBeforeForwardingBearerRequest() async throws {
+        let recipient = try FakeHARESTServer()
+        recipient.start()
+        defer { recipient.stop() }
+        let origin = try FakeHARESTServer(responseOverrides: [
+            "/api/": FakeHAHTTPResponse(statusCode: 302, headers: ["Location": recipient.baseURL.appendingPathComponent("api/").absoluteString])
+        ])
+        origin.start()
+        defer { origin.stop() }
+
+        let result = await HomeAssistantClient().checkRESTConnection(HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: origin.baseURL, fallbackURL: nil), token: "fake-token"))
+
+        XCTAssertEqual(result, .failure(.httpStatus(path: "/api/", statusCode: 302)))
+        let received = await recipient.journal.snapshot()
+        XCTAssertTrue(received.isEmpty, "A bearer request must stay within its configured origin")
+    }
+
+    func testOAuthRefreshRefusesHTTPSDowngradeAfterSameOriginRedirect() async throws {
+        let recipient = try FakeHARESTServer(responseOverrides: ["/collect": FakeHAHTTPResponse(statusCode: 200)])
+        recipient.start()
+        defer { recipient.stop() }
+        let identity = try FakeHASelfSignedIdentity()
+        let origin = try FakeHARESTServer(tlsIdentity: identity.identity, responseOverrides: [
+            "/auth/token": FakeHAHTTPResponse(statusCode: 307, headers: ["Location": "/secure-complete"]),
+            "/secure-complete": FakeHAHTTPResponse(statusCode: 307, headers: ["Location": recipient.baseURL.appendingPathComponent("collect").absoluteString])
+        ])
+        origin.start()
+        defer { origin.stop() }
+
+        let result = await HomeAssistantClient().refreshAccessToken(baseURL: origin.baseURL,
+            refreshToken: "private-refresh-value", clientID: "https://pearchha.example",
+            serverTrustPolicy: HAServerTrustPolicy(trustsAllHosts: true))
+
+        XCTAssertEqual(result, .failure(.httpStatus(path: "/auth/token", statusCode: 307)))
+        let requests = await origin.journal.snapshot()
+        XCTAssertEqual(requests.map(\.path), ["/auth/token", "/secure-complete"])
+        XCTAssertEqual(requests.map(\.method), ["POST", "POST"])
+        let received = await recipient.journal.snapshot()
+        XCTAssertTrue(received.isEmpty, "An HTTPS refresh token must never follow a redirect to HTTP")
+    }
+
+    func testRESTAndWebSocketDiscoveryPreserveOnlyControlAttributes() async throws {
+        let server = try FakeHAWebSocketServer(fixtures: FakeHAFixtures(apiBody: "{}", statesBody: "[\(controlStateJSON)]"))
+        server.start()
+        defer { server.stop() }
+        let client = HomeAssistantClient()
+        let rest = await client.states(controlConnection(server))
+        let websocket = await client.webSocketStates(controlConnection(server))
+        guard case let .success(states) = rest, case let .success(wsStates) = websocket else {
+            return XCTFail("Expected REST and WebSocket states: \(rest), \(websocket)")
+        }
+        XCTAssertEqual(states, wsStates)
+        let state = try XCTUnwrap(states.first)
+        XCTAssertEqual(state.controlAttributes?["supported_features"], 441)
+        XCTAssertEqual(state.controlAttributes?["temperature"], 22)
+        XCTAssertEqual(state.controlAttributes?["hvac_modes"], .array(["cool", "off"]))
+        XCTAssertEqual(state.controlAttributes?["swing_modes"], .array([]))
+        XCTAssertNil(state.controlAttributes?["unrelated_metadata"])
+        XCTAssertNil(state.controlAttributes?["friendly_name"])
+    }
+
+    func testCompactChangeMergesAttributesAndPreservesExplicitNull() async throws {
+        let server = try FakeHAWebSocketServer(fixtures: FakeHAFixtures(
+            apiBody: "{}", statesBody: "[\(controlStateJSON)]",
+            stateChangedEventBody: #"{"entity_id":"climate.office","attributes":{"temperature":null,"fan_modes":["Auto"]}}"#
+        ), mode: .partialSubscribeEntitiesChange)
+        server.start()
+        defer { server.stop() }
+        guard case let .success(state) = await HomeAssistantClient().nextStateChangedEvent(controlConnection(server)) else {
+            return XCTFail("Expected compact attribute change")
+        }
+        XCTAssertEqual(state.state, "off")
+        XCTAssertEqual(state.name, "Office AC")
+        XCTAssertEqual(state.controlAttributes?["temperature"], .null)
+        XCTAssertEqual(state.controlAttributes?["fan_modes"], .array(["Auto"]))
+        XCTAssertEqual(state.controlAttributes?["min_temp"], 16)
+        XCTAssertEqual(state.controlAttributes?["supported_features"], 441)
+    }
+
+    func testCompactRemovalDeletesOnlyNamedAttributes() async throws {
+        let server = try FakeHAWebSocketServer(fixtures: FakeHAFixtures(
+            apiBody: "{}", statesBody: "[\(controlStateJSON)]", stateChangedEventBody: controlStateJSON,
+            removedAttributeNames: ["temperature", "fan_modes", "swing_modes"]
+        ), mode: .attributeRemovalSubscribeEntitiesChange)
+        server.start()
+        defer { server.stop() }
+        guard case let .success(state) = await HomeAssistantClient().nextStateChangedEvent(controlConnection(server)) else {
+            return XCTFail("Expected compact attribute removal")
+        }
+        XCTAssertEqual(state.name, "Office AC")
+        XCTAssertEqual(state.controlAttributes?["supported_features"], 441)
+        XCTAssertEqual(state.controlAttributes?["min_temp"], 16)
+        XCTAssertNil(state.controlAttributes?["temperature"])
+        XCTAssertNil(state.controlAttributes?["fan_modes"])
+        XCTAssertNil(state.controlAttributes?["swing_modes"])
+    }
+
+    func testFullEventsReplaceCapabilitiesInsteadOfMergingStaleFields() async throws {
+        for mode: FakeHAWebSocketMode in [.normal, .unsupportedCommands(["subscribe_entities"])] {
+            let server = try FakeHAWebSocketServer(fixtures: FakeHAFixtures(
+                apiBody: "{}", statesBody: "[\(controlStateJSON)]",
+                stateChangedEventBody: #"{"entity_id":"climate.office","state":"cool","attributes":{"friendly_name":"Office AC","supported_features":1,"temperature":23}}"#
+            ), mode: mode)
+            server.start()
+            defer { server.stop() }
+            guard case let .success(state) = await HomeAssistantClient().nextStateChangedEvent(controlConnection(server)) else {
+                return XCTFail("Expected full state change")
+            }
+            XCTAssertEqual(state.state, "cool")
+            XCTAssertEqual(state.controlAttributes, ["supported_features": 1, "temperature": 23])
+        }
+    }
+
     func testConnectionInputKeepsURLs() throws {
         let primary = try XCTUnwrap(URL(string: "http://homeassistant.local:8123"))
         let fallback = try XCTUnwrap(URL(string: "https://example.ui.nabu.casa"))
@@ -82,10 +247,6 @@ final class PearchHAClientTests: XCTestCase {
     func testServerTrustPolicyTrustsAllHostsIsOffByDefault() {
         XCTAssertFalse(HAServerTrustPolicy.default.trustsAllHosts)
         XCTAssertFalse(HAServerTrustPolicy(allowedSelfSignedCertificateHosts: ["a.local"]).trustsAllHosts)
-    }
-
-    func testPlannedClientIdentifiesModule() {
-        XCTAssertEqual(PlannedHAClient().describe().name, "PearchHAClient")
     }
 
     func testOAuthAuthorizationURLUsesOfficialAuthorizeEndpointAndEncodesNativeRedirect() throws {
@@ -1437,6 +1598,111 @@ final class PearchHAClientTests: XCTestCase {
             result,
             .success(HistorySeries(entityID: "sensor.office_temperature", range: .day, samples: []))
         )
+    }
+
+    func testRESTHistoryKeepsTimestampSemanticsAcrossConcurrentRequests() async throws {
+        let body = #"""
+        [[],[
+          {"entity_id":"sensor.a","state":"1","last_changed":"2026-06-27T10:00:00.123456+00:00","last_updated":"2026-06-27T11:00:00Z"},
+          {"state":"2","last_changed":"invalid","last_updated":"2026-06-27T12:01:00+02:00"},
+          {"state":"unknown","last_changed":null,"last_updated":"2026-06-27T10:02:00Z"},
+          {"state":"4","last_changed":"2026-06-27T10:03:00Z","last_updated":"invalid"}
+        ],[
+          {"entity_id":"sensor.b","state":"7","last_changed":"2026-06-27T05:04:00.987654-05:00"}
+        ]]
+        """#
+        let server = try FakeHARESTServer(fixtures: FakeHAFixtures(
+            apiBody: #"{"message":"API running."}"#, statesBody: "[]", historyBody: body
+        ))
+        server.start()
+        defer { server.stop() }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil), token: "fake-token"
+        )
+        let client = HomeAssistantClient()
+        let base = try historyDate("2026-06-27T10:00:00Z").timeIntervalSince1970
+        let end = Date(timeIntervalSince1970: base + 7_200)
+        let expectedA = HistorySeries(entityID: "sensor.a", range: .day, samples: [
+            HistorySample(timestamp: Date(timeIntervalSince1970: base + 0.123), state: "1", numericValue: 1),
+            HistorySample(timestamp: Date(timeIntervalSince1970: base + 60), state: "2", numericValue: 2),
+            HistorySample(timestamp: Date(timeIntervalSince1970: base + 120), state: "unknown", numericValue: nil),
+            HistorySample(timestamp: Date(timeIntervalSince1970: base + 180), state: "4", numericValue: 4)
+        ])
+        let expectedB = HistorySeries(entityID: "sensor.b", range: .day, samples: [
+            HistorySample(timestamp: Date(timeIntervalSince1970: base + 240.987), state: "7", numericValue: 7)
+        ])
+        for _ in 0..<4 {
+            async let single = client.history(input, entityID: "sensor.a", range: .day, end: end)
+            async let batch = client.historyBatch(input, entityIDs: ["sensor.a", "sensor.b"], range: .day, end: end)
+            let results = await (single, batch)
+            XCTAssertEqual(results.0, .success(expectedA))
+            XCTAssertEqual(results.1, .success(["sensor.a": expectedA, "sensor.b": expectedB]))
+        }
+    }
+
+    func testRESTHistoryRejectsInvalidTimestampShapesForSingleAndBatchRequests() async throws {
+        let bodies = [
+            "{}", "[{}]", "[[null]]",
+            #"[[{"state":"1","last_changed":42,"last_updated":"2026-06-27T10:00:00Z"}]]"#,
+            #"[[{"state":"1","last_changed":"2026-06-27T10:00:00Z","last_updated":true}]]"#,
+            #"[[{"state":"1","last_changed":"bad","last_updated":"bad"}]]"#,
+            #"[[{"state":"1","last_changed":null,"last_updated":null}]]"#
+        ]
+        for body in bodies {
+            let response = HARESTResponse(statusCode: 200, headers: [:], body: Data(body.utf8))
+            let client = HomeAssistantClient(transport: RecordingHARESTTransport(
+                responses: [.success(response), .success(response)]
+            ))
+            let input = try connectionInput()
+            let single = await client.history(input, entityID: "sensor.a", range: .day)
+            let batch = await client.historyBatch(input, entityIDs: ["sensor.a"], range: .day)
+            guard case let .failure(singleFailure) = single,
+                  case let .failure(batchFailure) = batch else {
+                XCTFail("invalid history unexpectedly succeeded: \(body)")
+                continue
+            }
+            XCTAssertTrue(singleFailure.description.contains("/api/history/period"))
+            XCTAssertTrue(batchFailure.description.contains("/api/history/period"))
+        }
+    }
+
+    func testRESTHistoryLargeBatchStaysWithinCPUTimeBudget() async throws {
+        let count = 8_192
+        let row = #"{"entity_id":"sensor.a","state":"21.5","last_changed":"2026-06-27T10:00:00.123456+00:00","last_updated":"2026-06-27T10:00:01.654321+00:00"}"#
+        let body = "[[" + Array(repeating: row, count: count).joined(separator: ",") + "]]"
+        let server = try FakeHARESTServer(fixtures: FakeHAFixtures(apiBody: #"{"message":"API running."}"#, statesBody: "[]", historyBody: body))
+        server.start()
+        defer { server.stop() }
+        let input = HAConnectionInput(
+            endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
+            token: "fake-token"
+        )
+        let client = HomeAssistantClient()
+        let end = try historyDate("2026-06-27T12:00:00Z")
+        func cpuSeconds() throws -> Double {
+            var usage = rusage()
+            guard getrusage(RUSAGE_SELF, &usage) == 0 else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
+            return Double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec)
+                + Double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1_000_000
+        }
+        let start = try cpuSeconds()
+        let result = await client.historyBatch(input, entityIDs: ["sensor.a"], range: .day, end: end)
+        let elapsed = try cpuSeconds() - start
+        guard case let .success(series) = result else {
+            return XCTFail("large history batch failed: \(result)")
+        }
+        let samples = try XCTUnwrap(series["sensor.a"]).samples
+        XCTAssertEqual(samples.count, count)
+        let expected = HistorySample(
+            timestamp: Date(timeIntervalSince1970: try historyDate("2026-06-27T10:00:00Z").timeIntervalSince1970 + 0.123),
+            state: "21.5", numericValue: 21.5
+        )
+        XCTAssertTrue(samples.allSatisfy { $0 == expected })
+        // CPU time excludes network wait. The generous budget catches allocating
+        // and configuring ISO parsers per timestamp on a realistic history batch.
+        XCTAssertLessThan(elapsed, 3, "history batch used \(elapsed) CPU seconds")
     }
 
     func testRESTHistoryRejectsMalformedPayload() async throws {
@@ -4140,6 +4406,34 @@ final class PearchHAClientTests: XCTestCase {
         }
     }
 
+    func testMirrorWebSocketCaptureCancellationFinishesBeforeItsDeadline() async throws {
+        let server = try FakeHAWebSocketServer(mode: .silentAfterAuth)
+        server.start()
+        defer { server.stop() }
+        let environment = HAMirrorEnvironment(primaryURL: server.baseURL, fallbackURL: nil,
+                                              token: "fake-token", user: nil, password: nil)
+        let finished = expectation(description: "cancelled capture returns")
+        let capture = Task {
+            defer { finished.fulfill() }
+            do {
+                _ = try await HAMirrorCaptureService(webSocketReceiveTimeoutNanoseconds: 30_000_000_000)
+                    .captureOptimizedWebSocketEvidence(environment: environment)
+                XCTFail("Cancelled capture must fail")
+            } catch let error as HAMirrorCaptureError {
+                guard case let .transportFailure(path, _) = error else {
+                    return XCTFail("Expected cancellation transport failure, got \(error)")
+                }
+                XCTAssertEqual(path, "/api/websocket")
+            } catch {
+                XCTFail("Unexpected capture failure: \(error)")
+            }
+        }
+        defer { capture.cancel() }
+        try await waitForJournalPath(server: server, path: "/api/websocket")
+        capture.cancel()
+        await fulfillment(of: [finished], timeout: 2)
+    }
+
     func testMirrorCaptureSanitizesPrivateStatePayload() async throws {
         let transport = RecordingMirrorTransport(
             statesBody: """
@@ -5607,10 +5901,6 @@ struct ClientTestFailure: Error, CustomStringConvertible {
 }
 
 extension PearchHAClientTests {
-    func testHomeAssistantClientIdentifiesModule() {
-        XCTAssertEqual(HomeAssistantClient().describe().name, "PearchHAClient")
-    }
-
     func testOAuthAuthorizationURLRejectsBlankClientID() throws {
         let client = HomeAssistantClient()
         let request = HAOAuthAuthorizationRequest(
@@ -5626,13 +5916,13 @@ extension PearchHAClientTests {
         )
     }
 
-    func testPlannedClientChecksRESTConnectionThroughItsTransport() async throws {
+    func testClientContractChecksRESTConnectionThroughItsTransport() async throws {
         let transport = RecordingHARESTTransport(
             responses: [
                 .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(#"{"message":"API running."}"#.utf8)))
             ]
         )
-        let client = PlannedHAClient(transport: transport)
+        let client = HomeAssistantClient(transport: transport)
 
         let result = await client.checkRESTConnection(try connectionInput())
 
@@ -5642,7 +5932,7 @@ extension PearchHAClientTests {
         XCTAssertEqual(requests.first?.headers["Authorization"], "Bearer secret-token")
     }
 
-    func testPlannedClientFetchesStatesThroughItsTransport() async throws {
+    func testClientContractFetchesStatesThroughItsTransport() async throws {
         let body = """
         [
           {
@@ -5660,7 +5950,7 @@ extension PearchHAClientTests {
                 .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(body.utf8)))
             ]
         )
-        let client = PlannedHAClient(transport: transport)
+        let client = HomeAssistantClient(transport: transport)
 
         let result = await client.states(try connectionInput())
 
@@ -5674,14 +5964,14 @@ extension PearchHAClientTests {
         XCTAssertEqual(requests.map { requestPercentEncodedPath($0.url) }, ["/api/states"])
     }
 
-    func testPlannedClientChecksWebSocketConnectionAgainstFakeHA() async throws {
+    func testClientContractChecksWebSocketConnectionAgainstFakeHA() async throws {
         let server = try FakeHAWebSocketServer()
         server.start()
         defer {
             server.stop()
         }
         _ = try FakeHARawWebSocketProbe().authenticateWithCoalescedUpgrade(baseURL: server.baseURL)
-        let client = PlannedHAClient()
+        let client = HomeAssistantClient()
         let input = HAConnectionInput(
             endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
             token: "fake-token"
@@ -5690,7 +5980,7 @@ extension PearchHAClientTests {
         await assertEqualAsync(await client.checkWebSocketConnection(input), .success(HAWebSocketCheck(haVersion: "fake-ha")))
     }
 
-    func testPlannedClientFetchesWebSocketStatesAgainstFakeHA() async throws {
+    func testClientContractFetchesWebSocketStatesAgainstFakeHA() async throws {
         let fixtures = FakeHAFixtures(
             apiBody: #"{"message":"API running."}"#,
             statesBody: #"[{"entity_id":"sensor.office_temperature","state":"21.4","attributes":{"friendly_name":"Office temperature","unit_of_measurement":"°C"}}]"#
@@ -5700,7 +5990,7 @@ extension PearchHAClientTests {
         defer {
             server.stop()
         }
-        let client = PlannedHAClient()
+        let client = HomeAssistantClient()
         let input = HAConnectionInput(
             endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
             token: "fake-token"
@@ -5714,7 +6004,7 @@ extension PearchHAClientTests {
         )
     }
 
-    func testPlannedClientFetchesNextStateChangedEventAgainstFakeHA() async throws {
+    func testClientContractFetchesNextStateChangedEventAgainstFakeHA() async throws {
         let fixtures = FakeHAFixtures(
             apiBody: #"{"message":"API running."}"#,
             statesBody: #"[]"#,
@@ -5725,7 +6015,7 @@ extension PearchHAClientTests {
         defer {
             server.stop()
         }
-        let client = PlannedHAClient()
+        let client = HomeAssistantClient()
         let input = HAConnectionInput(
             endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
             token: "fake-token"
@@ -5737,7 +6027,7 @@ extension PearchHAClientTests {
         )
     }
 
-    func testPlannedClientFetchesServicesAgainstFakeHA() async throws {
+    func testClientContractFetchesServicesAgainstFakeHA() async throws {
         let fixtures = FakeHAFixtures(
             apiBody: #"{"message":"API running."}"#,
             statesBody: #"[]"#,
@@ -5770,7 +6060,7 @@ extension PearchHAClientTests {
         defer {
             server.stop()
         }
-        let client = PlannedHAClient()
+        let client = HomeAssistantClient()
         let input = HAConnectionInput(
             endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
             token: "fake-token"
@@ -5803,13 +6093,13 @@ extension PearchHAClientTests {
         )
     }
 
-    func testPlannedClientCallsServiceAgainstFakeHA() async throws {
+    func testClientContractCallsServiceAgainstFakeHA() async throws {
         let server = try FakeHAWebSocketServer()
         server.start()
         defer {
             server.stop()
         }
-        let client = PlannedHAClient()
+        let client = HomeAssistantClient()
         let input = HAConnectionInput(
             endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
             token: "fake-token"
@@ -5825,7 +6115,7 @@ extension PearchHAClientTests {
         try await waitForJournalPath(server: server, path: "/api/websocket/call_service")
     }
 
-    func testPlannedClientFetchesDiscoveryAgainstFakeHA() async throws {
+    func testClientContractFetchesDiscoveryAgainstFakeHA() async throws {
         let fixtures = FakeHAFixtures(
             apiBody: #"{"message":"API running."}"#,
             statesBody: """
@@ -5853,7 +6143,7 @@ extension PearchHAClientTests {
         defer {
             server.stop()
         }
-        let client = PlannedHAClient()
+        let client = HomeAssistantClient()
         let input = HAConnectionInput(
             endpoint: HAEndpoint(primaryURL: server.baseURL, fallbackURL: nil),
             token: "fake-token"
@@ -5872,7 +6162,7 @@ extension PearchHAClientTests {
         )
     }
 
-    func testPlannedClientFetchesHistoryThroughItsTransport() async throws {
+    func testClientContractFetchesHistoryThroughItsTransport() async throws {
         let historyBody = """
         [[
           {"entity_id":"sensor.office_temperature","state":"21.4","last_changed":"2026-06-27T10:30:00+00:00"},
@@ -5884,7 +6174,7 @@ extension PearchHAClientTests {
                 .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(historyBody.utf8)))
             ]
         )
-        let client = PlannedHAClient(transport: transport)
+        let client = HomeAssistantClient(transport: transport)
 
         let result = await client.history(
             try connectionInput(),
@@ -5908,7 +6198,7 @@ extension PearchHAClientTests {
         )
     }
 
-    func testPlannedClientFetchesHistoryBatchThroughItsTransport() async throws {
+    func testClientContractFetchesHistoryBatchThroughItsTransport() async throws {
         let historyBody = """
         [
           [
@@ -5925,7 +6215,7 @@ extension PearchHAClientTests {
                 .success(HARESTResponse(statusCode: 200, headers: [:], body: Data(historyBody.utf8)))
             ]
         )
-        let client = PlannedHAClient(transport: transport)
+        let client = HomeAssistantClient(transport: transport)
 
         let result = await client.historyBatch(
             try connectionInput(),

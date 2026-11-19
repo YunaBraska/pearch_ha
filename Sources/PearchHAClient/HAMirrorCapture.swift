@@ -524,34 +524,62 @@ public struct HAMirrorCaptureService: Sendable {
     }
 
     private func receiveWebSocketMessage(task: URLSessionWebSocketTask) async throws -> URLSessionWebSocketTask.Message {
-        try await withThrowingTaskGroup(of: WebSocketReceiveResult.self) { group in
-            let timeout = webSocketReceiveTimeoutNanoseconds
-            group.addTask {
-                .message(try await task.receive())
+        try Task.checkCancellation()
+        // Finish the wait directly. A task group would also wait for URLSession's
+        // cancelled receive, which may never resume after an unresponsive peer.
+        let completion = HAMirrorWebSocketReceiveCompletion()
+        let stream = AsyncThrowingStream<URLSessionWebSocketTask.Message, Error> { continuation in
+            let timer = Task {
+                do {
+                    try await Task.sleep(nanoseconds: webSocketReceiveTimeoutNanoseconds)
+                } catch {
+                    return
+                }
+                guard completion.claim() else {
+                    return
+                }
+                continuation.finish(throwing: HAMirrorCaptureError.webSocketTimeout)
+                task.cancel()
             }
-            group.addTask {
-                try await Task.sleep(nanoseconds: timeout)
-                return .timeout
+            continuation.onTermination = { _ in
+                timer.cancel()
+                if completion.claim() {
+                    task.cancel()
+                }
             }
-            guard let result = try await group.next() else {
-                group.cancelAll()
-                throw HAMirrorCaptureError.webSocketProtocol("WebSocket receive ended without a result")
-            }
-            group.cancelAll()
-            switch result {
-            case let .message(message):
-                return message
-            case .timeout:
-                task.cancel(with: .goingAway, reason: nil)
-                throw HAMirrorCaptureError.webSocketTimeout
+            task.receive { result in
+                guard completion.claim() else {
+                    return
+                }
+                switch result {
+                case let .success(message):
+                    continuation.yield(message)
+                    continuation.finish()
+                case let .failure(error):
+                    continuation.finish(throwing: error)
+                }
             }
         }
+        for try await message in stream { return message }
+        throw CancellationError()
     }
 }
 
-private enum WebSocketReceiveResult {
-    case message(URLSessionWebSocketTask.Message)
-    case timeout
+private final class HAMirrorWebSocketReceiveCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        guard !claimed else {
+            return false
+        }
+        claimed = true
+        return true
+    }
 }
 
 public struct HAMirrorFixtureSanitizer: Sendable {

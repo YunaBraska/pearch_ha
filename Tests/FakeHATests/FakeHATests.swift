@@ -382,15 +382,12 @@ final class FakeHATests: XCTestCase {
             webSocketServers.forEach { $0.stop() }
         }
 
-        for _ in 0..<12 {
-            let rest = try FakeHARESTServer()
-            rest.start()
-            restServers.append(rest)
-
-            let webSocket = try FakeHAWebSocketServer()
-            webSocket.start()
-            webSocketServers.append(webSocket)
+        for _ in 0..<48 {
+            restServers.append(try FakeHARESTServer())
+            webSocketServers.append(try FakeHAWebSocketServer())
         }
+        restServers.forEach { $0.start() }
+        webSocketServers.forEach { $0.start() }
 
         let restPorts = Set(restServers.compactMap { $0.baseURL.port })
         let webSocketPorts = Set(webSocketServers.compactMap { $0.baseURL.port })

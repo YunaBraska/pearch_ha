@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="{{ page.description | default: site.description | escape }}">
+    <title>{{ page.title | default: site.product | escape }} | {{ site.product | escape }}</title>
+    {% if site.oauth_client_id and site.oauth_redirect_uri %}
+    <link rel="canonical" href="{{ site.oauth_client_id | escape }}">
+    <link rel="redirect_uri" href="{{ site.oauth_redirect_uri | escape }}">
+    {% endif %}
+    <link rel="stylesheet" href="{{ '/assets/site.css' | relative_url }}">
+  </head>
+  <body class="theme-{{ site.color_scheme | default: 'light' }}" style="--accent: {{ site.accent }}; --accent-soft: {{ site.accent_soft }};">
+    <a class="skip-link" href="#content">Skip to content</a>
+    <header class="site-header">
+      <div class="container header-content">
+        <a class="brand" href="{{ '/' | relative_url }}">{{ site.product }}</a>
+        <nav aria-label="Primary navigation">
+          <a href="{{ '/' | relative_url }}">Overview</a>
+          <a href="{{ '/documentation.html' | relative_url }}">Documentation</a>
+          <a href="{{ '/install.html' | relative_url }}">Get the app</a>
+          <details class="product-menu">
+            <summary>More apps</summary>
+            <div class="product-menu-panel">
+              <a href="https://yunabraska.github.io/Aven/"><strong>Aven</strong><span>Voice companion for focused work</span></a>
+              <a href="https://yunabraska.github.io/pearch_ha/"><strong>PearchHA</strong><span>Home Assistant in the menu bar</span></a>
+              <a href="https://yunabraska.github.io/podlord/"><strong>PodLord</strong><span>Kubernetes control center</span></a>
+              <a href="https://yunabraska.github.io/Sentrio/"><strong>Sentrio</strong><span>Audio and BusyLight control</span></a>
+              <a href="https://yunabraska.github.io/SquadSpeak/"><strong>SquadSpeak</strong><span>Private voice and chat</span></a>
+            </div>
+          </details>
+        </nav>
+      </div>
+    </header>
+    <main id="content" class="container">
+      {% if page.help %}
+      <article class="help-document">
+        {{ content }}
+      </article>
+      {% else %}
+      {{ content }}
+      {% endif %}
+    </main>
+    <footer class="site-footer">
+      <div class="container footer-content">
+        <span>{{ site.product }}</span>
+        <span><a href="{{ '/privacy.html' | relative_url }}">Privacy</a><a href="{{ site.repository }}">Source</a><a href="{{ site.support }}">Support</a></span>
+      </div>
+    </footer>
+  </body>
+</html>
