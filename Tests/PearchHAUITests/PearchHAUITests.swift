@@ -4012,7 +4012,7 @@ final class PearchHAUITests: XCTestCase {
         XCTAssertFalse(model.moveMenuBarEntity("sensor.office_humidity", direction: .up))
     }
 
-    func test_t_settings_search_blocks_promoted_menu_bar_reorder() async {
+    func test_t_settings_search_allows_promoted_menu_bar_reorder() async {
         let sink = MenuBarDisplaySinkRecorder()
         let model = PearchHAPanelModel(
             connector: { _ in .success(rooms: selectionRooms()) },
@@ -4031,19 +4031,22 @@ final class PearchHAUITests: XCTestCase {
         model.updateSelectionQuery("humidity")
 
         XCTAssertEqual(model.snapshot.selectionTree.flatMap(\.entities).map(\.entity.id), ["sensor.office_humidity"])
-        XCTAssertFalse(model.moveMenuBarEntity("sensor.office_humidity", direction: .down))
-        XCTAssertFalse(
+        XCTAssertTrue(model.moveMenuBarEntity("sensor.office_humidity", direction: .down))
+        XCTAssertTrue(
             model.moveMenuBarEntity(
                 "sensor.office_humidity",
                 relativeTo: "sensor.office_temperature",
-                placement: .after
+                placement: .before
             )
         )
         XCTAssertEqual(model.snapshot.menuBarDisplayConfiguration.promotedEntityIDs, [
             "sensor.office_humidity",
             "sensor.office_temperature"
         ])
-        XCTAssertNil(sink.lastDisplayConfiguration)
+        XCTAssertEqual(sink.lastDisplayConfiguration?.promotedEntityIDs, [
+            "sensor.office_humidity",
+            "sensor.office_temperature"
+        ])
     }
 
     func test_t_settings_rejects_promoted_menu_bar_reorder_when_save_fails() async {

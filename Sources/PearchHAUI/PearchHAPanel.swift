@@ -752,9 +752,6 @@ public final class PearchHAPanelModel: ObservableObject {
 
     @discardableResult
     public func moveMenuBarEntity(_ id: EntityID, direction: SelectionMoveDirection) -> Bool {
-        guard canReorderMenuBarDisplay else {
-            return false
-        }
         return updateMenuBarDisplayConfiguration(
             snapshot.menuBarDisplayConfiguration.movingPromotion(id, direction: direction),
             persist: true
@@ -763,9 +760,6 @@ public final class PearchHAPanelModel: ObservableObject {
 
     @discardableResult
     public func moveMenuBarEntity(_ id: EntityID, relativeTo targetID: EntityID, placement: SelectionDropPlacement) -> Bool {
-        guard canReorderMenuBarDisplay else {
-            return false
-        }
         return updateMenuBarDisplayConfiguration(
             snapshot.menuBarDisplayConfiguration.movingPromotion(id, relativeTo: targetID, placement: placement),
             persist: true
@@ -4126,7 +4120,4 @@ public final class PearchHAPanelModel: ObservableObject {
         return visibleOrder
     }
 
-    private var canReorderMenuBarDisplay: Bool {
-        snapshot.canReorderSelectionWithKeyboard
-    }
 }
