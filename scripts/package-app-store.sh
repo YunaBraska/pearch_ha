@@ -69,3 +69,9 @@ if strings "${app_dir}/Contents/MacOS/PearchHA" | grep -q 'Sparkle'; then
   echo 'App Store build must not contain Sparkle.' >&2
   exit 1
 fi
+for forbidden_domain in github.com/sponsors buymeacoffee.com ko-fi.com liberapay.com; do
+  if strings "${app_dir}/Contents/MacOS/PearchHA" | grep -Fq "${forbidden_domain}"; then
+    echo "App Store build must not contain ${forbidden_domain}." >&2
+    exit 1
+  fi
+done

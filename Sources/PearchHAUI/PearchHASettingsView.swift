@@ -1396,16 +1396,23 @@ public struct PearchHASettingsView: View {
         }
     }
 
-    /// Support card: optional appreciation links (repo star, sponsor/coffee/Ko-fi/
-    /// Liberapay) plus an issues/feedback link.
+    /// Support card with direct-distribution appreciation links or Store-safe feedback.
     private var aboutSupportCard: some View {
         settingsCard {
             settingsSection(title: "Support", systemImage: "heart") {
                 VStack(alignment: .leading, spacing: 10) {
+                    #if PEARCHHA_APP_STORE
+                    Text("Need help or want to report a problem?")
+                        .pearchHAFont(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    #else
                     Text("If it earned a place on your menu bar, a star on the repo helps. If you want to fuel a coffee:")
                         .pearchHAFont(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    #endif
+                    #if !PEARCHHA_APP_STORE
                     HStack(spacing: 8) {
                         aboutSupportLink("GitHub Sponsors", systemImage: "heart.fill", destination: Self.sponsorsURL)
                         aboutSupportLink("Buy Me a Coffee", systemImage: "cup.and.saucer.fill", destination: Self.buyMeACoffeeURL)
@@ -1414,6 +1421,7 @@ public struct PearchHASettingsView: View {
                         aboutSupportLink("Ko-fi", systemImage: "mug.fill", destination: Self.koFiURL)
                         aboutSupportLink("Liberapay", systemImage: "banknote", destination: Self.liberapayURL)
                     }
+                    #endif
                     Link(destination: Self.issuesURL) {
                         Label("Issues / feedback", systemImage: "exclamationmark.bubble")
                             .labelStyle(.titleAndIcon)
@@ -1425,6 +1433,7 @@ public struct PearchHASettingsView: View {
         }
     }
 
+    #if !PEARCHHA_APP_STORE
     /// A single design-system styled support link with an SF Symbol and an
     /// accessible name describing where it leads.
     private func aboutSupportLink(_ title: String, systemImage: String, destination: URL) -> some View {
@@ -1436,6 +1445,7 @@ public struct PearchHASettingsView: View {
         .buttonStyle(PearchHAIconButtonStyle(prominentOnHover: true))
         .accessibilityLabel("\(title), opens in browser")
     }
+    #endif
 
     @ViewBuilder
     private var aboutUpdateAction: some View {
@@ -1509,10 +1519,12 @@ public struct PearchHASettingsView: View {
     private static let privacyPolicyURL = URL(string: "https://yunabraska.github.io/pearch_ha/privacy.html")!
     private static let licenseURL = URL(string: "https://github.com/YunaBraska/pearch_ha/blob/main/LICENSE")!
     private static let issuesURL = URL(string: "https://github.com/YunaBraska/pearch_ha/issues")!
+    #if !PEARCHHA_APP_STORE
     private static let sponsorsURL = URL(string: "https://github.com/sponsors/YunaBraska")!
     private static let buyMeACoffeeURL = URL(string: "https://buymeacoffee.com/YunaBraska")!
     private static let koFiURL = URL(string: "https://ko-fi.com/YunaBraska")!
     private static let liberapayURL = URL(string: "https://liberapay.com/YunaBraska")!
+    #endif
 
     /// The running application's icon, used in the About identity card. Resolves
     /// from the live `NSApp` icon first, then the named application icon.
