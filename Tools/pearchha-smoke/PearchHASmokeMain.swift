@@ -4881,15 +4881,15 @@ struct PearchHASmoke {
         searchedMenuBar.toggleSettings()
         searchedMenuBar.updateSelectionQuery("humidity")
         try expect(
-            !searchedMenuBar.moveMenuBarEntity("sensor.office_humidity", direction: .down),
-            "settings search blocks promoted menu bar reorder"
+            searchedMenuBar.moveMenuBarEntity("sensor.office_humidity", direction: .down),
+            "settings search allows promoted menu bar reorder"
         )
         try expect(
             searchedMenuBar.snapshot.menuBarDisplayConfiguration.promotedEntityIDs == [
-                "sensor.office_humidity",
-                "sensor.energy_today"
+                "sensor.energy_today",
+                "sensor.office_humidity"
             ],
-            "blocked searched menu bar reorder keeps order stable"
+            "searched menu bar reorder updates order"
         )
 
         let reconnectGate = Gate()

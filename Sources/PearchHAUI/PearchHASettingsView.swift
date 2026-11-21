@@ -1888,8 +1888,8 @@ public struct PearchHASettingsView: View {
             selectionEntityRow(
                 roomName: room.name,
                 selectable,
-                canMoveUp: canReorderSelection && !isFirst,
-                canMoveDown: canReorderSelection && !isLast
+                canMoveUp: !isFirst,
+                canMoveDown: !isLast
             ),
             item: .entity(selectable.entity.id)
         )
@@ -3259,8 +3259,8 @@ public struct PearchHASettingsView: View {
     private func menuBarMoveButtons(for entity: DiscoveredEntity) -> some View {
         let promotedIDs = model.snapshot.menuBarDisplayConfiguration.promotedEntityIDs
         let index = promotedIDs.firstIndex(of: entity.id)
-        let canMoveUp = canReorderSelection && (index.map { $0 > promotedIDs.startIndex } ?? false)
-        let canMoveDown = canReorderSelection && (index.map { $0 < promotedIDs.index(before: promotedIDs.endIndex) } ?? false)
+        let canMoveUp = index.map { $0 > promotedIDs.startIndex } ?? false
+        let canMoveDown = index.map { $0 < promotedIDs.index(before: promotedIDs.endIndex) } ?? false
         return HStack(spacing: 2) {
             Button {
                 model.moveMenuBarEntity(entity.id, direction: .up)
@@ -3291,7 +3291,7 @@ public struct PearchHASettingsView: View {
     }
 
     private func menuBarMoveHelp(canMove: Bool, boundaryReason: String) -> String {
-        model.snapshot.menuBarReorderAccessibilityHint(canMove: canMove, boundaryReason: boundaryReason)
+        canMove ? "Changes menu bar order" : boundaryReason
     }
 
     @ViewBuilder
@@ -3367,10 +3367,7 @@ public struct PearchHASettingsView: View {
     }
 
     private func moveControlHelp(canMove: Bool, boundaryReason: String) -> String {
-        if !selectedRoomID.isEmpty || !entityDomain.isEmpty || entityScope != "all" {
-            return "Clear filters to reorder entities and rooms"
-        }
-        return model.snapshot.selectionReorderAccessibilityHint(canMove: canMove, boundaryReason: boundaryReason)
+        canMove ? "Changes display order" : boundaryReason
     }
 
     /// The Entities search binding. The field edits view-local state so every
