@@ -6,7 +6,7 @@ import PackageDescription
 let isAppStoreBuild = ProcessInfo.processInfo.environment["PEARCHHA_APP_STORE"] == "1"
 let packageDependencies: [Package.Dependency] = isAppStoreBuild
     ? []
-    : [.package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0")]
+    : [.package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1")]
 let appShellDependencies: [Target.Dependency] = [
     "PearchHACore",
     "PearchHAClient",
