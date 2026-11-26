@@ -129,6 +129,7 @@ public enum PearchHAAppBundleBuildError: Error, Equatable, CustomStringConvertib
     case executableMissing(String)
     case iconMissing(String)
     case privacyManifestMissing(String)
+    case resourceBundleInfoInvalid(String)
     case outputExists(String)
 
     public var description: String {
@@ -139,6 +140,8 @@ public enum PearchHAAppBundleBuildError: Error, Equatable, CustomStringConvertib
             "icon file does not exist: \(path)"
         case let .privacyManifestMissing(path):
             "privacy manifest does not exist: \(path)"
+        case let .resourceBundleInfoInvalid(path):
+            "resource bundle info is invalid: \(path)"
         case let .outputExists(path):
             "output app already exists: \(path)"
         }
@@ -549,7 +552,47 @@ public struct PearchHAAppBundleBuilder {
         }
 
         for bundleURL in configuration.resourceBundleURLs {
-            try fileManager.copyItem(at: bundleURL, to: resourcesURL.appendingPathComponent(bundleURL.lastPathComponent, isDirectory: true))
+            let copiedBundleURL = resourcesURL.appendingPathComponent(bundleURL.lastPathComponent, isDirectory: true)
+            try fileManager.copyItem(at: bundleURL, to: copiedBundleURL)
+            let copiedContentsURL = copiedBundleURL.appendingPathComponent("Contents", isDirectory: true)
+            let copiedInfoURL = copiedContentsURL.appendingPathComponent("Info.plist", isDirectory: false)
+            guard !fileManager.fileExists(atPath: copiedInfoURL.path) else {
+                continue
+            }
+
+            let copiedResourcesURL = copiedContentsURL.appendingPathComponent("Resources", isDirectory: true)
+            try fileManager.createDirectory(at: copiedResourcesURL, withIntermediateDirectories: true)
+            let legacyInfoURL = copiedBundleURL.appendingPathComponent("Info.plist", isDirectory: false)
+            var propertyList: [String: Any] = [:]
+            if fileManager.fileExists(atPath: legacyInfoURL.path) {
+                let data = try Data(contentsOf: legacyInfoURL)
+                guard let values = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
+                    throw PearchHAAppBundleBuildError.resourceBundleInfoInvalid(legacyInfoURL.path)
+                }
+                propertyList = values
+                try fileManager.removeItem(at: legacyInfoURL)
+            }
+            for itemURL in try fileManager.contentsOfDirectory(
+                at: copiedBundleURL,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) where itemURL.lastPathComponent != "Contents" {
+                try fileManager.moveItem(
+                    at: itemURL,
+                    to: copiedResourcesURL.appendingPathComponent(itemURL.lastPathComponent)
+                )
+            }
+            let bundleName = copiedBundleURL.deletingPathExtension().lastPathComponent
+            let bundleSuffix = bundleName.lowercased().unicodeScalars.map {
+                CharacterSet.alphanumerics.contains($0) ? String($0) : "-"
+            }.joined()
+            propertyList["CFBundleIdentifier"] = "\(configuration.manifest.bundleIdentifier).resources.\(bundleSuffix)"
+            propertyList["CFBundleName"] = propertyList["CFBundleName"] ?? bundleName
+            propertyList["CFBundlePackageType"] = propertyList["CFBundlePackageType"] ?? "BNDL"
+            try PropertyListSerialization.data(fromPropertyList: propertyList, format: .xml, options: 0).write(
+                to: copiedInfoURL,
+                options: .atomic
+            )
         }
 
         let infoPlistURL = contentsURL.appendingPathComponent("Info.plist", isDirectory: false)

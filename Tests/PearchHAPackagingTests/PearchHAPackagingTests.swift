@@ -161,12 +161,23 @@ final class PearchHAPackagingTests: XCTestCase {
         try FileManager.default.createDirectory(at: localized, withIntermediateDirectories: true)
         let strings = Data("\"thisMac\" = \"Dieser Mac\";".utf8)
         try strings.write(to: localized.appendingPathComponent("LocalMac.strings"))
+        try PropertyListSerialization.data(
+            fromPropertyList: ["CFBundleDevelopmentRegion": "en"],
+            format: .xml,
+            options: 0
+        ).write(to: bundle.appendingPathComponent("Info.plist"))
         let executable = directory.appendingPathComponent("PearchHA-source")
         try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
         let output = directory.appendingPathComponent("PearchHA.app")
         _ = try PearchHAAppBundleBuilder().build(.init(executableURL: executable, outputURL: output,
                                                     manifest: PearchHAAppBundleManifest(), resourceBundleURLs: [bundle]))
-        XCTAssertEqual(try Data(contentsOf: output.appendingPathComponent("Contents/Resources/PearchHA_PearchHACore.bundle/de.lproj/LocalMac.strings")), strings)
+        let copiedBundle = output.appendingPathComponent("Contents/Resources/PearchHA_PearchHACore.bundle")
+        XCTAssertEqual(
+            try Data(contentsOf: copiedBundle.appendingPathComponent("Contents/Resources/de.lproj/LocalMac.strings")),
+            strings
+        )
+        let info = try propertyList(from: Data(contentsOf: copiedBundle.appendingPathComponent("Contents/Info.plist")))
+        XCTAssertEqual(info["CFBundleIdentifier"] as? String, "dev.pearchha.app.resources.pearchha-pearchhacore")
     }
 
     func testAppBundleIncludesDependencyNoticesForItsDistributionChannel() throws {
@@ -443,6 +454,10 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertEqual(export["method"] as? String, "app-store")
         XCTAssertTrue(try String(contentsOf: scriptURL, encoding: .utf8).contains("PEARCHHA_APP_STORE=1"))
         XCTAssertTrue(try String(contentsOf: scriptURL, encoding: .utf8).contains("Xcode/PearchHA/PearchHA-AppStore.entitlements"))
+        XCTAssertTrue(try String(contentsOf: scriptURL, encoding: .utf8).contains("github.com/sponsors"))
+        XCTAssertTrue(try String(contentsOf: scriptURL, encoding: .utf8).contains("buymeacoffee.com"))
+        XCTAssertTrue(try String(contentsOf: scriptURL, encoding: .utf8).contains("ko-fi.com"))
+        XCTAssertTrue(try String(contentsOf: scriptURL, encoding: .utf8).contains("liberapay.com"))
         let package = try String(contentsOf: packageURL, encoding: .utf8)
         XCTAssertTrue(package.contains("isAppStoreBuild"))
         XCTAssertTrue(package.contains("packageDependencies"))
@@ -464,7 +479,8 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertTrue(pullRequest.contains("ref: ${{ github.event.pull_request.head.sha || github.sha }}"))
         XCTAssertFalse(pullRequest.contains("secrets: inherit"))
         XCTAssertTrue(snapshot.contains("wc_swift_snapshot.yml@"))
-        XCTAssertTrue(snapshot.contains("contents: write"))
+        XCTAssertTrue(snapshot.contains("contents: read"))
+        XCTAssertFalse(snapshot.contains("contents: write"))
     }
 
     func testCheckScriptEnforcesTestsCoverageSmokeAndAudit() throws {
@@ -494,6 +510,7 @@ final class PearchHAPackagingTests: XCTestCase {
         let products = directory.appendingPathComponent(".build/products")
         let coverage = products.appendingPathComponent("codecov")
         try FileManager.default.createDirectory(at: coverage, withIntermediateDirectories: true)
+        try writeOAuthPageConfiguration(in: directory)
         try "last bundle only".write(to: coverage.appendingPathComponent("PearchHA.json"), atomically: true, encoding: .utf8)
         try Data().write(to: coverage.appendingPathComponent("default.profdata"))
         for name in ["CoreTests", "ClientTests"] {
@@ -559,6 +576,7 @@ final class PearchHAPackagingTests: XCTestCase {
         let directory = temporaryDirectory().appendingPathComponent("release workspace")
         defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent()) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try writeOAuthPageConfiguration(in: directory)
         let swift = try fakeExecutable(in: directory, name: "swift")
         try #"""
         #!/bin/sh
@@ -633,6 +651,7 @@ final class PearchHAPackagingTests: XCTestCase {
         )
         XCTAssertTrue(packageArguments.contains("--framework"))
         XCTAssertTrue(packageArguments.contains("Sparkle.framework"))
+        XCTAssertTrue(packageArguments.contains("--oauth-env"))
     }
 
     func testXcodePreflightReportsBlockedWhenOnlyCommandLineToolsAreSelected() throws {
@@ -1120,6 +1139,8 @@ final class PearchHAPackagingTests: XCTestCase {
         XCTAssertTrue(workflow.contains("workflow_dispatch:"))
         XCTAssertTrue(workflow.contains("wc_swift_release.yml@"))
         XCTAssertTrue(workflow.contains("force: ${{ inputs.force }}"))
+        XCTAssertTrue(workflow.contains("app_store_app_name: PearchHA"))
+        XCTAssertTrue(workflow.contains("app_store_bundle_id: berlin.yuna.pearchha"))
         XCTAssertFalse(workflow.contains("homebrew-tap"))
         XCTAssertFalse(workflow.contains("RELEASE_TOKEN"))
 
@@ -3293,6 +3314,35 @@ final class PearchHAPackagingTests: XCTestCase {
     private func temporaryDirectory() -> URL {
         URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("pearchha-packaging-test-\(UUID().uuidString)", isDirectory: true)
+    }
+
+    private func writeOAuthPageConfiguration(in directory: URL) throws {
+        let sourceRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let scriptsDirectory = directory.appendingPathComponent("scripts", isDirectory: true)
+        let pageDirectory = directory.appendingPathComponent("docs/Page", isDirectory: true)
+        let layoutDirectory = pageDirectory.appendingPathComponent("_layouts", isDirectory: true)
+        try FileManager.default.createDirectory(at: scriptsDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: layoutDirectory, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: sourceRoot.appendingPathComponent("scripts/write-oauth-environment.sh", isDirectory: false),
+            to: scriptsDirectory.appendingPathComponent("write-oauth-environment.sh", isDirectory: false)
+        )
+        try """
+        oauth_client_id: https://example.invalid/pearchha/
+        oauth_redirect_uri: pearchha://auth
+        """.write(
+            to: pageDirectory.appendingPathComponent("_config.yml", isDirectory: false),
+            atomically: true,
+            encoding: .utf8
+        )
+        try """
+        {{ site.oauth_client_id }}
+        {{ site.oauth_redirect_uri }}
+        """.write(
+            to: layoutDirectory.appendingPathComponent("default.html", isDirectory: false),
+            atomically: true,
+            encoding: .utf8
+        )
     }
 
     private func sha256Hex(_ data: Data) -> String {
