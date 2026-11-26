@@ -68,6 +68,7 @@ light/dark and accessibility appearances, packaging, and the app-shell lifecycle
 It also measures cold launch, cached panel opening, idle CPU, memory across repeated
 lifecycles, request volume, history debounce/cache behavior, and status-item redraws.
 Timing tests use injected clocks. Async tests wait for observable progress. Performance-reference breaches emit GitHub warnings; functional assertions remain blocking.
+The cached opening benchmark reuses the same popover after one warm-up open.
 
 The separate `Native UI` workflow runs `scripts/test-ui.sh` on GitHub-hosted macOS
 desktops. The script and XCUITest both reject local and self-hosted execution.
